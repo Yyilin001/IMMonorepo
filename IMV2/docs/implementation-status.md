@@ -17,6 +17,23 @@ V2 correctness, security, failure-recovery or release-evidence requirements.
 
 ## Latest local verification (not a production release approval)
 
+- 2026-08-04: account-edge now has an owner-authenticated, no-store device
+  session inventory and durable remote-revocation commands. Registration stores
+  a bounded device name/platform and last-active timestamp; a single-device or
+  “other devices” command holds the same account lock as credential rotation,
+  revokes access/refresh credentials and Push endpoint, and appends the gateway
+  revocation event in one PostgreSQL transaction. The native account menu now
+  exposes a Login Devices sheet with current-device labelling, refresh,
+  per-device logout and logout-all-others confirmation. The new same-account
+  dual-simulator script stages two independent Keychain/SQLite installations
+  through device list, message projection/edit/withdrawal, group receipt
+  persistence, preference sync, offline-outbox reconnect, foreground
+  restoration and a per-device snapshot reset. Reset is deliberately exposed
+  only on the loopback operator process, with its existing dedicated bearer;
+  its operation UUID is the snapshot UUID, so a lost response retries
+  idempotently. This checkout has compiled the script and all test targets,
+  but no simulator was booted for this review, so it is not recorded as
+  executed E2E evidence; two physical-device execution remains required.
 - 2026-07-27: UUID identifiers now use Foundation's single canonical spelling
   at every V2 boundary. This prevents the same direct room or account from
   becoming two SQLite keys when a PostgreSQL `uuid::text` value and a room-event
@@ -711,8 +728,9 @@ including the receipt high-water restart regression and media authorization
 transfer tests. Both disposable PostgreSQL drills—retained local-schema ledger
 and logical restore—also passed on 2026-07-26. Its backup-policy test writes
 only a uniquely named Application Support child and removes it afterward. No
-GitHub Actions workflow is enabled; historical remote results are not current
-evidence.
+The checked-in GitHub Actions workflow now runs the Swift/PostgreSQL and iOS
+build-for-testing checks; the historical remote results above are still not
+current evidence.
 
 On 2026-07-25, the IMApp Debug simulator baseline was repaired by declaring
 `IMV2Core` as a direct local package product of both IMApp and IMAppTests. The

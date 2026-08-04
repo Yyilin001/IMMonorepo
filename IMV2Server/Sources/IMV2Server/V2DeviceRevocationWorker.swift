@@ -15,6 +15,13 @@ public struct V2DeviceRevocationEvent: Equatable, Sendable {
     }
 }
 
+/// Stable durable-cursor namespace for the current device-revocation worker.
+/// Any retired namespace is migrated by the numbered PostgreSQL schema before
+/// the gateway process passes its readiness check.
+enum V2DeviceRevocationCursorNamespace {
+    static let workerName = "device-revocation"
+}
+
 public protocol V2DeviceRevocationEventStore: Sendable {
     /// A new gateway process has no live sockets before its TLS listener is
     /// bound, so historical revocations do not need replaying there. Existing
@@ -62,7 +69,7 @@ public struct V2DeviceRevocationWorker: Sendable {
 
 public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore {
     private let database: any Database
-    private let workerName = "device-revocation-v1"
+    private let workerName = V2DeviceRevocationCursorNamespace.workerName
 
     public init(database: any Database) { self.database = database }
 

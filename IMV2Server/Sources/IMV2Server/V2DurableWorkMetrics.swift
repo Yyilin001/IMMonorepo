@@ -182,7 +182,7 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                      WHERE event.event_id > COALESCE((
                         SELECT cursor.last_event_id
                         FROM im_v2.gateway_worker_cursors AS cursor
-                        WHERE cursor.worker_name = 'device-revocation-v1'
+                        WHERE cursor.worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
                           AND cursor.node_id = \(bind: scopedGatewayNodeID)
                      ), 0)) AS pending_device_revocation_events
             """).first(decoding: DurableWorkMetricsRow.self)

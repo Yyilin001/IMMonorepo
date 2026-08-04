@@ -68,6 +68,14 @@ enum IMV2OperatorServerApp {
                     operatorPrincipal: configuration.accountDisableOperatorPrincipal
                 )
             ).register(on: app)
+            V2VaporDeviceSnapshotResetOperatorRoutes(
+                authenticator: configuration.authenticator,
+                service: try V2PostgresDeviceSnapshotResetService(
+                    router: V2PostgresUserShardRouter(database: database),
+                    registry: userShardStorage,
+                    capabilityProfile: configuration.capabilityProfile
+                )
+            ).register(on: app)
             try await app.startup()
             app.logger.notice("IM V2 durable-work operator service bound", metadata: [
                 "host": "\(configuration.listener.host)",

@@ -155,6 +155,7 @@ services:
       IM_V2_OPERATOR_REPLAY_LISTEN_PORT: 9445
       IM_V2_OPERATOR_REPLAY_PRINCIPAL: local-operator-replay
       IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL: local-account-safety
+      IM_V2_CAPABILITY_PROFILE: base
       IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
     depends_on:
       postgres:

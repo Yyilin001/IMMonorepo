@@ -742,20 +742,27 @@ struct V2ConversationListView: View {
             }
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button(store.isShowingArchived ? "返回收件箱" : "已归档", systemImage: store.isShowingArchived ? "tray" : "archivebox") {
-                        store.isShowingArchived.toggle()
+                    Menu {
+                        Button(store.isShowingArchived ? "返回收件箱" : "已归档", systemImage: store.isShowingArchived ? "tray" : "archivebox") {
+                            store.isShowingArchived.toggle()
+                        }
+                        .accessibilityIdentifier("v2.conversation.archive-toggle")
+                        Button("搜索消息", systemImage: "magnifyingglass") {
+                            guard let searchStore = store.messageSearchStore() else { return }
+                            messageSearchStore = searchStore
+                            isPresentingMessageSearch = true
+                        }
+                        .accessibilityIdentifier("v2.message.search")
+                        Button("收藏", systemImage: "star") {
+                            isPresentingFavorites = true
+                        }
+                        .accessibilityIdentifier("v2.message.favorites")
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityIdentifier("v2.conversation.archive-toggle")
-                    Button("搜索消息", systemImage: "magnifyingglass") {
-                        guard let searchStore = store.messageSearchStore() else { return }
-                        messageSearchStore = searchStore
-                        isPresentingMessageSearch = true
-                    }
-                    .accessibilityIdentifier("v2.message.search")
-                    Button("收藏", systemImage: "star") {
-                        isPresentingFavorites = true
-                    }
-                    .accessibilityIdentifier("v2.message.favorites")
+                    .accessibilityLabel("会话工具")
+                    .accessibilityHint("打开归档、搜索和收藏")
+                    .accessibilityIdentifier("v2.conversation.tools")
                     Button("新建群聊", systemImage: "person.3") {
                         newConversationSheet = .group
                     }
@@ -768,9 +775,7 @@ struct V2ConversationListView: View {
                         Task { await store.refresh() }
                     }
                     .accessibilityIdentifier("v2.conversation.refresh")
-                }
-                if let accountMenu {
-                    ToolbarItem(placement: .topBarTrailing) {
+                    if let accountMenu {
                         accountMenu
                     }
                 }
@@ -964,7 +969,9 @@ struct V2ConversationListView: View {
 
 struct V2ConversationAccountMenu: View {
     let canOpenPublicIdentity: Bool
+    let canOpenDeviceSessions: Bool
     let openPublicIdentity: @MainActor () -> Void
+    let openDeviceSessions: @MainActor () -> Void
     let openPrivacySettings: @MainActor () -> Void
     let signOut: @MainActor () -> Void
 
@@ -973,6 +980,10 @@ struct V2ConversationAccountMenu: View {
             if canOpenPublicIdentity {
                 Button("我的资料", action: openPublicIdentity)
                     .accessibilityIdentifier("v2.identity.open")
+            }
+            if canOpenDeviceSessions {
+                Button("登录设备", action: openDeviceSessions)
+                    .accessibilityIdentifier("v2.device-sessions.open")
             }
             Button("消息接收设置", action: openPrivacySettings)
                 .accessibilityIdentifier("v2.privacy.open")

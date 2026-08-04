@@ -119,7 +119,7 @@ public enum V2AuthSessionError: Error, Equatable, Sendable {
 /// Sole owner of device-bound credentials and refresh rotation. The actor makes
 /// local mutations serial; its unstructured refresh task remains alive if one
 /// of multiple callers cancels its own wait.
-public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEndpointCredentialProvider {
+public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEndpointCredentialProvider, V2ClientDeviceSessionCredentialProvider {
     private let credentialStore: any V2CredentialStore
     private let transport: any V2AuthTransport
     private let makeUUID: @Sendable () -> UUID
@@ -186,6 +186,11 @@ public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEnd
     /// Push registration cannot combine a fresh bearer token with an old
     /// device identity after credential rotation.
     public func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials {
+        let credentials = try await mediaEdgeCredentials()
+        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
+    }
+
+    public func deviceSessionCredentials() async throws -> V2ClientDeviceSessionCredentials {
         let credentials = try await mediaEdgeCredentials()
         return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
     }

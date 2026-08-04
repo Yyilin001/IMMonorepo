@@ -25,8 +25,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30),
             "接收端独立 App 安装必须通过真实密码注册、设备凭据和本地会话初始化。"
         )
+        let accountMenu = app.buttons["v2.account-menu"]
         XCTAssertTrue(
-            app.buttons["v2.account-menu"].exists,
+            accountMenu.waitForExistence(timeout: 10),
             "账户菜单必须作为会话列表导航栏的一部分出现。"
         )
         try auditOrdinaryChatSurface(in: app)
@@ -81,16 +82,19 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             cancel.tap()
         }
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
-        app.buttons["v2.account-menu"].tap()
-        let privacySettings = app.buttons["v2.privacy.open"]
+        XCTAssertTrue(accountMenu.waitForExistence(timeout: 10))
+        accountMenu.tap()
+        let privacySettings = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "消息接收设置")
+        ).firstMatch
         XCTAssertTrue(privacySettings.waitForExistence(timeout: 5))
         privacySettings.tap()
         XCTAssertTrue(
-            app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 15),
+            app.buttons["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 15),
             "账户菜单必须能打开已认证的陌生人消息接收设置。"
         )
         XCTAssertTrue(
-            app.switches["v2.privacy.allow-stranger-messages"].isHittable,
+            app.buttons["v2.privacy.allow-stranger-messages"].isHittable,
             "陌生人消息接收开关必须可由辅助技术定位并操作。"
         )
         try auditPrivacySettingsSurface(in: app)
@@ -98,8 +102,11 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(done.exists)
         done.tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
-        app.buttons["v2.account-menu"].tap()
-        let publicIdentity = app.buttons["v2.identity.open"]
+        XCTAssertTrue(accountMenu.waitForExistence(timeout: 10))
+        accountMenu.tap()
+        let publicIdentity = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "我的资料")
+        ).firstMatch
         XCTAssertTrue(publicIdentity.waitForExistence(timeout: 5))
         publicIdentity.tap()
         XCTAssertTrue(
@@ -531,6 +538,259 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             replayedOfflineMessageAppeared,
             "发送端恢复实时连接后，先前由普通 UI 安全保存的私聊消息必须只投递一次并进入接收端投影。"
         )
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationListsDevicesAndSendsToSharedGroup() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let submit = app.buttons["v2.password.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 15))
+        submit.tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+
+        app.buttons["v2.account-menu"].tap()
+        let devices = app.buttons["v2.device-sessions.open"]
+        XCTAssertTrue(devices.waitForExistence(timeout: 10) && devices.isHittable)
+        devices.tap()
+        let rows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.device-sessions.row.")
+        )
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 30))
+        XCTAssertGreaterThanOrEqual(
+            rows.count,
+            2,
+            "同一账号在第二台安装登录后，设备清单必须显示两个独立设备会话。"
+        )
+        XCTAssertTrue(app.buttons["v2.device-sessions.done"].isHittable)
+        app.buttons["v2.device-sessions.done"].tap()
+
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 10))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let draft = app.textViews["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
+        draft.tap()
+        draft.typeText("m")
+        XCTAssertEqual(draft.value as? String, "m")
+        app.buttons["v2.message.send"].tap()
+        let feedback = app.staticTexts["v2.message.send-feedback"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 30))
+        XCTAssertTrue(feedback.label.contains("已发送") || feedback.label.contains("已安全保存"))
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountFirstInstallationProjectsEditsAndChangesPreference() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let messageBody = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "m")
+        ).firstMatch
+        XCTAssertTrue(messageBody.waitForExistence(timeout: 30))
+        messageBody.press(forDuration: 1)
+        let edit = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.edit.")
+        ).firstMatch
+        XCTAssertTrue(edit.waitForExistence(timeout: 10) && edit.isHittable)
+        edit.tap()
+        let editor = app.textViews["v2.message.edit-text"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10) && editor.isHittable)
+        editor.tap()
+        editor.typeText("x")
+        let save = app.buttons["v2.message.edit-save"]
+        XCTAssertTrue(save.isHittable && save.isEnabled)
+        save.tap()
+        let actionFeedback = app.staticTexts["v2.message.action-feedback"]
+        XCTAssertTrue(actionFeedback.waitForExistence(timeout: 30))
+        XCTAssertTrue(actionFeedback.label.contains("编辑已提交") || actionFeedback.label.contains("编辑已安全保存"))
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        let accountMenu = app.buttons["v2.account-menu"]
+        XCTAssertTrue(accountMenu.waitForExistence(timeout: 10) && accountMenu.isHittable)
+        accountMenu.tap()
+        let privacySettings = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "消息接收设置")
+        ).firstMatch
+        XCTAssertTrue(privacySettings.waitForExistence(timeout: 10) && privacySettings.isHittable)
+        privacySettings.tap()
+        let strangerMessages = app.buttons["v2.privacy.allow-stranger-messages"]
+        XCTAssertTrue(strangerMessages.waitForExistence(timeout: 15) && strangerMessages.isHittable && strangerMessages.isEnabled)
+        strangerMessages.tap()
+        let strangerDisabled = NSPredicate(format: "value == %@", "已关闭")
+        expectation(for: strangerDisabled, evaluatedWith: strangerMessages, handler: nil)
+        waitForExpectations(timeout: 45)
+        let groupReadReceipts = app.buttons["v2.privacy.share-group-read-receipts"]
+        XCTAssertTrue(groupReadReceipts.waitForExistence(timeout: 15) && groupReadReceipts.isHittable && groupReadReceipts.isEnabled)
+        groupReadReceipts.tap()
+        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "已关闭")
+        expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
+        waitForExpectations(timeout: 45)
+        let done = app.buttons["v2.privacy.done"]
+        XCTAssertTrue(done.isHittable)
+        done.tap()
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationProjectsEditPreferenceAndWithdraws() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let accountMenu = app.buttons["v2.account-menu"]
+        XCTAssertTrue(accountMenu.waitForExistence(timeout: 10) && accountMenu.isHittable)
+        accountMenu.tap()
+        let privacySettings = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "消息接收设置")
+        ).firstMatch
+        XCTAssertTrue(privacySettings.waitForExistence(timeout: 10) && privacySettings.isHittable)
+        privacySettings.tap()
+        let strangerMessages = app.buttons["v2.privacy.allow-stranger-messages"]
+        XCTAssertTrue(strangerMessages.waitForExistence(timeout: 30))
+        let strangerDisabled = NSPredicate(format: "value == %@", "已关闭")
+        expectation(for: strangerDisabled, evaluatedWith: strangerMessages, handler: nil)
+        waitForExpectations(timeout: 30)
+        let groupReadReceipts = app.buttons["v2.privacy.share-group-read-receipts"]
+        XCTAssertTrue(groupReadReceipts.waitForExistence(timeout: 30))
+        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "已关闭")
+        expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
+        waitForExpectations(timeout: 30)
+        app.buttons["v2.privacy.done"].tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let editedBody = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "xm")
+        ).firstMatch
+        XCTAssertTrue(editedBody.waitForExistence(timeout: 30), "第二台设备必须先投影同账号设备对消息的编辑。")
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationQueuesOfflineGroupMessage() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let draft = app.textViews["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
+        draft.tap()
+        draft.typeText("q")
+        XCTAssertEqual(draft.value as? String, "q")
+        app.buttons["v2.message.send"].tap()
+        let feedback = app.staticTexts["v2.message.send-feedback"]
+        XCTAssertTrue(feedback.waitForExistence(timeout: 30))
+        XCTAssertEqual(
+            feedback.label,
+            "已安全保存，连接恢复后会重试。",
+            "同账号的第二台设备离线时，群消息必须进入该设备自己的 durable outbox。"
+        )
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationReplaysOfflineGroupMessageAndWithdraws() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let queuedMessage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "q")
+        ).firstMatch
+        XCTAssertTrue(queuedMessage.waitForExistence(timeout: 30), "恢复连接后必须仅重放该设备离线时安全保存的群消息。")
+        let editedMessage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "xm")
+        ).firstMatch
+        XCTAssertTrue(editedMessage.waitForExistence(timeout: 10))
+        editedMessage.press(forDuration: 1)
+        let withdraw = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.withdraw.")
+        ).firstMatch
+        XCTAssertTrue(withdraw.waitForExistence(timeout: 10) && withdraw.isHittable)
+        withdraw.tap()
+        let actionFeedback = app.staticTexts["v2.message.action-feedback"]
+        XCTAssertTrue(actionFeedback.waitForExistence(timeout: 30))
+        XCTAssertTrue(actionFeedback.label.contains("撤回已提交") || actionFeedback.label.contains("撤回请求已安全保存"))
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationProjectsSnapshotReset() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let withdrawn = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "消息已撤回")
+        ).firstMatch
+        XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "设备被要求重置快照后必须重建撤回 tombstone。")
+        let replayedMessage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "q")
+        ).firstMatch
+        XCTAssertTrue(replayedMessage.waitForExistence(timeout: 30), "设备被要求重置快照后必须重建此前离线重放的消息。")
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountFirstInstallationProjectsWithdrawal() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let refresh = app.buttons["v2.conversation.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
+        refresh.tap()
+        let group = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "同账号群")
+        ).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let withdrawn = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "消息已撤回")
+        ).firstMatch
+        XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "第一台设备必须投影第二台设备提交的撤回 tombstone。")
+        let replayedOfflineMessage = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "q")
+        ).firstMatch
+        XCTAssertTrue(replayedOfflineMessage.waitForExistence(timeout: 30), "第一台设备必须投影第二台设备恢复连接后重放的群消息。")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "同账号设备前后台切换后必须保留撤回后的同步投影。")
         app.terminate()
     }
 

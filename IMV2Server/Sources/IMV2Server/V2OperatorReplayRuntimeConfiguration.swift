@@ -24,6 +24,7 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     public let accountDisableAuthenticator: V2OperatorReplayBearerAuthenticator
     public let accountDisableOperatorPrincipal: String
     public let userShardStorage: [V2UserShardStorageConfiguration]
+    public let capabilityProfile: String
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
@@ -53,6 +54,7 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL")
         }
         accountDisableOperatorPrincipal = accountDisablePrincipal
+        capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )

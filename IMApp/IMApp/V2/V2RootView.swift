@@ -103,6 +103,7 @@ struct V2RootView: View {
                         userBlockSettingsStore: store.userBlockSettingsStore,
                         publicIdentitySettingsStore: store.publicIdentitySettingsStore,
                         pushWakeSettingsStore: store.pushWakeSettingsStore,
+                        deviceSessionsStore: store.deviceSessionsStore,
                         localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                         signOut: { await store.signOut() }
                     )
@@ -314,6 +315,7 @@ private struct V2SignedInRootView: View {
     private enum PresentedSettingsSheet: String, Identifiable {
         case privacy
         case publicIdentity
+        case deviceSessions
 
         var id: String { rawValue }
     }
@@ -324,6 +326,7 @@ private struct V2SignedInRootView: View {
     let userBlockSettingsStore: V2UserBlockSettingsStore?
     let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
+    let deviceSessionsStore: V2DeviceSessionsStore?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
@@ -338,7 +341,9 @@ private struct V2SignedInRootView: View {
                 localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                 accountMenu: V2ConversationAccountMenu(
                     canOpenPublicIdentity: publicIdentitySettingsStore != nil,
+                    canOpenDeviceSessions: deviceSessionsStore != nil,
                     openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
+                    openDeviceSessions: { presentedSettingsSheet = .deviceSessions },
                     openPrivacySettings: { presentedSettingsSheet = .privacy },
                     signOut: {
                         guard signOutTask == nil else { return }
@@ -384,6 +389,18 @@ private struct V2SignedInRootView: View {
                                     ToolbarItem(placement: .cancellationAction) {
                                         Button("完成") { presentedSettingsSheet = nil }
                                             .accessibilityIdentifier("v2.identity.done")
+                                    }
+                                }
+                        }
+                    }
+                case .deviceSessions:
+                    if let deviceSessionsStore {
+                        NavigationStack {
+                            V2DeviceSessionsView(store: deviceSessionsStore)
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("完成") { presentedSettingsSheet = nil }
+                                            .accessibilityIdentifier("v2.device-sessions.done")
                                     }
                                 }
                         }

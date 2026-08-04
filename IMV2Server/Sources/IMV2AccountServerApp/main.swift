@@ -114,6 +114,10 @@ enum IMV2AccountServerApp {
                     envelopeKey: configuration.pushEndpointEnvelopeKey
                 )
             ).register(on: app)
+            V2VaporDeviceSessionRoutes(
+                authenticator: authenticator,
+                sessions: V2PostgresDeviceSessionService(database: database)
+            ).register(on: app)
             V2VaporPublicIdentityRoutes(
                 authenticator: authenticator,
                 directory: V2PostgresPublicIdentityDirectory(

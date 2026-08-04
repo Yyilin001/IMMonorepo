@@ -22,11 +22,14 @@ public struct V2AuthoritativeSnapshotProjection: Equatable, Sendable {
 public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
     private let database: any Database
     private let pageItemLimit: Int
+    private let schema: String
 
-    public init(database: any Database, pageItemLimit: Int = 500) {
+    public init(database: any Database, pageItemLimit: Int = 500, schema: String = "im_v2") {
         precondition(pageItemLimit > 0)
+        precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
         self.database = database
         self.pageItemLimit = pageItemLimit
+        self.schema = schema
     }
 
     public func materialize(userID: UserID, now: Date) async throws -> V2AuthoritativeSnapshotProjection {
@@ -35,14 +38,14 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
             try await sql.raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").run()
             let watermark = try await sql.raw("""
-                SELECT COALESCE((SELECT next_sequence FROM im_v2.user_sync_sequences
+                SELECT COALESCE((SELECT next_sequence FROM \(unsafeRaw: table("user_sync_sequences"))
                                  WHERE user_id = \(bind: userUUID)), 0) AS value
                 """).first(decoding: SnapshotProjectionWatermarkRow.self)?.value ?? 0
             let log = try await sql.raw("""
                 SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
                        CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json
-                FROM im_v2.user_sync_log AS log
-                LEFT JOIN im_v2.fanout_sync_payloads AS shared
+                FROM \(unsafeRaw: table("user_sync_log")) AS log
+                LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
                 WHERE log.user_id = \(bind: userUUID)
@@ -53,27 +56,27 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                        state,
                        CASE WHEN state = 'pending' THEN requested_by_user_id ELSE NULL END AS requested_by_user_id,
                        updated_at
-                FROM im_v2.user_relationships
+                FROM \(unsafeRaw: table("user_relationships"))
                 WHERE lower_user_id = \(bind: userUUID) OR higher_user_id = \(bind: userUUID)
                 ORDER BY target_user_id
                 """).all(decoding: SnapshotProjectionRelationshipRow.self)
             let blocks = try await sql.raw("""
                 SELECT blocked_user_id AS target_user_id, created_at AS updated_at
-                FROM im_v2.user_blocks
+                FROM \(unsafeRaw: table("user_blocks"))
                 WHERE blocker_user_id = \(bind: userUUID)
                 ORDER BY blocked_user_id
                 """).all(decoding: SnapshotProjectionBlockRow.self)
             let preference = try await sql.raw("""
                 SELECT allows_stranger_messages, updated_at
-                FROM im_v2.user_stranger_message_preferences
+                FROM \(unsafeRaw: table("user_stranger_message_preferences"))
                 WHERE user_id = \(bind: userUUID)
                 """).first(decoding: SnapshotProjectionPreferenceRow.self)
             let userAddPreference = try await sql.raw("""
                 SELECT allows_being_added, updated_at
-                FROM im_v2.user_add_preferences
+                FROM \(unsafeRaw: table("user_add_preferences"))
                 WHERE user_id = \(bind: userUUID)
                 """).first(decoding: SnapshotProjectionUserAddPreferenceRow.self)
-            let readReceiptPreference = try await sql.raw("SELECT allows_direct_read_receipts, allows_group_read_receipts, updated_at FROM im_v2.user_read_receipt_preferences WHERE user_id = \(bind: userUUID)").first(decoding: SnapshotProjectionReadReceiptPreferenceRow.self)
+            let readReceiptPreference = try await sql.raw("SELECT allows_direct_read_receipts, allows_group_read_receipts, updated_at FROM \(unsafeRaw: table("user_read_receipt_preferences")) WHERE user_id = \(bind: userUUID)").first(decoding: SnapshotProjectionReadReceiptPreferenceRow.self)
             // Direct rooms have exactly one counterpart. Their public profile
             // is therefore constant-size per active room and may be rebuilt
             // from authority during a reset; group rosters deliberately do
@@ -84,29 +87,29 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                             THEN pair.higher_user_id ELSE pair.lower_user_id END AS target_user_id,
                        profile.public_handle, profile.display_name,
                        profile.revision, profile.updated_at
-                FROM im_v2.direct_room_pairs AS pair
-                INNER JOIN im_v2.rooms AS room
+                FROM \(unsafeRaw: table("direct_room_pairs")) AS pair
+                INNER JOIN \(unsafeRaw: table("rooms")) AS room
                     ON room.room_id = pair.room_id AND room.room_kind = 'direct'
-                INNER JOIN im_v2.room_memberships AS actor_membership
+                INNER JOIN \(unsafeRaw: table("room_memberships")) AS actor_membership
                     ON actor_membership.room_id = pair.room_id
                    AND actor_membership.user_id = \(bind: userUUID)
                    AND actor_membership.joined_revision <= room.membership_revision
                    AND (actor_membership.left_revision IS NULL OR actor_membership.left_revision > room.membership_revision)
-                INNER JOIN im_v2.public_user_profiles AS profile
+                INNER JOIN \(unsafeRaw: table("public_user_profiles")) AS profile
                     ON profile.user_id = CASE WHEN pair.lower_user_id = \(bind: userUUID)
                                               THEN pair.higher_user_id ELSE pair.lower_user_id END
                 WHERE pair.lower_user_id = \(bind: userUUID) OR pair.higher_user_id = \(bind: userUUID)
-                  AND EXISTS (SELECT 1 FROM im_v2.messages WHERE room_id = pair.room_id)
+                  AND EXISTS (SELECT 1 FROM \(unsafeRaw: table("messages")) WHERE room_id = pair.room_id)
                 ORDER BY pair.room_id
                 """).all(decoding: SnapshotProjectionDirectRoomProfileRow.self)
             let directReadReceipts = try await sql.raw("""
                 SELECT pair.room_id, receipt.user_id AS reader_user_id,
                        receipt.read_through_room_sequence, receipt.updated_at
-                FROM im_v2.direct_room_pairs AS pair
-                INNER JOIN im_v2.room_read_receipts AS receipt ON receipt.room_id = pair.room_id
-                LEFT JOIN im_v2.user_read_receipt_preferences AS reader_preference
+                FROM \(unsafeRaw: table("direct_room_pairs")) AS pair
+                INNER JOIN \(unsafeRaw: table("room_read_receipts")) AS receipt ON receipt.room_id = pair.room_id
+                LEFT JOIN \(unsafeRaw: table("user_read_receipt_preferences")) AS reader_preference
                     ON reader_preference.user_id = receipt.user_id
-                LEFT JOIN im_v2.user_read_receipt_preferences AS viewer_preference
+                LEFT JOIN \(unsafeRaw: table("user_read_receipt_preferences")) AS viewer_preference
                     ON viewer_preference.user_id = \(bind: userUUID)
                 WHERE (pair.lower_user_id = \(bind: userUUID) OR pair.higher_user_id = \(bind: userUUID))
                   AND receipt.user_id <> \(bind: userUUID)
@@ -114,8 +117,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                   AND COALESCE(viewer_preference.allows_direct_read_receipts, TRUE)
                 ORDER BY pair.room_id
                 """).all(decoding: SnapshotProjectionDirectReadReceiptRow.self)
-            let conversationStates = try await sql.raw("SELECT room_id, pinned_at IS NOT NULL AS is_pinned, archived_at IS NOT NULL AS is_archived, mute_until, updated_at FROM im_v2.user_room_preferences WHERE user_id = \(bind: userUUID) ORDER BY room_id").all(decoding: SnapshotProjectionConversationStateRow.self)
-            let messageFavorites = try await sql.raw("SELECT room_id, message_id, TRUE AS is_favorited, created_at AS updated_at FROM im_v2.user_message_favorites WHERE user_id = \(bind: userUUID) ORDER BY message_id").all(decoding: SnapshotProjectionMessageFavoriteRow.self)
+            let conversationStates = try await sql.raw("SELECT room_id, pinned_at IS NOT NULL AS is_pinned, archived_at IS NOT NULL AS is_archived, mute_until, updated_at FROM \(unsafeRaw: table("user_room_preferences")) WHERE user_id = \(bind: userUUID) ORDER BY room_id").all(decoding: SnapshotProjectionConversationStateRow.self)
+            let messageFavorites = try await sql.raw("SELECT room_id, message_id, TRUE AS is_favorited, created_at AS updated_at FROM \(unsafeRaw: table("user_message_favorites")) WHERE user_id = \(bind: userUUID) ORDER BY message_id").all(decoding: SnapshotProjectionMessageFavoriteRow.self)
             return (watermark, log, relationships, blocks, preference, userAddPreference, readReceiptPreference, directRoomProfiles, directReadReceipts, conversationStates, messageFavorites)
         }
         guard source.0 >= 0 else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
@@ -173,6 +176,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
         )
         return .init(baseSequence: UInt64(source.0), pages: payloads.map { .init(digest: snapshotProjectionSHA256($0), payload: $0) })
     }
+
+    private func table(_ name: String) -> String { "\(schema).\(name)" }
 
     private func makePages(
         messages: [V2SnapshotMessageProjection],
@@ -276,7 +281,12 @@ public struct V2ServerSnapshotResetStager: Sendable {
         self.now = now
     }
 
-    public func stageReset(userID: UserID, deviceID: DeviceID, capabilityProfile: String) async throws -> UInt64 {
+    public func stageReset(
+        userID: UserID,
+        deviceID: DeviceID,
+        capabilityProfile: String,
+        snapshotID: SnapshotID? = nil
+    ) async throws -> UInt64 {
         guard !capabilityProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw V2SnapshotProjectionMaterializerError.invalidCapabilityProfile
         }
@@ -284,7 +294,7 @@ public struct V2ServerSnapshotResetStager: Sendable {
         let projection = try await materializer.materialize(userID: userID, now: currentTime)
         let pageDigests = projection.pages.map(\.digest)
         let snapshot = try V2SnapshotStage(
-            snapshotID: .init(makeUUID().uuidString),
+            snapshotID: snapshotID ?? .init(makeUUID().uuidString),
             baseSequence: projection.baseSequence,
             manifestDigest: try snapshotProjectionManifestDigest(
                 baseSequence: projection.baseSequence,

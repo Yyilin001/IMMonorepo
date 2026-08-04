@@ -133,6 +133,39 @@ migration_marker() {
     0029_shared_fanout_sync_payloads.sql)
       printf "%s" "SELECT to_regclass('im_v2.fanout_sync_payloads') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'user_sync_log' AND column_name = 'payload_storage')"
       ;;
+    0030_group_room_staged_audience_import.sql)
+      printf "%s" "SELECT to_regclass('im_v2.group_room_creation_drafts') IS NOT NULL"
+      ;;
+    0031_group_room_finalizing_recovery_index.sql)
+      printf "%s" "SELECT to_regclass('im_v2.group_room_creation_drafts_finalizing_recovery_idx') IS NOT NULL"
+      ;;
+    0032_profile_views.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'public_user_profiles' AND column_name = 'avatar_media_id')"
+      ;;
+    0033_profile_update_operations.sql)
+      printf "%s" "SELECT to_regclass('im_v2.public_profile_update_operations') IS NOT NULL"
+      ;;
+    0034_user_add_preferences.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_add_preferences') IS NOT NULL"
+      ;;
+    0035_rich_message_content.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'messages' AND column_name = 'rich_entities')"
+      ;;
+    0036_read_receipt_visibility.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_read_receipt_preferences') IS NOT NULL"
+      ;;
+    0037_live_activity.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_live_activity_preferences') IS NOT NULL"
+      ;;
+    0038_conversation_message_group_capabilities.sql)
+      printf "%s" "SELECT to_regclass('im_v2.message_forward_operations') IS NOT NULL"
+      ;;
+    0039_device_revocation_worker_cursor_namespace.sql)
+      printf "%s" "SELECT NOT EXISTS (SELECT 1 FROM im_v2.gateway_worker_cursors AS retired LEFT JOIN im_v2.gateway_worker_cursors AS current ON current.worker_name = 'device-revocation' AND current.node_id = retired.node_id WHERE retired.worker_name = 'device-revocation-v1' AND (current.last_event_id IS NULL OR current.last_event_id < retired.last_event_id))"
+      ;;
+    0040_device_session_management.sql)
+      printf "%s" "SELECT to_regclass('im_v2.device_session_operations') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'auth_devices' AND column_name = 'last_active_at')"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

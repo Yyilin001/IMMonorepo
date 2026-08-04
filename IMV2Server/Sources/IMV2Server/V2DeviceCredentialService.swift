@@ -32,12 +32,34 @@ public struct V2TrustedDeviceRegistration: Sendable {
     public let userID: UserID
     public let deviceID: DeviceID
     public let operationID: UUID
+    public let metadata: V2DeviceRegistrationMetadata
 
-    public init(userID: UserID, deviceID: DeviceID, operationID: UUID) {
+    public init(
+        userID: UserID,
+        deviceID: DeviceID,
+        operationID: UUID,
+        metadata: V2DeviceRegistrationMetadata = .unknown
+    ) {
         self.userID = userID
         self.deviceID = deviceID
         self.operationID = operationID
+        self.metadata = metadata
     }
+}
+
+/// Client-supplied, non-security-sensitive information used only to make a
+/// signed-in device recognisable to its account owner. It deliberately does
+/// not contain an advertising ID, IP address, or OS version.
+public struct V2DeviceRegistrationMetadata: Equatable, Sendable {
+    public let displayName: String
+    public let platform: String
+
+    public init(displayName: String, platform: String) {
+        self.displayName = displayName
+        self.platform = platform
+    }
+
+    public static let unknown = Self(displayName: "This device", platform: "Unknown")
 }
 
 public struct V2DeviceCredentialRefresh: Sendable {
@@ -185,6 +207,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceCredentialServiceError.unavailable }
             let userUUID = try credentialUUID(request.userID)
             let deviceUUID = try credentialUUID(request.deviceID)
+            let metadata = try normalizedMetadata(request.metadata)
             try await lockAccountState(sql, userID: userUUID)
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
@@ -202,8 +225,9 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 guard try await sql.raw("SELECT 1 FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first() == nil else {
                     return .idempotencyConflict
                 }
+                try await sql.raw("UPDATE im_v2.auth_devices SET display_name = \(bind: metadata.displayName), platform = \(bind: metadata.platform), last_active_at = GREATEST(last_active_at, \(bind: issuedAt)) WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)").run()
             } else {
-                try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: issuedAt))").run()
+                try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, display_name, platform, last_active_at, created_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: metadata.displayName), \(bind: metadata.platform), \(bind: issuedAt), \(bind: issuedAt))").run()
             }
 
             let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, issuedAt: issuedAt)
@@ -310,6 +334,20 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
 
     private func isAccountDisabled(_ sql: any SQLDatabase, userID: UUID) async throws -> Bool {
         try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID)").first() != nil
+    }
+
+    private func normalizedMetadata(_ metadata: V2DeviceRegistrationMetadata) throws -> (displayName: String, platform: String) {
+        func normalize(_ value: String, fallback: String) -> String {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalized.isEmpty ? fallback : normalized
+        }
+        let displayName = normalize(metadata.displayName, fallback: V2DeviceRegistrationMetadata.unknown.displayName)
+        let platform = normalize(metadata.platform, fallback: V2DeviceRegistrationMetadata.unknown.platform)
+        guard displayName.utf8.count <= 128, platform.utf8.count <= 64,
+              !displayName.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
+              !platform.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { throw V2DeviceCredentialServiceError.malformedPersistence }
+        return (displayName, platform)
     }
 
     private func replayContext(userID: UserID, deviceID: DeviceID, operationID: UUID) -> Data {

@@ -584,11 +584,24 @@ actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
             return .rejected(code: "GROUP_MEMBER_LIMIT_REACHED")
         }
         let command = try await outbox.enqueueCreation(title: title, deliveryMode: deliveryMode, initialMemberUserIDs: members)
-        switch try await outbox.flushOnce() {
-        case .acknowledged(_, let roomID): return .created(roomID: roomID.rawValue)
-        case .retryScheduled, .idle, .cancelled, .cancellationRefused: return .queuedForRetry(operationID: command.operationID.rawValue)
-        case .rejected(_, let code): return .rejected(code: code)
+        // A staged creation has at least Begin and Finalize, plus one bounded
+        // Append per audience page. Calling the durable engine only once made
+        // a healthy foreground creation look offline after Begin succeeded.
+        // Keep the immediate path finite; a network error still leaves the
+        // same persisted command for the normal reconnect scheduler.
+        let pageCount = (members.count + V2GroupAudienceImportLimits.maximumMembersPerAppend - 1) / V2GroupAudienceImportLimits.maximumMembersPerAppend
+        let maximumForegroundFlushes = pageCount + 2
+        for _ in 0..<maximumForegroundFlushes {
+            switch try await outbox.flushOnce() {
+            case .acknowledged(_, let roomID): return .created(roomID: roomID.rawValue)
+            case .rejected(_, let code): return .rejected(code: code)
+            case .retryScheduled:
+                continue
+            case .idle, .cancelled, .cancellationRefused:
+                return .queuedForRetry(operationID: command.operationID.rawValue)
+            }
         }
+        return .queuedForRetry(operationID: command.operationID.rawValue)
     }
 
     func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {

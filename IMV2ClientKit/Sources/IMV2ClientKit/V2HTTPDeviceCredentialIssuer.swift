@@ -17,6 +17,20 @@ public protocol V2DeviceIdentityProvider: Sendable {
     func deviceID() async throws -> DeviceID
 }
 
+/// Non-sensitive label shown only in the owner's device-session inventory.
+/// The app owns platform-specific discovery; ClientKit only transports it.
+public struct V2ClientDeviceRegistrationMetadata: Equatable, Sendable {
+    public let deviceName: String
+    public let platform: String
+
+    public init(deviceName: String, platform: String) {
+        self.deviceName = deviceName
+        self.platform = platform
+    }
+
+    public static let unknown = Self(deviceName: "This device", platform: "Unknown")
+}
+
 /// The operation is not a credential, but must be device-local and durable:
 /// it is the only way to retrieve the exact registration result after a
 /// response is lost before credentials reach `V2AuthSession`.
@@ -65,6 +79,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
     private let assertionProvider: any V2DeviceBoundAccountAssertionProvider
     private let deviceIdentityProvider: any V2DeviceIdentityProvider
     private let operationStore: any V2DeviceCredentialRegistrationOperationStore
+    private let registrationMetadata: V2ClientDeviceRegistrationMetadata
     private let transport: any V2AuthHTTPTransport
     private let makeUUID: @Sendable () -> UUID
     private var issuedRegistration: IssuedRegistration?
@@ -74,6 +89,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         assertionProvider: any V2DeviceBoundAccountAssertionProvider,
         deviceIdentityProvider: any V2DeviceIdentityProvider,
         operationStore: any V2DeviceCredentialRegistrationOperationStore,
+        registrationMetadata: V2ClientDeviceRegistrationMetadata = .unknown,
         transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport(),
         makeUUID: @escaping @Sendable () -> UUID = { UUID() }
     ) throws {
@@ -84,6 +100,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         self.assertionProvider = assertionProvider
         self.deviceIdentityProvider = deviceIdentityProvider
         self.operationStore = operationStore
+        self.registrationMetadata = registrationMetadata
         self.transport = transport
         self.makeUUID = makeUUID
     }
@@ -191,7 +208,9 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
             request.httpBody = try JSONEncoder().encode(IssueRequest(
                 accountAssertion: assertion,
                 deviceID: pending.deviceID.rawValue,
-                operationID: pending.operationID
+                operationID: pending.operationID,
+                deviceName: registrationMetadata.deviceName,
+                platform: registrationMetadata.platform
             ))
         } catch {
             throw V2HTTPAuthTransportError.invalidRequest
@@ -214,6 +233,8 @@ private struct IssueRequest: Encodable {
     let accountAssertion: String
     let deviceID: String
     let operationID: UUID
+    let deviceName: String
+    let platform: String
 }
 
 private struct IssueResponse: Decodable {

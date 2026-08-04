@@ -61,5 +61,20 @@ printf '%s\n' "${repair_output}" | grep -Fxq 'local V2 migration applied: 0010_u
 test "$(psql -tAc "SELECT to_regclass('im_v2.user_shard_router_configuration') IS NOT NULL")" = 't'
 test "$(psql -tAc "SELECT EXISTS (SELECT 1 FROM im_v2.local_schema_migrations WHERE migration_name = '0010_user_shard_router_control.sql')")" = 't'
 
+psql -c "INSERT INTO im_v2.gateway_worker_cursors (worker_name, node_id, last_event_id, updated_at) VALUES ('device-revocation-v1', 'retired-gateway', 42, '2026-08-03T00:00:00Z')" >/dev/null
+psql -c "DELETE FROM im_v2.local_schema_migrations WHERE migration_name = '0039_device_revocation_worker_cursor_namespace.sql'" >/dev/null
+
+cursor_migration_output="$(run_migrator)"
+printf '%s\n' "${cursor_migration_output}" | grep -Fxq 'local V2 migration applied: 0039_device_revocation_worker_cursor_namespace.sql'
+test "$(psql -tAc "SELECT last_event_id FROM im_v2.gateway_worker_cursors WHERE worker_name = 'device-revocation' AND node_id = 'retired-gateway'")" = '42'
+test "$(psql -tAc "SELECT EXISTS (SELECT 1 FROM im_v2.local_schema_migrations WHERE migration_name = '0039_device_revocation_worker_cursor_namespace.sql')")" = 't'
+
+psql -c "DELETE FROM im_v2.local_schema_migrations WHERE migration_name = '0040_device_session_management.sql'" >/dev/null
+device_session_migration_output="$(run_migrator)"
+printf '%s\n' "${device_session_migration_output}" | grep -Fxq 'local V2 migration recorded: 0040_device_session_management.sql'
+test "$(psql -tAc "SELECT to_regclass('im_v2.device_session_operations') IS NOT NULL")" = 't'
+test "$(psql -tAc "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'auth_devices' AND column_name = 'last_active_at')")" = 't'
+test "$(psql -tAc "SELECT EXISTS (SELECT 1 FROM im_v2.local_schema_migrations WHERE migration_name = '0040_device_session_management.sql')")" = 't'
+
 test -z "$(run_migrator)"
 printf 'local V2 schema migration ledger regression passed\n'

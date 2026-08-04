@@ -12,6 +12,7 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+.swiftpm/xcode/
 .swiftpm/xcode/package.xcworkspace/xcuserdata/
 
 # Vapor / local environment
@@ -50,13 +51,3 @@ id_ed25519*
 *.bundle
 monorepo-backups/
 dist/
-
-# IMServer generated smoke/load-test reports
-IMServer/reports/
-IMServer/LoadTests/accounts/
-IMServer/LoadTests/**/*login-cache*
-IMServer/LoadTests/**/login_cache/*
-IMServer/LoadTests/**/*token-cache*
-IMServer/LoadTests/**/*token_cache*
-IMServer/LoadTests/**/*tcp_login_cache*
-IMServer/LoadTests/results/

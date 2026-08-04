@@ -7,11 +7,15 @@ public struct V2DeviceCredentialIssueHTTPRequest: Content, Sendable {
     public let accountAssertion: String
     public let deviceID: String
     public let operationID: UUID
+    public let deviceName: String?
+    public let platform: String?
 
-    public init(accountAssertion: String, deviceID: String, operationID: UUID) {
+    public init(accountAssertion: String, deviceID: String, operationID: UUID, deviceName: String? = nil, platform: String? = nil) {
         self.accountAssertion = accountAssertion
         self.deviceID = deviceID
         self.operationID = operationID
+        self.deviceName = deviceName
+        self.platform = platform
     }
 }
 
@@ -80,7 +84,15 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
             }
             let outcome: V2DeviceRegistrationOutcome
             do {
-                outcome = try await issuer.register(.init(userID: userID, deviceID: deviceID, operationID: input.operationID))
+                outcome = try await issuer.register(.init(
+                    userID: userID,
+                    deviceID: deviceID,
+                    operationID: input.operationID,
+                    metadata: .init(
+                        displayName: input.deviceName ?? V2DeviceRegistrationMetadata.unknown.displayName,
+                        platform: input.platform ?? V2DeviceRegistrationMetadata.unknown.platform
+                    )
+                ))
             } catch {
                 throw Abort(.serviceUnavailable)
             }

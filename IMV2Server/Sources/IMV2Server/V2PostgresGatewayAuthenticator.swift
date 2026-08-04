@@ -73,6 +73,11 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
+        // Activity is display metadata, never an authentication prerequisite.
+        // Bound writes to once per minute so a busy foreground device cannot
+        // turn account-edge reads into an unbounded write load.
+        let observedAt = now()
+        try? await database.raw("UPDATE im_v2.auth_devices SET last_active_at = \(bind: observedAt) WHERE device_id = \(bind: deviceUUID) AND (last_active_at IS NULL OR last_active_at < \(bind: observedAt.addingTimeInterval(-60)))").run()
         return userID
     }
 

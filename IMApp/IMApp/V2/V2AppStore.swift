@@ -174,6 +174,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var userBlockSettingsStore: V2UserBlockSettingsStore?
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
+    private(set) var deviceSessionsStore: V2DeviceSessionsStore?
 
     init(
         startupMode: StartupMode = .production,
@@ -200,6 +201,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
+            deviceSessionsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
@@ -264,6 +266,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
+            deviceSessionsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
@@ -284,6 +287,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             userBlockSettingsStore = nil
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
+            deviceSessionsStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
         }
@@ -353,7 +357,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
                 assertionProvider: accountProvider,
                 deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
+                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService),
+                registrationMetadata: Self.deviceRegistrationMetadata()
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try Task.checkCancellation()
@@ -394,7 +399,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
                 assertionProvider: accountProvider,
                 deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService)
+                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService),
+                registrationMetadata: Self.deviceRegistrationMetadata()
             )
             let localStore = try await bootstrapper.establishSession(using: issuer)
             try Task.checkCancellation()
@@ -558,6 +564,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         userBlockSettingsStore = nil
         publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
+        deviceSessionsStore = nil
         route = nextRoute
     }
 
@@ -565,6 +572,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard let authSession else { throw V2AppConfigurationError.invalidAccountBaseURL }
         let credentials = try await authSession.realtimeCredentials()
         return credentials.userID
+    }
+
+    private static func deviceRegistrationMetadata() -> V2ClientDeviceRegistrationMetadata {
+        .init(deviceName: UIDevice.current.name, platform: UIDevice.current.model)
     }
 
     private func beginAuthenticationAttempt() -> UInt64 {
@@ -643,7 +654,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             readReceiptUpdater: realtime.readReceiptPreferenceUpdater,
             readReceiptReader: V2GRDBReadReceiptPreferenceDataSource(localStore: localStore),
             liveActivityUpdater: realtime.liveActivityPreferenceUpdater,
-            liveActivityReader: realtime.liveActivityPreferenceReader
+            liveActivityReader: realtime.liveActivityPreferenceReader,
+            projectionChangeNotifier: realtime.projectionChangeNotifier
         )
         let contacts = V2ContactsStore(
             dataSource: contactsDataSource,
@@ -662,6 +674,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let publicIdentitySettings = try V2PublicIdentitySettingsStore(
             manager: V2HTTPPublicIdentityProfileClient(
                 endpoint: configuration.endpoint("v2/public-identities/me"),
+                credentials: authSession
+            )
+        )
+        let deviceSessions = try V2DeviceSessionsStore(
+            manager: V2HTTPDeviceSessionClient(
+                endpoint: configuration.endpoint("v2/devices"),
                 credentials: authSession
             )
         )
@@ -693,6 +711,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         userBlockSettingsStore = userBlockSettings
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
+        deviceSessionsStore = deviceSessions
         route = .signedIn(userID: userID.rawValue)
         messageSearchIndexTask?.cancel()
         messageSearchIndexTask = Task { [localStore] in

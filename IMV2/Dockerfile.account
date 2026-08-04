@@ -32,7 +32,7 @@ RUN swift build -c release --package-path IMV2Server --product IMV2AccountServer
 FROM swift:6.3-jammy
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

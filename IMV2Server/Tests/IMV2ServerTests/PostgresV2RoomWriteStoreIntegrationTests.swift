@@ -3229,6 +3229,56 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("device sessions list metadata and atomically revoke one remote installation")
+    func deviceSessionManagementRevokesOnlyTheRequestedDevice() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_100)
+            let tokenKey = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 0x51, count: 32))
+            let replayKey = try V2CredentialReplayEnvelopeKey(rawBytes: Data(repeating: 0x52, count: 32))
+            let issuer = try V2PostgresDeviceCredentialService(database: app.db(.psql), tokenHMACKey: tokenKey, replayEnvelopeKey: replayKey, now: { now })
+            let userID = try UserID("00000000-0000-0000-0000-000000000a01")
+            let currentDeviceID = try DeviceID("00000000-0000-0000-0000-000000000a02")
+            let remoteDeviceID = try DeviceID("00000000-0000-0000-0000-000000000a03")
+            guard case .issued(let currentCredentials) = try await issuer.register(.init(userID: userID, deviceID: currentDeviceID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000a04")!, metadata: .init(displayName: "Current iPhone", platform: "iPhone"))),
+                  case .issued(let remoteCredentials) = try await issuer.register(.init(userID: userID, deviceID: remoteDeviceID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000a05")!, metadata: .init(displayName: "Remote iPad", platform: "iPad")))
+            else { Issue.record("expected device credentials"); return }
+            let remoteUUID = try #require(UUID(uuidString: remoteDeviceID.rawValue))
+            let endpointGeneration = UUID(uuidString: "00000000-0000-0000-0000-000000000a06")!
+            try await sql.raw("INSERT INTO im_v2.push_device_endpoints (device_id, provider, environment, endpoint_generation, encrypted_token, updated_at) VALUES (\(bind: remoteUUID), 'apns', 'development', \(bind: endpointGeneration), 'sealed', \(bind: now))").run()
+
+            let service = V2PostgresDeviceSessionService(database: app.db(.psql), now: { now.addingTimeInterval(1) })
+            let listed = try await service.sessions(for: userID)
+            #expect(listed.map(\.deviceID) == [currentDeviceID, remoteDeviceID])
+            #expect(listed.map(\.displayName) == ["Current iPhone", "Remote iPad"])
+            let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000a07")!
+            #expect(try await service.revokeDevice(actorUserID: userID, currentDeviceID: currentDeviceID, targetDeviceID: remoteDeviceID, operationID: operationID) == .applied)
+            #expect(try await service.revokeDevice(actorUserID: userID, currentDeviceID: currentDeviceID, targetDeviceID: remoteDeviceID, operationID: operationID) == .idempotent)
+
+            let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now.addingTimeInterval(2) })
+            #expect(try await gateway.authenticate(accessToken: currentCredentials.accessToken, deviceID: currentDeviceID) == userID)
+            await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
+                try await gateway.authenticate(accessToken: remoteCredentials.accessToken, deviceID: remoteDeviceID)
+            }
+            #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 1)
+            #expect(try await count("im_v2.device_session_operations", on: sql) == 1)
+            #expect(try await count("im_v2.device_revocation_events", on: sql) == 1)
+            #expect(try await count("im_v2.push_device_endpoints WHERE disabled_at IS NOT NULL", on: sql) == 1)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown(); throw error
+        }
+    }
+
     @Test("account disable fences credential issuance, revokes every device, and preserves one audit fact")
     func accountDisableRevokesCredentialsAndFencesFutureIssue() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

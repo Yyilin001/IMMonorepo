@@ -66,10 +66,10 @@
 ### 阶段 0：恢复可验证基线（P0，先完成）
 
 1. [已完成，本机 2026-07-25] 显式链接 `IMV2Core` 到 IMApp/IMAppTests，修复 V2-only 清理后的链接缺失；iPhone 17 / iOS 26.5 arm64 已通过 `V2ConversationStoreTests`、`V2PushWakeSettingsTests`，通用 Simulator 双架构 `build-for-testing` 已通过。
-2. [历史记录，远端执行，`c02af08`] 曾通过 generic Simulator build、聚焦运行时测试、Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。项目当前不启用 GitHub Actions；这些历史结果不是当前门禁，本机回归才是现阶段有效门禁。
+2. [历史记录，远端执行，`c02af08`] 曾通过 generic Simulator build、聚焦运行时测试、Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。当前 GitHub Actions 已运行 Swift/PostgreSQL 集成和 iOS `build-for-testing` 检查；这些历史结果仍不是当前门禁证据。
 3. [已完成，2026-07-26] `implementation-status.md` 记录本机验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
 
-**完成条件**：干净 checkout 上，本机指定模拟器、隔离 PostgreSQL 与本地账号栈可重复成功。GitHub Actions 不属于当前门禁。
+**完成条件**：干净 checkout 上，本机指定模拟器、隔离 PostgreSQL 与本地账号栈可重复成功，并保持 GitHub Actions 的 Swift/PostgreSQL 与 iOS 构建检查通过。
 
 ### 阶段 1：首发安全与最小部署（P0）
 
@@ -84,7 +84,7 @@
 
 1. 完成真实对象存储、扫描 provider、provider cleanup 与媒体滥用/失败回归。
 2. 完成真实 APNs 凭据、Push-enabled profile、用户开关、失效 token 和后台 sync 真机回归。
-3. 完成两台设备的登录、离线发送、断网重连、snapshot reset、撤回/编辑/reaction/receipt、陌生人设置和群成员管理 E2E。
+3. 已新增同账号双安装回归入口：`IMApp/Scripts/verify_local_account_multi_device_e2e.sh` 在两台指定模拟器上注册同一账号的两个独立 Keychain/SQLite scope，覆盖设备清单、消息投影、编辑、撤回、陌生人消息与群已读设置、用户级群已读持久化、离线 outbox 重连、前后台恢复及单设备 snapshot reset。reset 只能经 loopback operator 的专用 bearer 调用，并以操作 UUID 幂等。仍需在已连接的两台真机执行同一套回归，并补录 reaction 与 APNs 结果。
 4. [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) 的 direct-profile
    同步投影、会话标题和群成员显示名已实现：direct room 创建与 snapshot reset
    只携带对端的有界公开资料，显示名更新通过独立 outbox 按接收者预算增量投递。
