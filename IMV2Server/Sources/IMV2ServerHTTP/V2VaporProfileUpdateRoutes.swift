@@ -16,6 +16,17 @@ public struct V2VaporProfileUpdateRoutes: Sendable {
     }
 
     public func register(on routes: RoutesBuilder) {
+        routes.get("v2", "profile", "me") { request async throws -> Response in
+            let actor = try await authenticate(request)
+            do {
+                let view = try await profiles.currentProfile(for: actor.userID)
+                return try noStoreJSONResponse(.init(view: view, idempotent: true))
+            } catch is V2ProfileUpdateError {
+                throw Abort(.serviceUnavailable)
+            } catch {
+                throw Abort(.serviceUnavailable)
+            }
+        }
         routes.put("v2", "profile", "me") { request async throws -> Response in
             let actor = try await authenticate(request)
             let input = try request.content.decode(V2ProfileUpdateHTTPRequest.self)
@@ -105,6 +116,7 @@ public struct V2ProfileUpdateHTTPResponse: Content, Sendable {
     public let userID: String?
     public let handle: String?
     public let displayName: String?
+    public let accountKind: V2AccountKind?
     public let avatarMediaID: String?
     public let state: String?
     public let revision: UInt64?
@@ -116,6 +128,7 @@ public struct V2ProfileUpdateHTTPResponse: Content, Sendable {
         case userID = "user_id"
         case handle
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case avatarMediaID = "avatar_media_id"
         case state
         case revision
@@ -128,6 +141,7 @@ public struct V2ProfileUpdateHTTPResponse: Content, Sendable {
         userID = view.userID.rawValue
         handle = view.publicIdentity?.handle.rawValue
         displayName = view.publicIdentity?.displayName
+        accountKind = view.publicIdentity?.accountKind
         avatarMediaID = view.avatar?.mediaID.rawValue
         state = view.state.rawValue
         revision = view.revision.rawValue
@@ -140,6 +154,7 @@ public struct V2ProfileUpdateHTTPResponse: Content, Sendable {
         userID = nil
         handle = nil
         displayName = nil
+        accountKind = nil
         avatarMediaID = nil
         state = nil
         revision = nil

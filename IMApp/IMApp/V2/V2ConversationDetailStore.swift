@@ -142,7 +142,7 @@ final class V2ConversationDetailStore {
         do {
             let refreshedMessages = try await dataSource.messages(in: roomID, for: userID)
             let refreshedTimeline = try await dataSource.timeline(in: roomID, for: userID)
-            let refreshedCanSend = if !isGroupConversation, let sendingCapabilityReader {
+            let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
                 try await sendingCapabilityReader.directSendingCapability(in: roomID)
             } else {
                 nil

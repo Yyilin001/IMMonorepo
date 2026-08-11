@@ -9,7 +9,13 @@ struct V2PublicIdentitySettingsStoreTests {
     @Test("显示名保存忽略取消后的迟到成功")
     func saveIgnoresLateSuccessAfterCancellation() async throws {
         let manager = V2LateProfileManager()
-        let store = try V2PublicIdentitySettingsStore(manager: manager)
+        let store = V2PublicIdentitySettingsStore(
+            manager: manager,
+            attachmentStager: nil,
+            attachmentUploader: nil,
+            mediaDownloader: nil
+        )
+        await store.load()
         store.displayName = "本地草稿"
 
         let save = Task { await store.save() }
@@ -25,15 +31,20 @@ struct V2PublicIdentitySettingsStoreTests {
     }
 }
 
-private actor V2LateProfileManager: V2PublicIdentityProfileManaging {
-    private var responseWaiter: CheckedContinuation<V2PublicIdentity, Never>?
+private actor V2LateProfileManager: V2OwnProfileManaging {
+    private var responseWaiter: CheckedContinuation<V2ProfileView, Never>?
     private var responseReadyWaiter: CheckedContinuation<Void, Never>?
 
-    func currentProfile() async throws -> V2PublicIdentity {
+    func currentProfile() async throws -> V2ProfileView {
         try profile(displayName: "当前显示名")
     }
 
-    func updateDisplayName(_: String) async throws -> V2PublicIdentity {
+    func updateProfile(
+        operationID _: ProfileUpdateOperationID,
+        expectedRevision _: V2ProfileRevision,
+        displayName _: String,
+        avatar _: V2AvatarReference?
+    ) async throws -> V2ProfileView {
         await withCheckedContinuation { continuation in
             responseWaiter = continuation
             responseReadyWaiter?.resume()
@@ -52,11 +63,15 @@ private actor V2LateProfileManager: V2PublicIdentityProfileManaging {
         responseWaiter.resume(returning: try profile(displayName: "远端迟到结果"))
     }
 
-    private func profile(displayName: String) throws -> V2PublicIdentity {
-        try .init(
-            userID: .init("00000000-0000-0000-0000-000000000515"),
-            handle: .init("profile_test"),
-            displayName: displayName
+    private func profile(displayName: String) throws -> V2ProfileView {
+        let userID = try UserID("00000000-0000-0000-0000-000000000515")
+        return try .init(
+            userID: userID,
+            publicIdentity: .init(userID: userID, handle: .init("profile_test"), displayName: displayName),
+            avatar: nil,
+            state: .active,
+            revision: .init(rawValue: 1)!,
+            visibilityRevision: .init(rawValue: 1)!
         )
     }
 }

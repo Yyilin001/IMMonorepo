@@ -129,9 +129,14 @@ enum IMV2AccountServerApp {
                 authenticator: authenticator,
                 profiles: .init(store: PostgresV2ProfileViewStore(database: database))
             ).register(on: app)
+            let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,
-                profiles: .init(store: PostgresV2ProfileUpdateStore(database: database))
+                profiles: .init(store: profileUpdateStore, reader: profileUpdateStore)
+            ).register(on: app)
+            V2VaporProfilePresentationRoutes(
+                authenticator: authenticator,
+                presentations: PostgresV2ProfilePresentationStore(database: database)
             ).register(on: app)
             V2PasswordAccountRoutes(
                 store: .init(database: database),

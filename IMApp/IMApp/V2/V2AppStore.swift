@@ -673,11 +673,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             changer: realtime.userBlockChanger,
             currentUserID: userID
         )
-        let publicIdentitySettings = try V2PublicIdentitySettingsStore(
-            manager: V2HTTPPublicIdentityProfileClient(
-                endpoint: configuration.endpoint("v2/public-identities/me"),
+        let publicIdentitySettings = V2PublicIdentitySettingsStore(
+            manager: try V2HTTPOwnProfileClient(
+                endpoint: configuration.endpoint("v2/profile/me"),
                 credentials: authSession
-            )
+            ),
+            attachmentStager: attachmentStager,
+            attachmentUploader: realtime.attachmentUploader,
+            mediaDownloader: realtime.mediaDownloader
         )
         let deviceSessions = try V2DeviceSessionsStore(
             manager: V2HTTPDeviceSessionClient(

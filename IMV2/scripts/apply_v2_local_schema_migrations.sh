@@ -166,6 +166,9 @@ migration_marker() {
     0040_device_session_management.sql)
       printf "%s" "SELECT to_regclass('im_v2.device_session_operations') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'auth_devices' AND column_name = 'last_active_at')"
       ;;
+    0043_profile_presentations.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_contact_aliases') IS NOT NULL AND to_regclass('im_v2.room_member_nicknames') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

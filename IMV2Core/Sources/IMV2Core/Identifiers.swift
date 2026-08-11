@@ -104,6 +104,8 @@ public enum MessageForwardOperationIDTag: V2IdentifierTag {}
 public enum MediaIDTag: V2IdentifierTag {}
 public enum MediaUploadOperationIDTag: V2IdentifierTag {}
 public enum ProfileUpdateOperationIDTag: V2IdentifierTag {}
+public enum ContactAliasOperationIDTag: V2IdentifierTag {}
+public enum GroupNicknameOperationIDTag: V2IdentifierTag {}
 public enum MediaUploadSessionIDTag: V2IdentifierTag {}
 public enum MediaDownloadSessionIDTag: V2IdentifierTag {}
 
@@ -141,5 +143,7 @@ public typealias MessageForwardOperationID = V2Identifier<MessageForwardOperatio
 public typealias MediaID = V2Identifier<MediaIDTag>
 public typealias MediaUploadOperationID = V2Identifier<MediaUploadOperationIDTag>
 public typealias ProfileUpdateOperationID = V2Identifier<ProfileUpdateOperationIDTag>
+public typealias ContactAliasOperationID = V2Identifier<ContactAliasOperationIDTag>
+public typealias GroupNicknameOperationID = V2Identifier<GroupNicknameOperationIDTag>
 public typealias MediaUploadSessionID = V2Identifier<MediaUploadSessionIDTag>
 public typealias MediaDownloadSessionID = V2Identifier<MediaDownloadSessionIDTag>

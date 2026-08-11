@@ -6,7 +6,7 @@ import SQLKit
 /// Own-profile writer. It verifies that an avatar is both owned by the actor
 /// and scanner-approved in the same transaction as the profile revision and
 /// durable direct-peer invalidation source record.
-public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore {
+public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileReading {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
@@ -103,6 +103,18 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore {
                         \(bind: result.revision.rawValue), \(bind: changedAt))
                 """).run()
             return .updated(result)
+        }
+    }
+
+    public func currentProfile(for actorUserID: UserID) async throws -> V2ProfileView {
+        guard let actorID = UUID(uuidString: actorUserID.rawValue) else {
+            throw V2ProfileUpdateError.corruptPersistenceState
+        }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2ProfileUpdateError.corruptPersistenceState
+            }
+            return try await activeProfile(userID: actorID, sql: sql)
         }
     }
 
