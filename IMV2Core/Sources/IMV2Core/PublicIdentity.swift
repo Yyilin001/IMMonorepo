@@ -1,5 +1,14 @@
 import Foundation
 
+/// The server-controlled presentation class of an account.  This is not an
+/// authorization credential: a client may render it, but only the server-side
+/// special-account registry can grant the corresponding sending privileges.
+public enum V2AccountKind: String, Codable, CaseIterable, Equatable, Sendable {
+    case regular
+    case system
+    case customerSupport = "customer_support"
+}
+
 /// A public, user-chosen identifier. It is intentionally distinct from every
 /// authentication credential: callers may use an optional leading `@` for
 /// input ergonomics, while persistence and protocol values are canonical.
@@ -29,8 +38,14 @@ public struct V2PublicIdentity: Codable, Equatable, Sendable {
     public let userID: UserID
     public let handle: V2PublicHandle
     public let displayName: String
+    public let accountKind: V2AccountKind
 
-    public init(userID: UserID, handle: V2PublicHandle, displayName: String) throws {
+    public init(
+        userID: UserID,
+        handle: V2PublicHandle,
+        displayName: String,
+        accountKind: V2AccountKind = .regular
+    ) throws {
         let normalizedName = displayName.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty,
@@ -42,6 +57,35 @@ public struct V2PublicIdentity: Codable, Equatable, Sendable {
         self.userID = userID
         self.handle = handle
         self.displayName = normalizedName
+        self.accountKind = accountKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userID
+        case handle
+        case displayName
+        case accountKind
+    }
+
+    /// Old snapshots and direct-room cache records did not contain an account
+    /// kind. They are ordinary accounts by definition, so decoding keeps that
+    /// history valid while all new server projections carry the explicit fact.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            userID: container.decode(UserID.self, forKey: .userID),
+            handle: container.decode(V2PublicHandle.self, forKey: .handle),
+            displayName: container.decode(String.self, forKey: .displayName),
+            accountKind: try container.decodeIfPresent(V2AccountKind.self, forKey: .accountKind) ?? .regular
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(userID, forKey: .userID)
+        try container.encode(handle, forKey: .handle)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(accountKind, forKey: .accountKind)
     }
 }
 

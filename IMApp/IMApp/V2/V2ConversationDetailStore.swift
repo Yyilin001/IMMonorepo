@@ -13,6 +13,7 @@ final class V2ConversationDetailStore {
     }
 
     private let dataSource: any V2ConversationDataSource
+    private let sendingCapabilityReader: (any V2ConversationSendingCapabilityReading)?
     private let messageSearcher: (any V2ConversationMessageSearching)?
     private let sender: (any V2ConversationSending)?
     private let messageWithdrawer: (any V2MessageWithdrawing)?
@@ -44,7 +45,10 @@ final class V2ConversationDetailStore {
     let roomID: String
     let title: String
     let isGroupConversation: Bool
+    let directAccountKind: V2AccountKind
     private(set) var messages: [V2ConversationMessageItem] = []
+    private(set) var timeline: [V2ConversationTimelineItem] = []
+    private(set) var canSendInDirectConversation: Bool?
     private(set) var state: State = .loading
     private(set) var sendFeedback: String?
     private(set) var isSending = false
@@ -87,8 +91,9 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, messageSearcher: (any V2ConversationMessageSearching)? = nil, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, messageFavoriter: (any V2MessageFavoriting)? = nil, groupMessagePinner: (any V2GroupMessagePinning)? = nil, messageForwarder: (any V2MessageForwarding)? = nil, forwardTargets: [V2ConversationForwardTarget] = [], groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil, groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil, groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil, groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil, groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil, groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil, conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
+    init(dataSource: any V2ConversationDataSource, messageSearcher: (any V2ConversationMessageSearching)? = nil, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, messageFavoriter: (any V2MessageFavoriting)? = nil, groupMessagePinner: (any V2GroupMessagePinning)? = nil, messageForwarder: (any V2MessageForwarding)? = nil, forwardTargets: [V2ConversationForwardTarget] = [], groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil, groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil, groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil, groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil, groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil, groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil, conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, directAccountKind: V2AccountKind = .regular, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
         self.dataSource = dataSource
+        self.sendingCapabilityReader = dataSource as? any V2ConversationSendingCapabilityReading
         self.messageSearcher = messageSearcher
         self.sender = sender
         self.messageWithdrawer = messageWithdrawer
@@ -110,6 +115,7 @@ final class V2ConversationDetailStore {
         self.roomID = roomID
         self.title = title
         self.isGroupConversation = isGroupConversation
+        self.directAccountKind = directAccountKind
         self.groupMemberDirectory = groupMemberDirectory
         self.groupMembershipChanger = groupMembershipChanger
         self.groupMemberMuter = groupMemberMuter
@@ -135,6 +141,12 @@ final class V2ConversationDetailStore {
         state = .loading
         do {
             let refreshedMessages = try await dataSource.messages(in: roomID, for: userID)
+            let refreshedTimeline = try await dataSource.timeline(in: roomID, for: userID)
+            let refreshedCanSend = if !isGroupConversation, let sendingCapabilityReader {
+                try await sendingCapabilityReader.directSendingCapability(in: roomID)
+            } else {
+                nil
+            }
             let refreshedAnnouncement: V2ClientGroupAnnouncement? = if isGroupConversation, let groupAnnouncementReader {
                 try await groupAnnouncementReader.groupAnnouncement(in: roomID)
             } else {
@@ -143,6 +155,8 @@ final class V2ConversationDetailStore {
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
             messages = refreshedMessages
+            timeline = refreshedTimeline
+            canSendInDirectConversation = refreshedCanSend
             groupAnnouncement = refreshedAnnouncement
             let visibleMediaIDs = Set(refreshedMessages.lazy
                 .filter { !$0.isWithdrawn }
@@ -451,6 +465,10 @@ final class V2ConversationDetailStore {
 
     func sendDraft() async {
         guard !isSending else { return }
+        guard isGroupConversation || canSendInDirectConversation != false else {
+            sendFeedback = "当前无法向此会话发送消息。"
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let sender else {
@@ -569,7 +587,7 @@ final class V2ConversationDetailStore {
         switch code {
         case "RATE_LIMITED":
             return "发送失败：发送频率已达上限，请稍后再试。"
-        case "FORBIDDEN":
+        case "FORBIDDEN", "DIRECT_MESSAGE_RESTRICTED":
             // Do not disclose whether the receiver disabled stranger messages,
             // blocked the sender, or a separate room policy denied the action.
             return "当前无法向此会话发送消息。"
@@ -584,6 +602,7 @@ final class V2ConversationDetailStore {
 
     var canAddAttachment: Bool {
         !isSending
+            && (isGroupConversation || canSendInDirectConversation != false)
             && attachments.count < V2MessageCommandLimits.maxMediaAttachments
             && !attachments.contains(where: { $0.state == .uploading })
     }

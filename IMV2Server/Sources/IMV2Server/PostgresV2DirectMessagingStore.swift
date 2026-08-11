@@ -36,7 +36,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
 
             let createdRoomID = try directUUID(roomID)
             let profiles = try await sql.raw("""
-                SELECT user_id, public_handle, display_name, revision, updated_at
+                SELECT user_id, public_handle, display_name, account_kind, revision, updated_at
                 FROM im_v2.public_user_profiles
                 WHERE user_id = \(bind: actorID) OR user_id = \(bind: targetID)
                 """).all(decoding: DirectPublicProfileRow.self)
@@ -141,7 +141,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         // records lexically differ from messages for the same room.
         let wireRoomID = roomID.uuidString
         let wireTargetUserID = profile.userID.uuidString
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
     }
 }
 
@@ -176,6 +176,7 @@ private struct DirectPublicProfileRow: Decodable {
     let userID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let revision: Int64
     let updatedAt: Date
 
@@ -183,6 +184,7 @@ private struct DirectPublicProfileRow: Decodable {
         case userID = "user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case revision
         case updatedAt = "updated_at"
     }

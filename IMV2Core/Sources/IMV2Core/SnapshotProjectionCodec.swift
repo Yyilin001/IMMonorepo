@@ -25,6 +25,9 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
+    /// Ordering key for the rendered room timeline. Legacy snapshots which
+    /// predate private activity map this to `roomSequence` on decode.
+    public let timelineSequence: UInt64
     public let messageRevision: UInt64
     public let senderUserID: UserID
     public let text: String
@@ -38,8 +41,9 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
     public let isWithdrawn: Bool
     public let reactions: [V2SnapshotMessageReaction]
 
-    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, forwardedFrom: V2ForwardedMessageAttribution? = nil, createdAt: Date, isWithdrawn: Bool = false, reactions: [V2SnapshotMessageReaction] = []) throws {
-        guard roomSequence > 0, messageRevision > 0, (!text.isEmpty || !media.isEmpty),
+    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, timelineSequence: UInt64? = nil, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, forwardedFrom: V2ForwardedMessageAttribution? = nil, createdAt: Date, isWithdrawn: Bool = false, reactions: [V2SnapshotMessageReaction] = []) throws {
+        let resolvedTimelineSequence = timelineSequence ?? roomSequence
+        guard roomSequence > 0, resolvedTimelineSequence > 0, messageRevision > 0, (!text.isEmpty || !media.isEmpty),
               media.count <= V2MessageCommandLimits.maxMediaAttachments,
               Set(media).count == media.count,
               mentions.count <= V2MessageCommandLimits.maxMentions,
@@ -51,6 +55,7 @@ public struct V2SnapshotMessageProjection: Equatable, Sendable {
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
+        self.timelineSequence = resolvedTimelineSequence
         self.messageRevision = messageRevision
         self.senderUserID = senderUserID
         self.text = text
@@ -229,6 +234,29 @@ public struct V2SnapshotMessageFavorite: Equatable, Sendable {
     }
 }
 
+/// Viewer-private system activity retained across a sync reset. This uses the
+/// same timeline sequence as messages but remains structurally unable to
+/// participate in message commands.
+public struct V2SnapshotTimelineActivity: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case directMessageRestricted = "direct_message_restricted"
+        case systemAccountReadOnly = "system_account_read_only"
+    }
+    public let sourceEventID: EventID; public let roomID: RoomID; public let timelineSequence: UInt64; public let kind: Kind; public let createdAt: Date
+    public init(sourceEventID: EventID, roomID: RoomID, timelineSequence: UInt64, kind: Kind, createdAt: Date) throws {
+        guard timelineSequence > 0, createdAt.timeIntervalSince1970 >= 0 else { throw V2SnapshotProjectionError.invalidPage }
+        self.sourceEventID = sourceEventID; self.roomID = roomID; self.timelineSequence = timelineSequence; self.kind = kind; self.createdAt = createdAt
+    }
+}
+
+public struct V2SnapshotDirectSendingCapability: Equatable, Sendable {
+    public let roomID: RoomID; public let canSend: Bool; public let updatedAt: Date
+    public init(roomID: RoomID, canSend: Bool, updatedAt: Date) throws {
+        guard updatedAt.timeIntervalSince1970 >= 0 else { throw V2SnapshotProjectionError.invalidPage }
+        self.roomID = roomID; self.canSend = canSend; self.updatedAt = updatedAt
+    }
+}
+
 public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let messages: [V2SnapshotMessageProjection]
     public let relationships: [V2SnapshotRelationshipProjection]
@@ -243,7 +271,9 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
     public let directReadReceipts: [V2SnapshotDirectReadReceiptProjection]
     public let conversationStates: [V2SnapshotConversationState]
     public let messageFavorites: [V2SnapshotMessageFavorite]
-    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = [], userAddPreference: V2SnapshotUserAddPreference? = nil, readReceiptPreference: V2SnapshotReadReceiptPreference? = nil, directReadReceipts: [V2SnapshotDirectReadReceiptProjection] = [], conversationStates: [V2SnapshotConversationState] = [], messageFavorites: [V2SnapshotMessageFavorite] = []) throws {
+    public let timelineActivities: [V2SnapshotTimelineActivity]
+    public let directSendingCapabilities: [V2SnapshotDirectSendingCapability]
+    public init(messages: [V2SnapshotMessageProjection], relationships: [V2SnapshotRelationshipProjection], userBlocks: [V2SnapshotUserBlockProjection], strangerMessagePreference: V2SnapshotStrangerMessagePreference?, moderationActions: [V2SnapshotModerationProjection], roomControls: [V2SnapshotRoomControlProjection], roomProfiles: [V2SnapshotRoomProfileProjection] = [], directRoomProfiles: [V2SnapshotDirectRoomProfileProjection] = [], userAddPreference: V2SnapshotUserAddPreference? = nil, readReceiptPreference: V2SnapshotReadReceiptPreference? = nil, directReadReceipts: [V2SnapshotDirectReadReceiptProjection] = [], conversationStates: [V2SnapshotConversationState] = [], messageFavorites: [V2SnapshotMessageFavorite] = [], timelineActivities: [V2SnapshotTimelineActivity] = [], directSendingCapabilities: [V2SnapshotDirectSendingCapability] = []) throws {
         guard Set(relationships.map(\.targetUserID)).count == relationships.count,
               Set(userBlocks.map(\.targetUserID)).count == userBlocks.count,
               Set(moderationActions.map(\.sourceEventID)).count == moderationActions.count,
@@ -252,9 +282,11 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
               Set(directRoomProfiles.map(\.roomID)).count == directRoomProfiles.count,
               Set(directReadReceipts.map(\.roomID)).count == directReadReceipts.count,
               Set(conversationStates.map(\.roomID)).count == conversationStates.count,
-              Set(messageFavorites.map(\.messageID)).count == messageFavorites.count
+              Set(messageFavorites.map(\.messageID)).count == messageFavorites.count,
+              Set(timelineActivities.map(\.sourceEventID)).count == timelineActivities.count,
+              Set(directSendingCapabilities.map(\.roomID)).count == directSendingCapabilities.count
         else { throw V2SnapshotProjectionError.invalidPage }
-        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.userAddPreference = userAddPreference; self.readReceiptPreference = readReceiptPreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles; self.directRoomProfiles = directRoomProfiles; self.directReadReceipts = directReadReceipts; self.conversationStates = conversationStates; self.messageFavorites = messageFavorites
+        self.messages = messages; self.relationships = relationships; self.userBlocks = userBlocks; self.strangerMessagePreference = strangerMessagePreference; self.userAddPreference = userAddPreference; self.readReceiptPreference = readReceiptPreference; self.moderationActions = moderationActions; self.roomControls = roomControls; self.roomProfiles = roomProfiles; self.directRoomProfiles = directRoomProfiles; self.directReadReceipts = directReadReceipts; self.conversationStates = conversationStates; self.messageFavorites = messageFavorites; self.timelineActivities = timelineActivities; self.directSendingCapabilities = directSendingCapabilities
     }
 }
 
@@ -264,14 +296,14 @@ public struct V2SnapshotProjectionPage: Equatable, Sendable {
 public enum V2SnapshotProjectionCodec {
     /// V2 snapshot schema. There is deliberately no reader for the earlier
     /// draft page shape: this product has no released data to migrate.
-    public static let schemaVersion: UInt32 = 19
+    public static let schemaVersion: UInt32 = 20
 
     public static func encode(messages: [V2SnapshotMessageProjection]) throws -> Data {
         try encode(.init(messages: messages, relationships: [], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
     }
 
     public static func encode(_ page: V2SnapshotProjectionPage) throws -> Data {
-        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), userAddPreference: page.userAddPreference.map(UserAddPreference.init), readReceiptPreference: page.readReceiptPreference.map(ReadReceiptPreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init), directRoomProfiles: page.directRoomProfiles.map(DirectRoomProfile.init), directReadReceipts: page.directReadReceipts.map(DirectReadReceipt.init), conversationStates: page.conversationStates.map(ConversationState.init), messageFavorites: page.messageFavorites.map(MessageFavorite.init))
+        let wire = Page(schemaVersion: schemaVersion, messages: page.messages.map(Message.init), relationships: page.relationships.map(Relationship.init), userBlocks: page.userBlocks.map(UserBlock.init), strangerMessagePreference: page.strangerMessagePreference.map(StrangerMessagePreference.init), userAddPreference: page.userAddPreference.map(UserAddPreference.init), readReceiptPreference: page.readReceiptPreference.map(ReadReceiptPreference.init), moderationActions: page.moderationActions.map(Moderation.init), roomControls: page.roomControls.map(RoomControl.init), roomProfiles: page.roomProfiles.map(RoomProfile.init), directRoomProfiles: page.directRoomProfiles.map(DirectRoomProfile.init), directReadReceipts: page.directReadReceipts.map(DirectReadReceipt.init), conversationStates: page.conversationStates.map(ConversationState.init), messageFavorites: page.messageFavorites.map(MessageFavorite.init), timelineActivities: page.timelineActivities.map(TimelineActivity.init), directSendingCapabilities: page.directSendingCapabilities.map(DirectSendingCapability.init))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(wire)
@@ -286,7 +318,7 @@ public enum V2SnapshotProjectionCodec {
         do { page = try JSONDecoder().decode(Page.self, from: payload) }
         catch { throw V2SnapshotProjectionError.invalidPage }
         guard page.schemaVersion == schemaVersion else { throw V2SnapshotProjectionError.unsupportedSchemaVersion }
-        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }, directRoomProfiles: page.directRoomProfiles.map { try $0.projection() }, userAddPreference: try page.userAddPreference?.projection(), readReceiptPreference: try page.readReceiptPreference?.projection(), directReadReceipts: page.directReadReceipts.map { try $0.projection() }, conversationStates: page.conversationStates.map { try $0.projection() }, messageFavorites: page.messageFavorites.map { try $0.projection() }) }
+        do { return try .init(messages: page.messages.map { try $0.projection() }, relationships: page.relationships.map { try $0.projection() }, userBlocks: page.userBlocks.map { try $0.projection() }, strangerMessagePreference: try page.strangerMessagePreference?.projection(), moderationActions: page.moderationActions.map { try $0.projection() }, roomControls: page.roomControls.map { try $0.projection() }, roomProfiles: page.roomProfiles.map { try $0.projection() }, directRoomProfiles: page.directRoomProfiles.map { try $0.projection() }, userAddPreference: try page.userAddPreference?.projection(), readReceiptPreference: try page.readReceiptPreference?.projection(), directReadReceipts: page.directReadReceipts.map { try $0.projection() }, conversationStates: page.conversationStates.map { try $0.projection() }, messageFavorites: page.messageFavorites.map { try $0.projection() }, timelineActivities: page.timelineActivities.map { try $0.projection() }, directSendingCapabilities: page.directSendingCapabilities.map { try $0.projection() }) }
         catch let error as V2SnapshotProjectionError { throw error }
         catch { throw V2SnapshotProjectionError.invalidPage }
     }
@@ -306,7 +338,9 @@ public enum V2SnapshotProjectionCodec {
         let directReadReceipts: [DirectReadReceipt]
         let conversationStates: [ConversationState]
         let messageFavorites: [MessageFavorite]
-        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case userAddPreference = "user_add_preference"; case readReceiptPreference = "read_receipt_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles"; case directRoomProfiles = "direct_room_profiles"; case directReadReceipts = "direct_read_receipts"; case conversationStates = "conversation_states"; case messageFavorites = "message_favorites" }
+        let timelineActivities: [TimelineActivity]
+        let directSendingCapabilities: [DirectSendingCapability]
+        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version"; case messages; case relationships; case userBlocks = "user_blocks"; case strangerMessagePreference = "stranger_message_preference"; case userAddPreference = "user_add_preference"; case readReceiptPreference = "read_receipt_preference"; case moderationActions = "moderation_actions"; case roomControls = "room_controls"; case roomProfiles = "room_profiles"; case directRoomProfiles = "direct_room_profiles"; case directReadReceipts = "direct_read_receipts"; case conversationStates = "conversation_states"; case messageFavorites = "message_favorites"; case timelineActivities = "timeline_activities"; case directSendingCapabilities = "direct_sending_capabilities" }
     }
 
     private struct Message: Codable {
@@ -314,6 +348,7 @@ public enum V2SnapshotProjectionCodec {
         let messageID: String
         let roomID: String
         let roomSequence: UInt64
+        let timelineSequence: UInt64?
         let messageRevision: UInt64
         let senderUserID: String
         let text: String
@@ -334,6 +369,7 @@ public enum V2SnapshotProjectionCodec {
             messageID = projection.messageID.rawValue
             roomID = projection.roomID.rawValue
             roomSequence = projection.roomSequence
+            timelineSequence = projection.timelineSequence
             messageRevision = projection.messageRevision
             senderUserID = projection.senderUserID.rawValue
             text = projection.text
@@ -365,7 +401,7 @@ public enum V2SnapshotProjectionCodec {
             case let (.some(messageID), .some(userID)): forwardedFrom = try .init(messageID: .init(messageID), senderUserID: .init(userID))
             default: throw V2SnapshotProjectionError.invalidPage
             }
-            return try .init(sourceEventID: .init(sourceEventID), messageID: .init(messageID), roomID: .init(roomID), roomSequence: roomSequence, messageRevision: messageRevision, senderUserID: .init(senderUserID), text: text, media: media, mediaPresentations: presentations, mentions: mentions, entities: entities, replyTo: try replyToMessageID.map { .init(messageID: try .init($0)) }, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(serverCreatedAtMilliseconds) / 1_000), isWithdrawn: isWithdrawn, reactions: try reactions.map { try $0.projection() })
+            return try .init(sourceEventID: .init(sourceEventID), messageID: .init(messageID), roomID: .init(roomID), roomSequence: roomSequence, timelineSequence: timelineSequence, messageRevision: messageRevision, senderUserID: .init(senderUserID), text: text, media: media, mediaPresentations: presentations, mentions: mentions, entities: entities, replyTo: try replyToMessageID.map { .init(messageID: try .init($0)) }, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(serverCreatedAtMilliseconds) / 1_000), isWithdrawn: isWithdrawn, reactions: try reactions.map { try $0.projection() })
         }
 
         enum CodingKeys: String, CodingKey {
@@ -373,6 +409,7 @@ public enum V2SnapshotProjectionCodec {
             case messageID = "message_id"
             case roomID = "room_id"
             case roomSequence = "room_sequence"
+            case timelineSequence = "timeline_sequence"
             case messageRevision = "message_revision"
             case senderUserID = "sender_user_id"
             case text
@@ -515,6 +552,7 @@ public enum V2SnapshotProjectionCodec {
         let targetUserID: String
         let publicHandle: String
         let displayName: String
+        let accountKind: V2AccountKind?
         let revision: UInt64
         let updatedAtMilliseconds: Int64
 
@@ -524,13 +562,14 @@ public enum V2SnapshotProjectionCodec {
             targetUserID = value.publicIdentity.userID.rawValue
             publicHandle = value.publicIdentity.handle.rawValue
             displayName = value.publicIdentity.displayName
+            accountKind = value.publicIdentity.accountKind
             revision = value.revision
             updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
         }
 
         func projection() throws -> V2SnapshotDirectRoomProfileProjection {
             guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }
-            let identity = try V2PublicIdentity(userID: .init(targetUserID), handle: .init(publicHandle), displayName: displayName)
+            let identity = try V2PublicIdentity(userID: .init(targetUserID), handle: .init(publicHandle), displayName: displayName, accountKind: accountKind ?? .regular)
             return try .init(sourceEventID: .init(sourceEventID), roomID: .init(roomID), publicIdentity: identity, revision: revision, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000))
         }
 
@@ -540,6 +579,7 @@ public enum V2SnapshotProjectionCodec {
             case targetUserID = "target_user_id"
             case publicHandle = "public_handle"
             case displayName = "display_name"
+            case accountKind = "account_kind"
             case revision
             case updatedAtMilliseconds = "updated_at_ms"
         }
@@ -564,6 +604,26 @@ public enum V2SnapshotProjectionCodec {
         init(_ value: V2SnapshotMessageFavorite) { roomID = value.roomID.rawValue; messageID = value.messageID.rawValue; isFavorited = value.isFavorited; updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000) }
         func projection() throws -> V2SnapshotMessageFavorite { guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }; return try .init(roomID: .init(roomID), messageID: .init(messageID), isFavorited: isFavorited, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000)) }
         enum CodingKeys: String, CodingKey { case roomID = "room_id"; case messageID = "message_id"; case isFavorited = "is_favorited"; case updatedAtMilliseconds = "updated_at_ms" }
+    }
+
+    private struct TimelineActivity: Codable {
+        let sourceEventID: String; let roomID: String; let timelineSequence: UInt64; let eventType: String; let createdAtMilliseconds: Int64
+        init(_ value: V2SnapshotTimelineActivity) { sourceEventID = value.sourceEventID.rawValue; roomID = value.roomID.rawValue; timelineSequence = value.timelineSequence; eventType = value.kind.rawValue; createdAtMilliseconds = Int64(value.createdAt.timeIntervalSince1970 * 1_000) }
+        func projection() throws -> V2SnapshotTimelineActivity {
+            guard createdAtMilliseconds >= 0, let kind = V2SnapshotTimelineActivity.Kind(rawValue: eventType) else { throw V2SnapshotProjectionError.invalidPage }
+            return try .init(sourceEventID: .init(sourceEventID), roomID: .init(roomID), timelineSequence: timelineSequence, kind: kind, createdAt: Date(timeIntervalSince1970: TimeInterval(createdAtMilliseconds) / 1_000))
+        }
+        enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id"; case roomID = "room_id"; case timelineSequence = "timeline_sequence"; case eventType = "event_type"; case createdAtMilliseconds = "created_at_ms" }
+    }
+
+    private struct DirectSendingCapability: Codable {
+        let roomID: String; let canSend: Bool; let updatedAtMilliseconds: Int64
+        init(_ value: V2SnapshotDirectSendingCapability) { roomID = value.roomID.rawValue; canSend = value.canSend; updatedAtMilliseconds = Int64(value.updatedAt.timeIntervalSince1970 * 1_000) }
+        func projection() throws -> V2SnapshotDirectSendingCapability {
+            guard updatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionError.invalidPage }
+            return try .init(roomID: .init(roomID), canSend: canSend, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000))
+        }
+        enum CodingKeys: String, CodingKey { case roomID = "room_id"; case canSend = "can_send"; case updatedAtMilliseconds = "updated_at_ms" }
     }
 }
 

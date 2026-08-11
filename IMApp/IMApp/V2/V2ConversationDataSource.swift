@@ -4,7 +4,7 @@ import IMV2Core
 
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
-actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
+actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
     private let localStore: GRDBV2LocalSyncStore
 
     init(localStore: GRDBV2LocalSyncStore) {
@@ -28,6 +28,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavo
                 ).displayName
             )
         })
+        let directAccountKinds = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.accountKind) })
         let groupRoomIDs = Set(profiles.map(\.roomID))
         let directRoomIDs = Set(directIdentities.map(\.roomID))
         let knownRoomIDs = groupRoomIDs.union(directRoomIDs)
@@ -56,6 +57,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavo
                 lastActivity: message.createdAt,
                 isOutgoing: message.senderUserID.rawValue == userID,
                 kind: groupRoomIDs.contains(summary.roomID) ? .group : (directRoomIDs.contains(summary.roomID) ? .direct : .unknown),
+                accountKind: directAccountKinds[summary.roomID] ?? .regular,
                 isPinned: state?.isPinned ?? false,
                 isArchived: state?.isArchived ?? false,
                 muteUntil: state?.muteUntil
@@ -106,6 +108,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavo
                 lastActivity: identity.updatedAt,
                 isOutgoing: false,
                 kind: .direct,
+                accountKind: identity.publicIdentity.accountKind,
                 isPinned: conversationStates[identity.roomID]?.isPinned ?? false,
                 isArchived: conversationStates[identity.roomID]?.isArchived ?? false,
                 muteUntil: conversationStates[identity.roomID]?.muteUntil
@@ -152,6 +155,30 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavo
             ))
         }
         return items
+    }
+
+    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
+        let parsedRoomID = try RoomID(roomID)
+        let messageItems = try await messages(in: roomID, for: userID)
+        let messageTimeline = try await localStore.messages(in: parsedRoomID)
+        let messageSequenceByID = Dictionary(uniqueKeysWithValues: messageTimeline.map { ($0.messageID.rawValue, $0.timelineSequence) })
+        let activities = try await localStore.timelineActivities(in: parsedRoomID)
+        let renderedActivities: [V2ConversationTimelineItem] = activities.map { activity in
+            let kind: V2ConversationTimelineItem.Activity.Kind = switch activity.kind {
+            case .directMessageRestricted: .directMessageRestricted
+            case .systemAccountReadOnly: .systemAccountReadOnly
+            }
+            return .activity(.init(id: activity.id, timelineSequence: activity.timelineSequence, kind: kind, createdAt: activity.createdAt))
+        }
+        return (messageItems.map { message in
+            .message(message, timelineSequence: messageSequenceByID[message.id] ?? message.roomSequence)
+        } + renderedActivities).sorted { lhs, rhs in
+            lhs.timelineSequence == rhs.timelineSequence ? lhs.id < rhs.id : lhs.timelineSequence < rhs.timelineSequence
+        }
+    }
+
+    func directSendingCapability(in roomID: String) async throws -> Bool? {
+        try await localStore.directSendingCapability(roomID: .init(roomID))?.canSend
     }
 
     func groupAnnouncement(in roomID: String) async throws -> V2ClientGroupAnnouncement? {

@@ -33,12 +33,17 @@ struct V2DirectRoomIdentityCacheTests {
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000d12")
         let userID: UserID = try .init("00000000-0000-0000-0000-000000000d13")
         let cached = try V2PublicIdentity(userID: userID, handle: .init("direct_user"), displayName: "旧名称")
-        let synced = try V2PublicIdentity(userID: userID, handle: .init("direct_user"), displayName: "同步名称")
+        let synced = try V2PublicIdentity(
+            userID: userID,
+            handle: .init("direct_user"),
+            displayName: "同步名称",
+            accountKind: .customerSupport
+        )
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: cached, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         let sourceEventID: EventID = try .init("00000000-0000-0000-0000-000000000d14")
         let payload = Data("""
-            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","revision":2,"updated_at_ms":1750000001000}
+            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","account_kind":"customer_support","revision":2,"updated_at_ms":1750000001000}
             """.utf8)
         _ = try await store.apply(.init(
             generation: 1,

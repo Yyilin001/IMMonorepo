@@ -44,7 +44,7 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             guard let sql = transaction as? any SQLDatabase else { throw V2PublicIdentityDirectoryError.unavailable }
             try await consumeLookupBudget(sql: sql, actorUserID: actorUUID)
             guard let row = try await sql.raw("""
-                SELECT p.user_id, p.public_handle, p.display_name
+                SELECT p.user_id, p.public_handle, p.display_name, p.account_kind
                 FROM im_v2.public_user_profiles p
                 WHERE p.public_handle = \(bind: handle.rawValue)
                   AND NOT EXISTS (
@@ -54,7 +54,8 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
                   )
                 """).first(decoding: PublicIdentityRow.self),
                 let userID = try? UserID(row.userID.uuidString),
-                let profile = try? V2PublicIdentity(userID: userID, handle: .init(row.handle), displayName: row.displayName)
+                let accountKind = V2AccountKind(rawValue: row.accountKind),
+                let profile = try? V2PublicIdentity(userID: userID, handle: .init(row.handle), displayName: row.displayName, accountKind: accountKind)
             else { return nil }
             return profile
         }
@@ -92,9 +93,9 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             }
             try await sql.raw("""
                 INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, revision, profile_updated_at, created_at)
-                VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: validated.handle.rawValue),
-                        \(bind: validated.displayName), \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
+                    (source_event_id, source_user_id, public_handle, display_name, account_kind, revision, profile_updated_at, created_at)
+                    VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: validated.handle.rawValue),
+                        \(bind: validated.displayName), \(bind: validated.accountKind.rawValue), \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
                 """).run()
             return validated
         }
@@ -119,9 +120,10 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
     }
 
     private func profile(sql: any SQLDatabase, userID: UUID) async throws -> V2PublicIdentity? {
-        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID)").first(decoding: PublicIdentityRow.self),
+        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name, account_kind FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID)").first(decoding: PublicIdentityRow.self),
               let profileUserID = try? UserID(row.userID.uuidString),
-              let profile = try? V2PublicIdentity(userID: profileUserID, handle: .init(row.handle), displayName: row.displayName)
+              let accountKind = V2AccountKind(rawValue: row.accountKind),
+              let profile = try? V2PublicIdentity(userID: profileUserID, handle: .init(row.handle), displayName: row.displayName, accountKind: accountKind)
         else { return nil }
         return profile
     }
@@ -144,7 +146,7 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
             guard let rawHandle = request.query[String.self, at: "handle"], let handle = try? V2PublicHandle(rawHandle) else { throw Abort(.badRequest) }
             do {
                 guard let result = try await directory.resolve(handle: handle, actorUserID: actor.userID) else { throw Abort(.notFound) }
-                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName))
+                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName, accountKind: result.accountKind))
             } catch let error as V2PublicIdentityDirectoryError {
                 switch error {
                 case .rateLimited(let retryAfterSeconds): return noStoreRetryAfterResponse(seconds: retryAfterSeconds)
@@ -157,7 +159,7 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
             let actor = try await authenticate(request)
             do {
                 guard let result = try await directory.profile(for: actor.userID) else { throw Abort(.notFound) }
-                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName))
+                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName, accountKind: result.accountKind))
             } catch is Abort { throw Abort(.notFound) }
             catch { throw Abort(.serviceUnavailable) }
         }
@@ -167,7 +169,7 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
             let input = try request.content.decode(V2PublicIdentityProfileHTTPRequest.self)
             do {
                 let result = try await directory.updateDisplayName(for: actor.userID, displayName: input.displayName)
-                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName))
+                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName, accountKind: result.accountKind))
             } catch { throw Abort(.badRequest) }
         }
     }
@@ -205,6 +207,7 @@ public struct V2PublicIdentityHTTPResponse: Content, Sendable {
     public let userID: String
     public let handle: String
     public let displayName: String
+    public let accountKind: V2AccountKind
 }
 
 public struct V2PublicIdentityProfileHTTPRequest: Content, Sendable {
@@ -217,7 +220,8 @@ private struct PublicIdentityRow: Decodable {
     let userID: UUID
     let handle: String
     let displayName: String
-    enum CodingKeys: String, CodingKey { case userID = "user_id"; case handle = "public_handle"; case displayName = "display_name" }
+    let accountKind: String
+    enum CodingKeys: String, CodingKey { case userID = "user_id"; case handle = "public_handle"; case displayName = "display_name"; case accountKind = "account_kind" }
 }
 
 private struct UpdatedPublicIdentityRow: Decodable {

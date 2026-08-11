@@ -110,7 +110,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             FROM candidate
             WHERE outbox.source_event_id = candidate.source_event_id
             RETURNING outbox.source_event_id, outbox.source_user_id, outbox.public_handle,
-                      outbox.display_name, outbox.revision, outbox.profile_updated_at,
+                      outbox.display_name, outbox.account_kind, outbox.revision, outbox.profile_updated_at,
                       outbox.enumeration_checkpoint, outbox.claim_token
             """).first(decoding: ProfileUpdateLeaseRow.self).map(ProfileUpdateLease.init)
     }
@@ -164,6 +164,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                        payload->>'target_user_id' AS target_user_id,
                        payload->>'public_handle' AS public_handle,
                        payload->>'display_name' AS display_name,
+                       payload->>'account_kind' AS account_kind,
                        (payload->>'revision')::bigint AS revision,
                        (payload->>'updated_at_ms')::bigint AS updated_at_ms
                 FROM im_v2.user_sync_log
@@ -196,6 +197,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                                            'target_user_id', \(bind: wireTargetUserID),
                                            'public_handle', \(bind: lease.publicHandle),
                                            'display_name', \(bind: lease.displayName),
+                                           'account_kind', \(bind: lease.accountKind),
                                            'revision', \(bind: lease.revision),
                                            'updated_at_ms', \(bind: lease.updatedAtMilliseconds)),
                         \(bind: lease.profileUpdatedAt))
@@ -271,6 +273,7 @@ private struct ProfileUpdateLease: Sendable {
     let sourceUserID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let revision: Int64
     let profileUpdatedAt: Date
     let enumerationCheckpoint: UUID?
@@ -284,6 +287,7 @@ private struct ProfileUpdateLeaseRow: Decodable {
     let sourceUserID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let revision: Int64
     let profileUpdatedAt: Date
     let enumerationCheckpoint: UUID?
@@ -294,6 +298,7 @@ private struct ProfileUpdateLeaseRow: Decodable {
         case sourceUserID = "source_user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case revision
         case profileUpdatedAt = "profile_updated_at"
         case enumerationCheckpoint = "enumeration_checkpoint"
@@ -307,6 +312,7 @@ private extension ProfileUpdateLease {
         sourceUserID = row.sourceUserID
         publicHandle = row.publicHandle
         displayName = row.displayName
+        accountKind = row.accountKind
         revision = row.revision
         profileUpdatedAt = row.profileUpdatedAt
         enumerationCheckpoint = row.enumerationCheckpoint
@@ -335,6 +341,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
     let targetUserID: String
     let publicHandle: String
     let displayName: String
+    let accountKind: String?
     let revision: Int64
     let updatedAtMilliseconds: Int64
 
@@ -344,6 +351,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
         case targetUserID = "target_user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case revision
         case updatedAtMilliseconds = "updated_at_ms"
     }
@@ -357,6 +365,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
             return false
         }
         return publicHandle == lease.publicHandle && displayName == lease.displayName &&
+            (accountKind ?? V2AccountKind.regular.rawValue) == lease.accountKind &&
             revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds
     }
 }

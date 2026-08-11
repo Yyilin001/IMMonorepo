@@ -36,6 +36,7 @@ public struct V2ForwardMessagesService: Sendable {
                         try await markResult(actor: actorUserID, operation: command.operationID, source: source, target: target, message: message.messageID)
                         results.append(.init(sourceMessageID: source, targetRoomID: target, messageID: message.messageID, roomSequence: message.roomSequence, errorCode: nil))
                     case .idempotencyConflict: results.append(.init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: "IDEMPOTENCY_CONFLICT"))
+                    case .denied: results.append(.init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: "DIRECT_MESSAGE_RESTRICTED"))
                     case .rateLimited: results.append(.init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: "RATE_LIMITED"))
                     case .unavailable: results.append(.init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: "UNAVAILABLE"))
                     }

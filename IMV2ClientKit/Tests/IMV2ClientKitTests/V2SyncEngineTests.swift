@@ -5,6 +5,40 @@ import Testing
 
 @Suite("V2 client sync")
 struct V2SyncEngineTests {
+    @Test("private activity is projected separately from messages and disables only the direct composer")
+    func privateTimelineActivityAndCapabilityAreApplied() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000210"
+        let activity = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000211"),
+            projectionKind: "timeline_activity",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "direct_message_restricted",
+                "room_id": roomID,
+                "timeline_sequence": 2,
+                "server_created_at_ms": 1_750_000_000_000,
+            ])
+        )
+        let capability = try V2ClientSyncRecord(
+            sequence: 2,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000211"),
+            projectionKind: "direct_sending_capability",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "room_id": roomID,
+                "can_send": false,
+                "updated_at_ms": 1_750_000_000_000,
+            ])
+        )
+        _ = try await store.apply(.init(generation: 1, records: [activity, capability], nextSyncToken: .init("activity-token"), receipt: .init("activity-receipt"), hasMore: false, capabilityProfile: "base"))
+
+        #expect(try await store.messages(in: .init(roomID)).isEmpty)
+        let projected = try #require(await store.timelineActivities(in: .init(roomID)).first)
+        #expect(projected.kind == .directMessageRestricted)
+        #expect(projected.timelineSequence == 2)
+        #expect(try await store.directSendingCapability(roomID: .init(roomID))?.canSend == false)
+    }
+
     @Test("media presentation metadata survives durable message projection")
     func mediaPresentationProjectionIsApplied() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)

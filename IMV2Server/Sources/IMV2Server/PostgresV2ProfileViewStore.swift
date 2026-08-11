@@ -47,7 +47,7 @@ public struct PostgresV2ProfileViewStore: V2ProfileViewStore {
         switch key.context {
         case .directConversation:
             row = try await sql.raw("""
-                SELECT p.user_id, p.public_handle, p.display_name,
+                SELECT p.user_id, p.public_handle, p.display_name, p.account_kind,
                        CASE WHEN avatar.owner_user_id = p.user_id AND avatar.state = 'available'
                             THEN avatar.media_id ELSE NULL END AS avatar_media_id,
                        p.state, p.revision, p.visibility_revision
@@ -78,7 +78,7 @@ public struct PostgresV2ProfileViewStore: V2ProfileViewStore {
             // authorizes only an existing bilateral relationship, so the
             // profile endpoint cannot become an internal-ID directory.
             row = try await sql.raw("""
-                SELECT p.user_id, p.public_handle, p.display_name,
+                SELECT p.user_id, p.public_handle, p.display_name, p.account_kind,
                        CASE WHEN avatar.owner_user_id = p.user_id AND avatar.state = 'available'
                             THEN avatar.media_id ELSE NULL END AS avatar_media_id,
                        p.state, p.revision, p.visibility_revision
@@ -100,7 +100,7 @@ public struct PostgresV2ProfileViewStore: V2ProfileViewStore {
                 throw V2ProfileViewReadError.corruptPersistenceState
             }
             row = try await sql.raw("""
-                SELECT p.user_id, p.public_handle, p.display_name,
+                SELECT p.user_id, p.public_handle, p.display_name, p.account_kind,
                        CASE WHEN avatar.owner_user_id = p.user_id AND avatar.state = 'available'
                             THEN avatar.media_id ELSE NULL END AS avatar_media_id,
                        p.state, p.revision, p.visibility_revision
@@ -130,6 +130,7 @@ private struct ProfileViewRow: Decodable {
     let userID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let avatarMediaID: UUID?
     let state: String
     let revision: Int64
@@ -139,6 +140,7 @@ private struct ProfileViewRow: Decodable {
         case userID = "user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case avatarMediaID = "avatar_media_id"
         case state
         case revision
@@ -148,6 +150,7 @@ private struct ProfileViewRow: Decodable {
     func profileView() throws -> V2ProfileView {
         guard revision > 0, visibilityRevision > 0,
               let state = V2ProfileState(rawValue: state),
+              let accountKind = V2AccountKind(rawValue: accountKind),
               let profileRevision = V2ProfileRevision(rawValue: UInt64(revision)),
               let accessRevision = V2ProfileRevision(rawValue: UInt64(visibilityRevision))
         else { throw V2ProfileViewReadError.corruptPersistenceState }
@@ -156,7 +159,7 @@ private struct ProfileViewRow: Decodable {
         case .active:
             return try .init(
                 userID: userID,
-                publicIdentity: .init(userID: userID, handle: .init(publicHandle), displayName: displayName),
+                publicIdentity: .init(userID: userID, handle: .init(publicHandle), displayName: displayName, accountKind: accountKind),
                 avatar: try avatarMediaID.map { try V2AvatarReference(mediaID: .init($0.uuidString)) },
                 state: state,
                 revision: profileRevision,

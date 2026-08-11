@@ -68,6 +68,12 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               AND token.expires_at > \(bind: now())
               AND token.revoked_at IS NULL
               AND device.revoked_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM im_v2.special_accounts AS special
+                  WHERE special.account_user_id = token.user_id
+                    AND special.status = 'active'
+              )
             """).first(decoding: V2AuthenticatedUserRow.self)
         else { throw V2GatewayAuthenticationError.unauthenticated }
         guard let userID = try? UserID(row.userID.uuidString) else {
@@ -95,6 +101,12 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               AND token.expires_at > \(bind: now())
               AND token.revoked_at IS NULL
               AND device.revoked_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM im_v2.special_accounts AS special
+                  WHERE special.account_user_id = token.user_id
+                    AND special.status = 'active'
+              )
             """).first(decoding: V2AuthenticatedExpiryRow.self)
         else { throw V2GatewayAuthenticationError.unauthenticated }
         return row.expiresAt

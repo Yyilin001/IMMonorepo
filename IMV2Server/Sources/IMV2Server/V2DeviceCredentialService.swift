@@ -210,6 +210,10 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let metadata = try normalizedMetadata(request.metadata)
             try await lockAccountState(sql, userID: userUUID)
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
+            // Special accounts are operated only through the trusted service
+            // boundary. Never mint a client/device credential that could make
+            // one available to the public gateway.
+            guard !(try await isSpecialAccount(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
 
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
@@ -249,6 +253,10 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let incomingRefreshHMAC = tokenHMACKey.digest(request.refreshCredential)
             try await lockAccountState(sql, userID: userUUID)
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else {
+                try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
+                return .terminalRejection
+            }
+            guard !(try await isSpecialAccount(sql, userID: userUUID)) else {
                 try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
                 return .terminalRejection
             }
@@ -334,6 +342,10 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
 
     private func isAccountDisabled(_ sql: any SQLDatabase, userID: UUID) async throws -> Bool {
         try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID)").first() != nil
+    }
+
+    private func isSpecialAccount(_ sql: any SQLDatabase, userID: UUID) async throws -> Bool {
+        try await sql.raw("SELECT 1 FROM im_v2.special_accounts WHERE account_user_id = \(bind: userID) AND status = 'active'").first() != nil
     }
 
     private func normalizedMetadata(_ metadata: V2DeviceRegistrationMetadata) throws -> (displayName: String, platform: String) {

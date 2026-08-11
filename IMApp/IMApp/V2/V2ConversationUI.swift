@@ -37,17 +37,19 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
     let lastActivity: Date
     let isOutgoing: Bool
     let kind: Kind
+    let accountKind: V2AccountKind
     let isPinned: Bool
     let isArchived: Bool
     let muteUntil: Date?
 
-    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: Kind = .unknown, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil) {
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: Kind = .unknown, accountKind: V2AccountKind = .regular, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil) {
         self.id = id
         self.title = title
         self.preview = preview
         self.lastActivity = lastActivity
         self.isOutgoing = isOutgoing
         self.kind = kind
+        self.accountKind = accountKind
         self.isPinned = isPinned
         self.isArchived = isArchived
         self.muteUntil = muteUntil
@@ -121,6 +123,36 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     }
 }
 
+/// Render-only union for the conversation stream. Keeping activity separate
+/// from `V2ConversationMessageItem` prevents a local system notice from
+/// accidentally becoming replyable, forwardable or read-receipt eligible.
+enum V2ConversationTimelineItem: Hashable, Identifiable, Sendable {
+    struct Activity: Hashable, Sendable {
+        enum Kind: Hashable, Sendable { case directMessageRestricted; case systemAccountReadOnly }
+        let id: String
+        let timelineSequence: UInt64
+        let kind: Kind
+        let createdAt: Date
+    }
+
+    case message(V2ConversationMessageItem, timelineSequence: UInt64)
+    case activity(Activity)
+
+    var id: String {
+        switch self {
+        case .message(let message, _): "message-\(message.id)"
+        case .activity(let activity): "activity-\(activity.id)"
+        }
+    }
+
+    var timelineSequence: UInt64 {
+        switch self {
+        case .message(_, let sequence): sequence
+        case .activity(let activity): activity.timelineSequence
+        }
+    }
+}
+
 /// A compact, cross-conversation entry for the personal Favorites screen.
 /// IDs remain navigation keys; presentation strings have already been
 /// resolved at the data-source boundary.
@@ -169,6 +201,19 @@ enum V2ConversationMediaDownloadState: Hashable, Sendable {
 protocol V2ConversationDataSource: Sendable {
     func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem]
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
+    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem]
+}
+
+protocol V2ConversationSendingCapabilityReading: Sendable {
+    /// `nil` means no server decision has been projected yet, so the composer
+    /// remains usable and the authoritative send command is still the gate.
+    func directSendingCapability(in roomID: String) async throws -> Bool?
+}
+
+extension V2ConversationDataSource {
+    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
+        try await messages(in: roomID, for: userID).map { .message($0, timelineSequence: $0.roomSequence) }
+    }
 }
 
 protocol V2ConversationFavoritesReading: Sendable {
@@ -561,10 +606,11 @@ final class V2ConversationListStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
+        let accountKind = item?.accountKind ?? .regular
         let forwardTargets = items
             .filter { $0.id != roomID }
             .map { V2ConversationForwardTarget(roomID: $0.id, title: $0.title) }
-        return .init(dataSource: dataSource, messageSearcher: messageSearcher, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, messageFavoriter: messageFavoriter, groupMessagePinner: groupMessagePinner, messageForwarder: messageForwarder, forwardTargets: forwardTargets, groupAnnouncementReader: dataSource as? any V2GroupAnnouncementReading, groupAnnouncementManager: groupAnnouncementManager, groupMemberRoleChanger: groupMemberRoleChanger, groupRolePolicyReader: dataSource as? any V2GroupRolePolicyReading, groupRolePolicyChanger: groupRolePolicyChanger, groupReadReceiptReader: groupReadReceiptReader, conversationLiveActivity: conversationLiveActivity, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
+        return .init(dataSource: dataSource, messageSearcher: messageSearcher, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, messageFavoriter: messageFavoriter, groupMessagePinner: groupMessagePinner, messageForwarder: messageForwarder, forwardTargets: forwardTargets, groupAnnouncementReader: dataSource as? any V2GroupAnnouncementReading, groupAnnouncementManager: groupAnnouncementManager, groupMemberRoleChanger: groupMemberRoleChanger, groupRolePolicyReader: dataSource as? any V2GroupRolePolicyReading, groupRolePolicyChanger: groupRolePolicyChanger, groupReadReceiptReader: groupReadReceiptReader, conversationLiveActivity: conversationLiveActivity, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, directAccountKind: accountKind, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
     }
 
     func messageSearchStore() -> V2ConversationSearchStore? {
@@ -702,6 +748,13 @@ struct V2ConversationListView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text(item.title).font(.headline)
+                                    if let accountBadge = item.accountKind.badgeTitle {
+                                        Text(accountBadge)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.tint)
+                                            .accessibilityLabel(accountBadge)
+                                            .accessibilityIdentifier("v2.conversation.account-kind.\(item.accountKind.rawValue)")
+                                    }
                                     if item.isPinned { Image(systemName: "pin.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     if item.muteUntil.map({ $0 > Date() }) == true { Image(systemName: "bell.slash.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     Spacer()
@@ -971,6 +1024,16 @@ struct V2ConversationListView: View {
     }
 }
 
+private extension V2AccountKind {
+    var badgeTitle: String? {
+        switch self {
+        case .regular: nil
+        case .system: "系统"
+        case .customerSupport: "客服"
+        }
+    }
+}
+
 struct V2ConversationAccountMenu: View {
     let canOpenPublicIdentity: Bool
     let canOpenDeviceSessions: Bool
@@ -1235,24 +1298,30 @@ private struct V2ConversationDetailView: View {
                             presentedDetailSheet = .groupAnnouncement
                         }
                     }
-                    if store.messages.isEmpty {
+                    if store.timeline.isEmpty {
                         ContentUnavailableView("暂无消息", systemImage: "bubble")
                     } else {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 10) {
-                                    ForEach(store.messages) { message in
-                                        V2ConversationMessageRow(
-                                            store: store,
-                                            message: message,
-                                            beginEditing: { presentedDetailSheet = .edit(message) },
-                                            showReadReceipts: { presentedDetailSheet = .groupReadReceipts(message) },
-                                            beginForward: {
-                                                store.beginForwardSelection(with: message)
-                                                presentedDetailSheet = .forward
-                                            }
-                                        )
-                                        .id(message.id)
+                                    ForEach(store.timeline) { item in
+                                        switch item {
+                                        case .message(let message, _):
+                                            V2ConversationMessageRow(
+                                                store: store,
+                                                message: message,
+                                                beginEditing: { presentedDetailSheet = .edit(message) },
+                                                showReadReceipts: { presentedDetailSheet = .groupReadReceipts(message) },
+                                                beginForward: {
+                                                    store.beginForwardSelection(with: message)
+                                                    presentedDetailSheet = .forward
+                                                }
+                                            )
+                                            .id(item.id)
+                                        case .activity(let activity):
+                                            V2ConversationTimelineActivityRow(activity: activity)
+                                                .id(item.id)
+                                        }
                                     }
                                 }
                                 .padding()
@@ -1261,7 +1330,7 @@ private struct V2ConversationDetailView: View {
                             .onChange(of: focusedMessageID) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
                             }
-                            .onChange(of: store.messages.map(\.id)) { _, _ in
+                            .onChange(of: store.timeline.map(\.id)) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
                             }
                         }
@@ -1287,7 +1356,7 @@ private struct V2ConversationDetailView: View {
                         )
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .disabled(store.isSending)
+                            .disabled(store.isSending || store.canSendInDirectConversation == false)
                             .accessibilityIdentifier("v2.message.mentions")
                             .padding(.horizontal)
                             .padding(.top, 8)
@@ -1339,7 +1408,7 @@ private struct V2ConversationDetailView: View {
                         Button("添加附件", systemImage: "paperclip") {
                             isPresentingAttachmentImporter = true
                         }
-                        .disabled(!store.canAddAttachment)
+                        .disabled(!store.canAddAttachment || store.directAccountKind == .system)
                         .tint(.primary)
                         .accessibilityHint("从文件中选择要发送的附件")
                         .accessibilityIdentifier("v2.message.attachment.add")
@@ -1349,7 +1418,7 @@ private struct V2ConversationDetailView: View {
                             accessibilityLabel: "消息内容",
                             accessibilityHint: "输入要发送的消息"
                         )
-                            .disabled(store.isSending)
+                            .disabled(store.isSending || store.canSendInDirectConversation == false || store.directAccountKind == .system)
                             .onChange(of: store.draft) { _, _ in store.updateTypingForDraft() }
                             .accessibilityIdentifier("v2.message.draft")
                         if store.isSending {
@@ -1363,6 +1432,14 @@ private struct V2ConversationDetailView: View {
                         }
                     }
                     .padding()
+                    if !store.isGroupConversation, store.canSendInDirectConversation == false || store.directAccountKind == .system {
+                        Text(store.directAccountKind == .system ? "此系统账号仅用于发送通知" : "当前无法向此会话发送消息")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+                            .padding(.bottom, 8)
+                            .accessibilityIdentifier("v2.message.sending-restricted")
+                    }
                     if let sendFeedback = store.sendFeedback {
                         Text(sendFeedback)
                             .font(.caption)
@@ -1436,6 +1513,8 @@ private struct V2ConversationDetailView: View {
 
     private var canSendDraft: Bool {
         !store.isSending
+            && store.directAccountKind != .system
+            && store.canSendInDirectConversation != false
             && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
     }
 
@@ -1598,6 +1677,31 @@ private struct V2ConversationAttachmentRow: View {
         case .uploading: "正在上传并等待安全扫描"
         case .available: "已准备发送"
         case .failed: "上传失败，可重试"
+        }
+    }
+}
+
+private struct V2ConversationTimelineActivityRow: View {
+    let activity: V2ConversationTimelineItem.Activity
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .padding(.horizontal, 24)
+            .accessibilityLabel("系统提示")
+            .accessibilityValue(text)
+            .accessibilityIdentifier("v2.timeline.activity.\(activity.id)")
+    }
+
+    private var text: String {
+        switch activity.kind {
+        case .directMessageRestricted:
+            "当前无法向此会话发送消息"
+        case .systemAccountReadOnly:
+            "此系统账号仅用于发送通知"
         }
     }
 }

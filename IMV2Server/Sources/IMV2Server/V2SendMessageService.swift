@@ -32,6 +32,31 @@ public enum V2SendMessageOutcome: Equatable, Sendable {
     case idempotencyConflict
     case rateLimited(retryAfterSeconds: Int)
     case unavailable(FanoutAdmissionUnavailableReason)
+    /// The server persisted a private activity and composer capability for
+    /// this exact operation. No message, room event or fan-out plan exists.
+    case denied(V2DirectMessageDenied)
+}
+
+public struct V2DirectMessageDenied: Equatable, Sendable {
+    public enum Reason: String, Equatable, Sendable {
+        case generic
+        case systemAccountReadOnly = "system_account_read_only"
+    }
+
+    public let roomID: RoomID
+    public let sourceEventID: EventID
+    public let timelineSequence: UInt64
+    public let createdAt: Date
+    public let reason: Reason
+
+    public init(roomID: RoomID, sourceEventID: EventID, timelineSequence: UInt64, createdAt: Date, reason: Reason = .generic) {
+        precondition(timelineSequence > 0)
+        self.roomID = roomID
+        self.sourceEventID = sourceEventID
+        self.timelineSequence = timelineSequence
+        self.createdAt = createdAt
+        self.reason = reason
+    }
 }
 
 /// Binds a runtime capacity policy to the persisted room profile identifier.

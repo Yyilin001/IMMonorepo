@@ -77,7 +77,7 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore {
                         updated_at = \(bind: changedAt)
                     WHERE user_id = \(bind: actorID) AND state = 'active'
                     RETURNING user_id, public_handle, display_name, avatar_media_id,
-                              state, revision, visibility_revision
+                              account_kind, state, revision, visibility_revision
                     """).first(decoding: UpdatedProfileRow.self) else {
                     throw V2ProfileUpdateError.unavailable
                 }
@@ -87,9 +87,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore {
                 }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
-                        (source_event_id, source_user_id, public_handle, display_name, revision, profile_updated_at, created_at)
+                    (source_event_id, source_user_id, public_handle, display_name, account_kind, revision, profile_updated_at, created_at)
                     VALUES (\(bind: makeUUID()), \(bind: actorID), \(bind: identity.handle.rawValue),
-                            \(bind: identity.displayName), \(bind: result.revision.rawValue), \(bind: changedAt), \(bind: changedAt))
+                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), \(bind: result.revision.rawValue), \(bind: changedAt), \(bind: changedAt))
                     """).run()
             } else {
                 result = current
@@ -116,7 +116,7 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore {
 
     private func activeProfile(userID: UUID, sql: any SQLDatabase) async throws -> V2ProfileView {
         guard let row = try await sql.raw("""
-            SELECT p.user_id, p.public_handle, p.display_name,
+            SELECT p.user_id, p.public_handle, p.display_name, p.account_kind,
                    CASE WHEN avatar.owner_user_id = p.user_id AND avatar.state = 'available'
                         THEN avatar.media_id ELSE NULL END AS avatar_media_id,
                    p.state, p.revision, p.visibility_revision
@@ -157,6 +157,7 @@ private struct UpdatedProfileRow: Decodable {
     let userID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let avatarMediaID: UUID?
     let state: String
     let revision: Int64
@@ -166,6 +167,7 @@ private struct UpdatedProfileRow: Decodable {
         case userID = "user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case avatarMediaID = "avatar_media_id"
         case state
         case revision
@@ -175,13 +177,14 @@ private struct UpdatedProfileRow: Decodable {
     func profileView() throws -> V2ProfileView {
         guard let userID = try? UserID(userID.uuidString),
               let state = V2ProfileState(rawValue: state),
+              let accountKind = V2AccountKind(rawValue: accountKind),
               let revision = V2ProfileRevision(rawValue: UInt64(revision)),
               let visibilityRevision = V2ProfileRevision(rawValue: UInt64(visibilityRevision))
         else { throw V2ProfileUpdateError.corruptPersistenceState }
         guard state == .active else { throw V2ProfileUpdateError.unavailable }
         return try .init(
             userID: userID,
-            publicIdentity: .init(userID: userID, handle: .init(publicHandle), displayName: displayName),
+            publicIdentity: .init(userID: userID, handle: .init(publicHandle), displayName: displayName, accountKind: accountKind),
             avatar: try avatarMediaID.map { try .init(mediaID: .init($0.uuidString)) },
             state: state,
             revision: revision,

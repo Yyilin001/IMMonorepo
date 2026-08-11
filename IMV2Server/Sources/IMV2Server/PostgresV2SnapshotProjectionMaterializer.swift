@@ -85,7 +85,7 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 SELECT pair.room_id,
                        CASE WHEN pair.lower_user_id = \(bind: userUUID)
                             THEN pair.higher_user_id ELSE pair.lower_user_id END AS target_user_id,
-                       profile.public_handle, profile.display_name,
+                       profile.public_handle, profile.display_name, profile.account_kind,
                        profile.revision, profile.updated_at
                 FROM \(unsafeRaw: table("direct_room_pairs")) AS pair
                 INNER JOIN \(unsafeRaw: table("rooms")) AS room
@@ -143,7 +143,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             let publicIdentity = try V2PublicIdentity(
                 userID: .init(row.targetUserID.uuidString),
                 handle: .init(row.publicHandle),
-                displayName: row.displayName
+                displayName: row.displayName,
+                accountKind: try snapshotAccountKind(row.accountKind)
             )
             guard row.revision > 0 else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
             return try .init(
@@ -172,7 +173,9 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             readReceiptPreference: readReceiptPreference,
             directReadReceipts: directReadReceipts,
             conversationStates: conversationStates,
-            messageFavorites: messageFavorites
+            messageFavorites: messageFavorites,
+            timelineActivities: replay.timelineActivities,
+            directSendingCapabilities: replay.directSendingCapabilities
         )
         return .init(baseSequence: UInt64(source.0), pages: payloads.map { .init(digest: snapshotProjectionSHA256($0), payload: $0) })
     }
@@ -192,7 +195,9 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
         readReceiptPreference: V2SnapshotReadReceiptPreference,
         directReadReceipts: [V2SnapshotDirectReadReceiptProjection],
         conversationStates: [V2SnapshotConversationState],
-        messageFavorites: [V2SnapshotMessageFavorite]
+        messageFavorites: [V2SnapshotMessageFavorite],
+        timelineActivities: [V2SnapshotTimelineActivity],
+        directSendingCapabilities: [V2SnapshotDirectSendingCapability]
     ) throws -> [Data] {
         let items = messages.sorted { ($0.roomID.rawValue, $0.roomSequence) < ($1.roomID.rawValue, $1.roomSequence) }.map(SnapshotProjectionItem.message)
             + relationships.map(SnapshotProjectionItem.relationship)
@@ -204,6 +209,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             + directReadReceipts.sorted { $0.roomID.rawValue < $1.roomID.rawValue }.map(SnapshotProjectionItem.directReadReceipt)
             + conversationStates.sorted { $0.roomID.rawValue < $1.roomID.rawValue }.map(SnapshotProjectionItem.conversationState)
             + messageFavorites.sorted { $0.messageID.rawValue < $1.messageID.rawValue }.map(SnapshotProjectionItem.messageFavorite)
+            + timelineActivities.sorted { ($0.roomID.rawValue, $0.timelineSequence) < ($1.roomID.rawValue, $1.timelineSequence) }.map(SnapshotProjectionItem.timelineActivity)
+            + directSendingCapabilities.sorted { $0.roomID.rawValue < $1.roomID.rawValue }.map(SnapshotProjectionItem.directSendingCapability)
         var offset = 0
         var pages: [Data] = []
         repeat {
@@ -219,6 +226,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
             var pageDirectReadReceipts: [V2SnapshotDirectReadReceiptProjection] = []
             var pageConversationStates: [V2SnapshotConversationState] = []
             var pageMessageFavorites: [V2SnapshotMessageFavorite] = []
+            var pageTimelineActivities: [V2SnapshotTimelineActivity] = []
+            var pageDirectSendingCapabilities: [V2SnapshotDirectSendingCapability] = []
             for item in slice {
                 switch item {
                 case .message(let value): pageMessages.append(value)
@@ -231,6 +240,8 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 case .directReadReceipt(let value): pageDirectReadReceipts.append(value)
                 case .conversationState(let value): pageConversationStates.append(value)
                 case .messageFavorite(let value): pageMessageFavorites.append(value)
+                case .timelineActivity(let value): pageTimelineActivities.append(value)
+                case .directSendingCapability(let value): pageDirectSendingCapabilities.append(value)
                 }
             }
             pages.append(try V2SnapshotProjectionCodec.encode(.init(
@@ -246,7 +257,9 @@ public struct PostgresV2SnapshotProjectionMaterializer: Sendable {
                 readReceiptPreference: pages.isEmpty ? readReceiptPreference : nil,
                 directReadReceipts: pageDirectReadReceipts,
                 conversationStates: pageConversationStates,
-                messageFavorites: pageMessageFavorites
+                messageFavorites: pageMessageFavorites,
+                timelineActivities: pageTimelineActivities,
+                directSendingCapabilities: pageDirectSendingCapabilities
             )))
             offset = end
         } while offset < items.count
@@ -329,6 +342,8 @@ private enum SnapshotProjectionItem {
     case directReadReceipt(V2SnapshotDirectReadReceiptProjection)
     case conversationState(V2SnapshotConversationState)
     case messageFavorite(V2SnapshotMessageFavorite)
+    case timelineActivity(V2SnapshotTimelineActivity)
+    case directSendingCapability(V2SnapshotDirectSendingCapability)
 }
 
 private struct SnapshotProjectionReplay {
@@ -336,6 +351,8 @@ private struct SnapshotProjectionReplay {
     let moderationActions: [V2SnapshotModerationProjection]
     let roomControls: [V2SnapshotRoomControlProjection]
     let roomProfiles: [V2SnapshotRoomProfileProjection]
+    let timelineActivities: [V2SnapshotTimelineActivity]
+    let directSendingCapabilities: [V2SnapshotDirectSendingCapability]
 }
 
 private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) throws -> SnapshotProjectionReplay {
@@ -345,6 +362,8 @@ private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) thro
     var moderationActions: [V2SnapshotModerationProjection] = []
     var roomControls: [RoomID: V2SnapshotRoomControlProjection] = [:]
     var roomProfiles: [RoomID: V2SnapshotRoomProfileProjection] = [:]
+    var timelineActivities: [EventID: V2SnapshotTimelineActivity] = [:]
+    var directSendingCapabilities: [RoomID: V2SnapshotDirectSendingCapability] = [:]
     let decoder = JSONDecoder()
     for row in rows {
         guard row.sequence == expectedSequence, let payload = row.payloadJSON.data(using: .utf8) else {
@@ -381,6 +400,18 @@ private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) thro
                 }
             }
             roomProfiles[profile.roomID] = profile
+        case "timeline_activity":
+            let event = try decoder.decode(SnapshotProjectionTimelineActivityWire.self, from: payload)
+            let activity = try event.projection(sourceEventID: .init(row.sourceEventID.uuidString))
+            guard timelineActivities[activity.sourceEventID] == nil else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
+            timelineActivities[activity.sourceEventID] = activity
+        case "direct_sending_capability":
+            let event = try decoder.decode(SnapshotProjectionDirectSendingCapabilityWire.self, from: payload)
+            let capability = try event.projection()
+            if let existing = directSendingCapabilities[capability.roomID], existing.updatedAt > capability.updatedAt {
+                throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory
+            }
+            directSendingCapabilities[capability.roomID] = capability
         case "relationship", "user_block", "stranger_message_permission", "user_add_permission", "read_receipt_preferences", "direct_room_profile", "direct_read_receipt":
             // Social state is rebuilt from its authoritative tables. ClientKit
             // intentionally stores membership records only as sync history.
@@ -396,7 +427,9 @@ private func replayDeliveredHistory(_ rows: [SnapshotProjectionSyncLogRow]) thro
         messages: try messages.values.map { try $0.projection() },
         moderationActions: moderationActions,
         roomControls: Array(roomControls.values),
-        roomProfiles: Array(roomProfiles.values)
+        roomProfiles: Array(roomProfiles.values),
+        timelineActivities: Array(timelineActivities.values),
+        directSendingCapabilities: Array(directSendingCapabilities.values)
     )
 }
 
@@ -470,6 +503,7 @@ private struct ReplayedMessage {
     let messageID: MessageID
     let roomID: RoomID
     let roomSequence: UInt64
+    let timelineSequence: UInt64
     var revision: UInt64
     let senderUserID: UserID
     var text: String
@@ -484,7 +518,7 @@ private struct ReplayedMessage {
     var reactions: [String: V2SnapshotMessageReaction] = [:]
 
     init(accepted event: SnapshotProjectionMessageWire, sourceEventID: EventID) throws {
-        guard event.roomSequence > 0, let revision = event.messageRevision, revision == 1,
+        guard event.roomSequence > 0, (event.timelineSequence ?? event.roomSequence) > 0, let revision = event.messageRevision, revision == 1,
               event.serverCreatedAtMilliseconds >= 0,
               let messageID = event.messageID, let senderUserID = event.senderUserID,
               let text = event.text, !text.isEmpty || !(event.mediaIDs ?? []).isEmpty
@@ -513,6 +547,7 @@ private struct ReplayedMessage {
         self.messageID = try .init(messageID)
         self.roomID = try .init(event.roomID)
         self.roomSequence = event.roomSequence
+        self.timelineSequence = event.timelineSequence ?? event.roomSequence
         self.revision = revision
         self.senderUserID = try .init(senderUserID)
         self.text = text
@@ -526,7 +561,7 @@ private struct ReplayedMessage {
     }
 
     func projection() throws -> V2SnapshotMessageProjection {
-        try .init(sourceEventID: sourceEventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence, messageRevision: revision, senderUserID: senderUserID, text: text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: createdAt, isWithdrawn: isWithdrawn, reactions: reactions.values.sorted())
+        try .init(sourceEventID: sourceEventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence, timelineSequence: timelineSequence, messageRevision: revision, senderUserID: senderUserID, text: text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: createdAt, isWithdrawn: isWithdrawn, reactions: reactions.values.sorted())
     }
 }
 
@@ -540,6 +575,7 @@ private struct SnapshotProjectionMessageWire: Decodable {
     let messageID: String?
     let roomID: String
     let roomSequence: UInt64
+    let timelineSequence: UInt64?
     let messageRevision: UInt64?
     let senderUserID: String?
     let text: String?
@@ -556,7 +592,7 @@ private struct SnapshotProjectionMessageWire: Decodable {
     let reaction: String?
     let action: String?
     enum CodingKeys: String, CodingKey {
-        case eventType = "event_type"; case messageID = "message_id"; case roomID = "room_id"; case roomSequence = "room_sequence"; case messageRevision = "message_revision"; case senderUserID = "sender_user_id"; case text; case mediaIDs = "media_ids"; case mediaPresentations = "media_presentations"; case mentionUserIDs = "mention_user_ids"; case mentionsEveryone = "mentions_everyone"; case entities; case replyToMessageID = "reply_to_message_id"; case forwardedFromMessageID = "forwarded_from_message_id"; case forwardedFromUserID = "forwarded_from_user_id"; case serverCreatedAtMilliseconds = "server_created_at_ms"; case actorUserID = "actor_user_id"; case reaction; case action
+        case eventType = "event_type"; case messageID = "message_id"; case roomID = "room_id"; case roomSequence = "room_sequence"; case timelineSequence = "timeline_sequence"; case messageRevision = "message_revision"; case senderUserID = "sender_user_id"; case text; case mediaIDs = "media_ids"; case mediaPresentations = "media_presentations"; case mentionUserIDs = "mention_user_ids"; case mentionsEveryone = "mentions_everyone"; case entities; case replyToMessageID = "reply_to_message_id"; case forwardedFromMessageID = "forwarded_from_message_id"; case forwardedFromUserID = "forwarded_from_user_id"; case serverCreatedAtMilliseconds = "server_created_at_ms"; case actorUserID = "actor_user_id"; case reaction; case action
     }
     func requiredMessageID() throws -> MessageID {
         guard let messageID else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
@@ -579,6 +615,28 @@ private struct SnapshotProjectionMessageWire: Decodable {
             case contentType = "content_type"
             case byteCount = "byte_count"
         }
+    }
+}
+
+private struct SnapshotProjectionTimelineActivityWire: Decodable {
+    let eventType: String
+    let roomID: String
+    let timelineSequence: UInt64
+    let serverCreatedAtMilliseconds: Int64
+    enum CodingKeys: String, CodingKey { case eventType = "event_type", roomID = "room_id", timelineSequence = "timeline_sequence", serverCreatedAtMilliseconds = "server_created_at_ms" }
+    func projection(sourceEventID: EventID) throws -> V2SnapshotTimelineActivity {
+        guard let kind = V2SnapshotTimelineActivity.Kind(rawValue: eventType), serverCreatedAtMilliseconds >= 0 else { throw V2SnapshotProjectionMaterializerError.invalidDeliveredHistory }
+        return try .init(sourceEventID: sourceEventID, roomID: .init(roomID), timelineSequence: timelineSequence, kind: kind, createdAt: Date(timeIntervalSince1970: TimeInterval(serverCreatedAtMilliseconds) / 1_000))
+    }
+}
+
+private struct SnapshotProjectionDirectSendingCapabilityWire: Decodable {
+    let roomID: String
+    let canSend: Bool
+    let updatedAtMilliseconds: Int64
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", canSend = "can_send", updatedAtMilliseconds = "updated_at_ms" }
+    func projection() throws -> V2SnapshotDirectSendingCapability {
+        try .init(roomID: .init(roomID), canSend: canSend, updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAtMilliseconds) / 1_000))
     }
 }
 
@@ -656,6 +714,7 @@ private struct SnapshotProjectionDirectRoomProfileRow: Decodable {
     let targetUserID: UUID
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     let revision: Int64
     let updatedAt: Date
 
@@ -664,6 +723,7 @@ private struct SnapshotProjectionDirectRoomProfileRow: Decodable {
         case targetUserID = "target_user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case revision
         case updatedAt = "updated_at"
     }
@@ -686,6 +746,13 @@ private struct SnapshotProjectionMessageFavoriteRow: Decodable {
 private func snapshotProjectionUnsigned(_ value: Int64) throws -> UInt64 {
     guard value > 0 else { throw V2SnapshotProjectionMaterializerError.corruptPersistenceState }
     return UInt64(value)
+}
+
+private func snapshotAccountKind(_ value: String) throws -> V2AccountKind {
+    guard let kind = V2AccountKind(rawValue: value) else {
+        throw V2SnapshotProjectionMaterializerError.corruptPersistenceState
+    }
+    return kind
 }
 
 private func snapshotProjectionUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {

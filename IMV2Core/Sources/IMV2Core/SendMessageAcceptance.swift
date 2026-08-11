@@ -92,6 +92,11 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
+    /// A room-local presentation sequence shared by ordinary messages and
+    /// private activity entries. It is deliberately independent from
+    /// `roomSequence`: read receipts and message mutations continue to use
+    /// the message-only sequence without gaps introduced by system activity.
+    public let timelineSequence: UInt64
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
     public let text: String
@@ -109,6 +114,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         messageID: MessageID,
         roomID: RoomID,
         roomSequence: UInt64,
+        timelineSequence: UInt64? = nil,
         senderUserID: UserID,
         clientMessageID: ClientMessageID,
         text: String,
@@ -122,6 +128,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
+        self.timelineSequence = timelineSequence ?? roomSequence
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.text = text
@@ -145,6 +152,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             messageID: messageID,
             roomID: roomID,
             roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
             senderUserID: senderUserID,
             clientMessageID: clientMessageID,
             text: text,
@@ -165,6 +173,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
+    /// See ``V2AcceptedMessageDraft/timelineSequence``.
+    public let timelineSequence: UInt64
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
     public let text: String
@@ -183,6 +193,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         messageID: MessageID,
         roomID: RoomID,
         roomSequence: UInt64,
+        timelineSequence: UInt64? = nil,
         senderUserID: UserID,
         clientMessageID: ClientMessageID,
         text: String,
@@ -197,6 +208,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
+        self.timelineSequence = timelineSequence ?? roomSequence
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
         self.text = text

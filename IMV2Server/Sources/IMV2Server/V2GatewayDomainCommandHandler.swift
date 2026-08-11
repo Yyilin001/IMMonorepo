@@ -301,6 +301,11 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return acceptedMessageEnvelope(message)
         case .idempotent(let message):
             return acceptedMessageEnvelope(message)
+        case .denied:
+            // The durable, private activity and composer capability are
+            // synced separately. Do not disclose which counterpart policy
+            // caused this rejection on the realtime response.
+            return errorEnvelope(code: "DIRECT_MESSAGE_RESTRICTED", retryable: false)
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
         case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)

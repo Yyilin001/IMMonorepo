@@ -42,7 +42,12 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
         guard payload.revision > 0, payload.updatedAtMilliseconds >= 0 else { throw V2ClientProjectionError.invalidMessagePayload }
         sourceEventID = record.sourceEventID
         roomID = try .init(payload.roomID)
-        publicIdentity = try .init(userID: .init(payload.targetUserID), handle: .init(payload.publicHandle), displayName: payload.displayName)
+        publicIdentity = try .init(
+            userID: .init(payload.targetUserID),
+            handle: .init(payload.publicHandle),
+            displayName: payload.displayName,
+            accountKind: payload.accountKind ?? .regular
+        )
         revision = payload.revision
         updatedAt = Date(timeIntervalSince1970: TimeInterval(payload.updatedAtMilliseconds) / 1_000)
     }
@@ -52,6 +57,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
         let targetUserID: String
         let publicHandle: String
         let displayName: String
+        let accountKind: V2AccountKind?
         let revision: UInt64
         let updatedAtMilliseconds: Int64
 
@@ -60,6 +66,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
             case targetUserID = "target_user_id"
             case publicHandle = "public_handle"
             case displayName = "display_name"
+            case accountKind = "account_kind"
             case revision
             case updatedAtMilliseconds = "updated_at_ms"
         }

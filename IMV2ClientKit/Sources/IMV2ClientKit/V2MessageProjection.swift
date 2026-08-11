@@ -9,6 +9,9 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
+    /// Ordering key in a room's presentation timeline. Message-only actions
+    /// (read receipts, edits and withdrawals) continue to use roomSequence.
+    public let timelineSequence: UInt64
     public let messageRevision: UInt64
     public let senderUserID: UserID
     public let text: String
@@ -21,11 +24,12 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     public let createdAt: Date
     public let isWithdrawn: Bool
 
-    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, forwardedFrom: V2ForwardedMessageAttribution? = nil, createdAt: Date, isWithdrawn: Bool = false) {
+    public init(sourceEventID: EventID, messageID: MessageID, roomID: RoomID, roomSequence: UInt64, timelineSequence: UInt64? = nil, messageRevision: UInt64 = 1, senderUserID: UserID, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, forwardedFrom: V2ForwardedMessageAttribution? = nil, createdAt: Date, isWithdrawn: Bool = false) {
         self.sourceEventID = sourceEventID
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
+        self.timelineSequence = timelineSequence ?? roomSequence
         self.messageRevision = messageRevision
         self.senderUserID = senderUserID
         self.text = text
@@ -47,6 +51,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             messageID: snapshotProjection.messageID,
             roomID: snapshotProjection.roomID,
             roomSequence: snapshotProjection.roomSequence,
+            timelineSequence: snapshotProjection.timelineSequence,
             messageRevision: snapshotProjection.messageRevision,
             senderUserID: snapshotProjection.senderUserID,
             text: snapshotProjection.text,
@@ -66,7 +71,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let payload: Wire
         do { payload = try JSONDecoder().decode(Wire.self, from: record.payload) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
-        guard payload.eventType == "message.accepted", payload.roomSequence > 0, payload.messageRevision > 0,
+        guard payload.eventType == "message.accepted", payload.roomSequence > 0, (payload.timelineSequence ?? payload.roomSequence) > 0, payload.messageRevision > 0,
               payload.serverCreatedAtMilliseconds >= 0,
               (!payload.text.isEmpty || !(payload.mediaIDs ?? []).isEmpty)
         else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -91,7 +96,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
             try V2RichMessageContent.validate(text: payload.text, entities: entities)
-            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
+            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, timelineSequence: payload.timelineSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
     }
 
@@ -100,6 +105,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let messageID: String
         let roomID: String
         let roomSequence: UInt64
+        let timelineSequence: UInt64?
         let messageRevision: UInt64
         let senderUserID: String
         let text: String
@@ -117,6 +123,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             case messageID = "message_id"
             case roomID = "room_id"
             case roomSequence = "room_sequence"
+            case timelineSequence = "timeline_sequence"
             case messageRevision = "message_revision"
             case senderUserID = "sender_user_id"
             case text

@@ -253,6 +253,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.persist(V2ClientRoomProfileProjection(record: record), db: db)
                 } else if record.projectionKind == "direct_room_profile" {
                     try Self.persist(V2ClientDirectRoomProfileProjection(record: record), db: db)
+                } else if record.projectionKind == "timeline_activity" {
+                    try Self.persist(V2ClientTimelineActivityProjection(record: record), db: db)
+                } else if record.projectionKind == "direct_sending_capability" {
+                    try Self.persist(V2ClientDirectSendingCapability(record: record), db: db)
                 } else if record.projectionKind == "profile_invalidation" {
                     try Self.persist(V2ClientProfileInvalidation(record: record), db: db)
                 }
@@ -397,12 +401,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let snapshotReadReceiptPreferences = snapshotPages.compactMap(\.readReceiptPreference)
             let snapshotConversationStates = snapshotPages.flatMap(\.conversationStates)
             let snapshotMessageFavorites = snapshotPages.flatMap(\.messageFavorites)
+            let snapshotTimelineActivities = snapshotPages.flatMap(\.timelineActivities)
+            let snapshotDirectSendingCapabilities = snapshotPages.flatMap(\.directSendingCapabilities)
             var seenMessageIDs = Set<MessageID>()
             var seenRoomPositions = Set<String>()
             var seenSourceEventIDs = Set<EventID>()
             for message in snapshotMessages {
                 guard seenMessageIDs.insert(message.messageID).inserted,
-                      seenRoomPositions.insert("\(message.roomID.rawValue):\(message.roomSequence)").inserted,
+                      seenRoomPositions.insert("\(message.roomID.rawValue):\(message.timelineSequence)").inserted,
                       seenSourceEventIDs.insert(message.sourceEventID).inserted
                 else { throw V2ClientProjectionError.invalidMessagePayload }
             }
@@ -414,6 +420,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             for control in snapshotRoomControls {
                 guard seenRoomPositions.insert("\(control.roomID.rawValue):\(control.roomSequence)").inserted,
                       seenSourceEventIDs.insert(control.sourceEventID).inserted
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+            }
+            for activity in snapshotTimelineActivities {
+                guard seenRoomPositions.insert("\(activity.roomID.rawValue):\(activity.timelineSequence)").inserted,
+                      seenSourceEventIDs.insert(activity.sourceEventID).inserted
                 else { throw V2ClientProjectionError.invalidMessagePayload }
             }
             for profile in snapshotRoomProfiles {
@@ -436,6 +447,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   Set(snapshotDirectReadReceipts.map(\.roomID)).count == snapshotDirectReadReceipts.count,
                   Set(snapshotConversationStates.map(\.roomID)).count == snapshotConversationStates.count,
                   Set(snapshotMessageFavorites.map(\.messageID)).count == snapshotMessageFavorites.count
+                  , Set(snapshotDirectSendingCapabilities.map(\.roomID)).count == snapshotDirectSendingCapabilities.count
             else { throw V2ClientSocialProjectionError.invalidPayload }
             try Self.resetMessageSearchIndex(db: db)
             try db.execute(sql: "DELETE FROM v2_sync_events")
@@ -456,6 +468,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "DELETE FROM v2_user_add_preference")
             try db.execute(sql: "DELETE FROM v2_conversation_states")
             try db.execute(sql: "DELETE FROM v2_message_favorites")
+            try db.execute(sql: "DELETE FROM v2_timeline_activity_projections")
+            try db.execute(sql: "DELETE FROM v2_direct_sending_capabilities")
             for message in snapshotMessages {
                 let projection = V2ClientMessageProjection(snapshotProjection: message)
                 try Self.persist(projection, db: db)
@@ -469,6 +483,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             for receipt in snapshotDirectReadReceipts { try Self.persist(receipt, db: db) }
             for state in snapshotConversationStates { try Self.persist(.init(roomID: state.roomID, isPinned: state.isPinned, isArchived: state.isArchived, muteUntil: state.muteUntil, updatedAt: state.updatedAt), db: db) }
             for favorite in snapshotMessageFavorites { try Self.persist(.init(roomID: favorite.roomID, messageID: favorite.messageID, isFavorited: favorite.isFavorited, updatedAt: favorite.updatedAt), db: db) }
+            for activity in snapshotTimelineActivities {
+                try Self.persist(.init(sourceEventID: activity.sourceEventID, roomID: activity.roomID, timelineSequence: activity.timelineSequence, kind: .init(rawValue: activity.kind.rawValue)!, createdAt: activity.createdAt), db: db)
+            }
+            for capability in snapshotDirectSendingCapabilities { try Self.persist(.init(roomID: capability.roomID, canSend: capability.canSend, updatedAt: capability.updatedAt), db: db) }
             for userBlock in snapshotUserBlocks { try Self.persist(userBlock, db: db) }
             if let preference = snapshotPreferences.first { try Self.persist(preference, db: db) }
             if let preference = snapshotUserAddPreferences.first { try Self.persist(preference, db: db) }
@@ -528,7 +546,20 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     /// opaque sync-event bytes on the main actor.
     public func messages(in roomID: RoomID) throws -> [V2ClientMessageProjection] {
         try databasePool.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY room_sequence, message_id", arguments: [roomID.rawValue]).map(Self.decodeMessageProjection)
+            try Row.fetchAll(db, sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY timeline_sequence, message_id", arguments: [roomID.rawValue]).map(Self.decodeMessageProjection)
+        }
+    }
+
+    public func timelineActivities(in roomID: RoomID) throws -> [V2ClientTimelineActivityProjection] {
+        try databasePool.read { db in
+            try Row.fetchAll(db, sql: "SELECT source_event_id, room_id, timeline_sequence, event_type, server_created_at FROM v2_timeline_activity_projections WHERE room_id = ? ORDER BY timeline_sequence, source_event_id", arguments: [roomID.rawValue]).map(Self.decodeTimelineActivity)
+        }
+    }
+
+    public func directSendingCapability(roomID: RoomID) throws -> V2ClientDirectSendingCapability? {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT room_id, can_send, updated_at FROM v2_direct_sending_capabilities WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            return .init(roomID: try .init(row["room_id"] as String), canSend: row["can_send"], updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double))
         }
     }
 
@@ -750,11 +781,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(
                 sql: """
                 INSERT INTO v2_direct_room_identities
-                    (room_id, target_user_id, public_handle, display_name, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (room_id, target_user_id, public_handle, display_name, account_kind, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(room_id) DO UPDATE SET
                     public_handle = excluded.public_handle,
                     display_name = excluded.display_name,
+                    account_kind = excluded.account_kind,
                     updated_at = excluded.updated_at
                 """,
                 arguments: [
@@ -762,6 +794,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     publicIdentity.userID.rawValue,
                     publicIdentity.handle.rawValue,
                     publicIdentity.displayName,
+                    publicIdentity.accountKind.rawValue,
                     updatedAt.timeIntervalSince1970
                 ]
             )
@@ -772,11 +805,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             let cached = try Row.fetchAll(
                 db,
-                sql: "SELECT room_id, target_user_id, public_handle, display_name, updated_at FROM v2_direct_room_identities ORDER BY updated_at DESC, room_id"
+                sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_identities ORDER BY updated_at DESC, room_id"
             ).map(Self.decodeDirectRoomIdentity)
             let projected = try Row.fetchAll(
                 db,
-                sql: "SELECT room_id, target_user_id, public_handle, display_name, updated_at FROM v2_direct_room_profile_projections ORDER BY updated_at DESC, room_id"
+                sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_profile_projections ORDER BY updated_at DESC, room_id"
             ).map(Self.decodeDirectRoomIdentity)
             return Dictionary(projected.map { ($0.roomID, $0) }, uniquingKeysWith: { _, incoming in incoming })
                 .merging(Dictionary(cached.map { ($0.roomID, $0) }, uniquingKeysWith: { _, incoming in incoming }), uniquingKeysWith: { projected, _ in projected })
@@ -792,7 +825,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             guard let row = try Row.fetchOne(
                 db,
-                sql: "SELECT user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
+                sql: "SELECT user_id, public_handle, display_name, account_kind, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
                 arguments: [userID.rawValue]
             ) else { return nil }
             return try Self.decodeProfileView(row)
@@ -806,7 +839,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ", ")
             let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id IN (\(placeholders))",
+                sql: "SELECT user_id, public_handle, display_name, account_kind, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id IN (\(placeholders))",
                 arguments: StatementArguments(uniqueIDs.map(\.rawValue))
             )
             return try Dictionary(uniqueKeysWithValues: rows.map { row in
@@ -1003,12 +1036,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         else { throw V2ClientProjectionError.invalidMessagePayload }
         let handle: String? = row["public_handle"]
         let displayName: String? = row["display_name"]
+        let accountKind = (row["account_kind"] as String?).flatMap(V2AccountKind.init) ?? .regular
         let avatarMediaID: String? = row["avatar_media_id"]
         let identity: V2PublicIdentity?
         switch (handle, displayName) {
         case (.none, .none): identity = nil
         case let (.some(handle), .some(displayName)):
-            identity = try .init(userID: userID, handle: .init(handle), displayName: displayName)
+            identity = try .init(userID: userID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
         default: throw V2ClientProjectionError.invalidMessagePayload
         }
         let avatar = try avatarMediaID.map { try V2AvatarReference(mediaID: .init($0)) }
@@ -1060,6 +1094,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         case "moderation": try applyModeration(record, db: db)
         case "room", "membership": try persist(V2ClientRoomProfileProjection(record: record), db: db)
         case "group_capability": try applyGroupCapability(record, db: db)
+        case "timeline_activity": try persist(V2ClientTimelineActivityProjection(record: record), db: db)
         default: throw V2ClientProjectionError.invalidMessagePayload
         }
     }
@@ -1200,7 +1235,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         if let existing = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
             let decoded = try decodeMessageProjection(existing)
             guard decoded.sourceEventID == projection.sourceEventID, decoded.messageID == projection.messageID,
-                  decoded.roomID == projection.roomID, decoded.roomSequence == projection.roomSequence,
+                  decoded.roomID == projection.roomID, decoded.roomSequence == projection.roomSequence, decoded.timelineSequence == projection.timelineSequence,
                   decoded.messageRevision == projection.messageRevision, decoded.senderUserID == projection.senderUserID,
                   decoded.text == projection.text, decoded.media == projection.media, decoded.mediaPresentations == projection.mediaPresentations,
                   decoded.mentions == projection.mentions, decoded.entities == projection.entities, decoded.replyTo == projection.replyTo, decoded.forwardedFrom == projection.forwardedFrom, decoded.createdAt == projection.createdAt,
@@ -1211,11 +1246,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(
             sql: """
             INSERT INTO v2_message_projections
-                (message_id, source_event_id, room_id, room_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, forwarded_from_message_id, forwarded_from_user_id, server_created_at, is_withdrawn)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (message_id, source_event_id, room_id, room_sequence, timeline_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, forwarded_from_message_id, forwarded_from_user_id, server_created_at, is_withdrawn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [projection.messageID.rawValue, projection.sourceEventID.rawValue, projection.roomID.rawValue,
-                        try storageInteger(projection.roomSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue, projection.forwardedFrom?.messageID.rawValue, projection.forwardedFrom?.senderUserID.rawValue,
+                        try storageInteger(projection.roomSequence), try storageInteger(projection.timelineSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue, projection.forwardedFrom?.messageID.rawValue, projection.forwardedFrom?.senderUserID.rawValue,
                         projection.createdAt.timeIntervalSince1970, projection.isWithdrawn]
         )
         if let tombstone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
@@ -1225,6 +1260,31 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [revision, projection.messageID.rawValue])
         }
         try enqueueMessageSearchIndexJob(messageID: projection.messageID, db: db)
+    }
+
+    private static func persist(_ projection: V2ClientTimelineActivityProjection, db: Database) throws {
+        let timelineSequence = try storageInteger(projection.timelineSequence)
+        if let row = try Row.fetchOne(db, sql: "SELECT room_id, timeline_sequence, event_type, server_created_at FROM v2_timeline_activity_projections WHERE source_event_id = ?", arguments: [projection.sourceEventID.rawValue]) {
+            guard (row["room_id"] as String) == projection.roomID.rawValue,
+                  (row["timeline_sequence"] as Int64) == timelineSequence,
+                  (row["event_type"] as String) == projection.kind.rawValue,
+                  (row["server_created_at"] as Double) == projection.createdAt.timeIntervalSince1970
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        try db.execute(sql: "INSERT INTO v2_timeline_activity_projections (source_event_id, room_id, timeline_sequence, event_type, server_created_at) VALUES (?, ?, ?, ?, ?)", arguments: [projection.sourceEventID.rawValue, projection.roomID.rawValue, timelineSequence, projection.kind.rawValue, projection.createdAt.timeIntervalSince1970])
+    }
+
+    private static func persist(_ projection: V2ClientDirectSendingCapability, db: Database) throws {
+        if let row = try Row.fetchOne(db, sql: "SELECT can_send, updated_at FROM v2_direct_sending_capabilities WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
+            let existingTime = row["updated_at"] as Double
+            guard existingTime <= projection.updatedAt.timeIntervalSince1970 else { throw V2ClientProjectionError.invalidMessagePayload }
+            if existingTime == projection.updatedAt.timeIntervalSince1970 {
+                guard (row["can_send"] as Bool) == projection.canSend else { throw V2ClientProjectionError.invalidMessagePayload }
+                return
+            }
+        }
+        try db.execute(sql: "INSERT INTO v2_direct_sending_capabilities (room_id, can_send, updated_at) VALUES (?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET can_send = excluded.can_send, updated_at = excluded.updated_at", arguments: [projection.roomID.rawValue, projection.canSend, projection.updatedAt.timeIntervalSince1970])
     }
 
     private static func persist(_ projection: V2ClientModerationProjection, db: Database) throws {
@@ -1276,7 +1336,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     private static func persist(_ projection: V2ClientDirectRoomProfileProjection, db: Database) throws {
-        if let existing = try Row.fetchOne(db, sql: "SELECT source_event_id, target_user_id, public_handle, display_name, revision FROM v2_direct_room_profile_projections WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
+        if let existing = try Row.fetchOne(db, sql: "SELECT source_event_id, target_user_id, public_handle, display_name, account_kind, revision FROM v2_direct_room_profile_projections WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
             let existingRevision: Int64 = existing["revision"]
             let incomingRevision = try storageInteger(projection.revision)
             guard existingRevision <= incomingRevision else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -1284,16 +1344,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 guard (existing["source_event_id"] as String) == projection.sourceEventID.rawValue,
                       (existing["target_user_id"] as String) == projection.publicIdentity.userID.rawValue,
                       (existing["public_handle"] as String) == projection.publicIdentity.handle.rawValue,
-                      (existing["display_name"] as String) == projection.publicIdentity.displayName
+                      (existing["display_name"] as String) == projection.publicIdentity.displayName,
+                      (existing["account_kind"] as String) == projection.publicIdentity.accountKind.rawValue
                 else { throw V2ClientProjectionError.invalidMessagePayload }
                 try persist(profileView(from: projection), db: db)
                 return
             }
-            try db.execute(sql: "UPDATE v2_direct_room_profile_projections SET source_event_id = ?, target_user_id = ?, public_handle = ?, display_name = ?, revision = ?, updated_at = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, incomingRevision, projection.updatedAt.timeIntervalSince1970, projection.roomID.rawValue])
+            try db.execute(sql: "UPDATE v2_direct_room_profile_projections SET source_event_id = ?, target_user_id = ?, public_handle = ?, display_name = ?, account_kind = ?, revision = ?, updated_at = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, projection.publicIdentity.accountKind.rawValue, incomingRevision, projection.updatedAt.timeIntervalSince1970, projection.roomID.rawValue])
             try persist(profileView(from: projection), db: db)
             return
         }
-        try db.execute(sql: "INSERT INTO v2_direct_room_profile_projections (room_id, source_event_id, target_user_id, public_handle, display_name, revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, try storageInteger(projection.revision), projection.updatedAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_direct_room_profile_projections (room_id, source_event_id, target_user_id, public_handle, display_name, account_kind, revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, projection.publicIdentity.accountKind.rawValue, try storageInteger(projection.revision), projection.updatedAt.timeIntervalSince1970])
         try persist(profileView(from: projection), db: db)
     }
 
@@ -1316,7 +1377,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let incomingVisibilityRevision = try storageInteger(profile.visibilityRevision.rawValue)
         if let existing = try Row.fetchOne(
             db,
-            sql: "SELECT public_handle, display_name, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
+            sql: "SELECT public_handle, display_name, account_kind, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id = ?",
             arguments: [profile.userID.rawValue]
         ) {
             let existingRevision: Int64 = existing["revision"]
@@ -1327,6 +1388,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             if existingRevision == incomingRevision, existingVisibilityRevision == incomingVisibilityRevision {
                 guard (existing["public_handle"] as String?) == profile.publicIdentity?.handle.rawValue,
                       (existing["display_name"] as String?) == profile.publicIdentity?.displayName,
+                      (existing["account_kind"] as String?) == profile.publicIdentity?.accountKind.rawValue,
                       (existing["avatar_media_id"] as String?) == profile.avatar?.mediaID.rawValue,
                       (existing["state"] as String) == profile.state.rawValue
                 else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -1334,13 +1396,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 return
             }
             try db.execute(
-                sql: "UPDATE v2_profile_views SET public_handle = ?, display_name = ?, avatar_media_id = ?, state = ?, revision = ?, visibility_revision = ?, updated_at = ? WHERE user_id = ?",
-                arguments: [profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970, profile.userID.rawValue]
+                sql: "UPDATE v2_profile_views SET public_handle = ?, display_name = ?, account_kind = ?, avatar_media_id = ?, state = ?, revision = ?, visibility_revision = ?, updated_at = ? WHERE user_id = ?",
+                arguments: [profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.publicIdentity?.accountKind.rawValue, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970, profile.userID.rawValue]
             )
         } else {
             try db.execute(
-                sql: "INSERT INTO v2_profile_views (user_id, public_handle, display_name, avatar_media_id, state, revision, visibility_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                arguments: [profile.userID.rawValue, profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970]
+                sql: "INSERT INTO v2_profile_views (user_id, public_handle, display_name, account_kind, avatar_media_id, state, revision, visibility_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                arguments: [profile.userID.rawValue, profile.publicIdentity?.handle.rawValue, profile.publicIdentity?.displayName, profile.publicIdentity?.accountKind.rawValue, profile.avatar?.mediaID.rawValue, profile.state.rawValue, incomingRevision, incomingVisibilityRevision, Date().timeIntervalSince1970]
             )
         }
         try clearSatisfiedInvalidation(for: profile, db: db)
@@ -1423,6 +1485,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let senderUserID = try UserID(row["sender_user_id"] as String)
         let text: String = row["text_body"]
         let roomSequence = UInt64(row["room_sequence"] as Int64)
+        let timelineSequence = UInt64(row["timeline_sequence"] as Int64)
         let messageRevision = UInt64(row["message_revision"] as Int64)
         let media = try decodeMedia(row["media_ids"])
         let mediaPresentations = try decodeMediaPresentations(row["media_presentations"])
@@ -1445,6 +1508,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             messageID: messageID,
             roomID: roomID,
             roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
             messageRevision: messageRevision,
             senderUserID: senderUserID,
             text: text,
@@ -1456,6 +1520,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             forwardedFrom: forwardedFrom,
             createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double),
             isWithdrawn: (row["is_withdrawn"] as Int64) != 0
+        )
+    }
+
+    private static func decodeTimelineActivity(_ row: Row) throws -> V2ClientTimelineActivityProjection {
+        guard let kind = V2ClientTimelineActivityProjection.Kind(rawValue: row["event_type"] as String) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return try .init(
+            sourceEventID: .init(row["source_event_id"] as String),
+            roomID: .init(row["room_id"] as String),
+            timelineSequence: UInt64(row["timeline_sequence"] as Int64),
+            kind: kind,
+            createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double)
         )
     }
 
@@ -1699,7 +1776,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let identity = try V2PublicIdentity(
             userID: .init(row["target_user_id"] as String),
             handle: .init(row["public_handle"] as String),
-            displayName: row["display_name"] as String
+            displayName: row["display_name"] as String,
+            accountKind: (row["account_kind"] as String?).flatMap(V2AccountKind.init) ?? .regular
         )
         return try .init(
             roomID: .init(row["room_id"] as String),
@@ -2642,6 +2720,28 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 CREATE INDEX v2_forward_message_chunks_ready_idx
                     ON v2_forward_message_chunks (state, next_attempt_at, created_at) WHERE state = 'pending';
             """)
+        }
+        migrator.registerMigration("addV2PrivateTimelineActivities") { db in
+            // Existing messages predate the unified presentation sequence;
+            // preserving their message sequence keeps historical order stable.
+            try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN timeline_sequence INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: "UPDATE v2_message_projections SET timeline_sequence = room_sequence WHERE timeline_sequence = 0")
+            try db.execute(sql: "CREATE UNIQUE INDEX v2_message_projections_room_timeline_idx ON v2_message_projections (room_id, timeline_sequence)")
+            try db.execute(sql: "CREATE TABLE v2_timeline_activity_projections (source_event_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence > 0), event_type TEXT NOT NULL CHECK (event_type IN ('direct_message_restricted', 'system_account_read_only')), server_created_at REAL NOT NULL, UNIQUE (room_id, timeline_sequence)); CREATE INDEX v2_timeline_activity_room_order_idx ON v2_timeline_activity_projections (room_id, timeline_sequence, source_event_id); CREATE TABLE v2_direct_sending_capabilities (room_id TEXT PRIMARY KEY, can_send INTEGER NOT NULL CHECK (can_send IN (0, 1)), updated_at REAL NOT NULL)")
+        }
+        migrator.registerMigration("addV2SpecialAccountKinds") { db in
+            if try !db.columns(in: "v2_direct_room_identities").contains(where: { $0.name == "account_kind" }) {
+                try db.execute(sql: "ALTER TABLE v2_direct_room_identities ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'regular' CHECK (account_kind IN ('regular', 'system', 'customer_support'))")
+            }
+            if try !db.columns(in: "v2_direct_room_profile_projections").contains(where: { $0.name == "account_kind" }) {
+                try db.execute(sql: "ALTER TABLE v2_direct_room_profile_projections ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'regular' CHECK (account_kind IN ('regular', 'system', 'customer_support'))")
+            }
+            if try !db.columns(in: "v2_profile_views").contains(where: { $0.name == "account_kind" }) {
+                try db.execute(sql: "ALTER TABLE v2_profile_views ADD COLUMN account_kind TEXT NULL CHECK (account_kind IS NULL OR account_kind IN ('regular', 'system', 'customer_support'))")
+            }
+        }
+        migrator.registerMigration("allowV2SystemAccountTimelineActivity") { db in
+            try db.execute(sql: "ALTER TABLE v2_timeline_activity_projections RENAME TO v2_timeline_activity_projections_old; CREATE TABLE v2_timeline_activity_projections (source_event_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence > 0), event_type TEXT NOT NULL CHECK (event_type IN ('direct_message_restricted', 'system_account_read_only')), server_created_at REAL NOT NULL, UNIQUE (room_id, timeline_sequence)); INSERT INTO v2_timeline_activity_projections SELECT source_event_id, room_id, timeline_sequence, event_type, server_created_at FROM v2_timeline_activity_projections_old; DROP TABLE v2_timeline_activity_projections_old; CREATE INDEX v2_timeline_activity_room_order_idx ON v2_timeline_activity_projections (room_id, timeline_sequence, source_event_id)")
         }
         return migrator
     }()
