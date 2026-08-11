@@ -18,6 +18,7 @@ final class V2ConversationSearchStore {
     }
 
     private let searcher: any V2ConversationMessageSearching
+    private let progressReader: (any V2ConversationMessageSearchProgressReading)?
     private let scope: V2MessageSearchScope
     private var generation = 0
     private var cursor: V2MessageSearchCursor?
@@ -28,9 +29,11 @@ final class V2ConversationSearchStore {
     private(set) var hits: [V2MessageSearchHit] = []
     private(set) var state: State = .idle
     private(set) var canLoadMore = false
+    private(set) var isCatchingUp = false
 
     init(searcher: any V2ConversationMessageSearching, scope: V2MessageSearchScope = .allMessages) {
         self.searcher = searcher
+        progressReader = searcher as? any V2ConversationMessageSearchProgressReading
         self.scope = scope
     }
 
@@ -39,6 +42,7 @@ final class V2ConversationSearchStore {
         let requestGeneration = generation
         cursor = nil
         hits = []
+        isCatchingUp = false
         guard !query.isEmpty || contentFilter != .all else {
             state = .idle
             canLoadMore = false
@@ -54,6 +58,10 @@ final class V2ConversationSearchStore {
             hits = page.hits
             cursor = page.nextCursor
             canLoadMore = page.nextCursor != nil
+            if let progressReader {
+                let progress = try? await progressReader.messageSearchIndexProgress()
+                isCatchingUp = progress?.isCatchingUp ?? false
+            }
             state = .loaded
         } catch is CancellationError {
             return
@@ -78,6 +86,10 @@ final class V2ConversationSearchStore {
             hits += page.hits
             self.cursor = page.nextCursor
             canLoadMore = page.nextCursor != nil
+            if let progressReader {
+                let progress = try? await progressReader.messageSearchIndexProgress()
+                isCatchingUp = progress?.isCatchingUp ?? false
+            }
         } catch is CancellationError {
             return
         } catch V2MessageSearchError.indexUnavailable(.building) {

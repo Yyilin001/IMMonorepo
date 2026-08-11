@@ -113,6 +113,21 @@ public enum V2MessageSearchIndexState: Equatable, Sendable {
     }
 }
 
+/// The UI may keep serving verified historical hits while this reports a
+/// backlog. `building` means no complete generation is available; `isCatchingUp`
+/// only means very recent accepted/edited messages may not be indexed yet.
+public struct V2MessageSearchIndexProgress: Equatable, Sendable {
+    public let state: V2MessageSearchIndexState
+    public let pendingJobCount: Int
+
+    public init(state: V2MessageSearchIndexState, pendingJobCount: Int) {
+        self.state = state
+        self.pendingJobCount = pendingJobCount
+    }
+
+    public var isCatchingUp: Bool { state == .ready && pendingJobCount > 0 }
+}
+
 public enum V2MessageSearchError: Error, Equatable, Sendable {
     case emptyQuery
     case invalidPageSize

@@ -4,12 +4,17 @@ import IMV2Core
 
 /// V2's local database is intentionally separate from the V1 conversation
 /// cache. It applies sync records incrementally in one SQLite transaction.
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
     /// All local command repositories share this actor-owned pool. Extensions
     /// preserve the actor boundary while keeping each durable queue in its
     /// own source file.
     let databasePool: DatabasePool
-    private let databaseURL: URL
+    /// Search is intentionally a separately-writable derived database. This
+    /// prevents FTS maintenance from competing with the authoritative sync
+    /// projection writer in `databasePool`.
+    let messageSearchDatabasePool: DatabasePool
+    let databaseURL: URL
+    let messageSearchDatabaseURL: URL
 
     init(databaseURL: URL, installationBinding: V2LocalInstallationBinding) throws {
         self.databaseURL = databaseURL
@@ -26,10 +31,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "PRAGMA journal_mode = WAL")
         }
         try Self.migrator.migrate(databasePool)
+
+        messageSearchDatabaseURL = Self.messageSearchDatabaseURL(for: databaseURL)
+        messageSearchDatabasePool = try DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration)
+        try messageSearchDatabasePool.write { db in
+            try db.execute(sql: "PRAGMA journal_mode = WAL")
+        }
+        try Self.messageSearchMigrator.migrate(messageSearchDatabasePool)
         try databasePool.write { db in
             try Self.establishInstallationBinding(installationBinding, db: db)
         }
         try Self.applyBackupExclusion(databaseURL: databaseURL)
+        try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
     }
 
     /// Reasserts and verifies the device-only backup policy after database
@@ -37,6 +50,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     /// out of device backup and therefore cannot restore unsent V2 commands.
     public func refreshBackupExclusion() throws {
         try Self.applyBackupExclusion(databaseURL: databaseURL)
+        try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
     }
 
     private static func applyBackupExclusion(databaseURL: URL) throws {
@@ -45,6 +59,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         for artifact in [databaseURL, URL(fileURLWithPath: databaseURL.path + "-wal"), URL(fileURLWithPath: databaseURL.path + "-shm")] where FileManager.default.fileExists(atPath: artifact.path) {
             try V2LocalBackupExclusion.apply(to: artifact)
         }
+    }
+
+    private static func messageSearchDatabaseURL(for primaryDatabaseURL: URL) -> URL {
+        let directory = primaryDatabaseURL.deletingLastPathComponent()
+        // Production's V2.sqlite gets the stable, human-readable companion
+        // name requested by the storage design. Tests and alternate stores
+        // retain a per-primary database to prevent cross-account leakage.
+        if primaryDatabaseURL.lastPathComponent == "V2.sqlite" {
+            return directory.appending(path: "V2Search.sqlite")
+        }
+        return directory.appending(path: primaryDatabaseURL.deletingPathExtension().lastPathComponent + ".search.sqlite")
     }
 
     public func cursor() throws -> V2LocalSyncCursor? {
@@ -450,10 +475,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             if let preference = snapshotReadReceiptPreferences.first { try Self.persist(preference, db: db) }
             for action in snapshotModerationActions { try Self.persist(.init(snapshotProjection: action), db: db) }
             for control in snapshotRoomControls { try Self.persist(.init(snapshotProjection: control), db: db) }
-            try Self.finishMessageSearchIndexRebuild(
-                generation: try Self.messageSearchIndexGeneration(db: db),
-                db: db
-            )
             try db.execute(sql: "DELETE FROM v2_snapshot_pages")
             try db.execute(
                 sql: """
@@ -1203,7 +1224,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard roomID == projection.roomID.rawValue, revision > (try storageInteger(projection.messageRevision)) else { throw V2ClientProjectionError.invalidMessagePayload }
             try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [revision, projection.messageID.rawValue])
         }
-        try refreshMessageSearchIndex(messageID: projection.messageID, db: db)
+        try enqueueMessageSearchIndexJob(messageID: projection.messageID, db: db)
     }
 
     private static func persist(_ projection: V2ClientModerationProjection, db: Database) throws {
@@ -1368,7 +1389,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let revision: Int64 = projection["message_revision"]
             guard roomID == tombstone.roomID.rawValue, revision < tombstoneRevision else { throw V2ClientProjectionError.invalidMessagePayload }
             try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [try storageInteger(tombstone.messageRevision), tombstone.messageID.rawValue])
-            try refreshMessageSearchIndex(messageID: tombstone.messageID, db: db)
+            try enqueueMessageSearchIndexJob(messageID: tombstone.messageID, db: db)
         }
     }
 
@@ -1384,7 +1405,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
               edit.messageRevision == UInt64(revision + 1)
         else { throw V2ClientProjectionError.invalidMessagePayload }
         try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, entities = '[]', message_revision = ? WHERE message_id = ?", arguments: [edit.text, try storageInteger(edit.messageRevision), edit.messageID.rawValue])
-        try refreshMessageSearchIndex(messageID: edit.messageID, db: db)
+        try enqueueMessageSearchIndexJob(messageID: edit.messageID, db: db)
     }
 
     private static func persist(_ reaction: V2ClientMessageReaction, action: V2MessageReactionAction, db: Database) throws {
@@ -1709,6 +1730,35 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return try .init(kind: kind, operationID: row["operation_id"], roomID: .init(row["room_id"] as String), messageID: try (row["message_id"] as String?).map(MessageID.init), isPinned: row["is_pinned"], body: row["body"], role: role, permissions: permissions, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), expectedRevision: try storageUnsigned(row["expected_revision"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
     }
     static func decodePendingForwardMessages(_ row: Row) throws -> V2PendingForwardMessagesCommand { guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init); let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)).map(RoomID.init); return try .init(command: .init(operationID: .init(row["operation_id"] as String), sourceMessageIDs: sources, targetRoomIDs: targets), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"]) }
+    static func decodeForwardMessagesPlan(_ row: Row) throws -> V2ForwardMessagesPlan {
+        guard let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
+        let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8))
+        guard !targets.isEmpty, sources.count <= Int.max / targets.count else { throw V2ClientCommandError.commandConflict }
+        let total = sources.count * targets.count
+        return .init(operationID: try .init(row["plan_id"] as String), sourceMessageCount: sources.count, targetRoomCount: targets.count, totalForwardCount: total, succeededCount: Int(row["succeeded_count"] as Int64), failedCount: Int(row["failed_count"] as Int64), state: state)
+    }
+    static func decodeForwardPlanChunk(_ row: Row) throws -> V2PendingForwardMessagesCommand {
+        guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init)
+        let target = try RoomID(row["target_room_id"] as String)
+        return try .init(command: .init(operationID: try .init(row["operation_id"] as String), sourceMessageIDs: sources, targetRoomIDs: [target]), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+    }
+
+    static func advanceForwardPlan(planID: String, completedChunkIndex: Int64, succeeded: Int, failed: Int, now: Date, db: Database) throws {
+        guard succeeded >= 0, failed >= 0,
+              let row = try Row.fetchOne(db, sql: "SELECT next_chunk_index, total_chunk_count, state FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [planID]),
+              let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String), state == .active
+        else { return }
+        let nextChunkIndex: Int64 = row["next_chunk_index"]
+        let totalChunkCount: Int64 = row["total_chunk_count"]
+        guard nextChunkIndex == completedChunkIndex else { throw V2ClientCommandError.commandConflict }
+        let next = completedChunkIndex + 1
+        try db.execute(
+            sql: "UPDATE v2_forward_message_plans SET next_chunk_index = ?, succeeded_count = succeeded_count + ?, failed_count = failed_count + ?, state = ?, updated_at = ? WHERE plan_id = ?",
+            arguments: [next, succeeded, failed, next == totalChunkCount ? V2ForwardMessagesPlan.State.completed.rawValue : V2ForwardMessagesPlan.State.active.rawValue, now.timeIntervalSince1970, planID]
+        )
+    }
     static func decodePendingMessageEdit(_ row: Row) throws -> V2PendingMessageEdit {
         guard let state = V2PendingMessageEdit.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), expectedMessageRevision: UInt64(row["expected_message_revision"] as Int64), text: row["text_body"], state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(UInt64.init), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(UInt64.init))
@@ -2544,6 +2594,92 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
         migrator.registerMigration("addV2MessageForwardAttribution") { db in
             try db.execute(sql: "ALTER TABLE v2_message_projections ADD COLUMN forwarded_from_message_id TEXT; ALTER TABLE v2_message_projections ADD COLUMN forwarded_from_user_id TEXT;")
+        }
+        migrator.registerMigration("separateV2MessageSearchIndex") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_message_search_jobs (
+                    message_id TEXT PRIMARY KEY,
+                    expected_message_revision INTEGER NOT NULL CHECK (expected_message_revision > 0),
+                    generation INTEGER NOT NULL CHECK (generation > 0),
+                    enqueued_at REAL NOT NULL
+                );
+                CREATE INDEX v2_message_search_jobs_generation_idx
+                    ON v2_message_search_jobs (generation, enqueued_at, message_id);
+                UPDATE v2_message_search_state
+                SET state = 'building', generation = generation + 1
+                WHERE singleton = 1 AND generation < 9223372036854775807;
+            """)
+        }
+        migrator.registerMigration("addV2BulkForwardPlans") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_forward_message_plans (
+                    plan_id TEXT PRIMARY KEY,
+                    source_message_ids TEXT NOT NULL,
+                    target_room_ids TEXT NOT NULL,
+                    next_chunk_index INTEGER NOT NULL CHECK (next_chunk_index >= 0),
+                    total_chunk_count INTEGER NOT NULL CHECK (total_chunk_count > 0),
+                    succeeded_count INTEGER NOT NULL DEFAULT 0 CHECK (succeeded_count >= 0),
+                    failed_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
+                    state TEXT NOT NULL CHECK (state IN ('active','completed','cancelled')),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX v2_forward_message_plans_active_idx
+                    ON v2_forward_message_plans (created_at, plan_id) WHERE state = 'active';
+                CREATE TABLE v2_forward_message_chunks (
+                    operation_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL REFERENCES v2_forward_message_plans(plan_id),
+                    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+                    source_message_ids TEXT NOT NULL,
+                    target_room_id TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected','cancelled')),
+                    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+                    next_attempt_at REAL NOT NULL,
+                    terminal_code TEXT,
+                    created_at REAL NOT NULL,
+                    UNIQUE (plan_id, chunk_index)
+                );
+                CREATE INDEX v2_forward_message_chunks_ready_idx
+                    ON v2_forward_message_chunks (state, next_attempt_at, created_at) WHERE state = 'pending';
+            """)
+        }
+        return migrator
+    }()
+
+    /// This database never contains sync cursors, commands, or authoritative
+    /// message projections. It may always be discarded and rebuilt from the
+    /// primary V2 database.
+    static let messageSearchMigrator: DatabaseMigrator = {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("createV2DerivedMessageSearchIndex") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_search_documents (
+                    message_id TEXT PRIMARY KEY,
+                    message_revision INTEGER NOT NULL CHECK (message_revision > 0),
+                    generation INTEGER NOT NULL CHECK (generation > 0),
+                    room_id TEXT NOT NULL,
+                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+                    sender_user_id TEXT NOT NULL,
+                    text_body TEXT NOT NULL,
+                    media_presentations TEXT NOT NULL,
+                    server_created_at REAL NOT NULL
+                );
+                CREATE INDEX v2_search_documents_room_order_idx
+                    ON v2_search_documents (room_id, room_sequence DESC, message_id DESC);
+                CREATE INDEX v2_search_documents_global_order_idx
+                    ON v2_search_documents (server_created_at DESC, message_id DESC);
+                CREATE INDEX v2_search_documents_sender_order_idx
+                    ON v2_search_documents (sender_user_id, server_created_at DESC, message_id DESC);
+                CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(
+                    room_scope,
+                    sender_scope,
+                    unigrams,
+                    bigrams,
+                    tokenize = 'ascii',
+                    detail = full,
+                    columnsize = 0
+                );
+            """)
         }
         return migrator
     }()

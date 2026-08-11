@@ -4,7 +4,7 @@ import IMV2Core
 
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
-actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
+actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
     private let localStore: GRDBV2LocalSyncStore
 
     init(localStore: GRDBV2LocalSyncStore) {
@@ -164,6 +164,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationFavo
 
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
         try await localStore.searchMessages(request)
+    }
+
+    func messageSearchIndexProgress() async throws -> V2MessageSearchIndexProgress {
+        try await localStore.messageSearchIndexProgress()
     }
 
     func favoriteMessages(for _: String) async throws -> [V2FavoriteConversationMessageItem] {

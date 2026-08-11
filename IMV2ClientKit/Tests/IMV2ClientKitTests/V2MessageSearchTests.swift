@@ -73,12 +73,18 @@ struct V2MessageSearchTests {
         try await apply(store, records: [
             editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000b12", roomID: roomID, messageID: messageID, revision: 2, text: "新文本")
         ], token: "search-token-3")
+        #expect(try await store.messageSearchIndexProgress().isCatchingUp)
+        // The old document may still be physically present in V2Search, but
+        // revision validation against V2.sqlite must hide it immediately.
+        #expect(try await store.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
+        _ = try await store.processPendingMessageSearchIndexJobs()
         #expect(try await store.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
 
         try await apply(store, records: [
             tombstoneRecord(sequence: 3, sourceEvent: "00000000-0000-0000-0000-000000000b13", roomID: roomID, messageID: messageID, revision: 3)
         ], token: "search-token-4")
+        _ = try await store.processPendingMessageSearchIndexJobs()
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
     }
 
@@ -146,9 +152,34 @@ struct V2MessageSearchTests {
         try await store.stageSnapshotPage(.init(index: 0, digest: pageDigest, payload: payload), for: manifest)
         try await store.commitStagedSnapshot(manifest)
 
+        #expect(try await store.messageSearchIndexState() == .building)
+        try await store.rebuildMessageSearchIndex()
         #expect(try await store.messageSearchIndexState() == .ready)
         #expect(try await store.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.isEmpty)
         #expect(try await store.searchMessages(.init(query: "快照后", scope: .room(snapshotRoomID))).hits.map(\.messageID) == [snapshotMessageID])
+    }
+
+    @Test("an unacknowledged search job survives restart and replaces stale text")
+    func searchJobResumesAfterRestart() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-message-search-restart-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000e01")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000e02")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000e03")
+        let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        try await apply(first, records: [
+            acceptedRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000e11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "初始文本", createdAtMilliseconds: 1_750_000_000_000)
+        ], token: "search-restart-1")
+        try await first.rebuildMessageSearchIndex()
+        try await apply(first, records: [
+            editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000e12", roomID: roomID, messageID: messageID, revision: 2, text: "恢复后的文本")
+        ], token: "search-restart-2")
+
+        let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        #expect(try await restarted.messageSearchIndexProgress().isCatchingUp)
+        _ = try await restarted.processPendingMessageSearchIndexJobs()
+        #expect(try await restarted.searchMessages(.init(query: "恢复后", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
+        #expect(try await restarted.searchMessages(.init(query: "初始文", scope: .room(roomID))).hits.isEmpty)
     }
 
     private func makeStore() throws -> GRDBV2LocalSyncStore {

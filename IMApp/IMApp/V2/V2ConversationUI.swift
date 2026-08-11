@@ -189,6 +189,10 @@ protocol V2ConversationMessageSearching: Sendable {
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage
 }
 
+protocol V2ConversationMessageSearchProgressReading: Sendable {
+    func messageSearchIndexProgress() async throws -> V2MessageSearchIndexProgress
+}
+
 /// A foreground-only boundary for the currently open hybrid room. It is not a
 /// member notification channel: only the device that is displaying a room
 /// polls it, and every returned event still commits through the durable local
@@ -1063,10 +1067,16 @@ private struct V2MessageSearchView: View {
                     description: Text("请稍后重试。")
                 )
             case .loaded:
-                if store.hits.isEmpty {
-                    ContentUnavailableView("没有匹配消息", systemImage: "text.magnifyingglass")
-                } else {
-                    List {
+                List {
+                    if store.isCatchingUp {
+                        Label("搜索索引正在追赶最新消息，最新内容可能暂未显示。", systemImage: "clock.arrow.circlepath")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("v2.message.search.catching-up")
+                    }
+                    if store.hits.isEmpty {
+                        ContentUnavailableView("没有匹配消息", systemImage: "text.magnifyingglass")
+                    } else {
                         ForEach(store.hits) { hit in
                             Button {
                                 onSelect(hit)
@@ -1097,8 +1107,8 @@ private struct V2MessageSearchView: View {
                                 .accessibilityIdentifier("v2.message.search.load-more")
                         }
                     }
-                    .accessibilityIdentifier("v2.message.search.results")
                 }
+                .accessibilityIdentifier("v2.message.search.results")
             }
         }
         .navigationTitle("搜索消息")

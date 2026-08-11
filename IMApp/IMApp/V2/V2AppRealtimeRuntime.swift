@@ -440,25 +440,25 @@ actor V2OutboxGroupMessagePinner: V2GroupMessagePinning {
 }
 
 actor V2OutboxMessageForwarder: V2MessageForwarding {
-    private let outbox: V2ForwardMessagesOutboxEngine
+    private let outbox: V2BulkForwardMessagesOutboxEngine
 
-    init(outbox: V2ForwardMessagesOutboxEngine) { self.outbox = outbox }
+    init(outbox: V2BulkForwardMessagesOutboxEngine) { self.outbox = outbox }
 
     func forward(sourceMessageIDs: [String], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
         let sourceIDs = try sourceMessageIDs.map(MessageID.init)
         let targetIDs = try targetRoomIDs.map(RoomID.init)
-        let pending = try await outbox.enqueue(sourceMessageIDs: sourceIDs, targetRoomIDs: targetIDs)
+        let plan = try await outbox.enqueue(sourceMessageIDs: sourceIDs, targetRoomIDs: targetIDs)
         switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID, let results) where operationID == pending.command.operationID:
+        case .chunkAcknowledged(let planID, _, let results) where planID == plan.operationID:
             return .completed(
                 succeeded: results.filter { $0.errorCode == nil }.count,
                 failed: results.filter { $0.errorCode != nil }.count
             )
-        case .acknowledged, .retryScheduled, .idle:
+        case .chunkAcknowledged, .retryScheduled, .idle:
             return .queuedForRetry
-        case .rejected(let operationID, let code) where operationID == pending.command.operationID:
+        case .chunkRejected(let planID, _, let code) where planID == plan.operationID:
             return .rejected(code: code)
-        case .rejected:
+        case .chunkRejected:
             return .queuedForRetry
         }
     }
@@ -1037,7 +1037,7 @@ struct V2AppRealtimeRuntime {
         let readReceiptOutbox = V2ReadReceiptOutboxEngine(store: localStore, transport: transport)
         let conversationCapabilitiesOutbox = V2ConversationCapabilitiesOutboxEngine(store: localStore, transport: transport)
         let groupCapabilitiesOutbox = V2GroupCapabilitiesOutboxEngine(store: localStore, transport: transport)
-        let forwardMessagesOutbox = V2ForwardMessagesOutboxEngine(store: localStore, transport: transport)
+        let forwardMessagesOutbox = V2BulkForwardMessagesOutboxEngine(store: localStore, transport: transport)
         let mediaEdge = try V2HTTPMediaUploadEdgeClient(
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: authSession
@@ -1099,8 +1099,10 @@ struct V2AppRealtimeRuntime {
                     .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await groupCapabilitiesOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
+                    // Interactive sends take precedence over deferred bulk
+                    // forwarding. The latter is itself internally chunked.
                     .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
+                    .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
                     .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },

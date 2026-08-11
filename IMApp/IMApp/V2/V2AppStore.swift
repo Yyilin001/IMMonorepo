@@ -161,6 +161,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
     @ObservationIgnored private var messageSearchIndexTask: Task<Void, Never>?
+    @ObservationIgnored private var messageSearchLocalStore: GRDBV2LocalSyncStore?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
@@ -555,6 +556,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
         messageSearchIndexTask?.cancel()
         messageSearchIndexTask = nil
+        messageSearchLocalStore = nil
         await stopRealtime()
         realtimeRuntime = nil
         authenticationMessage = nil
@@ -712,18 +714,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
         deviceSessionsStore = deviceSessions
+        messageSearchLocalStore = localStore
         route = .signedIn(userID: userID.rawValue)
-        messageSearchIndexTask?.cancel()
-        messageSearchIndexTask = Task { [localStore] in
-            do {
-                try await localStore.prepareMessageSearchIndex()
-            } catch is CancellationError {
-                return
-            } catch {
-                // The search UI reports the persistent index state. A failed
-                // derived index must never break the authenticated runtime.
-            }
-        }
+        startMessageSearchIndexing(localStore: localStore)
         await conversations.refresh()
         await pushWakeSettings?.activate()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
@@ -736,6 +729,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// permission UI is presented over the app.
     func applicationDidEnterBackground() async {
         isApplicationActive = false
+        messageSearchIndexTask?.cancel()
+        messageSearchIndexTask = nil
         await stopRealtime()
     }
 
@@ -755,7 +750,24 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
               let realtimeRuntime,
               let conversationStore
         else { return }
+        if let messageSearchLocalStore {
+            startMessageSearchIndexing(localStore: messageSearchLocalStore)
+        }
         startRealtimeIfApplicationActive(runtime: realtimeRuntime, conversations: conversationStore)
+    }
+
+    private func startMessageSearchIndexing(localStore: GRDBV2LocalSyncStore) {
+        messageSearchIndexTask?.cancel()
+        messageSearchIndexTask = Task { [localStore] in
+            do {
+                try await localStore.runMessageSearchIndexer()
+            } catch is CancellationError {
+                return
+            } catch {
+                // The search UI reports persistent state. A derived-index
+                // failure must never interrupt authenticated messaging.
+            }
+        }
     }
 
     private func startRealtimeIfApplicationActive(

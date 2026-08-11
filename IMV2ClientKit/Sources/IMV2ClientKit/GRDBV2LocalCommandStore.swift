@@ -879,6 +879,111 @@ extension GRDBV2LocalSyncStore {
     public func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
     public func rejectForwardMessages(operationID: MessageForwardOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
 
+    public func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sourceMessageIDs: [MessageID], targetRoomIDs: [RoomID], now: Date) throws -> V2ForwardMessagesPlan {
+        try databasePool.write { db in
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [plan.operationID.rawValue]) {
+                let existing = try Self.decodeForwardMessagesPlan(row)
+                guard existing.sourceMessageCount == sourceMessageIDs.count,
+                      existing.targetRoomCount == targetRoomIDs.count,
+                      existing.totalForwardCount == plan.totalForwardCount
+                else { throw V2ClientCommandError.commandConflict }
+                return existing
+            }
+            let sourceJSON = String(decoding: try JSONEncoder().encode(sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
+            let targetJSON = String(decoding: try JSONEncoder().encode(targetRoomIDs.map(\.rawValue)), as: UTF8.self)
+            let sourceChunkCount = (sourceMessageIDs.count + V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk - 1) / V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+            let totalChunkCount = try Self.storageInteger(UInt64(sourceChunkCount * targetRoomIDs.count))
+            try db.execute(
+                sql: "INSERT INTO v2_forward_message_plans (plan_id, source_message_ids, target_room_ids, next_chunk_index, total_chunk_count, state, created_at, updated_at) VALUES (?, ?, ?, 0, ?, 'active', ?, ?)",
+                arguments: [plan.operationID.rawValue, sourceJSON, targetJSON, totalChunkCount, now.timeIntervalSince1970, now.timeIntervalSince1970]
+            )
+            return plan
+        }
+    }
+
+    public func nextReadyForwardPlanChunk(now: Date) throws -> V2PendingForwardMessagesCommand? {
+        try databasePool.write { db in
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) {
+                return try Self.decodeForwardPlanChunk(row)
+            }
+            guard let planRow = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE state = 'active' ORDER BY created_at, plan_id LIMIT 1") else { return nil }
+            let planID: String = planRow["plan_id"]
+            let sourceIDs = try JSONDecoder().decode([String].self, from: Data((planRow["source_message_ids"] as String).utf8)).map(MessageID.init)
+            let targetIDs = try JSONDecoder().decode([String].self, from: Data((planRow["target_room_ids"] as String).utf8)).map(RoomID.init)
+            let chunkIndex: Int64 = planRow["next_chunk_index"]
+            let totalChunkCount: Int64 = planRow["total_chunk_count"]
+            guard chunkIndex < totalChunkCount else {
+                try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'completed', updated_at = ? WHERE plan_id = ?", arguments: [now.timeIntervalSince1970, planID])
+                return nil
+            }
+            let sourcePage = Int(chunkIndex) / targetIDs.count
+            let sourceStart = sourcePage * V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+            let sourceEnd = min(sourceStart + V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk, sourceIDs.count)
+            guard sourceStart < sourceEnd else { throw V2ClientCommandError.commandConflict }
+            let targetRoomID = targetIDs[Int(chunkIndex) % targetIDs.count]
+            let operationID = try MessageForwardOperationID("\(planID)-f\(chunkIndex)")
+            let command = try V2ForwardMessagesCommand(operationID: operationID, sourceMessageIDs: Array(sourceIDs[sourceStart ..< sourceEnd]), targetRoomIDs: [targetRoomID])
+            let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
+            try db.execute(
+                sql: "INSERT INTO v2_forward_message_chunks (operation_id, plan_id, chunk_index, source_message_ids, target_room_id, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+                arguments: [operationID.rawValue, planID, chunkIndex, sources, targetRoomID.rawValue, now.timeIntervalSince1970, now.timeIntervalSince1970]
+            )
+            return .init(command: command, state: .pending, attemptCount: 0, nextAttemptAt: now, terminalCode: nil)
+        }
+    }
+
+    public func markForwardPlanChunkAcknowledged(operationID: MessageForwardOperationID, results: [V2ForwardMessageResult], now: Date) throws -> MessageForwardOperationID? {
+        try databasePool.write { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending'", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
+            let pending = try Self.decodeForwardPlanChunk(row)
+            let planID: String = row["plan_id"]
+            let chunkIndex: Int64 = row["chunk_index"]
+            guard results.count == pending.command.sourceMessageIDs.count,
+                  results.allSatisfy({ $0.targetRoomID == pending.command.targetRoomIDs[0] }),
+                  Set(results.map(\.sourceMessageID)) == Set(pending.command.sourceMessageIDs)
+            else { throw V2ClientCommandError.commandConflict }
+            let succeeded = results.filter { $0.errorCode == nil }.count
+            let failed = results.count - succeeded
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue])
+            try Self.advanceForwardPlan(planID: planID, completedChunkIndex: chunkIndex, succeeded: succeeded, failed: failed, now: now, db: db)
+            return try MessageForwardOperationID(planID)
+        }
+    }
+
+    public func scheduleForwardPlanChunkRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws {
+        try databasePool.write { db in
+            guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending')", arguments: [operationID.rawValue]) == true else { throw V2ClientCommandError.commandNotPending }
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+        }
+    }
+
+    public func rejectForwardPlanChunk(operationID: MessageForwardOperationID, code: String, now: Date) throws -> MessageForwardOperationID? {
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }
+        return try databasePool.write { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending'", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
+            let pending = try Self.decodeForwardPlanChunk(row)
+            let planID: String = row["plan_id"]
+            let chunkIndex: Int64 = row["chunk_index"]
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue])
+            try Self.advanceForwardPlan(planID: planID, completedChunkIndex: chunkIndex, succeeded: 0, failed: pending.command.sourceMessageIDs.count, now: now, db: db)
+            return try MessageForwardOperationID(planID)
+        }
+    }
+
+    public func cancelForwardPlan(operationID: MessageForwardOperationID, now: Date) throws {
+        try databasePool.write { db in
+            guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_forward_message_plans WHERE plan_id = ? AND state = 'active')", arguments: [operationID.rawValue]) == true else { throw V2ClientCommandError.commandConflict }
+            try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', updated_at = ? WHERE plan_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'cancelled' WHERE plan_id = ? AND state = 'pending'", arguments: [operationID.rawValue])
+        }
+    }
+
+    public func forwardPlan(operationID: MessageForwardOperationID) throws -> V2ForwardMessagesPlan? {
+        try databasePool.read { db in
+            try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [operationID.rawValue]).map(Self.decodeForwardMessagesPlan)
+        }
+    }
+
     public func enqueue(_ command: V2PendingSocialCommand) throws {
         try databasePool.write { db in
             if let row = try Row.fetchOne(db, sql: "SELECT command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [command.operationID]) {
