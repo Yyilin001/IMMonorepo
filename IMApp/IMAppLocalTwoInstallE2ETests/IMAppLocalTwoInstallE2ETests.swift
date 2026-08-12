@@ -47,7 +47,22 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(createGroup.isEnabled)
         createGroup.tap()
         let groupMembers = app.buttons["v2.group.members"]
-        if groupMembers.waitForExistence(timeout: 30) {
+        let groupFeedback = app.staticTexts["v2.conversation.group-feedback"]
+        // A response can be lost after the server durably finalizes the
+        // creation. In that valid outcome the sheet immediately exposes its
+        // durable-retry feedback. Check it first: waiting a full foreground
+        // success timeout for a control that can no longer appear made this
+        // stage needlessly vulnerable to an XCTest UI-query stall.
+        if groupFeedback.waitForExistence(timeout: 10) {
+            XCTAssertEqual(
+                groupFeedback.label,
+                "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。",
+                "未获得房间 ID 时，建群 UI 必须明确保留 durable-retry 语义。"
+            )
+            let cancel = app.buttons["v2.conversation.group-cancel"]
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5) && cancel.isHittable)
+            cancel.tap()
+        } else if groupMembers.waitForExistence(timeout: 20) {
             try auditOrdinaryChatSurface(in: app)
             groupMembers.tap()
             let groupMembersSheet = app.collectionViews["v2.group.members.sheet"]
@@ -71,10 +86,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             // issuing a second group-create command merely to regain a room
             // ID. Close the sheet and continue from the authoritative local
             // conversation list.
-            let groupFeedback = app.staticTexts["v2.conversation.group-feedback"]
             XCTAssertTrue(
                 groupFeedback.waitForExistence(timeout: 5)
-                    && groupFeedback.label == "建群请求已安全保存，连接恢复后会继续。",
+                    && groupFeedback.label == "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。",
                 "无法立即取得群 ID 时，建群 UI 必须明确保留 durable-retry 语义。"
             )
             let cancel = app.buttons["v2.conversation.group-cancel"]

@@ -16,7 +16,7 @@ public enum V2SchemaReadiness {
         "user_sync_sequences", "user_sync_log", "fanout_sync_payloads", "device_sync_cursors", "sync_snapshots",
         "sync_snapshot_pages", "sync_tokens", "sync_receipts", "push_campaigns",
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints",
-        "media_objects", "media_upload_operations", "media_upload_grants", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries",
+        "media_objects", "media_upload_operations", "media_upload_grants", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
         "user_shard_router_configuration", "user_shard_route_overrides",
         "user_shard_route_operations", "user_shard_migrations",
     ]

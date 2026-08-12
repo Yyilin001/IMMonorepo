@@ -86,6 +86,13 @@ struct V2MessageSearchTests {
         ], token: "search-token-4")
         _ = try await store.processPendingMessageSearchIndexJobs()
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
+        let persistedMessages = try await store.messages(in: roomID)
+        let localTombstone = try #require(persistedMessages.first)
+        #expect(localTombstone.isWithdrawn)
+        #expect(localTombstone.text == "[removed]")
+        #expect(localTombstone.media.isEmpty)
+        #expect(localTombstone.mentions.isEmpty)
+        #expect(localTombstone.entities.isEmpty)
     }
 
     @Test("media and sender filters can be combined without a text query")

@@ -2300,6 +2300,119 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("editing a claimed message resets review work to the new content revision")
+    func editReplacesTheClaimedContentReviewJob() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let limits = try RoomCapacityProfile(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            )
+            let profile = try V2CapacityProfile(id: "standard", limits: limits)
+            let send = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted(let message) = try await send.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: clientMessageID,
+                text: "before review reset"
+            )) else {
+                Issue.record("expected accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+
+            let oldToken = UUID(uuidString: "00000000-0000-0000-0000-000000000d21")!
+            let reviewStore = PostgresV2ContentReviewStore(database: app.db(.psql), makeUUID: { oldToken })
+            let oldLease = try #require(try await reviewStore.claimPending(now: now.addingTimeInterval(1), leaseDuration: 30, limit: 1).first)
+            #expect(oldLease.input.messageID == message.messageID)
+            #expect(oldLease.input.contentRevision == 1)
+            #expect(oldLease.input.text == "before review reset")
+
+            let edit = V2MessageEditService(
+                store: PostgresV2MessageEditStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                maximumTextUTF8Bytes: 64,
+                identifiers: .init(makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d22")! }),
+                now: { now.addingTimeInterval(2) }
+            )
+            guard case .edited(let editResult) = try await edit.edit(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-000000000d23"),
+                messageID: message.messageID,
+                expectedMessageRevision: 1,
+                text: "after review reset"
+            )) else {
+                Issue.record("expected edit")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(editResult.messageRevision == 2)
+
+            let messageUUID = try #require(UUID(uuidString: message.messageID.rawValue))
+            let resetJob = try #require(try await sql.raw("""
+                SELECT state, expected_content_revision, decision,
+                       claim_token IS NULL AS claim_released,
+                       lease_expires_at IS NULL AS lease_released,
+                       completed_at IS NULL AS is_uncompleted
+                FROM im_v2.content_review_jobs
+                WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewResetAssertionRow.self))
+            #expect(resetJob.state == "pending")
+            #expect(resetJob.revision == 2)
+            #expect(resetJob.decision == nil)
+            #expect(resetJob.claimReleased)
+            #expect(resetJob.leaseReleased)
+            #expect(resetJob.isUncompleted)
+
+            // The pre-edit worker loses authority, but its late check must
+            // not mark the replacement job superseded or release it.
+            #expect(!(try await reviewStore.isCurrent(oldLease, now: now.addingTimeInterval(3))))
+            let preserved = try #require(try await sql.raw("""
+                SELECT state, expected_content_revision, decision,
+                       claim_token IS NULL AS claim_released,
+                       lease_expires_at IS NULL AS lease_released,
+                       completed_at IS NULL AS is_uncompleted
+                FROM im_v2.content_review_jobs
+                WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewResetAssertionRow.self))
+            #expect(preserved == resetJob)
+
+            let replacementStore = PostgresV2ContentReviewStore(
+                database: app.db(.psql),
+                makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d24")! }
+            )
+            let replacementLease = try #require(try await replacementStore.claimPending(now: now.addingTimeInterval(3), leaseDuration: 30, limit: 1).first)
+            #expect(replacementLease.input.messageID == message.messageID)
+            #expect(replacementLease.input.contentRevision == 2)
+            #expect(replacementLease.input.text == "after review reset")
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("a tombstone rejects an older edit without creating replacement delivery work")
     func withdrawalWinsOverOlderEdit() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -2673,6 +2786,20 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
             let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: app.db(.psql)), capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "requires moderation")) else { Issue.record("expected accepted message"); return }
+            let messageUUID = try #require(UUID(uuidString: message.messageID.rawValue))
+            let mediaUUID = UUID(uuidString: "00000000-0000-0000-0000-0000000000a1")!
+            try await sql.raw("""
+                INSERT INTO im_v2.media_objects
+                    (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
+                VALUES
+                    (\(bind: mediaUUID), \(bind: senderUUID), 'image/png', 1, 'available',
+                     \(bind: UUID(uuidString: "00000000-0000-0000-0000-0000000000a2")!),
+                     \(bind: now.addingTimeInterval(3_600)), \(bind: now), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at)
+                VALUES (\(bind: messageUUID), \(bind: mediaUUID), 0, \(bind: now))
+                """).run()
             let acceptedTrigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox ORDER BY created_at LIMIT 1").first(decoding: TriggerRow.self))
             _ = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(0.25) }).plan(.init(sourceEventID: try .init(acceptedTrigger.sourceEventID.uuidString), planID: try .init(acceptedTrigger.planID.uuidString)))
             _ = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(0.5) }).runOnce(limit: 8)
@@ -2685,6 +2812,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let event = try #require(try await sql.raw("SELECT event_type, payload->>'message_id' AS message_id FROM im_v2.room_events WHERE event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!)").first(decoding: ModerationEventAssertionRow.self))
             let audit = try #require(try await sql.raw("SELECT action, reason_code FROM im_v2.moderation_audit_entries WHERE actor_user_id = \(bind: senderUUID)").first(decoding: ModerationAuditAssertionRow.self))
             let state = try #require(try await sql.raw("SELECT withdrawn_at IS NOT NULL AS withdrawn, content_revision FROM im_v2.messages WHERE message_id = \(bind: UUID(uuidString: message.messageID.rawValue)!)").first(decoding: ModerationMessageAssertionRow.self))
+            let mediaReference = try #require(try await sql.raw("""
+                SELECT revoked_at IS NOT NULL AS exists
+                FROM im_v2.message_media_references
+                WHERE message_id = \(bind: messageUUID) AND media_id = \(bind: mediaUUID)
+                """).first(decoding: ExistsRow.self))
             let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(3) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(4) }).runOnce(limit: 8)
             let delivered = try #require(try await sql.raw("""
@@ -2705,6 +2837,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(audit.reasonCode == "abuse_spam")
             #expect(state.withdrawn)
             #expect(state.revision == 2)
+            #expect(mediaReference.exists)
             #expect(planning == .init(createdCompletionUnits: 2, createdDeliveries: 3, wasAlreadyPlanned: false))
             #expect(delivery == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
             #expect(delivered.eventType == "message.redacted")
@@ -5212,6 +5345,292 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("content review jobs commit with messages, fence expired leases, and persist review decisions")
+    func contentReviewJobsAreTransactionalLeaseFencedAndDurablyResolved() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            ))
+            let sender = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted(let accepted) = try await sender.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: clientMessageID,
+                text: "needs review"
+            )) else {
+                Issue.record("expected accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let messageUUID = try #require(UUID(uuidString: accepted.messageID.rawValue))
+            let initial = try #require(try await sql.raw("""
+                SELECT state, expected_content_revision, decision
+                FROM im_v2.content_review_jobs WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewJobAssertionRow.self))
+            #expect(initial.state == "pending")
+            #expect(initial.revision == 1)
+            #expect(initial.decision == nil)
+
+            let oldToken = UUID(uuidString: "00000000-0000-0000-0000-000000000d01")!
+            let newToken = UUID(uuidString: "00000000-0000-0000-0000-000000000d02")!
+            let oldStore = PostgresV2ContentReviewStore(database: app.db(.psql), makeUUID: { oldToken })
+            let oldLease = try #require(try await oldStore.claimPending(now: now, leaseDuration: 10, limit: 1).first)
+            #expect(oldLease.input.messageID == accepted.messageID)
+            #expect(try await oldStore.isCurrent(oldLease, now: now.addingTimeInterval(1)))
+
+            let renewedStore = PostgresV2ContentReviewStore(database: app.db(.psql), makeUUID: { newToken })
+            let renewedLease = try #require(try await renewedStore.claimPending(now: now.addingTimeInterval(11), leaseDuration: 10, limit: 1).first)
+            #expect(renewedLease.claimToken == newToken)
+            #expect(renewedLease.claimToken != oldLease.claimToken)
+
+            // An old worker may resume after its lease expires, but it must
+            // never release or resolve the newer owner's claim.
+            try await oldStore.release(oldLease)
+            try await oldStore.resolve(oldLease, verdict: .clear, now: now.addingTimeInterval(12))
+            let fenced = try #require(try await sql.raw("""
+                SELECT state, claim_token = \(bind: newToken) AS has_new_token, decision
+                FROM im_v2.content_review_jobs WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewLeaseFenceAssertionRow.self))
+            #expect(fenced.state == "claimed")
+            #expect(fenced.hasNewToken)
+            #expect(fenced.decision == nil)
+
+            try await renewedStore.resolve(
+                renewedLease,
+                verdict: .reviewRequired(category: "manual_review", severity: 2, confidence: 0.75),
+                now: now.addingTimeInterval(12)
+            )
+            let completed = try #require(try await sql.raw("""
+                SELECT state, decision, claim_token IS NULL AS released
+                FROM im_v2.content_review_jobs WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewCompletionAssertionRow.self))
+            #expect(completed.state == "completed")
+            #expect(completed.decision == "review_required")
+            #expect(completed.released == true)
+            #expect(try await count("im_v2.content_review_decisions", on: sql) == 1)
+            #expect(try await count("im_v2.content_review_findings", on: sql) == 1)
+            #expect(try await count("im_v2.content_review_cases", on: sql) == 1)
+
+            // A late worker must never close or redact a newer edit. The
+            // edit path rewrites the expected revision in its own transaction;
+            // this assertion exercises the review store's final fence.
+            guard case .accepted(let editedLater) = try await sender.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-000000000d03"),
+                text: "will be edited before review"
+            )) else {
+                Issue.record("expected second accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let editedLaterUUID = try #require(UUID(uuidString: editedLater.messageID.rawValue))
+            let staleStore = PostgresV2ContentReviewStore(
+                database: app.db(.psql),
+                makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d04")! }
+            )
+            let staleLease = try #require(try await staleStore.claimPending(now: now.addingTimeInterval(20), leaseDuration: 10, limit: 1).first)
+            #expect(staleLease.input.messageID == editedLater.messageID)
+            try await sql.raw("UPDATE im_v2.messages SET content_revision = 2 WHERE message_id = \(bind: editedLaterUUID)").run()
+            #expect(!(try await staleStore.isCurrent(staleLease, now: now.addingTimeInterval(21))))
+            let superseded = try #require(try await sql.raw("""
+                SELECT state, decision FROM im_v2.content_review_jobs WHERE message_id = \(bind: editedLaterUUID)
+                """).first(decoding: ContentReviewCompletionAssertionRow.self))
+            #expect(superseded.state == "superseded")
+            #expect(superseded.decision == nil)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("a content-review escalation keeps the message visible and opens exactly one review case")
+    func contentReviewEscalationDoesNotRedactTheMessage() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            ))
+            let sender = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted(let accepted) = try await sender.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: clientMessageID,
+                text: "needs manual review"
+            )) else {
+                Issue.record("expected accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+
+            let reviewStore = PostgresV2ContentReviewStore(
+                database: app.db(.psql),
+                makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d10")! }
+            )
+            let moderation = V2TrustedSafetyModerationService(
+                store: PostgresV2ModerationStore(database: app.db(.psql)),
+                safetyActorUserID: try .init("00000000-0000-0000-0000-000000000d12"),
+                capacityProfile: profile,
+                identifiers: .init(makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d13")! }),
+                now: { now.addingTimeInterval(1) }
+            )
+            let worker = try V2ContentReviewWorker(
+                store: reviewStore,
+                reviewer: V2ConfiguredContentReviewer(reviewTerms: ["manual"]),
+                moderation: moderation,
+                now: { now.addingTimeInterval(1) }
+            )
+
+            #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 1, redactedCount: 0, releasedCount: 0))
+            let messageUUID = try #require(UUID(uuidString: accepted.messageID.rawValue))
+            let message = try #require(try await sql.raw("""
+                SELECT withdrawn_at IS NOT NULL AS withdrawn, content_revision
+                FROM im_v2.messages WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewRedactionAssertionRow.self))
+            let job = try #require(try await sql.raw("""
+                SELECT state, decision FROM im_v2.content_review_jobs WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewCompletionAssertionRow.self))
+            #expect(!message.withdrawn)
+            #expect(message.revision == 1)
+            #expect(job.state == "completed")
+            #expect(job.decision == "review_required")
+            #expect(try await count("im_v2.content_review_decisions", on: sql) == 1)
+            #expect(try await count("im_v2.content_review_findings", on: sql) == 1)
+            #expect(try await count("im_v2.content_review_cases", on: sql) == 1)
+            #expect(try await count("im_v2.moderation_operations", on: sql) == 0)
+            #expect(try await count("im_v2.moderation_audit_entries", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("a content policy violation redacts the reviewed revision through the authoritative moderation transaction")
+    func contentReviewViolationUsesAuthoritativeRedaction() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            ))
+            let sender = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted(let accepted) = try await sender.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: clientMessageID,
+                text: "blocked policy text"
+            )) else {
+                Issue.record("expected accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let reviewStore = PostgresV2ContentReviewStore(
+                database: app.db(.psql),
+                makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d11")! }
+            )
+            let moderation = V2TrustedSafetyModerationService(
+                store: PostgresV2ModerationStore(database: app.db(.psql)),
+                safetyActorUserID: try .init("00000000-0000-0000-0000-000000000d12"),
+                capacityProfile: profile,
+                identifiers: .init(makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000d13")! }),
+                now: { now.addingTimeInterval(1) }
+            )
+            let worker = try V2ContentReviewWorker(
+                store: reviewStore,
+                reviewer: V2ConfiguredContentReviewer(violatingTerms: ["blocked"]),
+                moderation: moderation,
+                now: { now.addingTimeInterval(1) }
+            )
+
+            #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 1, redactedCount: 1, releasedCount: 0))
+            let messageUUID = try #require(UUID(uuidString: accepted.messageID.rawValue))
+            let redacted = try #require(try await sql.raw("""
+                SELECT withdrawn_at IS NOT NULL AS withdrawn, content_revision
+                FROM im_v2.messages WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewRedactionAssertionRow.self))
+            let job = try #require(try await sql.raw("""
+                SELECT state, decision FROM im_v2.content_review_jobs WHERE message_id = \(bind: messageUUID)
+                """).first(decoding: ContentReviewCompletionAssertionRow.self))
+            #expect(redacted.withdrawn)
+            #expect(redacted.revision == 2)
+            #expect(job.state == "completed")
+            #expect(job.decision == "violation")
+            #expect(try await count("im_v2.moderation_operations", on: sql) == 1)
+            #expect(try await count("im_v2.moderation_audit_entries", on: sql) == 1)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("a 100k hybrid group creation commits one atomic membership and bootstrap fan-out plan")
     func createsOneHundredThousandMemberHybridRoomAtomically() async throws {
         guard Environment.get("IMV2_RUN_HYBRID_100K_GROUP_CREATE") == "1",
@@ -6067,6 +6486,53 @@ private struct EdgeClientRateLimitKeyRow: Decodable {
     enum CodingKeys: String, CodingKey { case clientKey = "client_key" }
 }
 private struct CountRow: Decodable { let value: Int64 }
+private struct ContentReviewJobAssertionRow: Decodable {
+    let state: String
+    let revision: Int64
+    let decision: String?
+    enum CodingKeys: String, CodingKey {
+        case state, decision
+        case revision = "expected_content_revision"
+    }
+}
+private struct ContentReviewLeaseFenceAssertionRow: Decodable {
+    let state: String
+    let hasNewToken: Bool
+    let decision: String?
+    enum CodingKeys: String, CodingKey {
+        case state, decision
+        case hasNewToken = "has_new_token"
+    }
+}
+private struct ContentReviewResetAssertionRow: Decodable, Equatable {
+    let state: String
+    let revision: Int64
+    let decision: String?
+    let claimReleased: Bool
+    let leaseReleased: Bool
+    let isUncompleted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case state, decision
+        case revision = "expected_content_revision"
+        case claimReleased = "claim_released"
+        case leaseReleased = "lease_released"
+        case isUncompleted = "is_uncompleted"
+    }
+}
+private struct ContentReviewCompletionAssertionRow: Decodable {
+    let state: String
+    let decision: String?
+    let released: Bool?
+}
+private struct ContentReviewRedactionAssertionRow: Decodable {
+    let withdrawn: Bool
+    let revision: Int64
+    enum CodingKeys: String, CodingKey {
+        case withdrawn
+        case revision = "content_revision"
+    }
+}
 private struct FanoutTerminalLatencyRow: Decodable {
     let elapsedSeconds: TimeInterval
     enum CodingKeys: String, CodingKey { case elapsedSeconds = "elapsed_seconds" }

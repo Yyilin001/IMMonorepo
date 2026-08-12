@@ -99,6 +99,37 @@ public struct V2TrustedSafetyRoomControl: Sendable {
     }
 }
 
+/// Privileged safety commands are constructed inside the service process, not
+/// decoded from a gateway frame.  Redaction is included here so a delayed
+/// content-review verdict follows the same audited tombstone path as a human
+/// moderator, without requiring the service account to be a room member.
+public struct V2TrustedSafetyModeration: Sendable {
+    public let roomID: RoomID
+    public let operationID: ModerationOperationID
+    public let action: V2ModerationAction
+    public let messageID: MessageID?
+    public let expectedMessageRevision: UInt64?
+    public let reasonCode: V2ModerationReasonCode
+
+    public init(roomID: RoomID, operationID: ModerationOperationID, action: V2ModerationAction, messageID: MessageID? = nil, expectedMessageRevision: UInt64? = nil, reasonCode: V2ModerationReasonCode) throws {
+        guard action == .freezeRoom || action == .unfreezeRoom || action == .redactMessage else {
+            throw V2ModerationValidationError.invalidActionShape
+        }
+        guard (action == .redactMessage) == (messageID != nil) else {
+            throw V2ModerationValidationError.invalidActionShape
+        }
+        guard action == .redactMessage || expectedMessageRevision == nil else {
+            throw V2ModerationValidationError.invalidActionShape
+        }
+        self.roomID = roomID
+        self.operationID = operationID
+        self.action = action
+        self.messageID = messageID
+        self.expectedMessageRevision = expectedMessageRevision
+        self.reasonCode = reasonCode
+    }
+}
+
 public protocol V2TrustedSafetyModerationStore: Sendable {
     func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome
 }
@@ -159,12 +190,23 @@ public struct V2TrustedSafetyModerationService: Sendable {
     }
 
     public func apply(_ request: V2TrustedSafetyRoomControl) async throws -> V2ModerationOutcome {
+        try await apply(.init(
+            roomID: request.roomID,
+            operationID: request.operationID,
+            action: request.action,
+            reasonCode: request.reasonCode
+        ))
+    }
+
+    public func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome {
         let ids = try identifiers.make()
         let command = try V2ModerationCommand(
             roomID: request.roomID,
             actorUserID: safetyActorUserID,
             operationID: request.operationID,
             action: request.action,
+            messageID: request.messageID,
+            expectedMessageRevision: request.expectedMessageRevision,
             reasonCode: request.reasonCode
         )
         return try await store.applyTrustedSafety(command: command, capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now())

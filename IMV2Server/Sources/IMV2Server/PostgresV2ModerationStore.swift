@@ -25,10 +25,14 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     }
 
     public func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome {
-        guard command.action == .freezeRoom || command.action == .unfreezeRoom else {
+        switch command.action {
+        case .redactMessage:
+            return try await redact(command: command, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now, isTrustedSafety: true)
+        case .freezeRoom, .unfreezeRoom:
+            return try await controlRoom(command: command, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+        case .removeMember, .muteMember:
             throw V2ModerationStoreError.unsupportedAction
         }
-        return try await controlRoom(command: command, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
     private func controlRoom(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome {
@@ -121,7 +125,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
         }
     }
 
-    private func redact(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome {
+    private func redact(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date, isTrustedSafety: Bool = false) async throws -> V2ModerationOutcome {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomID = try moderationUUID(command.roomID)
@@ -145,22 +149,33 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
-            guard let role = try await sql.raw("""
-                SELECT role FROM im_v2.room_memberships
-                WHERE room_id = \(bind: roomID) AND user_id = \(bind: actorID)
-                  AND joined_revision <= \(bind: room.membershipRevision)
-                  AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
-                FOR UPDATE
-                """).first(decoding: ModerationRoleRow.self),
-                let roleValue = V2RoomMembershipRole(rawValue: role.role)
-            else { throw V2ModerationStoreError.actorNotAuthorized }
-            try V2ModerationAuthorization.authorize(actorRole: roleValue, action: command.action, now: now, command: command)
+            if !isTrustedSafety {
+                guard let role = try await sql.raw("""
+                    SELECT role FROM im_v2.room_memberships
+                    WHERE room_id = \(bind: roomID) AND user_id = \(bind: actorID)
+                      AND joined_revision <= \(bind: room.membershipRevision)
+                      AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
+                    FOR UPDATE
+                    """).first(decoding: ModerationRoleRow.self),
+                    let roleValue = V2RoomMembershipRole(rawValue: role.role)
+                else { throw V2ModerationStoreError.actorNotAuthorized }
+                try V2ModerationAuthorization.authorize(actorRole: roleValue, action: command.action, now: now, command: command)
+            }
             guard let message = try await sql.raw("""
                 SELECT room_id, content_revision, withdrawn_at FROM im_v2.messages
                 WHERE message_id = \(bind: messageID) FOR UPDATE
                 """).first(decoding: ModerationMessageRow.self), message.roomID == roomID
             else { throw V2ModerationStoreError.messageNotFound }
             guard message.withdrawnAt == nil else { return .messageAlreadyRedacted }
+            if let expectedRevision = command.expectedMessageRevision {
+                let expectedRevisionValue = try moderationSigned(expectedRevision)
+                guard message.contentRevision == expectedRevisionValue else {
+                // This outcome is intentionally opaque at the privileged
+                // boundary. The review worker re-checks its lease and marks
+                // the stale finding superseded; it never acts on a newer edit.
+                    return .messageAlreadyRedacted
+                }
+            }
             guard let admission = try await sql.raw("""
                 SELECT eligible_member_count, command_window_limit, command_window_used,
                        fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
@@ -189,6 +204,10 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             let eventUUID = try moderationUUID(eventID); let planUUID = try moderationUUID(planID)
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.messages SET content_revision = \(bind: messageRevision), withdrawn_at = \(bind: now), withdrawn_by_user_id = \(bind: actorID) WHERE message_id = \(bind: messageID)").run()
+            // Existing grants fail through message withdrawal.  This explicit
+            // revocation additionally prevents future reference reuse and
+            // gives retention a deterministic disposal marker.
+            try await sql.raw("UPDATE im_v2.message_media_references SET revoked_at = \(bind: now) WHERE message_id = \(bind: messageID) AND revoked_at IS NULL").run()
             try await sql.raw("""
                 UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), fanout_window_used = \(bind: nextRoom.fanoutWindow.used), outstanding_fanout_units = \(bind: nextRoom.outstandingFanoutUnits), outstanding_plans = \(bind: nextRoom.outstandingPlans), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
                 """).run()

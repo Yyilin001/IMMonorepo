@@ -23,6 +23,46 @@ struct ModerationTests {
         }
     }
 
+    @Test("only a message redaction can carry a positive expected content revision")
+    func expectedMessageRevisionIsFencedToRedaction() throws {
+        let reason = try V2ModerationReasonCode("content_policy_violation")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000805")
+        let redaction = try V2ModerationCommand(
+            roomID: roomID,
+            actorUserID: actorID,
+            operationID: operationID,
+            action: .redactMessage,
+            messageID: messageID,
+            expectedMessageRevision: 3,
+            reasonCode: reason
+        )
+        #expect(redaction.expectedMessageRevision == 3)
+
+        #expect(throws: V2ModerationValidationError.invalidActionShape) {
+            try V2ModerationCommand(
+                roomID: roomID,
+                actorUserID: actorID,
+                operationID: operationID,
+                action: .redactMessage,
+                messageID: messageID,
+                expectedMessageRevision: 0,
+                reasonCode: reason
+            )
+        }
+        #expect(throws: V2ModerationValidationError.invalidActionShape) {
+            try V2ModerationCommand(
+                roomID: roomID,
+                actorUserID: actorID,
+                operationID: operationID,
+                action: .muteMember,
+                targetUserID: targetID,
+                expectedMessageRevision: 3,
+                muteUntil: Date(timeIntervalSince1970: 1_750_000_060),
+                reasonCode: reason
+            )
+        }
+    }
+
     @Test("only room owner or admin can moderate and mute expiry must be future")
     func authorizationAndExpiryAreFenced() throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)

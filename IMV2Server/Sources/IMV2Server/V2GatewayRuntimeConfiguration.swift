@@ -175,6 +175,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let groupRoomShardID: String
     public let strangerMessagePolicy: V2StrangerMessagePolicy
     public let push: V2PushRuntimeConfiguration
+    /// Content review stays disabled until a separately authenticated audit
+    /// principal is provisioned. Terms are deployment policy, never client
+    /// input; richer AI/OCR providers use the same worker boundary.
+    public let contentReviewSafetyActorUserID: UserID?
+    public let contentReviewViolationTerms: [String]
+    public let contentReviewEscalationTerms: [String]
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
@@ -239,6 +245,19 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
             window: TimeInterval(try Self.positive("IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS", environment: environment))
         )
+        if let rawSafetyActor = Self.optional("IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID", environment: environment) {
+            do {
+                guard UUID(uuidString: rawSafetyActor) != nil else {
+                    throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID")
+                }
+                contentReviewSafetyActorUserID = try .init(rawSafetyActor)
+            }
+            catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID") }
+        } else {
+            contentReviewSafetyActorUserID = nil
+        }
+        contentReviewViolationTerms = Self.csv("IM_V2_CONTENT_REVIEW_VIOLATION_TERMS", environment: environment)
+        contentReviewEscalationTerms = Self.csv("IM_V2_CONTENT_REVIEW_ESCALATION_TERMS", environment: environment)
         switch Self.optional("IM_V2_PUSH_PROVIDER", environment: environment)?.lowercased() {
         case nil, "disabled":
             push = .disabled
@@ -330,6 +349,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
               !value.isEmpty
         else { return nil }
         return value
+    }
+
+    private static func csv(_ key: String, environment: any V2RuntimeEnvironment) -> [String] {
+        guard let raw = optional(key, environment: environment) else { return [] }
+        return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     private static func integer(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {

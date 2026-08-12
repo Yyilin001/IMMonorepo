@@ -42,3 +42,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build app and test bundles without signing
         run: bash ./IMApp/Scripts/verify_generic_simulator_build.sh
+
+  ios-unit-tests:
+    name: iOS unit tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic App store and projection tests
+        run: bash ./IMApp/Scripts/verify_unit_tests.sh
+
+  ios-ui-tests:
+    name: iOS signed-out UI tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic signed-out accessibility UI tests
+        run: bash ./IMApp/Scripts/verify_ui_tests.sh

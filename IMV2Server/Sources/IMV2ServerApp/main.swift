@@ -171,6 +171,23 @@ enum IMV2ServerApp {
                 store: PostgresV2ModerationStore(database: database),
                 capacityProfile: configuration.capacityProfile
             )
+            let contentReviewWorker: V2ContentReviewWorker?
+            if let safetyActor = configuration.contentReviewSafetyActorUserID {
+                contentReviewWorker = try V2ContentReviewWorker(
+                    store: PostgresV2ContentReviewStore(database: database),
+                    reviewer: V2ConfiguredContentReviewer(
+                        violatingTerms: configuration.contentReviewViolationTerms,
+                        reviewTerms: configuration.contentReviewEscalationTerms
+                    ),
+                    moderation: .init(
+                        store: PostgresV2ModerationStore(database: database),
+                        safetyActorUserID: safetyActor,
+                        capacityProfile: configuration.capacityProfile
+                    )
+                )
+            } else {
+                contentReviewWorker = nil
+            }
             let conversationCapabilities = V2ConversationCapabilitiesService(
                 store: PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: userShardShadowForwarder)
             )
@@ -414,6 +431,30 @@ enum IMV2ServerApp {
                     }
                 }
             }
+            // Review is intentionally separate from fan-out and maintenance.
+            // A slow external/OCR adapter must never increase the accepted
+            // message's recipient delivery latency or delay media retention.
+            let contentReviewTask = Task {
+                guard let contentReviewWorker else { return }
+                while !Task.isCancelled {
+                    do {
+                        _ = try await contentReviewWorker.runOnce(limit: configuration.workerBatchSize)
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        // No message text, identifiers, or provider response
+                        // is included in this log line.
+                        logger.error("IM V2 content-review worker failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
             let maintenanceTask = Task {
                 var nextMaintenanceAt: Date?
                 while !Task.isCancelled {
@@ -511,11 +552,13 @@ enum IMV2ServerApp {
             await TerminationSignal.wait()
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
+            contentReviewTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
             await foregroundGroupEventHints.finish()
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value
+            await contentReviewTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
             try await server.shutdown()

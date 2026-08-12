@@ -127,10 +127,33 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.groupRoomShardID == "rooms-primary")
         #expect(configuration.strangerMessagePolicy.maximumMessagesPerWindow == 3)
         #expect(configuration.strangerMessagePolicy.window == 86_400)
+        #expect(configuration.contentReviewSafetyActorUserID == nil)
         guard case .durablePollingOnly = configuration.fanoutHint else {
             Issue.record("Expected durable polling without NATS configuration")
             return
         }
+    }
+
+    @Test("content-review safety actor must be a valid opaque user identifier")
+    func validatesContentReviewSafetyActor() {
+        var values = runtimeValues
+        values["IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID"] = "not-a-user-id"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("content-review policy parses only when the trusted actor is explicitly provisioned")
+    func parsesContentReviewPolicy() throws {
+        var values = runtimeValues
+        values["IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID"] = "00000000-0000-0000-0000-000000000901"
+        values["IM_V2_CONTENT_REVIEW_VIOLATION_TERMS"] = "blocked, malware "
+        values["IM_V2_CONTENT_REVIEW_ESCALATION_TERMS"] = "manual-review"
+
+        let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(configuration.contentReviewSafetyActorUserID?.rawValue == "00000000-0000-0000-0000-000000000901")
+        #expect(configuration.contentReviewViolationTerms == ["blocked", "malware"])
+        #expect(configuration.contentReviewEscalationTerms == ["manual-review"])
     }
 
     @Test("NATS hint requires both endpoint and subject")

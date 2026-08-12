@@ -99,6 +99,10 @@ final class V2PublicIdentitySettingsStore {
                 displayName: displayName,
                 avatar: avatar
             )
+            // The remote update may complete after this view/task was
+            // cancelled. Do not overwrite newer local editing state with a
+            // result the caller has explicitly abandoned.
+            try Task.checkCancellation()
             if let stagedAvatar, let attachmentStager { await attachmentStager.discard(stagedAvatar) }
             stagedAvatar = nil
             removesAvatar = false

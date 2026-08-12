@@ -275,10 +275,15 @@ final class V2PrivacySettingsStore {
         feedback = nil
         defer { isSaving = false }
         do {
-            switch try await liveActivityUpdater.update(
+            let outcome = try await liveActivityUpdater.update(
                 allowsOnlinePresence: desiredOnline,
                 allowsTypingIndicators: desiredTyping
-            ) {
+            )
+            // A view can be dismissed while the authenticated update is in
+            // flight. Do not let a late response overwrite fresher projected
+            // settings or a new editing intent after its task was cancelled.
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
                 allowsOnlinePresence = desiredOnline
                 allowsTypingIndicators = desiredTyping

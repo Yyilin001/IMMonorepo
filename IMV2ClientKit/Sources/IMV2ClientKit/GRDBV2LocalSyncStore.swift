@@ -1257,7 +1257,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let roomID: String = tombstone["room_id"]
             let revision: Int64 = tombstone["message_revision"]
             guard roomID == projection.roomID.rawValue, revision > (try storageInteger(projection.messageRevision)) else { throw V2ClientProjectionError.invalidMessagePayload }
-            try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [revision, projection.messageID.rawValue])
+            try redactLocalMessageProjection(messageID: projection.messageID, revision: revision, db: db)
         }
         try enqueueMessageSearchIndexJob(messageID: projection.messageID, db: db)
     }
@@ -1450,9 +1450,27 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let roomID: String = projection["room_id"]
             let revision: Int64 = projection["message_revision"]
             guard roomID == tombstone.roomID.rawValue, revision < tombstoneRevision else { throw V2ClientProjectionError.invalidMessagePayload }
-            try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, is_withdrawn = 1 WHERE message_id = ?", arguments: [try storageInteger(tombstone.messageRevision), tombstone.messageID.rawValue])
+            try redactLocalMessageProjection(messageID: tombstone.messageID, revision: try storageInteger(tombstone.messageRevision), db: db)
             try enqueueMessageSearchIndexJob(messageID: tombstone.messageID, db: db)
         }
+    }
+
+    /// Tombstones are durable permission revocations, not merely a rendering
+    /// flag. Remove content-bearing local columns before the search-index job
+    /// runs so a crash cannot leave text, media references, entities or
+    /// mention targets available through another local feature.
+    private static func redactLocalMessageProjection(messageID: MessageID, revision: Int64, db: Database) throws {
+        try db.execute(
+            sql: """
+            UPDATE v2_message_projections
+            SET message_revision = ?, is_withdrawn = 1, text_body = '[removed]',
+                media_ids = '[]', media_presentations = '[]',
+                mention_targets = '[]', entities = '[]',
+                forwarded_from_message_id = NULL, forwarded_from_user_id = NULL
+            WHERE message_id = ?
+            """,
+            arguments: [revision, messageID.rawValue]
+        )
     }
 
     private static func persist(_ edit: V2ClientMessageEditProjection, db: Database) throws {

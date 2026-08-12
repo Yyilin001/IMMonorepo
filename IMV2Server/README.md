@@ -231,6 +231,14 @@ evidence remains local-stack coverage, not a production deployment approval.
   transaction; the normal baseline is 3 messages per 24 hours.
 - `IM_V2_GROUP_ROOM_SHARD_ID` selects the admission pool used for atomically
   created group rooms and their initial memberships.
+- Content review has a durable per-message outbox and a lease-fenced worker.
+  Set `IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID` to enable it; the configured
+  actor is an audit principal, never a client-supplied identity and need not
+  be a room member. `...VIOLATION_TERMS` and `...ESCALATION_TERMS` are only a
+  deterministic baseline. Production AI/OCR/image/video adapters implement
+  the same `V2ContentReviewing` boundary. A later violation is redacted using
+  the existing ordered tombstone event, revokes message-media references, and
+  clients erase searchable/content-bearing local fields.
 - The configured 100,000-member profile requires the measured release gate in
   [`IMV2/docs/09-capacity/standard-100k.md`](../IMV2/docs/09-capacity/standard-100k.md);
   configuration alone is not capacity evidence.

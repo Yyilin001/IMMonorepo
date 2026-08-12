@@ -166,8 +166,17 @@ migration_marker() {
     0040_device_session_management.sql)
       printf "%s" "SELECT to_regclass('im_v2.device_session_operations') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'auth_devices' AND column_name = 'last_active_at')"
       ;;
+    0041_private_timeline_activities.sql)
+      printf "%s" "SELECT to_regclass('im_v2.room_timeline_activities') IS NOT NULL AND to_regclass('im_v2.direct_message_denials') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'messages' AND column_name = 'timeline_sequence')"
+      ;;
+    0042_special_accounts.sql)
+      printf "%s" "SELECT to_regclass('im_v2.special_accounts') IS NOT NULL AND to_regclass('im_v2.support_conversation_sessions') IS NOT NULL AND to_regclass('im_v2.special_account_message_operations') IS NOT NULL"
+      ;;
     0043_profile_presentations.sql)
       printf "%s" "SELECT to_regclass('im_v2.user_contact_aliases') IS NOT NULL AND to_regclass('im_v2.room_member_nicknames') IS NOT NULL"
+      ;;
+    0044_content_review_pipeline.sql)
+      printf "%s" "SELECT to_regclass('im_v2.content_review_jobs') IS NOT NULL AND to_regclass('im_v2.content_review_decisions') IS NOT NULL AND to_regclass('im_v2.content_review_findings') IS NOT NULL AND to_regclass('im_v2.content_review_cases') IS NOT NULL"
       ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2

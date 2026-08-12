@@ -279,6 +279,51 @@ struct V2ConversationStoreTests {
         #expect(store.messageActionFeedback == "附件下载失败，请稍后重试。")
     }
 
+    @Test func refreshedRedactionDiscardsEveryCachedAttachmentFromTheFormerMessage() async throws {
+        let firstReference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000513"))
+        let secondReference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000514"))
+        let visible = V2ConversationMessageItem(
+            id: "message-later-redacted",
+            revision: 1,
+            text: "带有两个附件的消息",
+            media: [firstReference, secondReference],
+            mediaPresentations: [try testPresentation(for: firstReference), try testPresentation(for: secondReference)],
+            createdAt: .now,
+            isOutgoing: false,
+            isWithdrawn: false
+        )
+        let redacted = V2ConversationMessageItem(
+            id: visible.id,
+            revision: 2,
+            text: "消息已撤回",
+            createdAt: visible.createdAt,
+            isOutgoing: false,
+            isWithdrawn: true
+        )
+        let source = V2SequencedConversationDataSource()
+        let downloader = V2ConversationMediaCacheDiscardingFake()
+        let store = V2ConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-a",
+            mediaDownloader: downloader
+        )
+
+        let initialRefresh = Task { await store.refresh() }
+        await source.waitUntilMessageRequestCount(1)
+        await source.completeMessageRequest(at: 0, with: [visible])
+        await initialRefresh.value
+
+        let redactionRefresh = Task { await store.refresh() }
+        await source.waitUntilMessageRequestCount(2)
+        await source.completeMessageRequest(at: 1, with: [redacted])
+        await redactionRefresh.value
+
+        #expect(store.messages == [redacted])
+        #expect(await downloader.discardedReferences() == [firstReference, secondReference])
+    }
+
     @Test func messageSendClearsDraftAndReportsDurableRetry() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .queuedForRetry)
@@ -1397,6 +1442,80 @@ struct V2ConversationStoreTests {
         #expect(await userAddUpdater.requestedValues() == [false])
     }
 
+    @Test func liveActivityPreferencesRefreshAndPersistBothValuesAtomically() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
+        let liveActivityReader = V2LiveActivityPreferenceReaderFake(
+            value: .init(allowsOnlinePresence: false, allowsTypingIndicators: true, updatedAt: .now)
+        )
+        let liveActivityUpdater = V2LiveActivityPreferenceUpdaterFake(result: .accepted)
+        let store = V2PrivacySettingsStore(
+            reader: reader,
+            updater: updater,
+            liveActivityUpdater: liveActivityUpdater,
+            liveActivityReader: liveActivityReader
+        )
+
+        await store.refresh()
+        await store.setLiveActivityPermission(typing: false)
+
+        #expect(store.state == .loaded)
+        #expect(!store.allowsOnlinePresence)
+        #expect(!store.allowsTypingIndicators)
+        #expect(store.feedback == "已更新在线与输入状态设置。")
+        #expect(await liveActivityUpdater.requests() == [.init(online: false, typing: false)])
+    }
+
+    @Test func rejectedLiveActivityPreferenceKeepsTheLastProjectedValues() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
+        let liveActivityReader = V2LiveActivityPreferenceReaderFake(
+            value: .init(allowsOnlinePresence: true, allowsTypingIndicators: false, updatedAt: .now)
+        )
+        let liveActivityUpdater = V2LiveActivityPreferenceUpdaterFake(result: .rejected(code: "FORBIDDEN"))
+        let store = V2PrivacySettingsStore(
+            reader: reader,
+            updater: updater,
+            liveActivityUpdater: liveActivityUpdater,
+            liveActivityReader: liveActivityReader
+        )
+
+        await store.refresh()
+        await store.setLiveActivityPermission(online: false)
+
+        #expect(store.allowsOnlinePresence)
+        #expect(!store.allowsTypingIndicators)
+        #expect(store.feedback == "设置被拒绝（FORBIDDEN）。")
+        #expect(await liveActivityUpdater.requests() == [.init(online: false, typing: false)])
+    }
+
+    @Test func cancelledLiveActivityPreferenceIgnoresALateSuccess() async {
+        let reader = V2StrangerMessagePreferenceReaderFake(value: true)
+        let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
+        let liveActivityReader = V2LiveActivityPreferenceReaderFake(
+            value: .init(allowsOnlinePresence: true, allowsTypingIndicators: true, updatedAt: .now)
+        )
+        let liveActivityUpdater = V2LateLiveActivityPreferenceUpdater()
+        let store = V2PrivacySettingsStore(
+            reader: reader,
+            updater: updater,
+            liveActivityUpdater: liveActivityUpdater,
+            liveActivityReader: liveActivityReader
+        )
+
+        await store.refresh()
+        let update = Task { await store.setLiveActivityPermission(online: false) }
+        await liveActivityUpdater.waitUntilResponseIsPending()
+        update.cancel()
+        await liveActivityUpdater.resumeAccepted()
+        await update.value
+
+        #expect(store.allowsOnlinePresence)
+        #expect(store.allowsTypingIndicators)
+        #expect(store.feedback == nil)
+        #expect(!store.isSaving)
+    }
+
     @Test func strangerMessagePreferenceRefreshIgnoresAFailureSupersededByANewerRefresh() async {
         let reader = V2SequencedStrangerMessagePreferenceReader()
         let updater = V2StrangerMessagePreferenceUpdaterFake(result: .accepted)
@@ -1796,6 +1915,10 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
         return messages
     }
 
+    func timeline(in _: String, for _: String) async throws -> [V2ConversationTimelineItem] {
+        messages.map { .message($0, timelineSequence: $0.roomSequence) }
+    }
+
     func messageRequestCount() -> Int { requestedMessageCount }
 }
 
@@ -1841,6 +1964,10 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
         return try await withCheckedContinuation { continuation in
             messageContinuations.append(continuation)
         }.get()
+    }
+
+    func timeline(in _: String, for _: String) async throws -> [V2ConversationTimelineItem] {
+        []
     }
 
     func waitUntilSummaryRequestCount(_ expectedCount: Int) async {
@@ -2010,6 +2137,20 @@ private actor V2ConversationMediaDownloaderFake: V2ConversationMediaDownloading 
     }
 
     func requests() -> [V2MediaReference] { requestsValue }
+}
+
+private actor V2ConversationMediaCacheDiscardingFake: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
+    private var discarded: [V2MediaReference] = []
+
+    func download(_: V2MediaReference) async throws -> V2DownloadedConversationMedia {
+        throw V2ConversationMediaDownloadFailure.failed
+    }
+
+    func discard(_ media: V2MediaReference) {
+        discarded.append(media)
+    }
+
+    func discardedReferences() -> [V2MediaReference] { discarded }
 }
 
 private actor V2MediaDownloadTargetResolverFake: V2ClientMediaDownloadTargetResolver {
@@ -2595,6 +2736,71 @@ private actor V2UserAddPreferenceUpdaterFake: V2UserAddPreferenceUpdating {
     init(result: V2UserAddPreferenceUpdateOutcome) { self.result = result }
     func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome { values.append(allowsBeingAdded); return result }
     func requestedValues() -> [Bool] { values }
+}
+
+private actor V2LiveActivityPreferenceReaderFake: V2LiveActivityPreferenceReading {
+    private let value: V2LiveActivityPreferences
+
+    init(value: V2LiveActivityPreferences) {
+        self.value = value
+    }
+
+    func preferences() async throws -> V2LiveActivityPreferences {
+        value
+    }
+}
+
+private actor V2LiveActivityPreferenceUpdaterFake: V2LiveActivityPreferenceUpdating {
+    struct Request: Equatable, Sendable {
+        let online: Bool
+        let typing: Bool
+    }
+
+    private let result: V2LiveActivityPreferenceUpdateOutcome
+    private var values: [Request] = []
+
+    init(result: V2LiveActivityPreferenceUpdateOutcome) {
+        self.result = result
+    }
+
+    func update(
+        allowsOnlinePresence: Bool,
+        allowsTypingIndicators: Bool
+    ) async throws -> V2LiveActivityPreferenceUpdateOutcome {
+        values.append(.init(online: allowsOnlinePresence, typing: allowsTypingIndicators))
+        return result
+    }
+
+    func requests() -> [Request] {
+        values
+    }
+}
+
+private actor V2LateLiveActivityPreferenceUpdater: V2LiveActivityPreferenceUpdating {
+    private var responseWaiter: CheckedContinuation<V2LiveActivityPreferenceUpdateOutcome, Never>?
+    private var responseReadyWaiter: CheckedContinuation<Void, Never>?
+
+    func update(
+        allowsOnlinePresence _: Bool,
+        allowsTypingIndicators _: Bool
+    ) async throws -> V2LiveActivityPreferenceUpdateOutcome {
+        await withCheckedContinuation { continuation in
+            responseWaiter = continuation
+            responseReadyWaiter?.resume()
+            responseReadyWaiter = nil
+        }
+    }
+
+    func waitUntilResponseIsPending() async {
+        guard responseWaiter == nil else { return }
+        await withCheckedContinuation { responseReadyWaiter = $0 }
+    }
+
+    func resumeAccepted() {
+        guard let responseWaiter else { return }
+        self.responseWaiter = nil
+        responseWaiter.resume(returning: .accepted)
+    }
 }
 
 private actor V2LateStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdating {

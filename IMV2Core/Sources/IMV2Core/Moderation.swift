@@ -36,19 +36,24 @@ public struct V2ModerationCommand: Equatable, Sendable {
     public let action: V2ModerationAction
     public let targetUserID: UserID?
     public let messageID: MessageID?
+    /// Trusted automated redaction may bind its decision to one content
+    /// revision. Ordinary moderator actions deliberately leave this nil.
+    public let expectedMessageRevision: UInt64?
     public let muteUntil: Date?
     public let reasonCode: V2ModerationReasonCode
 
-    public init(roomID: RoomID, actorUserID: UserID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID? = nil, messageID: MessageID? = nil, muteUntil: Date? = nil, reasonCode: V2ModerationReasonCode) throws {
+    public init(roomID: RoomID, actorUserID: UserID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID? = nil, messageID: MessageID? = nil, expectedMessageRevision: UInt64? = nil, muteUntil: Date? = nil, reasonCode: V2ModerationReasonCode) throws {
         switch action {
         case .redactMessage:
-            guard targetUserID == nil, messageID != nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
+            guard targetUserID == nil, messageID != nil, muteUntil == nil,
+                  expectedMessageRevision == nil || expectedMessageRevision! > 0
+            else { throw V2ModerationValidationError.invalidActionShape }
         case .removeMember:
-            guard let targetUserID, targetUserID != actorUserID, messageID == nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
+            guard let targetUserID, targetUserID != actorUserID, messageID == nil, expectedMessageRevision == nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
         case .muteMember:
-            guard let targetUserID, targetUserID != actorUserID, messageID == nil, muteUntil != nil else { throw V2ModerationValidationError.invalidActionShape }
+            guard let targetUserID, targetUserID != actorUserID, messageID == nil, expectedMessageRevision == nil, muteUntil != nil else { throw V2ModerationValidationError.invalidActionShape }
         case .freezeRoom, .unfreezeRoom:
-            guard targetUserID == nil, messageID == nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
+            guard targetUserID == nil, messageID == nil, expectedMessageRevision == nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
         }
         self.roomID = roomID
         self.actorUserID = actorUserID
@@ -56,6 +61,7 @@ public struct V2ModerationCommand: Equatable, Sendable {
         self.action = action
         self.targetUserID = targetUserID
         self.messageID = messageID
+        self.expectedMessageRevision = expectedMessageRevision
         self.muteUntil = muteUntil
         self.reasonCode = reasonCode
     }

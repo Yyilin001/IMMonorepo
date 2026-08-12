@@ -548,6 +548,15 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             VALUES
                 (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: entitiesJSON)::jsonb, NULLIF(\(bind: replyToMessageID), '')::uuid, \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID), \(bind: message.createdAt))
             """).run()
+        // This outbox row commits with the message. A process crash between
+        // acceptance and worker wake therefore cannot create an unreviewed
+        // blind spot; leases recover the work without touching the hot send
+        // path again.
+        try await sql.raw("""
+            INSERT INTO im_v2.content_review_jobs
+                (message_id, room_id, expected_content_revision, state, created_at)
+            VALUES (\(bind: messageID), \(bind: roomID), 1, 'pending', \(bind: message.createdAt))
+            """).run()
         for (ordinal, reference) in message.media.enumerated() {
             try await sql.raw("INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at) VALUES (\(bind: messageID), \(bind: try uuid(reference.mediaID)), \(bind: ordinal), \(bind: message.createdAt))").run()
         }

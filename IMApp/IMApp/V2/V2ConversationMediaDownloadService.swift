@@ -19,6 +19,12 @@ protocol V2ConversationMediaDownloading: Sendable {
     func download(_ media: V2MediaReference) async throws -> V2DownloadedConversationMedia
 }
 
+/// Optional local-cache capability. Kept separate from download so existing
+/// test/remote implementations do not acquire file-system authority.
+protocol V2ConversationMediaCacheDiscarding: Sendable {
+    func discard(_ media: V2MediaReference) async
+}
+
 enum V2DeviceLocalStorageError: Error, Equatable, Sendable {
     case fileSystemFailure
     case backupExclusionNotApplied
@@ -82,7 +88,7 @@ enum V2DeviceLocalStoragePolicy {
 /// room-membership, withdrawal, and delivered-projection authorization before
 /// a cached file is replaced. The cache filename is a one-way digest of the
 /// opaque media ID and never exposes an identifier or provider URL on disk.
-actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading {
+actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
     private let downloader: V2ClientMediaDownloadService
     private let directory: URL
     private let fileManager: FileManager
@@ -120,6 +126,12 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading {
             throw V2DeviceLocalStorageError.fileSystemFailure
         }
         return .init(mediaID: media.mediaID, fileURL: destination)
+    }
+
+    func discard(_ media: V2MediaReference) async {
+        let candidate = cacheURL(for: media.mediaID).standardizedFileURL
+        guard candidate.deletingLastPathComponent() == directory else { return }
+        try? fileManager.removeItem(at: candidate)
     }
 
     /// Interrupted URLSession downloads leave only random `.partial` files;

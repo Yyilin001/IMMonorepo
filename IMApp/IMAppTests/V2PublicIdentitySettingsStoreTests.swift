@@ -25,7 +25,7 @@ struct V2PublicIdentitySettingsStoreTests {
         await save.value
 
         #expect(store.displayName == "本地草稿")
-        #expect(store.handle.isEmpty)
+        #expect(store.handle == "@profile_test")
         #expect(!store.isSaving)
         #expect(store.feedback == nil)
     }

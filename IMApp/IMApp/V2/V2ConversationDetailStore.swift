@@ -154,6 +154,7 @@ final class V2ConversationDetailStore {
             }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages)
             messages = refreshedMessages
             timeline = refreshedTimeline
             canSendInDirectConversation = refreshedCanSend
@@ -169,6 +170,17 @@ final class V2ConversationDetailStore {
         } catch {
             guard generation == refreshGeneration else { return }
             state = .failed
+        }
+    }
+
+    private func discardMediaRevokedByRedaction(
+        previous: [V2ConversationMessageItem],
+        refreshed: [V2ConversationMessageItem]
+    ) async {
+        guard let cache = mediaDownloader as? any V2ConversationMediaCacheDiscarding else { return }
+        let withdrawnIDs = Set(refreshed.lazy.filter(\.isWithdrawn).map(\.id))
+        for message in previous where !message.isWithdrawn && withdrawnIDs.contains(message.id) {
+            for media in message.media { await cache.discard(media) }
         }
     }
 
