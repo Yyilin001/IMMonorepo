@@ -107,9 +107,12 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
             if !inserted {
                 guard let existing = try await sql.raw("""
                     SELECT user_sync_sequence
-                    FROM \(unsafeRaw: table("user_sync_log"))
-                    WHERE user_id = \(bind: targetUserID) AND source_event_id = \(bind: sourceEventID)
+                    FROM \(unsafeRaw: table("consumer_inbox"))
+                    WHERE consumer_name = \(bind: consumerName)
+                      AND target_user_id = \(bind: targetUserID)
+                      AND source_event_id = \(bind: sourceEventID)
                       AND projection_kind = \(bind: input.projectionKind)
+                      AND user_sync_sequence IS NOT NULL
                     """).first(decoding: CrossStoreSequenceRow.self)
                 else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 return try crossStoreUnsigned(existing.userSyncSequence)
@@ -145,6 +148,14 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     NULL, 'fanout_shared',
                     \(bind: now)
                 )
+                """).run()
+            try await sql.raw("""
+                UPDATE \(unsafeRaw: table("consumer_inbox"))
+                SET user_sync_sequence = \(bind: sequence.userSyncSequence)
+                WHERE consumer_name = \(bind: consumerName)
+                  AND source_event_id = \(bind: sourceEventID)
+                  AND target_user_id = \(bind: targetUserID)
+                  AND projection_kind = \(bind: input.projectionKind)
                 """).run()
             return try crossStoreUnsigned(sequence.userSyncSequence)
         }
@@ -215,6 +226,26 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 FROM payload_keys
                 ON CONFLICT DO NOTHING
                 """).run()
+            // As on the colocated path, make inbox fences visible to the next
+            // statement before allocating sequences. A data-modifying CTE
+            // cannot update a sibling CTE's newly inserted row through the
+            // table snapshot on PostgreSQL.
+            try await sql.raw("""
+                WITH input AS (
+                    SELECT source_event_id, target_user_id, projection_kind
+                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                        ordinal integer, source_event_id uuid, target_user_id uuid,
+                        projection_kind text, payload_index integer
+                    )
+                )
+                INSERT INTO \(unsafeRaw: table("consumer_inbox"))
+                    (consumer_name, source_event_id, target_user_id,
+                     projection_kind, committed_at)
+                SELECT \(bind: consumerName), source_event_id, target_user_id,
+                       projection_kind, \(bind: now)
+                FROM input
+                ON CONFLICT DO NOTHING
+                """).run()
             let rows = try await sql.raw("""
                 WITH payloads AS MATERIALIZED (
                     SELECT (ordinality - 1)::integer AS payload_index,
@@ -239,16 +270,17 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                       ON shared.source_event_id = payload_keys.source_event_id
                      AND shared.projection_kind = payload_keys.projection_kind
                      AND shared.payload = payload_keys.event_payload
-                ), inserted_inbox AS (
-                    INSERT INTO \(unsafeRaw: table("consumer_inbox"))
-                        (consumer_name, source_event_id, target_user_id, projection_kind, committed_at)
-                    SELECT \(bind: consumerName), source_event_id, target_user_id, projection_kind, \(bind: now)
-                    FROM input
-                    ON CONFLICT DO NOTHING
-                    RETURNING source_event_id, target_user_id, projection_kind
+                ), pending_inbox AS MATERIALIZED (
+                    SELECT inbox.source_event_id, inbox.target_user_id,
+                           inbox.projection_kind
+                    FROM \(unsafeRaw: table("consumer_inbox")) AS inbox
+                    JOIN input
+                      USING (source_event_id, target_user_id, projection_kind)
+                    WHERE inbox.consumer_name = \(bind: consumerName)
+                      AND inbox.user_sync_sequence IS NULL
                 ), per_user AS (
                     SELECT target_user_id AS user_id, COUNT(*)::bigint AS sequence_count
-                    FROM inserted_inbox
+                    FROM pending_inbox
                     GROUP BY target_user_id
                 ), reserved_sequence AS (
                     INSERT INTO \(unsafeRaw: table("user_sync_sequences")) AS sequence (user_id, next_sequence)
@@ -267,7 +299,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                                  ORDER BY input.source_event_id, input.target_user_id, input.projection_kind
                                ) AS user_sync_sequence
                     FROM input
-                    JOIN inserted_inbox
+                    JOIN pending_inbox
                       USING (source_event_id, target_user_id, projection_kind)
                     JOIN per_user ON per_user.user_id = input.target_user_id
                     JOIN reserved_sequence ON reserved_sequence.user_id = input.target_user_id
@@ -281,27 +313,39 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     JOIN verified_payloads
                       USING (source_event_id, projection_kind)
                     RETURNING user_id, user_sync_sequence, source_event_id, projection_kind
+                ), recorded_inbox AS (
+                    UPDATE \(unsafeRaw: table("consumer_inbox")) AS inbox
+                    SET user_sync_sequence = inserted_log.user_sync_sequence
+                    FROM inserted_log
+                    WHERE inbox.consumer_name = \(bind: consumerName)
+                      AND inbox.source_event_id = inserted_log.source_event_id
+                      AND inbox.target_user_id = inserted_log.user_id
+                      AND inbox.projection_kind = inserted_log.projection_kind
+                    RETURNING inbox.source_event_id, inbox.target_user_id,
+                              inbox.projection_kind, inbox.user_sync_sequence
                 ), inserted_outcomes AS (
-                    SELECT numbered.ordinal, inserted_log.user_sync_sequence
+                    SELECT numbered.ordinal, recorded_inbox.user_sync_sequence
                     FROM numbered
-                    JOIN inserted_log
-                      ON inserted_log.user_id = numbered.target_user_id
-                     AND inserted_log.user_sync_sequence = numbered.user_sync_sequence
-                     AND inserted_log.source_event_id = numbered.source_event_id
-                     AND inserted_log.projection_kind = numbered.projection_kind
+                    JOIN recorded_inbox
+                      ON recorded_inbox.target_user_id = numbered.target_user_id
+                     AND recorded_inbox.user_sync_sequence = numbered.user_sync_sequence
+                     AND recorded_inbox.source_event_id = numbered.source_event_id
+                     AND recorded_inbox.projection_kind = numbered.projection_kind
                 ), conflict_input AS (
                     SELECT input.ordinal, input.source_event_id, input.target_user_id, input.projection_kind
                     FROM input
-                    LEFT JOIN inserted_inbox
+                    LEFT JOIN pending_inbox
                       USING (source_event_id, target_user_id, projection_kind)
-                    WHERE inserted_inbox.source_event_id IS NULL
+                    WHERE pending_inbox.source_event_id IS NULL
                 ), conflict_outcomes AS (
-                    SELECT conflict.ordinal, log.user_sync_sequence
+                    SELECT conflict.ordinal, inbox.user_sync_sequence
                     FROM conflict_input AS conflict
-                    JOIN \(unsafeRaw: table("user_sync_log")) AS log
-                      ON log.user_id = conflict.target_user_id
-                     AND log.source_event_id = conflict.source_event_id
-                     AND log.projection_kind = conflict.projection_kind
+                    JOIN \(unsafeRaw: table("consumer_inbox")) AS inbox
+                      ON inbox.consumer_name = \(bind: consumerName)
+                     AND inbox.target_user_id = conflict.target_user_id
+                     AND inbox.source_event_id = conflict.source_event_id
+                     AND inbox.projection_kind = conflict.projection_kind
+                     AND inbox.user_sync_sequence IS NOT NULL
                 )
                 SELECT ordinal, user_sync_sequence
                 FROM inserted_outcomes
@@ -336,7 +380,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             if let existing = try await sql.raw("""
                 SELECT user_sync_sequence, payload::text AS payload_json
-                FROM \(unsafeRaw: table("user_sync_log"))
+                FROM \(unsafeRaw: table("user_projection_effects"))
                 WHERE user_id = \(bind: userID) AND source_event_id = \(bind: sourceEventID)
                   AND projection_kind = \(bind: record.projectionKind)
                 """).first(decoding: CrossStoreMirroredRecordRow.self) {
@@ -366,9 +410,12 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                         \(bind: record.payloadJSON)::jsonb, \(bind: record.createdAt))
                 ON CONFLICT DO NOTHING
                 """).run()
+            // The ordered row may already have been compacted after a prior
+            // successful mirror. The stable semantic result is the durable
+            // source for exact retry validation in either case.
             guard let mirrored = try await sql.raw("""
                 SELECT user_sync_sequence, payload::text AS payload_json
-                FROM \(unsafeRaw: table("user_sync_log"))
+                FROM \(unsafeRaw: table("user_projection_effects"))
                 WHERE user_id = \(bind: userID) AND source_event_id = \(bind: sourceEventID)
                   AND projection_kind = \(bind: record.projectionKind)
                 """).first(decoding: CrossStoreMirroredRecordRow.self),
@@ -397,7 +444,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             if let existing = try await sql.raw("""
                 SELECT user_sync_sequence, payload::text AS payload_json
-                FROM \(unsafeRaw: table("user_sync_log"))
+                FROM \(unsafeRaw: table("user_projection_effects"))
                 WHERE user_id = \(bind: userUUID) AND source_event_id = \(bind: eventUUID)
                   AND projection_kind = \(bind: projectionKind)
                 """).first(decoding: CrossStoreMirroredRecordRow.self) {
@@ -558,7 +605,7 @@ public struct V2CrossStoreFanoutDeliveryStore: V2FanoutDeliveryStore, Sendable {
     public func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
         guard !leases.isEmpty else { return [] }
         if try await canCommitAtomicallyInControlStore(leases) {
-            return try await control.commitBatch(leases, now: now)
+            return try await control.commitBatchFencedToCurrentRoutes(leases, now: now)
         }
         var results = Array<V2FanoutDeliveryCommit?>(repeating: nil, count: leases.count)
         let grouped = Dictionary(grouping: leases.enumerated(), by: { $0.element.observedRoute.bucket })

@@ -30,6 +30,24 @@ enum V2DeviceLocalStorageError: Error, Equatable, Sendable {
     case backupExclusionNotApplied
 }
 
+struct V2ConversationMediaCachePolicy: Equatable, Sendable {
+    let maximumByteCount: Int64
+    let maximumEntryCount: Int
+    let maximumAge: TimeInterval
+
+    init(
+        maximumByteCount: Int64 = 512 * 1_024 * 1_024,
+        maximumEntryCount: Int = 256,
+        maximumAge: TimeInterval = 7 * 24 * 60 * 60
+    ) {
+        precondition(maximumByteCount > 0 && maximumEntryCount > 0)
+        precondition(maximumAge.isFinite && maximumAge > 0)
+        self.maximumByteCount = maximumByteCount
+        self.maximumEntryCount = maximumEntryCount
+        self.maximumAge = maximumAge
+    }
+}
+
 /// Applies V2's device-local storage policy to the directory that contains
 /// local sync state or downloaded media. The application currently offers no
 /// persistent background media transfer, so `Complete` protection is correct
@@ -92,18 +110,24 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     private let downloader: V2ClientMediaDownloadService
     private let directory: URL
     private let fileManager: FileManager
+    private let cachePolicy: V2ConversationMediaCachePolicy
     private let makeUUID: @Sendable () -> UUID
+    private let now: @Sendable () -> Date
 
     init(
         downloader: V2ClientMediaDownloadService,
         directory: URL,
         fileManager: FileManager = .default,
-        makeUUID: @escaping @Sendable () -> UUID = UUID.init
+        cachePolicy: V2ConversationMediaCachePolicy = .init(),
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
+        now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         self.downloader = downloader
         self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(directory, fileManager: fileManager)
         self.fileManager = fileManager
+        self.cachePolicy = cachePolicy
         self.makeUUID = makeUUID
+        self.now = now
     }
 
     func download(_ media: V2MediaReference) async throws -> V2DownloadedConversationMedia {
@@ -117,14 +141,32 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         try Task.checkCancellation()
 
         do {
+            // Apply the complete protection policy before the commit. Once
+            // the staging file becomes visible at the stable cache URL there
+            // is no later fallible step that can report failure while leaving
+            // a partially configured cache entry behind.
+            try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary, fileManager: fileManager)
             if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
+                _ = try fileManager.replaceItemAt(
+                    destination,
+                    withItemAt: temporary,
+                    backupItemName: nil,
+                    options: [.usingNewMetadataOnly]
+                )
+            } else {
+                // Both URLs are in the same managed directory, so rename is
+                // the atomic first-publication operation for a new cache key.
+                try fileManager.moveItem(at: temporary, to: destination)
             }
-            try fileManager.moveItem(at: temporary, to: destination)
-            try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
+            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
         } catch {
             throw V2DeviceLocalStorageError.fileSystemFailure
         }
+        // Cache cleanup is best-effort after the atomic publication. Keep the
+        // file being returned even if one server-authorized object is larger
+        // than the aggregate target; the upload policy still bounds a single
+        // object, and a later maintenance pass may remove it.
+        try? enforceCachePolicy(excluding: destination)
         return .init(mediaID: media.mediaID, fileURL: destination)
     }
 
@@ -154,10 +196,84 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         }
     }
 
+    /// Activation-time maintenance removes interrupted transfers, expired
+    /// entries, then least-recently-downloaded files until both capacity caps
+    /// are satisfied. It only examines direct regular children with the cache
+    /// extension and never follows a path outside the managed directory.
+    func performMaintenance() {
+        discardOrphanedTemporaryFiles()
+        try? enforceCachePolicy(excluding: nil)
+    }
+
+    private func enforceCachePolicy(excluding retainedURL: URL?) throws {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let entries = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: []
+        ).compactMap { url -> MediaCacheEntry? in
+            let candidate = url.standardizedFileURL
+            guard candidate.deletingLastPathComponent() == directory,
+                  candidate.pathExtension == "media"
+            else { return nil }
+            let values = try candidate.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { return nil }
+            return .init(
+                url: candidate,
+                byteCount: max(0, Int64(values.fileSize ?? 0)),
+                lastAccessedAt: values.contentModificationDate ?? .distantPast
+            )
+        }
+        let expirationBoundary = now().addingTimeInterval(-cachePolicy.maximumAge)
+        var retainedEntries: [MediaCacheEntry] = []
+        for entry in entries {
+            if entry.lastAccessedAt < expirationBoundary,
+               entry.url != retainedURL?.standardizedFileURL {
+                do {
+                    try fileManager.removeItem(at: entry.url)
+                } catch {
+                    retainedEntries.append(entry)
+                }
+            } else {
+                retainedEntries.append(entry)
+            }
+        }
+
+        var totalBytes = retainedEntries.reduce(Int64(0)) { partial, entry in
+            partial.addingReportingOverflow(entry.byteCount).overflow
+                ? Int64.max
+                : partial + entry.byteCount
+        }
+        var totalEntries = retainedEntries.count
+        for entry in retainedEntries.sorted(by: MediaCacheEntry.olderFirst) {
+            guard totalEntries > cachePolicy.maximumEntryCount || totalBytes > cachePolicy.maximumByteCount else { break }
+            guard entry.url != retainedURL?.standardizedFileURL else { continue }
+            do {
+                try fileManager.removeItem(at: entry.url)
+                totalEntries -= 1
+                totalBytes = max(0, totalBytes - entry.byteCount)
+            } catch {
+                continue
+            }
+        }
+    }
+
     private func cacheURL(for mediaID: MediaID) -> URL {
         let digest = SHA256.hash(data: Data(mediaID.rawValue.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
         return directory.appendingPathComponent(digest + ".media", isDirectory: false)
+    }
+}
+
+private struct MediaCacheEntry {
+    let url: URL
+    let byteCount: Int64
+    let lastAccessedAt: Date
+
+    static func olderFirst(_ lhs: Self, _ rhs: Self) -> Bool {
+        lhs.lastAccessedAt == rhs.lastAccessedAt
+            ? lhs.url.lastPathComponent < rhs.url.lastPathComponent
+            : lhs.lastAccessedAt < rhs.lastAccessedAt
     }
 }

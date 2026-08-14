@@ -151,6 +151,23 @@ enum V2ConversationTimelineItem: Hashable, Identifiable, Sendable {
         case .activity(let activity): activity.timelineSequence
         }
     }
+
+    var storageItemID: String {
+        switch self {
+        case .message(let message, _): message.id
+        case .activity(let activity): activity.id
+        }
+    }
+}
+
+struct V2ConversationTimelineCursor: Equatable, Sendable {
+    let timelineSequence: UInt64
+    let itemID: String
+}
+
+struct V2ConversationTimelinePage: Equatable, Sendable {
+    let items: [V2ConversationTimelineItem]
+    let olderCursor: V2ConversationTimelineCursor?
 }
 
 /// A compact, cross-conversation entry for the personal Favorites screen.
@@ -198,10 +215,26 @@ enum V2ConversationMediaDownloadState: Hashable, Sendable {
     case failed
 }
 
+struct V2ConversationListPage: Equatable, Sendable {
+    let items: [V2ConversationListItem]
+    let nextCursor: V2ClientConversationListCursor?
+}
+
 protocol V2ConversationDataSource: Sendable {
-    func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem]
+    func conversationSummaryPage(
+        for userID: String,
+        isArchived: Bool,
+        before cursor: V2ClientConversationListCursor?,
+        limit: Int
+    ) async throws -> V2ConversationListPage
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
     func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem]
+    func timelinePage(
+        in roomID: String,
+        for userID: String,
+        before cursor: V2ConversationTimelineCursor?,
+        limit: Int
+    ) async throws -> V2ConversationTimelinePage
 }
 
 protocol V2ConversationSendingCapabilityReading: Sendable {
@@ -214,10 +247,47 @@ extension V2ConversationDataSource {
     func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
         try await messages(in: roomID, for: userID).map { .message($0, timelineSequence: $0.roomSequence) }
     }
+
+    /// Compatibility path for small deterministic fakes. Production data
+    /// sources override this with a bounded SQLite keyset query.
+    func timelinePage(
+        in roomID: String,
+        for userID: String,
+        before cursor: V2ConversationTimelineCursor?,
+        limit: Int
+    ) async throws -> V2ConversationTimelinePage {
+        precondition(limit > 0)
+        let candidates = try await timeline(in: roomID, for: userID)
+            .filter { item in
+                guard let cursor else { return true }
+                return item.timelineSequence < cursor.timelineSequence
+                    || (item.timelineSequence == cursor.timelineSequence && item.storageItemID < cursor.itemID)
+            }
+            .sorted { lhs, rhs in
+                lhs.timelineSequence == rhs.timelineSequence
+                    ? lhs.storageItemID > rhs.storageItemID
+                    : lhs.timelineSequence > rhs.timelineSequence
+            }
+        let selected = Array(candidates.prefix(limit)).reversed()
+        let items = Array(selected)
+        let olderCursor: V2ConversationTimelineCursor? = candidates.count > limit ? items.first.map {
+            V2ConversationTimelineCursor(timelineSequence: $0.timelineSequence, itemID: $0.storageItemID)
+        } : nil
+        return .init(items: items, olderCursor: olderCursor)
+    }
 }
 
 protocol V2ConversationFavoritesReading: Sendable {
-    func favoriteMessages(for userID: String) async throws -> [V2FavoriteConversationMessageItem]
+    func favoriteMessages(
+        for userID: String,
+        before cursor: V2ClientFavoriteMessageCursor?,
+        limit: Int
+    ) async throws -> V2ConversationFavoriteMessagesPage
+}
+
+struct V2ConversationFavoriteMessagesPage: Equatable, Sendable {
+    let items: [V2FavoriteConversationMessageItem]
+    let nextCursor: V2ClientFavoriteMessageCursor?
 }
 
 protocol V2GroupAnnouncementReading: Sendable {
@@ -305,43 +375,26 @@ final class V2ConversationListStore {
         case failed
     }
 
+    private let environment: V2ConversationFeatureEnvironment
     private let dataSource: any V2ConversationDataSource
     private let favoritesReader: (any V2ConversationFavoritesReading)?
     private let messageSearcher: (any V2ConversationMessageSearching)?
     private let userID: String
-    private let sender: (any V2ConversationSending)?
-    private let messageWithdrawer: (any V2MessageWithdrawing)?
-    private let messageReactionChanger: (any V2MessageReactionChanging)?
-    private let messageEditor: (any V2MessageEditing)?
-    private let readReceiptReporter: (any V2ConversationReadReporting)?
     private let conversationStateChanger: (any V2ConversationStateChanging)?
-    private let messageFavoriter: (any V2MessageFavoriting)?
-    private let groupMessagePinner: (any V2GroupMessagePinning)?
-    private let messageForwarder: (any V2MessageForwarding)?
-    private let groupAnnouncementManager: (any V2GroupAnnouncementManaging)?
-    private let groupMemberRoleChanger: (any V2GroupMemberRoleChanging)?
-    private let groupRolePolicyChanger: (any V2GroupRolePolicyChanging)?
-    private let groupReadReceiptReader: (any V2GroupReadReceiptReading)?
-    private let conversationLiveActivity: (any V2ConversationLiveActivityManaging)?
     private let directConversationOpener: (any V2DirectConversationOpening)?
     private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let groupConversationCreator: (any V2GroupConversationCreating)?
-    private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
-    private let groupMembershipChanger: (any V2GroupMembershipChanging)?
-    private let groupMemberMuter: (any V2GroupMemberMuting)?
-    private let moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)?
-    private let attachmentStager: (any V2ConversationAttachmentStaging)?
-    private let attachmentUploader: (any V2ConversationAttachmentUploading)?
-    private let mediaDownloader: (any V2ConversationMediaDownloading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
-    private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     private(set) var items: [V2ConversationListItem] = []
     private(set) var favoriteMessages: [V2FavoriteConversationMessageItem] = []
     private(set) var isLoadingFavorites = false
     private(set) var favoritesFeedback: String?
+    private(set) var favoritesNextCursor: V2ClientFavoriteMessageCursor?
+    private(set) var conversationNextCursor: V2ClientConversationListCursor?
+    private(set) var isLoadingMoreConversations = false
     /// Inbox and archive are distinct views over the same durable projection;
     /// archiving must not merely demote an item to the bottom of the inbox.
-    var isShowingArchived = false
+    private(set) var isShowingArchived = false
     var visibleItems: [V2ConversationListItem] {
         items.filter { $0.isArchived == isShowingArchived }
     }
@@ -356,67 +409,17 @@ final class V2ConversationListStore {
     private var explicitRoomKinds: [String: V2ConversationListItem.Kind] = [:]
     private var refreshGeneration = 0
 
-    init(
-        dataSource: any V2ConversationDataSource,
-        messageSearcher: (any V2ConversationMessageSearching)? = nil,
-        userID: String,
-        sender: (any V2ConversationSending)? = nil,
-        messageWithdrawer: (any V2MessageWithdrawing)? = nil,
-        messageReactionChanger: (any V2MessageReactionChanging)? = nil,
-        messageEditor: (any V2MessageEditing)? = nil,
-        readReceiptReporter: (any V2ConversationReadReporting)? = nil,
-        conversationStateChanger: (any V2ConversationStateChanging)? = nil,
-        messageFavoriter: (any V2MessageFavoriting)? = nil,
-        groupMessagePinner: (any V2GroupMessagePinning)? = nil,
-        messageForwarder: (any V2MessageForwarding)? = nil,
-        groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil,
-        groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil,
-        groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil,
-        groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil,
-        conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil,
-        directConversationOpener: (any V2DirectConversationOpening)? = nil,
-        publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil,
-        groupConversationCreator: (any V2GroupConversationCreating)? = nil,
-        groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
-        groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
-        groupMemberMuter: (any V2GroupMemberMuting)? = nil,
-        moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
-        attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
-        attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
-        mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
-        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
-        activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
-    ) {
-        self.dataSource = dataSource
-        favoritesReader = dataSource as? any V2ConversationFavoritesReading
-        self.messageSearcher = messageSearcher
-        self.userID = userID
-        self.sender = sender
-        self.messageWithdrawer = messageWithdrawer
-        self.messageReactionChanger = messageReactionChanger
-        self.messageEditor = messageEditor
-        self.readReceiptReporter = readReceiptReporter
-        self.conversationStateChanger = conversationStateChanger
-        self.messageFavoriter = messageFavoriter
-        self.groupMessagePinner = groupMessagePinner
-        self.messageForwarder = messageForwarder
-        self.groupAnnouncementManager = groupAnnouncementManager
-        self.groupMemberRoleChanger = groupMemberRoleChanger
-        self.groupRolePolicyChanger = groupRolePolicyChanger
-        self.groupReadReceiptReader = groupReadReceiptReader
-        self.conversationLiveActivity = conversationLiveActivity
-        self.directConversationOpener = directConversationOpener
-        self.publicIdentityResolver = publicIdentityResolver
-        self.groupConversationCreator = groupConversationCreator
-        self.groupMemberDirectory = groupMemberDirectory
-        self.groupMembershipChanger = groupMembershipChanger
-        self.groupMemberMuter = groupMemberMuter
-        self.moderatedGroupMemberRemover = moderatedGroupMemberRemover
-        self.attachmentStager = attachmentStager
-        self.attachmentUploader = attachmentUploader
-        self.mediaDownloader = mediaDownloader
-        self.projectionChangeNotifier = projectionChangeNotifier
-        self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
+    init(environment: V2ConversationFeatureEnvironment) {
+        self.environment = environment
+        dataSource = environment.projections.dataSource
+        favoritesReader = environment.projections.dataSource as? any V2ConversationFavoritesReading
+        messageSearcher = environment.projections.messageSearcher
+        userID = environment.userID
+        conversationStateChanger = environment.messages.stateChanger
+        directConversationOpener = environment.discovery.directConversationOpener
+        publicIdentityResolver = environment.discovery.publicIdentityResolver
+        groupConversationCreator = environment.groups.conversationCreator
+        projectionChangeNotifier = environment.runtime.projectionChangeNotifier
     }
 
     func createGroupConversation(title: String, memberHandlesText: String) async -> String? {
@@ -448,12 +451,11 @@ final class V2ConversationListStore {
             if handles.isEmpty {
                 members = []
             } else if let publicIdentityResolver {
-                var resolved: [String] = []
-                for handle in handles {
-                    resolved.append(try await publicIdentityResolver.resolve(handle: handle).userID.rawValue)
-                    try Task.checkCancellation()
-                }
-                members = resolved
+                members = try await resolveGroupMemberHandles(
+                    handles,
+                    resolver: publicIdentityResolver,
+                    maximumConcurrency: 8
+                )
             } else {
                 groupConversationFeedback = "身份目录暂不可用，无法解析成员公开 ID。"
                 return nil
@@ -485,6 +487,41 @@ final class V2ConversationListStore {
         }
     }
 
+    private func resolveGroupMemberHandles(
+        _ handles: [String],
+        resolver: any V2ConversationPublicIdentityResolving,
+        maximumConcurrency: Int
+    ) async throws -> [String] {
+        precondition(maximumConcurrency > 0)
+        var resolved = Array<String?>(repeating: nil, count: handles.count)
+        return try await withThrowingTaskGroup(of: (Int, String).self) { group in
+            var nextIndex = 0
+            let initialCount = min(maximumConcurrency, handles.count)
+            for index in 0..<initialCount {
+                let handle = handles[index]
+                group.addTask {
+                    let identity = try await resolver.resolve(handle: handle)
+                    return (index, identity.userID.rawValue)
+                }
+                nextIndex += 1
+            }
+            while let (index, userID) = try await group.next() {
+                resolved[index] = userID
+                if nextIndex < handles.count {
+                    let index = nextIndex
+                    let handle = handles[index]
+                    group.addTask {
+                        let identity = try await resolver.resolve(handle: handle)
+                        return (index, identity.userID.rawValue)
+                    }
+                    nextIndex += 1
+                }
+            }
+            guard resolved.allSatisfy({ $0 != nil }) else { throw CancellationError() }
+            return resolved.compactMap { $0 }
+        }
+    }
+
     func cancelPendingGroupConversationCreation() async {
         guard let operationID = pendingGroupConversationOperationID else { return }
         guard let groupConversationCreator else {
@@ -513,10 +550,16 @@ final class V2ConversationListStore {
         let generation = refreshGeneration
         state = .loading
         do {
-            let refreshedItems = try await dataSource.conversationSummaries(for: userID)
+            let page = try await dataSource.conversationSummaryPage(
+                for: userID,
+                isArchived: isShowingArchived,
+                before: nil,
+                limit: 50
+            )
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            items = refreshedItems
+            items = page.items
+            conversationNextCursor = page.nextCursor
             state = .loaded
             await restoreDurableGroupCreationStatusIfNeeded()
         } catch is CancellationError {
@@ -524,6 +567,39 @@ final class V2ConversationListStore {
         } catch {
             guard generation == refreshGeneration else { return }
             state = .failed
+        }
+    }
+
+    func toggleArchivedConversations() async {
+        isShowingArchived.toggle()
+        await refresh()
+    }
+
+    func loadMoreConversations() async {
+        guard state == .loaded,
+              let cursor = conversationNextCursor,
+              !isLoadingMoreConversations
+        else { return }
+        let generation = refreshGeneration
+        let archived = isShowingArchived
+        isLoadingMoreConversations = true
+        defer { isLoadingMoreConversations = false }
+        do {
+            let page = try await dataSource.conversationSummaryPage(
+                for: userID,
+                isArchived: archived,
+                before: cursor,
+                limit: 50
+            )
+            try Task.checkCancellation()
+            guard generation == refreshGeneration, archived == isShowingArchived else { return }
+            let existingIDs = Set(items.map(\.id))
+            items.append(contentsOf: page.items.filter { !existingIDs.contains($0.id) })
+            conversationNextCursor = page.nextCursor
+        } catch is CancellationError {
+            return
+        } catch {
+            conversationStateFeedback = "无法加载更多会话。"
         }
     }
 
@@ -535,12 +611,31 @@ final class V2ConversationListStore {
         isLoadingFavorites = true
         defer { isLoadingFavorites = false }
         do {
-            favoriteMessages = try await favoritesReader.favoriteMessages(for: userID)
+            let page = try await favoritesReader.favoriteMessages(for: userID, before: nil, limit: 50)
+            favoriteMessages = page.items
+            favoritesNextCursor = page.nextCursor
             favoritesFeedback = nil
         } catch is CancellationError {
             return
         } catch {
             favoritesFeedback = "无法读取收藏消息。"
+        }
+    }
+
+    func loadMoreFavorites() async {
+        guard let favoritesReader, let cursor = favoritesNextCursor, !isLoadingFavorites else { return }
+        isLoadingFavorites = true
+        defer { isLoadingFavorites = false }
+        do {
+            let page = try await favoritesReader.favoriteMessages(for: userID, before: cursor, limit: 50)
+            try Task.checkCancellation()
+            let existing = Set(favoriteMessages.map(\.id))
+            favoriteMessages.append(contentsOf: page.items.filter { !existing.contains($0.id) })
+            favoritesNextCursor = page.nextCursor
+            favoritesFeedback = nil
+        } catch is CancellationError {
+        } catch {
+            favoritesFeedback = "无法继续读取收藏消息。"
         }
     }
 
@@ -610,7 +705,18 @@ final class V2ConversationListStore {
         let forwardTargets = items
             .filter { $0.id != roomID }
             .map { V2ConversationForwardTarget(roomID: $0.id, title: $0.title) }
-        return .init(dataSource: dataSource, messageSearcher: messageSearcher, sender: sender, messageWithdrawer: messageWithdrawer, messageReactionChanger: messageReactionChanger, messageEditor: messageEditor, readReceiptReporter: readReceiptReporter, messageFavoriter: messageFavoriter, groupMessagePinner: groupMessagePinner, messageForwarder: messageForwarder, forwardTargets: forwardTargets, groupAnnouncementReader: dataSource as? any V2GroupAnnouncementReading, groupAnnouncementManager: groupAnnouncementManager, groupMemberRoleChanger: groupMemberRoleChanger, groupRolePolicyReader: dataSource as? any V2GroupRolePolicyReading, groupRolePolicyChanger: groupRolePolicyChanger, groupReadReceiptReader: groupReadReceiptReader, conversationLiveActivity: conversationLiveActivity, userID: userID, roomID: roomID, title: title, isGroupConversation: kind == .group, directAccountKind: accountKind, groupMemberDirectory: groupMemberDirectory, groupMembershipChanger: groupMembershipChanger, groupMemberMuter: groupMemberMuter, moderatedGroupMemberRemover: moderatedGroupMemberRemover, publicIdentityResolver: publicIdentityResolver, attachmentStager: attachmentStager, attachmentUploader: attachmentUploader, mediaDownloader: mediaDownloader, projectionChangeNotifier: projectionChangeNotifier, activeHybridGroupSynchronizer: activeHybridGroupSynchronizer, initialDraft: initialDraft, initialMentionHandles: initialMentionHandles)
+        return .init(
+            environment: environment,
+            context: .init(
+                roomID: roomID,
+                title: title,
+                isGroupConversation: kind == .group,
+                directAccountKind: accountKind,
+                forwardTargets: forwardTargets,
+                initialDraft: initialDraft,
+                initialMentionHandles: initialMentionHandles
+            )
+        )
     }
 
     func messageSearchStore() -> V2ConversationSearchStore? {
@@ -729,12 +835,6 @@ struct V2ConversationListView: View {
                         ContentUnavailableView("无法读取本地会话", systemImage: "exclamationmark.triangle")
                         Button("重试") { Task { await store.refresh() } }
                     }
-                case .loaded where store.items.isEmpty:
-                    ContentUnavailableView(
-                        "暂无会话",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text("连接实时网关并完成同步后，消息会显示在这里。")
-                    )
                 case .loaded:
                     if store.visibleItems.isEmpty {
                         ContentUnavailableView(
@@ -743,7 +843,8 @@ struct V2ConversationListView: View {
                             description: Text(store.isShowingArchived ? "归档的会话会显示在这里。" : "连接实时网关并完成同步后，消息会显示在这里。")
                         )
                     } else {
-                    List(store.visibleItems) { item in
+                    List {
+                    ForEach(store.visibleItems) { item in
                         NavigationLink(value: item.id) {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
@@ -787,6 +888,21 @@ struct V2ConversationListView: View {
                         }
                         .accessibilityIdentifier("v2.conversation.\(item.kind.accessibilityIdentifierComponent).\(item.id)")
                     }
+                    if store.conversationNextCursor != nil {
+                        HStack {
+                            Spacer()
+                            if store.isLoadingMoreConversations {
+                                ProgressView().accessibilityLabel("正在加载更多会话")
+                            } else {
+                                Button("加载更多会话") {
+                                    Task { await store.loadMoreConversations() }
+                                }
+                                .accessibilityIdentifier("v2.conversation.load-more")
+                            }
+                            Spacer()
+                        }
+                    }
+                    }
                     .accessibilityIdentifier("v2.conversation.list")
                     }
                 }
@@ -801,7 +917,7 @@ struct V2ConversationListView: View {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Menu {
                         Button(store.isShowingArchived ? "返回收件箱" : "已归档", systemImage: store.isShowingArchived ? "tray" : "archivebox") {
-                            store.isShowingArchived.toggle()
+                            Task { await store.toggleArchivedConversations() }
                         }
                         .accessibilityIdentifier("v2.conversation.archive-toggle")
                         Button("搜索消息", systemImage: "magnifyingglass") {
@@ -1202,26 +1318,37 @@ private struct V2FavoriteMessagesSheet: View {
                 } else if store.favoriteMessages.isEmpty {
                     ContentUnavailableView("暂无收藏", systemImage: "star", description: Text("长按消息后选择“收藏”，会显示在这里。"))
                 } else {
-                    List(store.favoriteMessages) { item in
-                        Button {
-                            select(item)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(item.roomTitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(item.text)
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(2)
-                                Text(item.createdAt, format: .dateTime.year().month().day().hour().minute())
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                    List {
+                        ForEach(store.favoriteMessages) { item in
+                            Button {
+                                select(item)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(item.roomTitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(item.text)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(2)
+                                    Text(item.createdAt, format: .dateTime.year().month().day().hour().minute())
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .accessibilityLabel(item.roomTitle)
+                            .accessibilityValue(item.text)
+                            .accessibilityHint("打开这条收藏消息所在的会话")
+                            .accessibilityIdentifier("v2.message.favorite.item.\(item.id)")
                         }
-                        .accessibilityLabel(item.roomTitle)
-                        .accessibilityValue(item.text)
-                        .accessibilityHint("打开这条收藏消息所在的会话")
-                        .accessibilityIdentifier("v2.message.favorite.item.\(item.id)")
+                        if store.favoritesNextCursor != nil {
+                            Button {
+                                Task { await store.loadMoreFavorites() }
+                            } label: {
+                                if store.isLoadingFavorites { ProgressView() } else { Text("加载更多收藏") }
+                            }
+                            .disabled(store.isLoadingFavorites)
+                            .accessibilityIdentifier("v2.message.favorites.load-more")
+                        }
                     }
                     .accessibilityIdentifier("v2.message.favorites.list")
                 }
@@ -1304,6 +1431,20 @@ private struct V2ConversationDetailView: View {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 10) {
+                                    if store.canLoadOlderTimeline {
+                                        Button {
+                                            Task { await store.loadOlderTimeline() }
+                                        } label: {
+                                            if store.isLoadingOlderTimeline {
+                                                ProgressView("正在加载更早消息…")
+                                            } else {
+                                                Label("加载更早消息", systemImage: "clock.arrow.circlepath")
+                                            }
+                                        }
+                                        .disabled(store.isLoadingOlderTimeline || store.isReturningToLatestTimeline)
+                                        .frame(maxWidth: .infinity)
+                                        .accessibilityIdentifier("v2.message.load-older")
+                                    }
                                     ForEach(store.timeline) { item in
                                         switch item {
                                         case .message(let message, _):
@@ -1323,6 +1464,21 @@ private struct V2ConversationDetailView: View {
                                                 .id(item.id)
                                         }
                                     }
+                                    if store.isBrowsingHistoricalTimeline {
+                                        Button {
+                                            Task { await store.returnToLatestTimeline() }
+                                        } label: {
+                                            if store.isReturningToLatestTimeline {
+                                                ProgressView("正在返回最新消息…")
+                                            } else {
+                                                Label("返回最新消息", systemImage: "arrow.down.to.line")
+                                            }
+                                        }
+                                        .disabled(store.isLoadingOlderTimeline || store.isReturningToLatestTimeline)
+                                        .frame(maxWidth: .infinity)
+                                        .accessibilityHint("重新加载当前会话的最新消息")
+                                        .accessibilityIdentifier("v2.message.return-latest")
+                                    }
                                 }
                                 .padding()
                             }
@@ -1330,7 +1486,7 @@ private struct V2ConversationDetailView: View {
                             .onChange(of: focusedMessageID) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
                             }
-                            .onChange(of: store.timeline.map(\.id)) { _, _ in
+                            .onChange(of: store.timelineRevision) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
                             }
                         }
@@ -1509,6 +1665,10 @@ private struct V2ConversationDetailView: View {
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
         .task { await store.observeLiveActivity() }
+        .task(id: focusedMessageID) {
+            guard let focusedMessageID else { return }
+            await store.loadTimeline(containing: focusedMessageID)
+        }
     }
 
     private var canSendDraft: Bool {

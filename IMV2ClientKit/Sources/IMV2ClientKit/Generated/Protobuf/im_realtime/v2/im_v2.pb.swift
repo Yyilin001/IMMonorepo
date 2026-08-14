@@ -2895,7 +2895,16 @@ public nonisolated struct IMV2ReadReceiptReadersPage: Sendable {
 
   public var messageRoomSequence: UInt64 = 0
 
-  public var readerCount: UInt32 = 0
+  /// Exact total is returned only on the first page. Later pages inherit the
+  /// first page's total and avoid repeating an O(group size) count scan.
+  public var readerCount: UInt32 {
+    get {_readerCount ?? 0}
+    set {_readerCount = newValue}
+  }
+  /// Returns true if `readerCount` has been explicitly set.
+  public var hasReaderCount: Bool {self._readerCount != nil}
+  /// Clears the value of `readerCount`. Subsequent reads from it will return its default value.
+  public mutating func clearReaderCount() {self._readerCount = nil}
 
   public var readers: [IMV2ReadReceiptReader] = []
 
@@ -2904,6 +2913,8 @@ public nonisolated struct IMV2ReadReceiptReadersPage: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
+
+  fileprivate var _readerCount: UInt32? = nil
 }
 
 /// The authenticated user is the actor. While a request is pending only its
@@ -3060,8 +3071,6 @@ public nonisolated struct IMV2ResetRequired: Sendable {
 
   public var baseUserSyncSequence: UInt64 = 0
 
-  public var manifestDigest: String = String()
-
   public var expiresAtMs: Int64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
@@ -3074,6 +3083,9 @@ public nonisolated struct IMV2SnapshotAck: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// Commits the server generation before the client atomically activates its
+  /// durable shadow projection. Exact replay must succeed after that commit,
+  /// including while a later generation is already being prepared.
   public var snapshotID: String = String()
 
   public var generation: UInt64 = 0
@@ -3087,9 +3099,8 @@ public nonisolated struct IMV2SnapshotAck: Sendable {
   public init() {}
 }
 
-/// The reset fence is established before any page is exposed. A manifest and
-/// each page request are bound to the authenticated device and its immutable
-/// snapshot generation.
+/// While a durable artifact is being built, SyncPull returns RESET_PREPARING.
+/// No partial descriptor or page is exposed.
 public nonisolated struct IMV2SyncSnapshot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3109,19 +3120,25 @@ public nonisolated struct IMV2SnapshotManifest: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
+  /// The client persists this descriptor together with its shadow import so a
+  /// crash after server ACK does not need a stale-token pull or page refetch.
   public var snapshotID: String = String()
 
   public var generation: UInt64 = 0
 
   public var baseUserSyncSequence: UInt64 = 0
 
-  public var manifestDigest: String = String()
+  public var rootDigest: String = String()
 
   public var schemaVersion: UInt32 = 0
 
   public var capabilityProfile: String = String()
 
-  public var pageDigests: [String] = []
+  public var pageCount: UInt32 = 0
+
+  public var totalItems: UInt64 = 0
+
+  public var totalBytes: UInt64 = 0
 
   public var nextSyncToken: String = String()
 
@@ -3143,7 +3160,7 @@ public nonisolated struct IMV2SnapshotPagePull: Sendable {
 
   public var generation: UInt64 = 0
 
-  public var manifestDigest: String = String()
+  public var rootDigest: String = String()
 
   public var pageIndex: UInt32 = 0
 
@@ -3161,9 +3178,19 @@ public nonisolated struct IMV2SnapshotPage: Sendable {
 
   public var generation: UInt64 = 0
 
-  public var manifestDigest: String = String()
+  public var rootDigest: String = String()
 
   public var pageIndex: UInt32 = 0
+
+  public var firstProjectionKind: String = String()
+
+  public var firstEntityKey: String = String()
+
+  public var lastProjectionKind: String = String()
+
+  public var lastEntityKey: String = String()
+
+  public var itemCount: UInt32 = 0
 
   public var pageDigest: String = String()
 
@@ -8418,7 +8445,7 @@ nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftPr
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.messageRoomSequence) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.readerCount) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self._readerCount) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.readers) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.nextCursor) }()
       default: break
@@ -8427,15 +8454,19 @@ nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftPr
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.roomID.isEmpty {
       try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
     }
     if self.messageRoomSequence != 0 {
       try visitor.visitSingularUInt64Field(value: self.messageRoomSequence, fieldNumber: 2)
     }
-    if self.readerCount != 0 {
-      try visitor.visitSingularUInt32Field(value: self.readerCount, fieldNumber: 3)
-    }
+    try { if let v = self._readerCount {
+      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 3)
+    } }()
     if !self.readers.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.readers, fieldNumber: 4)
     }
@@ -8448,7 +8479,7 @@ nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftPr
   public static func ==(lhs: IMV2ReadReceiptReadersPage, rhs: IMV2ReadReceiptReadersPage) -> Bool {
     if lhs.roomID != rhs.roomID {return false}
     if lhs.messageRoomSequence != rhs.messageRoomSequence {return false}
-    if lhs.readerCount != rhs.readerCount {return false}
+    if lhs._readerCount != rhs._readerCount {return false}
     if lhs.readers != rhs.readers {return false}
     if lhs.nextCursor != rhs.nextCursor {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -8803,7 +8834,7 @@ nonisolated extension IMV2SyncAck: SwiftProtobuf.Message, SwiftProtobuf._Message
 
 nonisolated extension IMV2ResetRequired: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResetRequired"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}base_user_sync_sequence\0\u{3}manifest_digest\0\u{3}expires_at_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}base_user_sync_sequence\0\u{3}expires_at_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8814,8 +8845,7 @@ nonisolated extension IMV2ResetRequired: SwiftProtobuf.Message, SwiftProtobuf._M
       case 1: try { try decoder.decodeSingularStringField(value: &self.snapshotID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.baseUserSyncSequence) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.manifestDigest) }()
-      case 5: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtMs) }()
+      case 4: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtMs) }()
       default: break
       }
     }
@@ -8831,11 +8861,8 @@ nonisolated extension IMV2ResetRequired: SwiftProtobuf.Message, SwiftProtobuf._M
     if self.baseUserSyncSequence != 0 {
       try visitor.visitSingularUInt64Field(value: self.baseUserSyncSequence, fieldNumber: 3)
     }
-    if !self.manifestDigest.isEmpty {
-      try visitor.visitSingularStringField(value: self.manifestDigest, fieldNumber: 4)
-    }
     if self.expiresAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.expiresAtMs, fieldNumber: 5)
+      try visitor.visitSingularInt64Field(value: self.expiresAtMs, fieldNumber: 4)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -8844,7 +8871,6 @@ nonisolated extension IMV2ResetRequired: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.snapshotID != rhs.snapshotID {return false}
     if lhs.generation != rhs.generation {return false}
     if lhs.baseUserSyncSequence != rhs.baseUserSyncSequence {return false}
-    if lhs.manifestDigest != rhs.manifestDigest {return false}
     if lhs.expiresAtMs != rhs.expiresAtMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -8933,7 +8959,7 @@ nonisolated extension IMV2SyncSnapshot: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SnapshotManifest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}base_user_sync_sequence\0\u{3}manifest_digest\0\u{3}schema_version\0\u{3}capability_profile\0\u{3}page_digests\0\u{3}next_sync_token\0\u{3}sync_receipt\0\u{3}expires_at_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}base_user_sync_sequence\0\u{3}root_digest\0\u{3}schema_version\0\u{3}capability_profile\0\u{3}page_count\0\u{3}total_items\0\u{3}total_bytes\0\u{3}next_sync_token\0\u{3}sync_receipt\0\u{3}expires_at_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8944,13 +8970,15 @@ nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf
       case 1: try { try decoder.decodeSingularStringField(value: &self.snapshotID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
       case 3: try { try decoder.decodeSingularUInt64Field(value: &self.baseUserSyncSequence) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.manifestDigest) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.rootDigest) }()
       case 5: try { try decoder.decodeSingularUInt32Field(value: &self.schemaVersion) }()
       case 6: try { try decoder.decodeSingularStringField(value: &self.capabilityProfile) }()
-      case 7: try { try decoder.decodeRepeatedStringField(value: &self.pageDigests) }()
-      case 8: try { try decoder.decodeSingularStringField(value: &self.nextSyncToken) }()
-      case 9: try { try decoder.decodeSingularStringField(value: &self.syncReceipt) }()
-      case 10: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtMs) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.pageCount) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.totalItems) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.totalBytes) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.nextSyncToken) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.syncReceipt) }()
+      case 12: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtMs) }()
       default: break
       }
     }
@@ -8966,8 +8994,8 @@ nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf
     if self.baseUserSyncSequence != 0 {
       try visitor.visitSingularUInt64Field(value: self.baseUserSyncSequence, fieldNumber: 3)
     }
-    if !self.manifestDigest.isEmpty {
-      try visitor.visitSingularStringField(value: self.manifestDigest, fieldNumber: 4)
+    if !self.rootDigest.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootDigest, fieldNumber: 4)
     }
     if self.schemaVersion != 0 {
       try visitor.visitSingularUInt32Field(value: self.schemaVersion, fieldNumber: 5)
@@ -8975,17 +9003,23 @@ nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf
     if !self.capabilityProfile.isEmpty {
       try visitor.visitSingularStringField(value: self.capabilityProfile, fieldNumber: 6)
     }
-    if !self.pageDigests.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.pageDigests, fieldNumber: 7)
+    if self.pageCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pageCount, fieldNumber: 7)
+    }
+    if self.totalItems != 0 {
+      try visitor.visitSingularUInt64Field(value: self.totalItems, fieldNumber: 8)
+    }
+    if self.totalBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.totalBytes, fieldNumber: 9)
     }
     if !self.nextSyncToken.isEmpty {
-      try visitor.visitSingularStringField(value: self.nextSyncToken, fieldNumber: 8)
+      try visitor.visitSingularStringField(value: self.nextSyncToken, fieldNumber: 10)
     }
     if !self.syncReceipt.isEmpty {
-      try visitor.visitSingularStringField(value: self.syncReceipt, fieldNumber: 9)
+      try visitor.visitSingularStringField(value: self.syncReceipt, fieldNumber: 11)
     }
     if self.expiresAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.expiresAtMs, fieldNumber: 10)
+      try visitor.visitSingularInt64Field(value: self.expiresAtMs, fieldNumber: 12)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -8994,10 +9028,12 @@ nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.snapshotID != rhs.snapshotID {return false}
     if lhs.generation != rhs.generation {return false}
     if lhs.baseUserSyncSequence != rhs.baseUserSyncSequence {return false}
-    if lhs.manifestDigest != rhs.manifestDigest {return false}
+    if lhs.rootDigest != rhs.rootDigest {return false}
     if lhs.schemaVersion != rhs.schemaVersion {return false}
     if lhs.capabilityProfile != rhs.capabilityProfile {return false}
-    if lhs.pageDigests != rhs.pageDigests {return false}
+    if lhs.pageCount != rhs.pageCount {return false}
+    if lhs.totalItems != rhs.totalItems {return false}
+    if lhs.totalBytes != rhs.totalBytes {return false}
     if lhs.nextSyncToken != rhs.nextSyncToken {return false}
     if lhs.syncReceipt != rhs.syncReceipt {return false}
     if lhs.expiresAtMs != rhs.expiresAtMs {return false}
@@ -9008,7 +9044,7 @@ nonisolated extension IMV2SnapshotManifest: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension IMV2SnapshotPagePull: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SnapshotPagePull"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}manifest_digest\0\u{3}page_index\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}root_digest\0\u{3}page_index\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9018,7 +9054,7 @@ nonisolated extension IMV2SnapshotPagePull: SwiftProtobuf.Message, SwiftProtobuf
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.snapshotID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.manifestDigest) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.rootDigest) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.pageIndex) }()
       default: break
       }
@@ -9032,8 +9068,8 @@ nonisolated extension IMV2SnapshotPagePull: SwiftProtobuf.Message, SwiftProtobuf
     if self.generation != 0 {
       try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 2)
     }
-    if !self.manifestDigest.isEmpty {
-      try visitor.visitSingularStringField(value: self.manifestDigest, fieldNumber: 3)
+    if !self.rootDigest.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootDigest, fieldNumber: 3)
     }
     if self.pageIndex != 0 {
       try visitor.visitSingularUInt32Field(value: self.pageIndex, fieldNumber: 4)
@@ -9044,7 +9080,7 @@ nonisolated extension IMV2SnapshotPagePull: SwiftProtobuf.Message, SwiftProtobuf
   public static func ==(lhs: IMV2SnapshotPagePull, rhs: IMV2SnapshotPagePull) -> Bool {
     if lhs.snapshotID != rhs.snapshotID {return false}
     if lhs.generation != rhs.generation {return false}
-    if lhs.manifestDigest != rhs.manifestDigest {return false}
+    if lhs.rootDigest != rhs.rootDigest {return false}
     if lhs.pageIndex != rhs.pageIndex {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
@@ -9053,7 +9089,7 @@ nonisolated extension IMV2SnapshotPagePull: SwiftProtobuf.Message, SwiftProtobuf
 
 nonisolated extension IMV2SnapshotPage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SnapshotPage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}manifest_digest\0\u{3}page_index\0\u{3}page_digest\0\u{1}payload\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}snapshot_id\0\u{1}generation\0\u{3}root_digest\0\u{3}page_index\0\u{3}first_projection_kind\0\u{3}first_entity_key\0\u{3}last_projection_kind\0\u{3}last_entity_key\0\u{3}item_count\0\u{3}page_digest\0\u{1}payload\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -9063,10 +9099,15 @@ nonisolated extension IMV2SnapshotPage: SwiftProtobuf.Message, SwiftProtobuf._Me
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.snapshotID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.generation) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.manifestDigest) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.rootDigest) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.pageIndex) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.pageDigest) }()
-      case 6: try { try decoder.decodeSingularBytesField(value: &self.payload) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.firstProjectionKind) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.firstEntityKey) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.lastProjectionKind) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.lastEntityKey) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.itemCount) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.pageDigest) }()
+      case 11: try { try decoder.decodeSingularBytesField(value: &self.payload) }()
       default: break
       }
     }
@@ -9079,17 +9120,32 @@ nonisolated extension IMV2SnapshotPage: SwiftProtobuf.Message, SwiftProtobuf._Me
     if self.generation != 0 {
       try visitor.visitSingularUInt64Field(value: self.generation, fieldNumber: 2)
     }
-    if !self.manifestDigest.isEmpty {
-      try visitor.visitSingularStringField(value: self.manifestDigest, fieldNumber: 3)
+    if !self.rootDigest.isEmpty {
+      try visitor.visitSingularStringField(value: self.rootDigest, fieldNumber: 3)
     }
     if self.pageIndex != 0 {
       try visitor.visitSingularUInt32Field(value: self.pageIndex, fieldNumber: 4)
     }
+    if !self.firstProjectionKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.firstProjectionKind, fieldNumber: 5)
+    }
+    if !self.firstEntityKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.firstEntityKey, fieldNumber: 6)
+    }
+    if !self.lastProjectionKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.lastProjectionKind, fieldNumber: 7)
+    }
+    if !self.lastEntityKey.isEmpty {
+      try visitor.visitSingularStringField(value: self.lastEntityKey, fieldNumber: 8)
+    }
+    if self.itemCount != 0 {
+      try visitor.visitSingularUInt32Field(value: self.itemCount, fieldNumber: 9)
+    }
     if !self.pageDigest.isEmpty {
-      try visitor.visitSingularStringField(value: self.pageDigest, fieldNumber: 5)
+      try visitor.visitSingularStringField(value: self.pageDigest, fieldNumber: 10)
     }
     if !self.payload.isEmpty {
-      try visitor.visitSingularBytesField(value: self.payload, fieldNumber: 6)
+      try visitor.visitSingularBytesField(value: self.payload, fieldNumber: 11)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -9097,8 +9153,13 @@ nonisolated extension IMV2SnapshotPage: SwiftProtobuf.Message, SwiftProtobuf._Me
   public static func ==(lhs: IMV2SnapshotPage, rhs: IMV2SnapshotPage) -> Bool {
     if lhs.snapshotID != rhs.snapshotID {return false}
     if lhs.generation != rhs.generation {return false}
-    if lhs.manifestDigest != rhs.manifestDigest {return false}
+    if lhs.rootDigest != rhs.rootDigest {return false}
     if lhs.pageIndex != rhs.pageIndex {return false}
+    if lhs.firstProjectionKind != rhs.firstProjectionKind {return false}
+    if lhs.firstEntityKey != rhs.firstEntityKey {return false}
+    if lhs.lastProjectionKind != rhs.lastProjectionKind {return false}
+    if lhs.lastEntityKey != rhs.lastEntityKey {return false}
+    if lhs.itemCount != rhs.itemCount {return false}
     if lhs.pageDigest != rhs.pageDigest {return false}
     if lhs.payload != rhs.payload {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}

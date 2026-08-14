@@ -13,6 +13,20 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     public let membershipRevision: UInt64
     public let createdAt: Date
 
+    init(
+        sourceEventID: EventID, roomID: RoomID, title: String,
+        ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode?,
+        membershipRevision: UInt64, createdAt: Date
+    ) {
+        self.sourceEventID = sourceEventID
+        self.roomID = roomID
+        self.title = title
+        self.ownerUserID = ownerUserID
+        self.deliveryMode = deliveryMode
+        self.membershipRevision = membershipRevision
+        self.createdAt = createdAt
+    }
+
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String
@@ -51,10 +65,5 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             membershipRevision = payload.membershipRevision
             createdAt = Date(timeIntervalSince1970: TimeInterval(payload.createdAtMilliseconds) / 1_000)
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
-    }
-
-    init(snapshotProjection: V2SnapshotRoomProfileProjection, deliveryMode: V2GroupDeliveryMode? = nil) {
-        sourceEventID = snapshotProjection.sourceEventID; roomID = snapshotProjection.roomID
-        title = snapshotProjection.title; ownerUserID = snapshotProjection.ownerUserID; self.deliveryMode = deliveryMode; membershipRevision = snapshotProjection.membershipRevision; createdAt = snapshotProjection.createdAt
     }
 }

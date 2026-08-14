@@ -100,6 +100,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.databaseMaxConnectionsPerEventLoop == 8)
         #expect(configuration.frameLimits.maximumPayloadBytes == 65_536)
         #expect(configuration.maximumProtobufMessageDepth == 32)
+        #expect(configuration.maximumConnections == 10_000)
+        #expect(configuration.maximumQueuedInboundChunks == 512)
+        #expect(configuration.authenticationTimeoutMilliseconds == 10_000)
         #expect(configuration.capacityProfile.id == "standard")
         #expect(configuration.capacityProfile.limits.maxEligibleMembers == 100_000)
         #expect(configuration.workerBatchSize == 256)
@@ -315,7 +318,10 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_MAX_FRAME_BYTES": "65536",
             "IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH": "32",
             "IM_V2_MAX_IN_FLIGHT_REQUESTS": "32",
+            "IM_V2_MAX_CONNECTIONS": "10000",
             "IM_V2_MAX_QUEUED_INBOUND_BYTES": "262144",
+            "IM_V2_MAX_QUEUED_INBOUND_CHUNKS": "512",
+            "IM_V2_AUTHENTICATION_TIMEOUT_MS": "10000",
             "IM_V2_IDLE_TIMEOUT_MS": "60000",
             "IM_V2_WORKER_BATCH_SIZE": "256",
             "IM_V2_WORKER_POLL_INTERVAL_MS": "100",

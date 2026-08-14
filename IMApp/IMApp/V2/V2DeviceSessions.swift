@@ -14,7 +14,10 @@ final class V2DeviceSessionsStore {
     private(set) var sessions: [V2ClientDeviceSession] = []
     private(set) var feedback: String?
     private(set) var isMutating = false
+    private(set) var isLoadingMore = false
+    private(set) var nextCursor: String?
     private var refreshGeneration = 0
+    private let pageSize = 50
 
     init(manager: any V2ClientDeviceSessionManaging, makeUUID: @escaping @Sendable () -> UUID = { UUID() }) {
         self.manager = manager
@@ -26,10 +29,11 @@ final class V2DeviceSessionsStore {
         let generation = refreshGeneration
         state = .loading
         do {
-            let values = try await manager.list()
+            let page = try await manager.list(cursor: nil, pageSize: pageSize)
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            sessions = values
+            sessions = page.sessions
+            nextCursor = page.nextCursor
             state = .loaded
             feedback = nil
         } catch is CancellationError {
@@ -37,6 +41,22 @@ final class V2DeviceSessionsStore {
             guard generation == refreshGeneration else { return }
             state = .failed
             feedback = "无法读取登录设备，请稍后重试。"
+        }
+    }
+
+    func loadMore() async {
+        guard let cursor = nextCursor, !isLoadingMore, state == .loaded else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        do {
+            let page = try await manager.list(cursor: cursor, pageSize: pageSize)
+            try Task.checkCancellation()
+            let existing = Set(sessions.map(\.deviceID))
+            sessions.append(contentsOf: page.sessions.filter { !existing.contains($0.deviceID) })
+            nextCursor = page.nextCursor
+        } catch is CancellationError {
+        } catch {
+            feedback = "无法继续读取登录设备，请稍后重试。"
         }
     }
 
@@ -145,6 +165,16 @@ struct V2DeviceSessionsView: View {
                     Button("退出此设备", role: .destructive) { sessionPendingRevocation = session }
                         .disabled(store.isMutating)
                         .accessibilityIdentifier("v2.device-sessions.revoke.\(session.deviceID.rawValue)")
+                }
+                if store.nextCursor != nil {
+                    Button {
+                        actionTask?.cancel()
+                        actionTask = Task { await store.loadMore() }
+                    } label: {
+                        if store.isLoadingMore { ProgressView() } else { Text("加载更多设备") }
+                    }
+                    .disabled(store.isLoadingMore || store.isMutating)
+                    .accessibilityIdentifier("v2.device-sessions.load-more")
                 }
                 Button("退出其他所有设备", role: .destructive) { confirmsOtherDevices = true }
                     .disabled(store.isMutating)

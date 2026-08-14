@@ -29,6 +29,19 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore {
             guard member != nil else { throw V2MessageReactionStoreError.actorNotMember }
             let exists = try await sql.raw("SELECT 1 AS exists FROM im_v2.message_reactions WHERE message_id = \(bind: messageID) AND actor_user_id = \(bind: actorID) AND reaction = \(bind: command.reaction) FOR UPDATE").first(decoding: ReactionExistsRow.self) != nil
             guard (command.action == .add && !exists) || (command.action == .remove && exists) else { return .alreadyInDesiredState }
+            if command.action == .add {
+                guard let counts = try await sql.raw("""
+                    SELECT COUNT(*)::bigint AS total_count,
+                           COUNT(*) FILTER (WHERE actor_user_id = \(bind: actorID))::bigint AS actor_count
+                    FROM im_v2.message_reactions
+                    WHERE message_id = \(bind: messageID)
+                    """).first(decoding: ReactionCountRow.self) else {
+                    throw V2MessageReactionStoreError.corruptPersistenceState
+                }
+                guard counts.totalCount < V2MessageReactionLimits.maximumReactionsPerMessage,
+                      counts.actorCount < V2MessageReactionLimits.maximumReactionsPerActorPerMessage
+                else { throw V2MessageReactionStoreError.reactionLimitReached }
+            }
 
             guard let admission = try await sql.raw("SELECT eligible_member_count, command_window_limit, command_window_used, fanout_window_limit, fanout_window_used, max_outstanding_fanout_units, outstanding_fanout_units, max_outstanding_plans, outstanding_plans, shard_lease_id, shard_lease_generation FROM im_v2.room_admission WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReactionAdmissionRow.self),
                   let shard = try await sql.raw("SELECT lease_id, generation, valid_until, command_window_limit, command_window_used, fanout_window_limit, fanout_window_used, max_outstanding_fanout_units, outstanding_fanout_units, max_outstanding_plans, outstanding_plans FROM im_v2.shard_admission_pools WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) FOR UPDATE").first(decoding: ReactionShardRow.self) else { throw V2MessageReactionStoreError.corruptPersistenceState }
@@ -61,6 +74,14 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore {
 private struct ReactionRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
 private struct ReactionMessageRow: Decodable { let roomID: UUID; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", withdrawnAt = "withdrawn_at" } }
 private struct ReactionExistsRow: Decodable { let exists: Int }
+private struct ReactionCountRow: Decodable {
+    let totalCount: Int
+    let actorCount: Int
+    enum CodingKeys: String, CodingKey {
+        case totalCount = "total_count"
+        case actorCount = "actor_count"
+    }
+}
 private struct ReactionOperationRow: Decodable { let roomID: UUID; let messageID: UUID; let reaction: String; let action: String; let roomSequence: Int64; let eventID: UUID; let planID: UUID; let createdAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", reaction, action, roomSequence = "room_sequence", eventID = "event_id", planID = "plan_id", createdAt = "created_at" }; func matches(_ command: V2ChangeMessageReactionCommand, roomID: UUID, messageID: UUID) -> Bool { self.roomID == roomID && self.messageID == messageID && reaction == command.reaction && action == command.action.rawValue }; func result(actorUserID: UserID) throws -> V2MessageReactionChange { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), actorUserID: actorUserID, reaction: reaction, action: try reactionAction(action), roomSequence: reactionUnsigned(roomSequence), eventID: .init(eventID.uuidString), fanoutPlanID: .init(planID.uuidString), createdAt: createdAt) } }
 private struct ReactionAdmissionRow { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64 }
 extension ReactionAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }

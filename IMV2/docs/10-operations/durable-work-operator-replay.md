@@ -25,9 +25,16 @@
 
 ## 触发条件与处置
 
-1. `IMV2PausedRoomOutbox` 或 `IMV2PausedFanoutDelivery`（对应
-   `im_v2_room_outbox_backlog{state="paused"}` / 
-   `im_v2_fanout_delivery_backlog{state="paused"}` 大于零）持续两分钟时创建 incident。
+1. `IMV2PausedRoomOutbox`、`IMV2PausedFanoutDelivery`、
+   `IMV2PausedContentReview`、`IMV2PausedMediaScan`、`IMV2PausedMediaPurge` 或
+   `IMV2PausedReadReceiptPreferencePropagation`、`IMV2PausedUserProjection`（对应
+   `im_v2_room_outbox_backlog{state="paused"}`、
+   `im_v2_fanout_delivery_backlog{state="paused"}` 或
+   `im_v2_content_review_backlog{state="paused"}`、
+   `im_v2_media_scan_backlog{state="paused"}` 或
+   `im_v2_media_purge_backlog{state="paused"}` 或
+   `im_v2_read_receipt_preference_propagation_backlog{state="paused"}` 或
+   `im_v2_user_projection_backlog{state="paused"}` 大于零）持续两分钟时创建 incident。
    规则和 role owner 见
    [`observability.md`](observability.md)；不能静默、snooze 后忘记或以容量理由提高该零阈值。
 2. 先修复根因（PostgreSQL、broker、路由或依赖服务），并确认没有正持续失败；
@@ -49,9 +56,17 @@
 }
 ```
 
-`targetKind: "room_outbox"` 时只能传 `sourceEventID`；不得附带 target user 或
-projection kind。可用原因码仅为 `dependency_recovered`、`data_repaired`、
+`targetKind` 为 `room_outbox`、`content_review`、`media_scan` 或 `media_purge`
+时只能传 `sourceEventID`（媒体类型中该字段承载 opaque media UUID）；不得附带
+target user 或 projection kind。`targetKind` 为
+`read_receipt_preference_propagation` 时，`sourceEventID` 必须是偏好操作 UUID，
+`targetUserID` 必须是该操作的 actor，且不得附带 projection kind。可用原因码仅为 `dependency_recovered`、`data_repaired`、
 `false_positive`。
+
+`targetKind` 为 `user_projection` 时，必须先修复/恢复 checkpoint 的精确
+`failed_sequence` 所指向 payload；`sourceEventID` 必须匹配该 log row，`targetUserID`
+必须是 paused checkpoint 的用户，且不得附带 projection kind。该 replay 只清零失败预算并
+恢复 ready，不会跳过 poison sequence。
 
 5. 记录 `operationID` 于 incident。网络重试必须复用同一 UUID：服务返回同一
    outcome 并标记 `wasIdempotent: true`。同一 UUID 搭配不同目标/原因返回冲突，

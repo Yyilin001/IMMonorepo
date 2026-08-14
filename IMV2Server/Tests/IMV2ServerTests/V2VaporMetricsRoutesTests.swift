@@ -85,11 +85,38 @@ struct V2VaporMetricsRoutesTests {
             pausedRoomOutboxRows: 7,
             readyDirectProfileUpdates: 15,
             leasedDirectProfileUpdates: 16,
+            readyReadReceiptPreferencePropagations: 30,
+            leasedReadReceiptPreferencePropagations: 31,
+            scheduledReadReceiptPreferencePropagations: 32,
+            pausedReadReceiptPreferencePropagations: 33,
             openFanoutPlans: 3,
             readyFanoutDeliveries: 4,
             leasedFanoutDeliveries: 5,
             scheduledFanoutDeliveries: 8,
             pausedFanoutDeliveries: 9,
+            readyContentReviews: 18,
+            leasedContentReviews: 19,
+            scheduledContentReviews: 20,
+            pausedContentReviews: 21,
+            readyMediaScans: 22,
+            leasedMediaScans: 23,
+            scheduledMediaScans: 24,
+            pausedMediaScans: 25,
+            readyMediaPurges: 26,
+            leasedMediaPurges: 27,
+            scheduledMediaPurges: 28,
+            pausedMediaPurges: 29,
+            userSyncLogEstimatedRows: 34,
+            userSyncLogRelationBytes: 35,
+            readyUserProjections: 36,
+            scheduledUserProjections: 37,
+            pausedUserProjections: 38,
+            maximumUserProjectionLag: 39,
+            buildingSnapshotArtifacts: 40,
+            failedSnapshotArtifacts: 41,
+            oldestBuildingSnapshotAgeSeconds: 42,
+            projectionVersionGCBacklogEstimatedRows: 43,
+            uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
             readyPushWakes: 12,
@@ -107,9 +134,28 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_room_outbox_backlog{state=\"paused\"} 7"))
             #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
             #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
+            #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 30"))
+            #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} 31"))
+            #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} 32"))
+            #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"paused\"} 33"))
+            #expect(body.contains("im_v2_user_sync_log_estimated_rows 34"))
+            #expect(body.contains("im_v2_user_sync_log_relation_bytes 35"))
+            #expect(body.contains("im_v2_user_projection_backlog{state=\"paused\"} 38"))
+            #expect(body.contains("im_v2_user_projection_maximum_lag_records 39"))
+            #expect(body.contains("im_v2_snapshot_artifacts{state=\"failed\"} 41"))
+            #expect(body.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
+            #expect(body.contains("im_v2_sync_uncompacted_projected_records 44"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 5"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
+            #expect(body.contains("im_v2_content_review_backlog{state=\"ready\"} 18"))
+            #expect(body.contains("im_v2_content_review_backlog{state=\"leased\"} 19"))
+            #expect(body.contains("im_v2_content_review_backlog{state=\"scheduled\"} 20"))
+            #expect(body.contains("im_v2_content_review_backlog{state=\"paused\"} 21"))
+            #expect(body.contains("im_v2_media_scan_backlog{state=\"scheduled\"} 24"))
+            #expect(body.contains("im_v2_media_scan_backlog{state=\"paused\"} 25"))
+            #expect(body.contains("im_v2_media_purge_backlog{state=\"scheduled\"} 28"))
+            #expect(body.contains("im_v2_media_purge_backlog{state=\"paused\"} 29"))
             #expect(body.contains("im_v2_sync_pending_records_across_devices 10"))
             #expect(body.contains("im_v2_push_wake_backlog{state=\"ready\"} 12"))
             #expect(body.contains("im_v2_push_wake_backlog{state=\"leased\"} 13"))

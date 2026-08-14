@@ -130,7 +130,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let frameLimits: V2FrameLimits
     public let maximumProtobufMessageDepth: Int
     public let connectionLimits: V2ConnectionLimits
+    /// Hard process-local admission ceiling, including unauthenticated TLS
+    /// sockets. This bounds per-connection queues, actors and TLS state.
+    public let maximumConnections: Int
     public let maximumQueuedInboundBytes: Int
+    /// Complements the byte bound so a stream of one-byte TCP fragments cannot
+    /// create an unbounded number of queued `Data` allocations.
+    public let maximumQueuedInboundChunks: Int
+    /// Absolute time from accepted channel to authenticated session. Unlike
+    /// idle timeout it cannot be extended by trickling bytes.
+    public let authenticationTimeoutMilliseconds: Int
     public let idleTimeoutMilliseconds: Int
     public let capabilityProfile: String
     public let workerBatchSize: Int
@@ -197,7 +206,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         frameLimits = try .init(maximumPayloadBytes: try Self.integer("IM_V2_MAX_FRAME_BYTES", environment: environment), acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
         maximumProtobufMessageDepth = try Self.positive("IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH", environment: environment)
         connectionLimits = try .init(maximumInFlightRequests: try Self.integer("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
+        maximumConnections = try Self.boundedPositive("IM_V2_MAX_CONNECTIONS", maximum: 1_000_000, environment: environment)
         maximumQueuedInboundBytes = try Self.positive("IM_V2_MAX_QUEUED_INBOUND_BYTES", environment: environment)
+        maximumQueuedInboundChunks = try Self.boundedPositive("IM_V2_MAX_QUEUED_INBOUND_CHUNKS", maximum: 4_096, environment: environment)
+        authenticationTimeoutMilliseconds = try Self.boundedPositive("IM_V2_AUTHENTICATION_TIMEOUT_MS", maximum: 300_000, environment: environment)
         idleTimeoutMilliseconds = try Self.positive("IM_V2_IDLE_TIMEOUT_MS", environment: environment)
         workerBatchSize = try Self.positive("IM_V2_WORKER_BATCH_SIZE", environment: environment)
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
@@ -369,6 +381,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     private static func positive(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {
         let result = try integer(key, environment: environment)
         guard result > 0 else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
+        return result
+    }
+
+    private static func boundedPositive(
+        _ key: String,
+        maximum: Int,
+        environment: any V2RuntimeEnvironment
+    ) throws -> Int {
+        let result = try positive(key, environment: environment)
+        guard result <= maximum else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return result
     }
 

@@ -11,65 +11,48 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         self.localStore = localStore
     }
 
-    func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem] {
-        let profiles = try await localStore.roomProfiles()
-        let titles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
-        let directIdentities = try await localStore.directRoomIdentities()
-        let profileViews = try await localStore.profileViews(userIDs: Array(Set(directIdentities.map(\.publicIdentity.userID))))
-        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { identity in
-            (
-                identity.roomID,
+    func conversationSummaryPage(
+        for userID: String,
+        isArchived: Bool,
+        before cursor: V2ClientConversationListCursor?,
+        limit: Int
+    ) async throws -> V2ConversationListPage {
+        let page = try await localStore.conversationListPage(
+            isArchived: isArchived,
+            before: cursor,
+            limit: limit
+        )
+        let items = page.entries.map { entry in
+            let directTitle = entry.directIdentity.map { identity in
                 V2ProfileResolver.resolve(
                     userID: identity.publicIdentity.userID,
-                    profile: profileViews[identity.publicIdentity.userID],
+                    profile: entry.directProfileView,
                     alias: nil,
                     groupMember: nil,
                     surface: .directConversation
                 ).displayName
-            )
-        })
-        let directAccountKinds = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.accountKind) })
-        let groupRoomIDs = Set(profiles.map(\.roomID))
-        let directRoomIDs = Set(directIdentities.map(\.roomID))
-        let knownRoomIDs = groupRoomIDs.union(directRoomIDs)
-        var states: [RoomID: V2ClientConversationState] = [:]
-        states.reserveCapacity(knownRoomIDs.count)
-        for roomID in knownRoomIDs {
-            if let state = try await localStore.conversationState(roomID: roomID) {
-                states[roomID] = state
             }
-        }
-        let summaries = try await localStore.conversationSummaries()
-        var messageItems: [V2ConversationListItem] = []
-        messageItems.reserveCapacity(summaries.count)
-        for summary in summaries {
-            let message = summary.lastMessage
-            let state: V2ClientConversationState?
-            if let knownState = states[summary.roomID] {
-                state = knownState
+            let kind: V2ConversationListItem.Kind = if entry.roomProfile != nil {
+                .group
+            } else if entry.directIdentity != nil {
+                .direct
             } else {
-                state = try await localStore.conversationState(roomID: summary.roomID)
+                .unknown
             }
-            messageItems.append(V2ConversationListItem(
-                id: summary.roomID.rawValue,
-                title: titles[summary.roomID] ?? directTitles[summary.roomID] ?? Self.roomTitle(summary.roomID.rawValue),
-                preview: Self.preview(for: message),
-                lastActivity: message.createdAt,
-                isOutgoing: message.senderUserID.rawValue == userID,
-                kind: groupRoomIDs.contains(summary.roomID) ? .group : (directRoomIDs.contains(summary.roomID) ? .direct : .unknown),
-                accountKind: directAccountKinds[summary.roomID] ?? .regular,
-                isPinned: state?.isPinned ?? false,
-                isArchived: state?.isArchived ?? false,
-                muteUntil: state?.muteUntil
-            ))
+            return V2ConversationListItem(
+                id: entry.roomID.rawValue,
+                title: entry.roomProfile?.title ?? directTitle ?? Self.roomTitle(entry.roomID.rawValue),
+                preview: entry.lastMessage.map { Self.preview(for: $0) } ?? "暂无消息",
+                lastActivity: entry.lastActivity,
+                isOutgoing: entry.lastMessage?.senderUserID.rawValue == userID,
+                kind: kind,
+                accountKind: entry.directIdentity?.publicIdentity.accountKind ?? .regular,
+                isPinned: entry.isPinned,
+                isArchived: entry.isArchived,
+                muteUntil: entry.muteUntil
+            )
         }
-        return Self.mergingEmptyProjectionItems(
-            messageItems: messageItems,
-            profiles: profiles,
-            directIdentities: directIdentities,
-            directTitles: directTitles,
-            conversationStates: states
-        )
+        return .init(items: items, nextCursor: page.nextCursor)
     }
 
     static func mergingEmptyProjectionItems(
@@ -126,55 +109,74 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         let messages = try await localStore.messages(in: parsedRoomID)
         let reactions = try await localStore.reactions(in: parsedRoomID)
         let pinnedMessageIDs = try await localStore.pinnedMessageIDs(roomID: parsedRoomID)
+        let favoritedMessageIDs = try await localStore.favoritedMessageIDs(in: parsedRoomID)
         let directReceipt = try await localStore.directReadReceipt(roomID: parsedRoomID)
         let reactionsByMessageID = Dictionary(grouping: reactions, by: \.messageID)
         var items: [V2ConversationMessageItem] = []
         items.reserveCapacity(messages.count)
         for message in messages {
-            items.append(.init(
-                id: message.messageID.rawValue,
-                roomSequence: message.roomSequence,
-                revision: message.messageRevision,
-                text: message.isWithdrawn ? "消息已撤回" : message.text,
-                media: message.isWithdrawn ? [] : message.media,
-                mediaPresentations: message.isWithdrawn ? [] : message.mediaPresentations,
-                mentions: message.isWithdrawn ? [] : message.mentions,
-                entities: message.isWithdrawn ? [] : message.entities,
-                replyTo: message.isWithdrawn ? nil : message.replyTo,
-                createdAt: message.createdAt,
-                isOutgoing: message.senderUserID.rawValue == userID,
-                isWithdrawn: message.isWithdrawn,
-                reactions: Self.reactionSummaries(
-                    reactionsByMessageID[message.messageID] ?? [],
-                    currentUserID: userID
-                ),
-                isReadByPeer: message.senderUserID.rawValue == userID && (directReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
-                isFavorited: try await localStore.isMessageFavorited(message.messageID),
-                isPinnedInGroup: pinnedMessageIDs.contains(message.messageID),
-                isForwarded: !message.isWithdrawn && message.forwardedFrom != nil
+            items.append(Self.messageItem(
+                message,
+                userID: userID,
+                reactions: reactionsByMessageID[message.messageID] ?? [],
+                pinnedMessageIDs: pinnedMessageIDs,
+                favoritedMessageIDs: favoritedMessageIDs,
+                directReceipt: directReceipt
             ))
         }
         return items
     }
 
     func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
+        try await timelinePage(in: roomID, for: userID, before: nil, limit: 10_000).items
+    }
+
+    func timelinePage(
+        in roomID: String,
+        for userID: String,
+        before cursor: V2ConversationTimelineCursor?,
+        limit: Int
+    ) async throws -> V2ConversationTimelinePage {
         let parsedRoomID = try RoomID(roomID)
-        let messageItems = try await messages(in: roomID, for: userID)
-        let messageTimeline = try await localStore.messages(in: parsedRoomID)
-        let messageSequenceByID = Dictionary(uniqueKeysWithValues: messageTimeline.map { ($0.messageID.rawValue, $0.timelineSequence) })
-        let activities = try await localStore.timelineActivities(in: parsedRoomID)
-        let renderedActivities: [V2ConversationTimelineItem] = activities.map { activity in
+        let page = try await localStore.conversationTimelinePage(
+            in: parsedRoomID,
+            before: cursor.map {
+                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID)
+            },
+            limit: limit
+        )
+        let reactionsByMessageID = Dictionary(grouping: page.reactions, by: \.messageID)
+        let renderedMessages: [V2ConversationTimelineItem] = page.messages.map { message in
+            .message(
+                Self.messageItem(
+                    message,
+                    userID: userID,
+                    reactions: reactionsByMessageID[message.messageID] ?? [],
+                    pinnedMessageIDs: page.pinnedMessageIDs,
+                    favoritedMessageIDs: page.favoritedMessageIDs,
+                    directReceipt: page.directReadReceipt
+                ),
+                timelineSequence: message.timelineSequence
+            )
+        }
+        let renderedActivities: [V2ConversationTimelineItem] = page.activities.map { activity in
             let kind: V2ConversationTimelineItem.Activity.Kind = switch activity.kind {
             case .directMessageRestricted: .directMessageRestricted
             case .systemAccountReadOnly: .systemAccountReadOnly
             }
             return .activity(.init(id: activity.id, timelineSequence: activity.timelineSequence, kind: kind, createdAt: activity.createdAt))
         }
-        return (messageItems.map { message in
-            .message(message, timelineSequence: messageSequenceByID[message.id] ?? message.roomSequence)
-        } + renderedActivities).sorted { lhs, rhs in
-            lhs.timelineSequence == rhs.timelineSequence ? lhs.id < rhs.id : lhs.timelineSequence < rhs.timelineSequence
+        let items = (renderedMessages + renderedActivities).sorted { lhs, rhs in
+            lhs.timelineSequence == rhs.timelineSequence
+                ? lhs.storageItemID < rhs.storageItemID
+                : lhs.timelineSequence < rhs.timelineSequence
         }
+        return .init(
+            items: items,
+            olderCursor: page.olderCursor.map {
+                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID)
+            }
+        )
     }
 
     func directSendingCapability(in roomID: String) async throws -> Bool? {
@@ -197,20 +199,23 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         try await localStore.messageSearchIndexProgress()
     }
 
-    func favoriteMessages(for _: String) async throws -> [V2FavoriteConversationMessageItem] {
-        let profiles = try await localStore.roomProfiles()
-        let groupTitles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.roomID, $0.title) })
-        let directIdentities = try await localStore.directRoomIdentities()
-        let directTitles = Dictionary(uniqueKeysWithValues: directIdentities.map { ($0.roomID, $0.publicIdentity.displayName) })
-        return try await localStore.favoritedMessages().map { message in
-            .init(
+    func favoriteMessages(
+        for _: String,
+        before cursor: V2ClientFavoriteMessageCursor?,
+        limit: Int
+    ) async throws -> V2ConversationFavoriteMessagesPage {
+        let page = try await localStore.favoritedMessages(before: cursor, limit: limit)
+        let titles = try await localStore.conversationTitles(for: Array(Set(page.messages.map(\.roomID))))
+        let items: [V2FavoriteConversationMessageItem] = page.messages.map { message in
+            V2FavoriteConversationMessageItem(
                 id: message.messageID.rawValue,
                 roomID: message.roomID.rawValue,
-                roomTitle: groupTitles[message.roomID] ?? directTitles[message.roomID] ?? Self.roomTitle(message.roomID.rawValue),
+                roomTitle: titles[message.roomID] ?? Self.roomTitle(message.roomID.rawValue),
                 text: Self.preview(for: message),
                 createdAt: message.createdAt
             )
         }
+        return .init(items: items, nextCursor: page.nextCursor)
     }
 
     private static func roomTitle(_ roomID: String) -> String {
@@ -226,6 +231,36 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         if message.isWithdrawn { return "消息已撤回" }
         if !message.text.isEmpty { return message.text }
         return message.media.isEmpty ? "" : "[附件]"
+    }
+
+    private static func messageItem(
+        _ message: V2ClientMessageProjection,
+        userID: String,
+        reactions: [V2ClientMessageReaction],
+        pinnedMessageIDs: Set<MessageID>,
+        favoritedMessageIDs: Set<MessageID>,
+        directReceipt: V2DirectReadReceiptProjection?
+    ) -> V2ConversationMessageItem {
+        .init(
+            id: message.messageID.rawValue,
+            roomSequence: message.roomSequence,
+            revision: message.messageRevision,
+            text: message.isWithdrawn ? "消息已撤回" : message.text,
+            media: message.isWithdrawn ? [] : message.media,
+            mediaPresentations: message.isWithdrawn ? [] : message.mediaPresentations,
+            mentions: message.isWithdrawn ? [] : message.mentions,
+            entities: message.isWithdrawn ? [] : message.entities,
+            replyTo: message.isWithdrawn ? nil : message.replyTo,
+            createdAt: message.createdAt,
+            isOutgoing: message.senderUserID.rawValue == userID,
+            isWithdrawn: message.isWithdrawn,
+            reactions: reactionSummaries(reactions, currentUserID: userID),
+            isReadByPeer: message.senderUserID.rawValue == userID
+                && (directReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
+            isFavorited: favoritedMessageIDs.contains(message.messageID),
+            isPinnedInGroup: pinnedMessageIDs.contains(message.messageID),
+            isForwarded: !message.isWithdrawn && message.forwardedFrom != nil
+        )
     }
 
     private static func reactionSummaries(_ reactions: [V2ClientMessageReaction], currentUserID: String) -> [V2ConversationMessageReaction] {

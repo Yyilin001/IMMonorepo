@@ -7,9 +7,9 @@
 PostgreSQL durable-work 指标是 worker 健康和积压的权威观测面。Hybrid 群的
 `group_event_wake_outbox` 也只在 room event 提交后发送最佳努力 wake hint；提示
 发布失败不会改变 cursor、outbox、plan 或 delivery 状态，因此不会产生“broker 成功
-即投递成功”的指标语义。当前 adapter 也没有 NATS connection、publish-confirmation、
-consumer lag、reconnect 或 broker availability 指标；启用 NATS 前不能把这些缺失
-指标误解为健康。
+即投递成功”的指标语义。adapter 以 `PING`/`PONG` 确认命令并在断线后重放当前本机兴趣，
+但尚未暴露 NATS connection、publish-confirmation latency、consumer lag、reconnect 或
+broker availability 指标；启用 NATS 前不能把这些缺失指标误解为健康。
 
 `V2TelemetrySink` 是 Server 的可注入边界。网关命令和一次 fan-out pipeline
 进度分别写入 `V2TelemetryEvent`；生产应用使用 `V2ApplicationTelemetrySink`
@@ -58,6 +58,16 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 `/metrics` 本身仍保持可抓取；该值必须被单独告警。快照包含
 `im_v2_room_outbox_backlog`、`im_v2_fanout_plans_open`、
 `im_v2_direct_profile_update_backlog`、`im_v2_fanout_delivery_backlog`、
+`im_v2_read_receipt_preference_propagation_backlog`、
+`im_v2_content_review_backlog`、`im_v2_media_scan_backlog`、
+`im_v2_media_purge_backlog`、
+`im_v2_user_sync_log_estimated_rows`、`im_v2_user_sync_log_relation_bytes`、
+`im_v2_user_projection_effects_estimated_rows`、
+`im_v2_user_projection_effects_relation_bytes`、
+`im_v2_user_projection_backlog`、`im_v2_user_projection_maximum_lag_records`、
+`im_v2_snapshot_artifacts`、`im_v2_snapshot_oldest_building_age_seconds`、
+`im_v2_projection_version_gc_backlog_estimated_rows`、
+`im_v2_sync_uncompacted_projected_records`、
 `im_v2_sync_pending_records_across_devices` 与
 `im_v2_sync_reset_pending_devices`。当 gateway 启动配置提供 node ID 时，快照还包含
 `im_v2_device_revocation_events_pending`：它只统计**当前 scrape 所在 gateway
@@ -67,7 +77,8 @@ runbook 处置。Gateway 在绑定 TLS listener 前只为此前未见过的 node
 cursor，并把它设为当时的 event watermark：新副本没有存活 socket，无需扫描历史；
 已存在 cursor 绝不在启动时推进，以保留崩溃恢复和防止重复 node ID 跳过工作。
 部署必须为同时运行的 gateway 使用不同、受限且稳定的 node ID；以 scrape target
-而非指标标签区分副本。room outbox 和投递只使用固定的
+而非指标标签区分副本。room outbox、投递、回执隐私传播、content review、
+media scan 和 media purge 只使用固定的
 `ready`/`leased`/`scheduled`/`paused` 标签；`scheduled` 表示仍处于退避等待期，
 `paused` 表示重试预算已耗尽、必须经受控
 operator replay 才会再次入队的 durable row，绝不能将它当作已投递或已终态。
@@ -75,8 +86,23 @@ direct-profile outbox 只使用 `ready`/`leased`：资料投递 worker 每轮按
 推进 checkpoint，因而没有独立的退避或 paused 状态；`leased` 超时会重新变为
 `ready`。它不含用户、room 或 shard 标签。
 投递统计覆盖本副本部署 registry 显式配置的全部逻辑 user-shard bucket，
-但不把 bucket 值作为标签。同步积压按每个 ready device cursor 计算，故多设备
+但不把 bucket 值作为标签。同步、projection、snapshot、GC、compaction 与 relation-size
+指标会并发查询每个去重后的物理 `(database, schema)` user store 后无标签聚合；计数与
+字节求和，最大 lag 和最老构建年龄取最大值。任一 store 查询失败时整组
+`im_v2_durable_work_metrics_available` 为 `0`，不会把局部结果伪装成全局健康值。
+同步积压按每个 ready device cursor 计算，故多设备
 用户会被分别计入；这反映实际待同步工作量，而不是独立消息数。
+`user_sync_log_estimated_rows` 读取 PostgreSQL planner statistics，不会为 scrape 执行
+追加表的精确全表计数，因此允许短期滞后；`user_sync_log_relation_bytes` 使用 relation
+size 元数据，包含 heap、index 与 TOAST。projection backlog/lag 区分可立即执行、退避和
+poison-paused 用户；snapshot 指标区分正在构建与失败 artifact，并给出最老构建年龄；GC
+使用 closed-version partial index 的 planner estimate，不为 scrape 扫描 MVCC 全表；
+uncompacted records 表示 canonical checkpoint 与 retained floor 的聚合距离。它们共同定位
+增长来自 projector、builder、GC 还是 compactor，不再只能看到最终 relation size。
+`user_projection_effects` 是控制投影的稳定幂等结果，和 operation ledger 同类，不属于可按
+retained floor 删除的增量历史；它的 estimate/bytes 用于容量规划与统一操作结果保留策略。
+默认告警在总 relation size 超过 10 GiB 且持续 30 分钟后触发，上线前必须按批准的操作速率、
+幂等窗口和磁盘预算重新校准，禁止由 sync-log compactor 顺手删除。
 
 ## 隐私与基数约束
 
@@ -104,6 +130,16 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2DurableWorkMetricsUnavailable` | scrape 值为 `0` 或指标缺失，5 分钟 | critical | 恢复 PostgreSQL metrics source 后确认 backlog；不能据此执行 replay |
 | `IMV2PausedRoomOutbox` | paused outbox 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
 | `IMV2PausedFanoutDelivery` | paused delivery 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
+| `IMV2PausedContentReview` | paused content review 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复审核依赖或策略错误，再单目标回放 |
+| `IMV2PausedMediaScan` | paused media scan 大于 `0`，2 分钟 | critical | 修复扫描 provider 后按 runbook 单目标回放 |
+| `IMV2PausedMediaPurge` | paused media purge 大于 `0`，2 分钟 | critical | 修复对象清理 provider 后按 runbook 单目标回放 |
+| `IMV2PausedReadReceiptPreferencePropagation` | paused 隐私传播大于 `0`，2 分钟 | critical | 优先恢复 user-shard shadow 依赖，再按 runbook 精确回放该偏好操作 |
+| `IMV2PausedUserProjection` | paused user projection 大于 `0`，2 分钟 | critical | 修复精确 poison event 后，按 runbook 使用 `user_projection` 单目标回放 |
+| `IMV2UserProjectionLag` | 最大单用户 lag 超过 10,000，10 分钟 | warning | 检查 projector worker、数据库锁与写入速率 |
+| `IMV2SnapshotBuildStalled` | 最老 building artifact 超过 15 分钟，5 分钟 | critical | 检查 builder lease、checkpoint fence 和页尺寸失败 |
+| `IMV2SnapshotBuildFailures` | failed artifact 大于 `0`，5 分钟 | warning | 按 failure code 调查尺寸/编码/存储，再确认过期清理 |
+| `IMV2ProjectionGCBacklog` | closed-version estimate 超过 1,000,000，30 分钟 | warning | 检查活跃 building baseline、migration fence 和 GC cadence |
+| `IMV2SyncCompactionBacklog` | projected-retained 差值超过 10,000,000，30 分钟 | warning | 检查未过期 capability、低 cursor reset 与 compactor cadence |
 | `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
 | `IMV2FanoutFailureRate` | 任意 fan-out failure 持续 10 分钟 | warning | 调查依赖、路由与失败 stage，避免演变为 paused |
 

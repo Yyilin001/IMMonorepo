@@ -40,23 +40,6 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
                 throw V2AccountEdgeClientRateLimitError.unavailable
             }
             let current = now()
-            // An edge-derived address can create a high-cardinality key. Keep
-            // only active fixed-window rows with a bounded, SKIP LOCKED sweep;
-            // this is intentionally part of the request transaction so the
-            // account process needs no unmanaged cleanup task to uphold the
-            // privacy/retention boundary.
-            let expiredBefore = current.addingTimeInterval(-policy.window)
-            try await sql.raw("""
-                DELETE FROM im_v2.account_edge_client_rate_limits
-                WHERE client_key IN (
-                    SELECT client_key
-                    FROM im_v2.account_edge_client_rate_limits
-                    WHERE updated_at < \(bind: expiredBefore)
-                    ORDER BY updated_at
-                    LIMIT 100
-                    FOR UPDATE SKIP LOCKED
-                )
-                """).run()
             let lockKey = "v2-account-edge-client-rate:" + clientKey
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             guard let existing = try await sql.raw("SELECT window_started_at, request_count FROM im_v2.account_edge_client_rate_limits WHERE client_key = \(bind: clientKey) FOR UPDATE").first(decoding: V2AccountEdgeClientRateLimitRow.self) else {
@@ -76,6 +59,33 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
             return .allowed
         }
     }
+
+    /// High-cardinality pseudonymous keys are reclaimed independently from
+    /// request latency. Multiple account replicas may run this bounded sweep.
+    @discardableResult
+    public func purgeExpired(limit: Int) async throws -> Int {
+        guard limit > 0, let sql = database as? any SQLDatabase else {
+            throw V2AccountEdgeClientRateLimitError.unavailable
+        }
+        let expiredBefore = now().addingTimeInterval(-policy.window)
+        let row = try await sql.raw("""
+            WITH expired AS (
+                SELECT client_key
+                FROM im_v2.account_edge_client_rate_limits
+                WHERE updated_at < \(bind: expiredBefore)
+                ORDER BY updated_at
+                LIMIT \(bind: limit)
+                FOR UPDATE SKIP LOCKED
+            ), deleted AS (
+                DELETE FROM im_v2.account_edge_client_rate_limits AS rate
+                USING expired
+                WHERE rate.client_key = expired.client_key
+                RETURNING 1
+            )
+            SELECT COUNT(*)::bigint AS value FROM deleted
+            """).first(decoding: V2AccountEdgeClientRateLimitCountRow.self)
+        return Int(row?.value ?? 0)
+    }
 }
 
 /// Runs after `V2AccountEdgeAuthenticationMiddleware`. A route cannot reach
@@ -83,12 +93,19 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
 /// itself and supplies one syntactically valid client address.
 public struct V2AccountEdgeClientRateLimitMiddleware: AsyncMiddleware, Sendable {
     private let limiter: any V2AccountEdgeClientRateLimiting
+    private let limitedPaths: Set<String>?
 
-    public init(limiter: any V2AccountEdgeClientRateLimiting) {
+    /// `nil` preserves an all-route policy for focused tests or deployments.
+    /// Production supplies only unauthenticated credential-issuance paths.
+    public init(limiter: any V2AccountEdgeClientRateLimiting, limitedPaths: Set<String>? = nil) {
         self.limiter = limiter
+        self.limitedPaths = limitedPaths
     }
 
     public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        if let limitedPaths, !limitedPaths.contains(request.url.path) {
+            return try await next.respond(to: request)
+        }
         guard let address = request.storage[V2AccountEdgeClientAddressStorageKey.self] else {
             throw Abort(.forbidden)
         }
@@ -128,3 +145,5 @@ private struct V2AccountEdgeClientRateLimitRow: Decodable {
         case requestCount = "request_count"
     }
 }
+
+private struct V2AccountEdgeClientRateLimitCountRow: Decodable { let value: Int64 }

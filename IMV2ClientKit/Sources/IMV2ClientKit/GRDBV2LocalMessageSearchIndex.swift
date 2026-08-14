@@ -20,7 +20,8 @@ extension GRDBV2LocalSyncStore {
     public func rebuildMessageSearchIndex() async throws {
         while !Task.isCancelled {
             let generation = try await databasePool.write { db in
-                try Self.beginMessageSearchIndexRebuild(db: db)
+                try Self.requireProjectionWritesUnfenced(db: db)
+                return try Self.beginMessageSearchIndexRebuild(db: db)
             }
             try await messageSearchDatabasePool.write { db in
                 try db.execute(sql: "DELETE FROM v2_message_char_fts")
@@ -234,6 +235,20 @@ extension GRDBV2LocalSyncStore {
         )
     }
 
+    static func enqueueMessageSearchDeletionJob(messageID: String, db: Database) throws {
+        try db.execute(
+            sql: """
+            INSERT INTO v2_message_search_jobs (message_id, expected_message_revision, generation, enqueued_at)
+            VALUES (?, 1, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                expected_message_revision = 1,
+                generation = excluded.generation,
+                enqueued_at = excluded.enqueued_at
+            """,
+            arguments: [messageID, try messageSearchIndexGeneration(db: db), Date().timeIntervalSince1970]
+        )
+    }
+
     private struct MessageSearchDocument: Sendable {
         let primaryRowID: Int64
         let messageID: String
@@ -319,30 +334,78 @@ extension GRDBV2LocalSyncStore {
         var scanCursor = cursor
         var hits: [V2MessageSearchHit] = []
         let batchSize = max(128, request.limit * 2)
-        while true {
-            let rows = try searchCandidateRows(match: match, request: request, generation: generation, cursor: scanCursor, limit: batchSize, db: db)
+        // A very stale derived index or a one-character query can have a low
+        // acceptance ratio. Bound one synchronous call and return the scan
+        // cursor so the UI can continue without monopolizing its executor.
+        let scanBudget = max(512, min(2_000, request.limit * 20))
+        var scannedCount = 0
+        while scannedCount < scanBudget {
+            let remainingBudget = scanBudget - scannedCount
+            let fetchLimit = min(batchSize, remainingBudget)
+            let rows = try searchCandidateRows(
+                match: match,
+                request: request,
+                generation: generation,
+                cursor: scanCursor,
+                limit: fetchLimit,
+                db: db
+            )
             guard !rows.isEmpty else { return .init(hits: hits, nextCursor: nil) }
-            for row in rows {
-                let candidate = try searchCandidate(row)
+            scannedCount += rows.count
+            let candidates = try rows.map(searchCandidate)
+            let exactCandidates = candidates.filter { candidate in
+                query.characterCount == 0 ||
+                    V2CharacterGramTokenizer.normalize(candidate.hit.text).range(of: query.normalized) != nil
+            }
+            let currentMessageIDs = try currentSearchCandidateIDs(
+                exactCandidates,
+                generation: generation,
+                primaryDatabasePool: primaryDatabasePool
+            )
+            for (candidateIndex, candidate) in candidates.enumerated() {
                 let candidateCursor = searchCursor(for: candidate.hit, scope: request.scope, filterFingerprint: filterFingerprint)
                 scanCursor = candidateCursor
                 guard query.characterCount == 0 || V2CharacterGramTokenizer.normalize(candidate.hit.text).range(of: query.normalized) != nil else { continue }
-                guard try isCurrentSearchCandidate(candidate, generation: generation, primaryDatabasePool: primaryDatabasePool) else { continue }
-                if hits.count == request.limit { return .init(hits: hits, nextCursor: cursor) }
+                guard currentMessageIDs.contains(candidate.hit.messageID.rawValue) else { continue }
                 hits.append(candidate.hit)
                 cursor = candidateCursor
+                if hits.count == request.limit {
+                    let mayHaveMore = candidateIndex < candidates.count - 1 || rows.count == fetchLimit
+                    return .init(hits: hits, nextCursor: mayHaveMore ? cursor : nil)
+                }
             }
             if rows.count < batchSize { return .init(hits: hits, nextCursor: nil) }
         }
+        return .init(hits: hits, nextCursor: scanCursor)
     }
 
-    private static func isCurrentSearchCandidate(_ candidate: IndexedCandidate, generation: Int64, primaryDatabasePool: DatabasePool) throws -> Bool {
-        guard candidate.generation == generation else { return false }
+    /// One primary read validates the entire FTS candidate batch. This keeps
+    /// the replaceable index privacy-safe without an N+1 query per hit.
+    private static func currentSearchCandidateIDs(
+        _ candidates: [IndexedCandidate],
+        generation: Int64,
+        primaryDatabasePool: DatabasePool
+    ) throws -> Set<String> {
+        let expected = Dictionary(uniqueKeysWithValues: candidates.compactMap { candidate in
+            candidate.generation == generation
+                ? (candidate.hit.messageID.rawValue, candidate.revision)
+                : nil
+        })
+        guard !expected.isEmpty else { return [] }
         return try primaryDatabasePool.read { db in
-            let row = try Row.fetchOne(db, sql: "SELECT message_revision, is_withdrawn FROM v2_message_projections WHERE message_id = ?", arguments: [candidate.hit.messageID.rawValue])
-            let revision: Int64? = row?["message_revision"]
-            let withdrawn: Bool? = row?["is_withdrawn"]
-            return revision == candidate.revision && withdrawn == false
+            let identifiers = Array(expected.keys)
+            let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ",")
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT message_id, message_revision, is_withdrawn FROM v2_message_projections WHERE message_id IN (\(placeholders))",
+                arguments: StatementArguments(identifiers)
+            )
+            return Set(rows.compactMap { row -> String? in
+                let messageID: String = row["message_id"]
+                let revision: Int64 = row["message_revision"]
+                let isWithdrawn: Bool = row["is_withdrawn"]
+                return !isWithdrawn && expected[messageID] == revision ? messageID : nil
+            })
         }
     }
 

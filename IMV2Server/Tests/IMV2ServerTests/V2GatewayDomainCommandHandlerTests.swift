@@ -443,11 +443,10 @@ private struct GatewayRejectingSyncStore: V2SyncStore {
         throw V2SyncStoreError.invalidOrExpiredSyncReceipt
     }
 
-    func stageReset(userID _: UserID, deviceID _: DeviceID, snapshot _: V2SnapshotStage, now _: Date) async throws -> UInt64 { 1 }
     func fetchSnapshotManifest(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, now _: Date) async throws -> V2SnapshotManifest {
         throw V2SyncStoreError.snapshotExpiredOrInvalid
     }
-    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, manifestDigest _: String, index _: UInt32, now _: Date) async throws -> V2SnapshotPage {
+    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, rootDigest _: String, index _: UInt32, now _: Date) async throws -> V2SnapshotPage {
         throw V2SyncStoreError.snapshotExpiredOrInvalid
     }
     func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, baseSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) async throws {}

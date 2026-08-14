@@ -22,8 +22,6 @@ enum V2PostgresMediaVisibilityAuthorization {
                 FROM im_v2.media_objects AS media
                 WHERE media.media_id = \(bind: mediaID)
                   AND media.state = 'available'
-                  AND message.withdrawn_at IS NULL
-                  AND reference.revoked_at IS NULL
                   AND EXISTS (
                       SELECT 1
                       FROM im_v2.auth_devices AS authenticated_device
@@ -47,20 +45,20 @@ enum V2PostgresMediaVisibilityAuthorization {
                           WHERE reference.media_id = media.media_id
                             AND message.withdrawn_at IS NULL
                             AND reference.revoked_at IS NULL
+                            -- Current projection state is the durable delivery
+                            -- authority after incremental log compaction. A
+                            -- withdrawn/redacted message closes this version,
+                            -- so old media cannot be re-authorized.
                             AND EXISTS (
                                 SELECT 1
-                                FROM im_v2.user_sync_log AS delivery
-                                LEFT JOIN im_v2.fanout_sync_payloads AS shared
-                                  ON shared.source_event_id = delivery.source_event_id
-                                 AND shared.projection_kind = delivery.projection_kind
+                                FROM im_v2.user_projection_versions AS delivery
                                 WHERE delivery.user_id = \(bind: requesterUserID)
                                   AND delivery.projection_kind = 'message'
-                                  AND (CASE WHEN delivery.payload_storage = 'inline'
-                                            THEN delivery.payload ELSE shared.payload END)->>'event_type' = 'message.accepted'
-                                  AND (CASE WHEN delivery.payload_storage = 'inline'
-                                            THEN delivery.payload ELSE shared.payload END)->>'message_id' = message.message_id::text
-                                  AND (CASE WHEN delivery.payload_storage = 'inline'
-                                            THEN delivery.payload ELSE shared.payload END)->'media_ids' @> jsonb_build_array(media.media_id::text)
+                                  AND delivery.entity_key = message.message_id::text
+                                  AND delivery.valid_to_sequence IS NULL
+                                  AND delivery.payload->>'event_type' = 'message.accepted'
+                                  AND COALESCE((delivery.payload->>'is_withdrawn')::boolean, FALSE) = FALSE
+                                  AND delivery.payload->'media_ids' @> jsonb_build_array(media.media_id::text)
                             )
                       )
                       OR EXISTS (
@@ -68,6 +66,14 @@ enum V2PostgresMediaVisibilityAuthorization {
                           FROM im_v2.public_user_profiles AS profile
                           WHERE profile.avatar_media_id = media.media_id
                             AND profile.state = 'active'
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM im_v2.user_blocks AS block
+                                WHERE (block.blocker_user_id = \(bind: requesterUserID)
+                                       AND block.blocked_user_id = profile.user_id)
+                                   OR (block.blocker_user_id = profile.user_id
+                                       AND block.blocked_user_id = \(bind: requesterUserID))
+                            )
                             AND (
                                 profile.user_id = \(bind: requesterUserID)
                                 OR EXISTS (

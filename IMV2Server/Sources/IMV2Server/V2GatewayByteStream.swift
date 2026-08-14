@@ -18,7 +18,11 @@ public actor V2GatewayByteStream {
     // bridges the NIO close future into this actor rather than merely
     // scheduling a best-effort close.
     private var deviceRevocationHandler: (@Sendable () async -> Void)?
-    private var outboundWriter: (@Sendable (Data) -> Void)?
+    private var outboundWriter: (@Sendable (Data) async -> Void)?
+    /// Once the owning transport closes, late callback installation must not
+    /// recreate a stream -> callback -> channel-handler -> stream retain
+    /// cycle. This also fences the handlerAdded/channelInactive race.
+    private var transportClosed = false
 
     public init(
         frameLimits: V2FrameLimits,
@@ -40,10 +44,22 @@ public actor V2GatewayByteStream {
     /// Framing or command failures close the session so a malformed stream
     /// cannot continue from an unknown protocol state.
     public func receive(_ bytes: Data) async throws -> [Data] {
+        var responses: [Data] = []
+        try await receive(bytes) { response in
+            responses.append(response)
+        }
+        return responses
+    }
+
+    /// Production transports use this form so replies can cross their
+    /// writability boundary one at a time instead of materializing a second
+    /// response batch beside the decoded frame batch.
+    public func receive(
+        _ bytes: Data,
+        respond: (Data) async throws -> Void
+    ) async throws {
         do {
             let inbound = try decoder.append(bytes)
-            var outbound: [Data] = []
-            outbound.reserveCapacity(inbound.count)
             for frame in inbound {
                 let inboundEnvelope = try V2ServerProtobufFrameCodec.decode(frame)
                 let response: V2Frame
@@ -54,9 +70,8 @@ public actor V2GatewayByteStream {
                 }
                 try await registerAuthenticatedDeviceIfNeeded()
                 try await updateHybridGroupSubscription(inbound: inboundEnvelope, response: response)
-                outbound.append(try V2FrameCodec.encode(response, limits: frameLimits))
+                try await respond(try V2FrameCodec.encode(response, limits: frameLimits))
             }
-            return outbound
         } catch {
             // A framing failure may leave an invalid prefix buffered. Session
             // closure fences further commands, but resetting the parser also
@@ -71,6 +86,7 @@ public actor V2GatewayByteStream {
     /// Must be called when the underlying TLS channel reaches EOF. A trailing
     /// partial frame is a protocol failure, not an ignored disconnect.
     public func finish() async throws {
+        detachTransport()
         do {
             try decoder.finish()
             await unregisterAuthenticatedDevice()
@@ -88,16 +104,38 @@ public actor V2GatewayByteStream {
         if let deviceRevocationHandler {
             await deviceRevocationHandler()
         }
+        detachTransport()
     }
 
     public func setDeviceRevocationHandler(_ handler: @escaping @Sendable () async -> Void) {
+        guard !transportClosed else { return }
         deviceRevocationHandler = handler
     }
 
     /// Live availability is explicitly best effort. The NIO owner drops it
     /// when its outbound channel is not writable; recovery is always SYNC_PULL.
-    public func setOutboundWriter(_ writer: @escaping @Sendable (Data) -> Void) {
+    public func setOutboundWriter(_ writer: @escaping @Sendable (Data) async -> Void) {
+        guard !transportClosed else { return }
         outboundWriter = writer
+    }
+
+    /// Installs both channel callbacks in one actor turn. Installing them in
+    /// separate awaits allowed EOF to clear the first callback before the
+    /// second one was installed, retaining a closed NIO pipeline forever.
+    public func attachTransport(
+        deviceRevocationHandler: @escaping @Sendable () async -> Void,
+        outboundWriter: @escaping @Sendable (Data) async -> Void
+    ) -> Bool {
+        guard !transportClosed else { return false }
+        self.deviceRevocationHandler = deviceRevocationHandler
+        self.outboundWriter = outboundWriter
+        return true
+    }
+
+    /// Transport admission uses this only to cancel its absolute pre-auth
+    /// deadline. Identity data remains inside the session actor.
+    public func isAuthenticated() async -> Bool {
+        await session.authenticatedIdentity() != nil
     }
 
     public func sendSyncAvailable(eventID: UInt64, highWatermark: UInt64) async {
@@ -111,7 +149,7 @@ public actor V2GatewayByteStream {
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
         else { return }
-        outboundWriter(bytes)
+        await outboundWriter(bytes)
     }
 
     /// A best-effort foreground wake over the same authenticated TLS stream.
@@ -128,7 +166,7 @@ public actor V2GatewayByteStream {
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
         else { return }
-        outboundWriter(bytes)
+        await outboundWriter(bytes)
     }
 
     public func sendPresenceState(_ state: V2PresenceState) async {
@@ -139,7 +177,7 @@ public actor V2GatewayByteStream {
         envelope.presenceChanged.isOnline = state.isOnline
         envelope.presenceChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
-        outboundWriter(bytes)
+        await outboundWriter(bytes)
     }
 
     public func sendTypingState(_ state: V2TypingState) async {
@@ -150,7 +188,13 @@ public actor V2GatewayByteStream {
         envelope.typingStateChanged.isTyping = state.isTyping
         envelope.typingStateChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
-        outboundWriter(bytes)
+        await outboundWriter(bytes)
+    }
+
+    private func detachTransport() {
+        transportClosed = true
+        deviceRevocationHandler = nil
+        outboundWriter = nil
     }
 
     private func registerAuthenticatedDeviceIfNeeded() async throws {

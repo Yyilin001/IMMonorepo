@@ -14,7 +14,7 @@ struct V2HTTPDeviceSessionClientTests {
         let current = try DeviceID("00000000-0000-0000-0000-000000000901")
         let other = try DeviceID("00000000-0000-0000-0000-000000000902")
         let transport = RecordingDeviceSessionTransport(responses: [
-            try response(status: 200, endpoint: endpoint, body: "[{\"deviceID\":\"\(current.rawValue)\",\"deviceName\":\"iPhone\",\"platform\":\"iPhone\",\"createdAtMilliseconds\":1750000000000,\"lastActiveAtMilliseconds\":1750000001000,\"isCurrentDevice\":true}]"),
+            try response(status: 200, endpoint: endpoint, body: "{\"sessions\":[{\"deviceID\":\"\(current.rawValue)\",\"deviceName\":\"iPhone\",\"platform\":\"iPhone\",\"createdAtMilliseconds\":1750000000000,\"lastActiveAtMilliseconds\":1750000001000,\"isCurrentDevice\":true}],\"nextCursor\":\"next-page\"}"),
             try response(status: 204, endpoint: endpoint.appendingPathComponent("revoke"), body: "")
         ])
         let client = try V2HTTPDeviceSessionClient(
@@ -23,16 +23,18 @@ struct V2HTTPDeviceSessionClientTests {
             transport: transport
         )
 
-        let sessions = try await client.list()
-        #expect(sessions.count == 1)
-        #expect(sessions[0].deviceName == "iPhone")
-        #expect(sessions[0].isCurrentDevice)
+        let page = try await client.list(cursor: nil, pageSize: 50)
+        #expect(page.sessions.count == 1)
+        #expect(page.sessions[0].deviceName == "iPhone")
+        #expect(page.sessions[0].isCurrentDevice)
+        #expect(page.nextCursor == "next-page")
         let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000903")!
         try await client.revoke(deviceID: other, operationID: operationID)
 
         let requests = await transport.requests()
         #expect(requests.count == 2)
         #expect(requests[0].httpMethod == "GET")
+        #expect(requests[0].url?.query == "page_size=50")
         #expect(requests[1].httpMethod == "POST")
         #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer edge-token" })
         #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "X-IM-Device-ID") == current.rawValue })

@@ -1,5 +1,6 @@
 import AVKit
 import Foundation
+import ImageIO
 import IMV2ClientKit
 import IMV2Core
 import Observation
@@ -34,16 +35,13 @@ struct V2ConversationMediaAttachmentRow: View {
     @ViewBuilder
     private func downloadedContent(_ downloaded: V2DownloadedConversationMedia) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            if (presentation.kind == .image || presentation.kind == .animatedImage),
-               let image = UIImage(contentsOfFile: downloaded.fileURL.path) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 260, maxHeight: 320)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .accessibilityLabel(kindLabel)
-                    .accessibilityValue(byteCountLabel)
-                    .accessibilityIdentifier(identifier + ".preview")
+            if presentation.kind == .image || presentation.kind == .animatedImage {
+                V2LocalMediaImagePreview(
+                    fileURL: downloaded.fileURL,
+                    accessibilityLabel: kindLabel,
+                    accessibilityValue: byteCountLabel,
+                    accessibilityIdentifier: identifier + ".preview"
+                )
             }
             if presentation.kind == .video || presentation.kind == .audio {
                 Button(playbackTitle, systemImage: playbackSymbol) {
@@ -109,6 +107,97 @@ struct V2ConversationMediaAttachmentRow: View {
 
     private var playbackTitle: String { presentation.kind == .video ? "播放视频" : "播放音频" }
     private var playbackSymbol: String { presentation.kind == .video ? "play.rectangle" : "play.circle" }
+}
+
+/// A downloaded image may be tens of megapixels even though the conversation
+/// row is small. Decode and downsample it away from MainActor, then retain only
+/// a bounded thumbnail cache instead of reopening the file from `body`.
+private struct V2LocalMediaImagePreview: View {
+    let fileURL: URL
+    let accessibilityLabel: String
+    let accessibilityValue: String
+    let accessibilityIdentifier: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 80)
+            }
+        }
+        .frame(maxWidth: 260, maxHeight: 320)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(accessibilityValue)
+        .accessibilityIdentifier(accessibilityIdentifier)
+        .task(id: fileURL) {
+            image = await V2LocalMediaThumbnailCache.shared.thumbnail(
+                fileURL: fileURL,
+                maximumPixelSize: 960
+            )?.image
+        }
+    }
+}
+
+private struct V2SendableImage: @unchecked Sendable {
+    let image: UIImage
+}
+
+private actor V2LocalMediaThumbnailCache {
+    static let shared = V2LocalMediaThumbnailCache()
+
+    private struct Key: Hashable, Sendable {
+        let path: String
+        let maximumPixelSize: Int
+    }
+
+    private let maximumEntryCount = 24
+    private var images: [Key: V2SendableImage] = [:]
+    private var recency: [Key] = []
+    private var inFlight: [Key: Task<V2SendableImage?, Never>] = [:]
+
+    func thumbnail(fileURL: URL, maximumPixelSize: Int) async -> V2SendableImage? {
+        let key = Key(path: fileURL.path, maximumPixelSize: maximumPixelSize)
+        if let cached = images[key] {
+            touch(key)
+            return cached
+        }
+        if let existing = inFlight[key] { return await existing.value }
+        let task = Task.detached(priority: .utility) { () -> V2SendableImage? in
+            let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions) else { return nil }
+            let thumbnailOptions = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
+            ] as CFDictionary
+            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+            return V2SendableImage(image: UIImage(cgImage: thumbnail))
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight.removeValue(forKey: key)
+        if let result {
+            images[key] = result
+            touch(key)
+            while recency.count > maximumEntryCount, let oldest = recency.first {
+                recency.removeFirst()
+                images.removeValue(forKey: oldest)
+            }
+        }
+        return result
+    }
+
+    private func touch(_ key: Key) {
+        recency.removeAll { $0 == key }
+        recency.append(key)
+    }
 }
 
 /// A privacy-preserving card: rendering a message never fetches a remote
@@ -193,4 +282,3 @@ struct V2LocalMediaPlayerSheet: View {
         isPlaying.toggle()
     }
 }
-

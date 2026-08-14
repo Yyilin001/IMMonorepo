@@ -12,8 +12,31 @@ struct V2MediaPurgeWorkerTests {
         let worker = try V2MediaPurgeWorker(store: store, provider: FailingMediaPurgeProvider())
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 1))
-        #expect(await store.releasedLeases() == [lease])
+        #expect(await store.retries().count == 1)
+        guard case .retry = try #require(await store.retries().first?.disposition) else {
+            Issue.record("expected a delayed retry")
+            return
+        }
         #expect(await store.completedLeases().isEmpty)
+    }
+
+    @Test("retry exhaustion pauses cleanup for audited replay")
+    func exhaustedPurgePausesLease() async throws {
+        let lease = try V2MediaPurgeLease(
+            mediaID: .init("media"),
+            reason: .withdrawnRetentionElapsed,
+            claimToken: UUID(),
+            attempt: 2
+        )
+        let store = RecordingMediaPurgeStore(leases: [lease])
+        let worker = try V2MediaPurgeWorker(
+            store: store,
+            provider: FailingMediaPurgeProvider(),
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0)
+        )
+
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 0, pausedCount: 1))
+        #expect(await store.retries().map(\.disposition) == [.pause])
     }
 
     @Test("successful purge marks only the fenced cleanup lease complete")
@@ -30,16 +53,19 @@ struct V2MediaPurgeWorkerTests {
 }
 
 private actor RecordingMediaPurgeStore: V2MediaPurgeStore {
+    struct Retry: Equatable, Sendable { let lease: V2MediaPurgeLease; let disposition: V2DurableRetryDisposition }
     private let leases: [V2MediaPurgeLease]
     private var completed: [V2MediaPurgeLease] = []
-    private var released: [V2MediaPurgeLease] = []
+    private var retryValues: [Retry] = []
 
     init(leases: [V2MediaPurgeLease]) { self.leases = leases }
     func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2MediaPurgeLease] { Array(leases.prefix(limit)) }
     func markCompleted(_ lease: V2MediaPurgeLease, now _: Date) { completed.append(lease) }
-    func release(_ lease: V2MediaPurgeLease) { released.append(lease) }
+    func scheduleRetry(_ lease: V2MediaPurgeLease, disposition: V2DurableRetryDisposition, now _: Date) {
+        retryValues.append(.init(lease: lease, disposition: disposition))
+    }
     func completedLeases() -> [V2MediaPurgeLease] { completed }
-    func releasedLeases() -> [V2MediaPurgeLease] { released }
+    func retries() -> [Retry] { retryValues }
 }
 
 private actor RecordingMediaPurgeProvider: V2MediaPurgeProvider {

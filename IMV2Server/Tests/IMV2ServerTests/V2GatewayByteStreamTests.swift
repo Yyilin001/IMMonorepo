@@ -4,6 +4,28 @@ import IMV2Core
 import Testing
 
 struct V2GatewayByteStreamTests {
+    @Test("transport callbacks cannot be reinstalled after the stream finishes")
+    func finishPermanentlyDetachesTransportCallbacks() async throws {
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]),
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base"
+            ),
+            handler: ByteStreamCommandFake()
+        )
+        #expect(await stream.attachTransport(
+            deviceRevocationHandler: {}, outboundWriter: { _ in }
+        ))
+
+        try await stream.finish()
+
+        #expect(await !stream.attachTransport(
+            deviceRevocationHandler: {}, outboundWriter: { _ in }
+        ))
+    }
+
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
 
     @Test("fragmented bootstrap and authenticated frames preserve request correlation")
@@ -73,6 +95,7 @@ struct V2GatewayByteStreamTests {
     @Test("declared frame limits are classified separately from generic request failures")
     func classifiesFrameLimitClosures() {
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.declaredPayloadTooLarge(4_097)) == .frameLimitViolation)
+        #expect(v2GatewayClosureReason(for: V2FrameCodecError.tooManyFramesInBatch(257)) == .frameLimitViolation)
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.invalidMagic) == .requestFailure)
     }
 
@@ -87,7 +110,7 @@ struct V2GatewayByteStreamTests {
         )
         let recorder = OutboundFrameRecorder()
         await stream.setOutboundWriter { bytes in
-            Task { await recorder.append(bytes) }
+            await recorder.append(bytes)
         }
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
@@ -118,7 +141,7 @@ struct V2GatewayByteStreamTests {
             registry: registry
         )
         let recorder = OutboundFrameRecorder()
-        await stream.setOutboundWriter { bytes in Task { await recorder.append(bytes) } }
+        await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"

@@ -6,7 +6,7 @@ final class IMAppLaunchUITests: XCTestCase {
     }
 
     @MainActor
-    func testFreshLaunchShowsPasswordSignInControls() throws {
+    func testFreshLaunchShowsPasswordControlsAndHonorsDisabledPasskeyConfiguration() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-v2-ui-testing-signed-out"]
         app.launch()
@@ -15,7 +15,7 @@ final class IMAppLaunchUITests: XCTestCase {
         XCTAssertTrue(accountHandle.waitForExistence(timeout: 5))
         XCTAssertTrue(app.secureTextFields["v2.password.value"].exists)
         XCTAssertTrue(app.buttons["v2.password.submit"].exists)
-        XCTAssertTrue(app.buttons["v2.passkey.sign-in"].exists)
+        XCTAssertFalse(app.buttons["v2.passkey.sign-in"].exists)
         // UIKit-owned Form chrome colors are not app controlled. The remaining
         // audit categories gate our semantics and layout; contrast still
         // receives a manual device-settings pass.
@@ -30,7 +30,7 @@ final class IMAppLaunchUITests: XCTestCase {
     }
 
     @MainActor
-    func testPasswordSignInRemainsUsableAtLargestTextSizeInRightToLeftLayout() throws {
+    func testPasswordOnlySignInRemainsUsableAtLargestTextSizeInRightToLeftLayout() throws {
         let app = XCUIApplication()
         app.launchArguments = [
             "-v2-ui-testing-signed-out",
@@ -46,7 +46,7 @@ final class IMAppLaunchUITests: XCTestCase {
         XCTAssertTrue(app.textFields["v2.password.account-handle"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.secureTextFields["v2.password.value"].isHittable)
         XCTAssertTrue(app.buttons["v2.password.submit"].isHittable)
-        XCTAssertTrue(app.buttons["v2.passkey.sign-in"].isHittable)
+        XCTAssertFalse(app.buttons["v2.passkey.sign-in"].exists)
 
         // The content-size launch argument makes this audit exercise the
         // actual accessibility-size layout. Arabic supplies a right-to-left

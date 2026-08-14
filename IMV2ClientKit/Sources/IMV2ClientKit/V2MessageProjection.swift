@@ -45,27 +45,6 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         self.isWithdrawn = isWithdrawn
     }
 
-    init(snapshotProjection: V2SnapshotMessageProjection) {
-        self.init(
-            sourceEventID: snapshotProjection.sourceEventID,
-            messageID: snapshotProjection.messageID,
-            roomID: snapshotProjection.roomID,
-            roomSequence: snapshotProjection.roomSequence,
-            timelineSequence: snapshotProjection.timelineSequence,
-            messageRevision: snapshotProjection.messageRevision,
-            senderUserID: snapshotProjection.senderUserID,
-            text: snapshotProjection.text,
-            media: snapshotProjection.media,
-            mediaPresentations: snapshotProjection.mediaPresentations,
-            mentions: snapshotProjection.mentions,
-            entities: snapshotProjection.entities,
-            replyTo: snapshotProjection.replyTo,
-            forwardedFrom: snapshotProjection.forwardedFrom,
-            createdAt: snapshotProjection.createdAt,
-            isWithdrawn: snapshotProjection.isWithdrawn
-        )
-    }
-
     init(record: V2ClientSyncRecord) throws {
         guard record.projectionKind == "message" else { throw V2ClientProjectionError.invalidMessagePayload }
         let payload: Wire
@@ -173,6 +152,51 @@ public struct V2ClientConversationSummary: Equatable, Sendable {
     }
 }
 
+/// Stable keyset cursor for the unified room timeline.  The sequence is the
+/// authoritative order; the opaque item ID is the deterministic tie-breaker
+/// shared by message and private-activity projections.
+public struct V2ClientTimelineCursor: Equatable, Sendable {
+    public let timelineSequence: UInt64
+    public let itemID: String
+
+    public init(timelineSequence: UInt64, itemID: String) {
+        precondition(timelineSequence > 0 && !itemID.isEmpty)
+        self.timelineSequence = timelineSequence
+        self.itemID = itemID
+    }
+}
+
+/// One immutable SQLite snapshot for a bounded room-timeline window.  Keeping
+/// decorations in the same read transaction prevents a message page from being
+/// paired with reactions, favorites, pins, or receipts from another generation.
+public struct V2ClientConversationTimelinePage: Equatable, Sendable {
+    public let messages: [V2ClientMessageProjection]
+    public let activities: [V2ClientTimelineActivityProjection]
+    public let reactions: [V2ClientMessageReaction]
+    public let pinnedMessageIDs: Set<MessageID>
+    public let favoritedMessageIDs: Set<MessageID>
+    public let directReadReceipt: V2DirectReadReceiptProjection?
+    public let olderCursor: V2ClientTimelineCursor?
+
+    public init(
+        messages: [V2ClientMessageProjection],
+        activities: [V2ClientTimelineActivityProjection],
+        reactions: [V2ClientMessageReaction],
+        pinnedMessageIDs: Set<MessageID>,
+        favoritedMessageIDs: Set<MessageID>,
+        directReadReceipt: V2DirectReadReceiptProjection?,
+        olderCursor: V2ClientTimelineCursor?
+    ) {
+        self.messages = messages
+        self.activities = activities
+        self.reactions = reactions
+        self.pinnedMessageIDs = pinnedMessageIDs
+        self.favoritedMessageIDs = favoritedMessageIDs
+        self.directReadReceipt = directReadReceipt
+        self.olderCursor = olderCursor
+    }
+}
+
 public enum V2ClientProjectionError: Error, Equatable, Sendable { case invalidMessagePayload }
 
 /// A later room event that replaces only the visible text of an existing
@@ -223,9 +247,9 @@ public struct V2ClientMessageReaction: Equatable, Sendable {
         let payload: Wire
         do { payload = try JSONDecoder().decode(Wire.self, from: record.payload) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
-        guard record.projectionKind == "message", payload.eventType == "message.reaction_changed",
+        guard record.projectionKind == "message_reaction", payload.eventType == "message.reaction_changed",
               (payload.action == "add" || payload.action == "remove"), !payload.reaction.isEmpty,
-              payload.reaction.utf8.count <= 64
+              payload.reaction.utf8.count <= V2MessageReactionLimits.maximumReactionBytes
         else { throw V2ClientProjectionError.invalidMessagePayload }
         do { roomID = try .init(payload.roomID); messageID = try .init(payload.messageID); actorUserID = try .init(payload.actorUserID); reaction = payload.reaction }
         catch { throw V2ClientProjectionError.invalidMessagePayload }

@@ -45,6 +45,8 @@ public func v2RenderPrometheusConnectionMetrics(_ snapshot: V2ConnectionMetricsS
 /// labels and cannot expose command payload or identity data.
 public enum V2GatewayConnectionClosure: String, CaseIterable, Equatable, Sendable {
     case peerDisconnected = "peer_disconnected"
+    case connectionLimit = "connection_limit"
+    case authenticationTimeout = "authentication_timeout"
     case idleTimeout = "idle_timeout"
     case inboundQueueLimit = "inbound_queue_limit"
     case frameLimitViolation = "frame_limit_violation"
@@ -82,6 +84,9 @@ public protocol V2GatewayTransportMetricsSource: Sendable {
 public protocol V2GatewayTransportMetricsRecorder: V2GatewayTransportMetricsSource {
     func connectionOpened()
     func connectionClosed(reason: V2GatewayConnectionClosure)
+    /// Records a socket rejected before the channel handler owns an active
+    /// connection gauge slot.
+    func connectionRejected(reason: V2GatewayConnectionClosure)
     func observeQueuedInboundBytes(_ bytes: Int)
 }
 
@@ -109,6 +114,12 @@ public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder,
     public func connectionClosed(reason: V2GatewayConnectionClosure) {
         storage.withLock { storage in
             storage.activeConnections = max(0, storage.activeConnections - 1)
+            storage.closures[reason] = v2SaturatingAdd(storage.closures[reason, default: 0], 1)
+        }
+    }
+
+    public func connectionRejected(reason: V2GatewayConnectionClosure) {
+        storage.withLock { storage in
             storage.closures[reason] = v2SaturatingAdd(storage.closures[reason, default: 0], 1)
         }
     }

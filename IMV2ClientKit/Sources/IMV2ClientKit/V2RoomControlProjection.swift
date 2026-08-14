@@ -23,10 +23,6 @@ public struct V2ClientRoomControlProjection: Equatable, Sendable {
         self.createdAt = createdAt
     }
 
-    init(snapshotProjection: V2SnapshotRoomControlProjection) throws {
-        try self.init(sourceEventID: snapshotProjection.sourceEventID, roomID: snapshotProjection.roomID, roomSequence: snapshotProjection.roomSequence, actorUserID: snapshotProjection.actorUserID, isFrozen: snapshotProjection.isFrozen, createdAt: snapshotProjection.createdAt)
-    }
-
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String

@@ -13,11 +13,19 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     private let stream: V2GatewayByteStream
     private let maximumQueuedInboundBytes: Int
+    private let maximumQueuedInboundChunks: Int
+    private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
     private let transportMetrics: (any V2GatewayTransportMetricsRecorder)?
     private var pending: [Data] = []
+    private var pendingHead = 0
     private var queuedInboundBytes = 0
     private var processing = false
+    private struct PendingResponseWrite {
+        let bytes: Data
+        let promise: EventLoopPromise<Void>
+    }
+    private var pendingResponseWrite: PendingResponseWrite?
     private var closed = false
     // `V2GatewayByteStream` is an actor, so installing its channel callbacks
     // crosses an async boundary. Never let an authenticate frame register in
@@ -25,17 +33,27 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private var callbacksReady = false
     private var lastInboundAt: NIODeadline?
     private var idleCheck: Scheduled<Void>?
+    private var authenticationDeadline: Scheduled<Void>?
     private var closeReason: V2GatewayConnectionClosure?
 
     public init(
         stream: V2GatewayByteStream,
         maximumQueuedInboundBytes: Int,
+        maximumQueuedInboundChunks: Int,
+        authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
         transportMetrics: (any V2GatewayTransportMetricsRecorder)? = nil
     ) {
-        precondition(maximumQueuedInboundBytes > 0 && idleTimeoutMilliseconds > 0)
+        precondition(
+            maximumQueuedInboundBytes > 0 &&
+            maximumQueuedInboundChunks > 0 &&
+            authenticationTimeoutMilliseconds > 0 &&
+            idleTimeoutMilliseconds > 0
+        )
         self.stream = stream
         self.maximumQueuedInboundBytes = maximumQueuedInboundBytes
+        self.maximumQueuedInboundChunks = maximumQueuedInboundChunks
+        self.authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
         self.idleTimeoutMilliseconds = idleTimeoutMilliseconds
         self.transportMetrics = transportMetrics
     }
@@ -46,12 +64,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             transportMetrics.connectionOpened()
         }
         scheduleIdleCheck(context: context)
+        scheduleAuthenticationDeadline(context: context)
         let boundContext = context.loopBound
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let eventLoop = context.eventLoop
         let stream = stream
         Task {
-            await stream.setDeviceRevocationHandler {
+            let attached = await stream.attachTransport(deviceRevocationHandler: {
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
                         let handler = boundHandler.value
@@ -72,19 +91,23 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         )
                     }
                 }
-            }
-            await stream.setOutboundWriter { bytes in
-                eventLoop.execute {
-                    let context = boundContext.value
-                    guard context.channel.isActive, context.channel.isWritable else { return }
-                    var buffer = context.channel.allocator.buffer(capacity: bytes.count)
-                    buffer.writeBytes(bytes)
-                    context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
+            }, outboundWriter: { bytes in
+                // Await the one event-loop hop so a hot notifier cannot queue
+                // an unbounded number of closures while this channel stalls.
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        defer { continuation.resume() }
+                        let context = boundContext.value
+                        guard context.channel.isActive, context.channel.isWritable else { return }
+                        var buffer = context.channel.allocator.buffer(capacity: bytes.count)
+                        buffer.writeBytes(bytes)
+                        context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
+                    }
                 }
-            }
+            })
             eventLoop.execute {
                 let handler = boundHandler.value
-                guard !handler.closed else { return }
+                guard attached, !handler.closed else { return }
                 handler.callbacksReady = true
                 handler.processNext(context: boundContext.value)
             }
@@ -96,6 +119,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let buffer = unwrapInboundIn(data)
         let bytes = Data(buffer.readableBytesView)
         guard queuedInboundBytes <= maximumQueuedInboundBytes - bytes.count else {
+            close(context: context, reason: .inboundQueueLimit)
+            return
+        }
+        guard pending.count - pendingHead < maximumQueuedInboundChunks else {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
@@ -112,8 +139,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         closed = true
         idleCheck?.cancel()
         idleCheck = nil
+        authenticationDeadline?.cancel()
+        authenticationDeadline = nil
         pending.removeAll(keepingCapacity: false)
+        pendingHead = 0
         queuedInboundBytes = 0
+        failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         let stream = stream
         Task { await stream.finishSilently() }
         if let transportMetrics {
@@ -123,27 +154,58 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         context.fireChannelInactive()
     }
 
+    public func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            flushPendingResponse(context: context)
+            processNext(context: context)
+        }
+        context.fireChannelWritabilityChanged()
+    }
+
     private func processNext(context: ChannelHandlerContext) {
-        guard callbacksReady, !closed, !processing, !pending.isEmpty else { return }
+        guard callbacksReady, !closed, !processing,
+              context.channel.isWritable,
+              pendingHead < pending.count
+        else { return }
         processing = true
-        let inbound = pending.removeFirst()
+        let inbound = pending[pendingHead]
+        pendingHead += 1
+        if pendingHead >= 64, pendingHead * 2 >= pending.count {
+            pending.removeFirst(pendingHead)
+            pendingHead = 0
+        }
         queuedInboundBytes -= inbound.count
         let stream = stream
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
-        context.eventLoop.makeFutureWithTask { try await stream.receive(inbound) }.whenComplete { result in
+        let eventLoop = context.eventLoop
+        eventLoop.makeFutureWithTask {
+            try await stream.receive(inbound) { response in
+                try await eventLoop.flatSubmit {
+                    boundHandler.value.writeWhenWritable(
+                        response,
+                        context: boundContext.value
+                    )
+                }.get()
+            }
+        }.whenComplete { result in
             let handler = boundHandler.value
             let context = boundContext.value
             guard !handler.closed else { return }
             handler.processing = false
             switch result {
-            case .success(let responses):
-                for response in responses {
-                    var buffer = context.channel.allocator.buffer(capacity: response.count)
-                    buffer.writeBytes(response)
-                    context.writeAndFlush(handler.wrapOutboundOut(buffer), promise: nil)
+            case .success:
+                let stream = handler.stream
+                let nextContext = boundContext
+                context.eventLoop.makeFutureWithTask { await stream.isAuthenticated() }.whenComplete { authenticated in
+                    let handler = boundHandler.value
+                    guard !handler.closed else { return }
+                    if case .success(true) = authenticated {
+                        handler.authenticationDeadline?.cancel()
+                        handler.authenticationDeadline = nil
+                    }
+                    handler.processNext(context: nextContext.value)
                 }
-                handler.processNext(context: context)
             case .failure(let error):
                 handler.close(
                     context: context,
@@ -167,8 +229,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         closeReason = reason
         idleCheck?.cancel()
         idleCheck = nil
+        authenticationDeadline?.cancel()
+        authenticationDeadline = nil
         pending.removeAll(keepingCapacity: false)
+        pendingHead = 0
         queuedInboundBytes = 0
+        failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         if revokeDevice {
             let stream = stream
             Task { await stream.revokeDevice() }
@@ -176,11 +242,70 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         context.close(promise: closePromise)
     }
 
+    private func writeWhenWritable(
+        _ bytes: Data,
+        context: ChannelHandlerContext
+    ) -> EventLoopFuture<Void> {
+        let promise = context.eventLoop.makePromise(of: Void.self)
+        guard !closed, context.channel.isActive else {
+            promise.fail(V2GatewayTransportWriteError.channelClosed)
+            return promise.futureResult
+        }
+        if context.channel.isWritable {
+            write(bytes, promise: promise, context: context)
+        } else if pendingResponseWrite == nil {
+            // The stream awaits this promise before dispatching another frame,
+            // so a stalled channel retains at most one complete response.
+            pendingResponseWrite = .init(bytes: bytes, promise: promise)
+        } else {
+            promise.fail(V2GatewayTransportWriteError.responseAlreadyPending)
+        }
+        return promise.futureResult
+    }
+
+    private func flushPendingResponse(context: ChannelHandlerContext) {
+        guard context.channel.isWritable, let pendingResponseWrite else { return }
+        self.pendingResponseWrite = nil
+        write(
+            pendingResponseWrite.bytes,
+            promise: pendingResponseWrite.promise,
+            context: context
+        )
+    }
+
+    private func write(
+        _ bytes: Data,
+        promise: EventLoopPromise<Void>,
+        context: ChannelHandlerContext
+    ) {
+        var buffer = context.channel.allocator.buffer(capacity: bytes.count)
+        buffer.writeBytes(bytes)
+        context.writeAndFlush(wrapOutboundOut(buffer), promise: promise)
+    }
+
+    private func failPendingResponse(_ error: any Error) {
+        let pending = pendingResponseWrite
+        pendingResponseWrite = nil
+        pending?.promise.fail(error)
+    }
+
     private func scheduleIdleCheck(context: ChannelHandlerContext) {
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         idleCheck = context.eventLoop.scheduleTask(in: .milliseconds(Int64(idleTimeoutMilliseconds))) {
             handler.value.checkIdle(context: boundContext.value)
+        }
+    }
+
+    private func scheduleAuthenticationDeadline(context: ChannelHandlerContext) {
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let boundContext = context.loopBound
+        authenticationDeadline = context.eventLoop.scheduleTask(
+            in: .milliseconds(Int64(authenticationTimeoutMilliseconds))
+        ) {
+            let handler = handler.value
+            guard !handler.closed, handler.authenticationDeadline != nil else { return }
+            handler.close(context: boundContext.value, reason: .authenticationTimeout)
         }
     }
 
@@ -196,14 +321,23 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 }
 
+private enum V2GatewayTransportWriteError: Error {
+    case channelClosed
+    case responseAlreadyPending
+}
+
 private extension V2GatewayByteStream {
     func finishSilently() async { try? await finish() }
 }
 
 func v2GatewayClosureReason(for error: Error) -> V2GatewayConnectionClosure {
-    if let frameError = error as? V2FrameCodecError,
-       case .declaredPayloadTooLarge = frameError {
-        return .frameLimitViolation
+    if let frameError = error as? V2FrameCodecError {
+        switch frameError {
+        case .declaredPayloadTooLarge, .tooManyFramesInBatch:
+            return .frameLimitViolation
+        default:
+            break
+        }
     }
     return .requestFailure
 }

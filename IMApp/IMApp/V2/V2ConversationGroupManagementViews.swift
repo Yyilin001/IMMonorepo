@@ -197,10 +197,12 @@ struct V2GroupReadReceiptsSheet: View {
             Group {
                 if let page = store.groupReadReceiptPage {
                     List {
-                        Section {
-                            Text("\(page.readerCount) 人已读")
-                                .accessibilityLabel("已有 \(page.readerCount) 人已读")
+                        if let readerCount = page.readerCount {
+                            Section {
+                                Text("\(readerCount) 人已读")
+                                .accessibilityLabel("已有 \(readerCount) 人已读")
                                 .accessibilityIdentifier("v2.message.group-readers.count.\(message.id)")
+                            }
                         }
                         Section("已读成员") {
                             ForEach(page.readers, id: \.userID) { reader in

@@ -869,6 +869,17 @@ recorded baseline; override either on a different local machine with
 development workload from an order-of-magnitude regression and are explicitly
 not production SLOs, admission limits, or approved capacity thresholds.
 
+On 2026-08-13, the same isolated Linux/arm64 Docker smoke path was rerun after
+the system-wide performance pass. It completed all **16,000** receiver
+projections with acceptance P50/P95/P99 **74/114/114ms**, durable terminal
+P50/P95/P99 **1,419/1,909/1,909ms**, and a **1,925ms** pipeline wall. The
+fixture now also inserts the sender's active public-profile fact required by
+production message admission; membership alone no longer bypasses that gate.
+The sample passes the checked-in regression ceilings, but its different host,
+warm Docker volumes and single local PostgreSQL mean it must not be compared
+numerically with the 2026-07 samples as a throughput improvement or production
+SLO.
+
 An additional opt-in recovery soak covers the failure boundaries that a full
 drain cannot. For each of the 100 completion units it loses a worker before
 the first target checkpoint, after one durable target checkpoint, immediately

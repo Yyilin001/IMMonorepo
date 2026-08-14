@@ -25,6 +25,16 @@ public struct V2ClientDeviceSession: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct V2ClientDeviceSessionPage: Equatable, Sendable {
+    public let sessions: [V2ClientDeviceSession]
+    public let nextCursor: String?
+
+    public init(sessions: [V2ClientDeviceSession], nextCursor: String?) {
+        self.sessions = sessions
+        self.nextCursor = nextCursor
+    }
+}
+
 public struct V2ClientDeviceSessionCredentials: Sendable {
     public let accessToken: String
     public let deviceID: DeviceID
@@ -50,7 +60,7 @@ public actor V2URLSessionDeviceSessionHTTPTransport: V2ClientDeviceSessionHTTPTr
 }
 
 public protocol V2ClientDeviceSessionManaging: Sendable {
-    func list() async throws -> [V2ClientDeviceSession]
+    func list(cursor: String?, pageSize: Int) async throws -> V2ClientDeviceSessionPage
     func revoke(deviceID: DeviceID, operationID: UUID) async throws
     func revokeOtherDevices(operationID: UUID) async throws
 }
@@ -69,13 +79,17 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         self.transport = transport
     }
 
-    public func list() async throws -> [V2ClientDeviceSession] {
-        let request = try await authenticatedRequest(path: [], method: "GET")
+    public func list(cursor: String?, pageSize: Int) async throws -> V2ClientDeviceSessionPage {
+        guard (1 ... 100).contains(pageSize) else { throw V2ClientDeviceSessionError.invalidRequest }
+        var queryItems = [URLQueryItem(name: "page_size", value: String(pageSize))]
+        if let cursor { queryItems.append(.init(name: "cursor", value: cursor)) }
+        let request = try await authenticatedRequest(path: [], method: "GET", queryItems: queryItems)
         let (data, response) = try await send(request)
         guard (200 ... 299).contains(response.statusCode) else { throw try failure(for: response) }
         do {
-            return try JSONDecoder().decode([SessionBody].self, from: data).map {
-                try .init(
+            let body = try JSONDecoder().decode(SessionPageBody.self, from: data)
+            let sessions: [V2ClientDeviceSession] = try body.sessions.map {
+                try V2ClientDeviceSession(
                     deviceID: .init($0.deviceID),
                     deviceName: $0.deviceName,
                     platform: $0.platform,
@@ -84,6 +98,7 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
                     isCurrentDevice: $0.isCurrentDevice
                 )
             }
+            return .init(sessions: sessions, nextCursor: body.nextCursor)
         } catch { throw V2ClientDeviceSessionError.invalidResponse }
     }
 
@@ -104,7 +119,7 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         guard (200 ... 299).contains(response.statusCode) else { throw try failure(for: response) }
     }
 
-    private func authenticatedRequest(path: [String], method: String) async throws -> URLRequest {
+    private func authenticatedRequest(path: [String], method: String, queryItems: [URLQueryItem] = []) async throws -> URLRequest {
         let current: V2ClientDeviceSessionCredentials
         do { current = try await credentials.deviceSessionCredentials() }
         catch is CancellationError { throw CancellationError() }
@@ -112,7 +127,12 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         guard !current.accessToken.isEmpty,
               !current.accessToken.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
         else { throw V2ClientDeviceSessionError.authorizationUnavailable }
-        let target = path.reduce(endpoint) { $0.appendingPathComponent($1) }
+        let pathTarget = path.reduce(endpoint) { $0.appendingPathComponent($1) }
+        guard var components = URLComponents(url: pathTarget, resolvingAgainstBaseURL: false) else {
+            throw V2ClientDeviceSessionError.invalidEndpoint
+        }
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let target = components.url else { throw V2ClientDeviceSessionError.invalidRequest }
         var request = URLRequest(url: target, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
         request.httpMethod = method
         request.setValue("Bearer \(current.accessToken)", forHTTPHeaderField: "Authorization")
@@ -155,4 +175,5 @@ private struct SessionBody: Decodable {
     let deviceID: String; let deviceName: String; let platform: String
     let createdAtMilliseconds: Int64; let lastActiveAtMilliseconds: Int64; let isCurrentDevice: Bool
 }
+private struct SessionPageBody: Decodable { let sessions: [SessionBody]; let nextCursor: String? }
 private struct MutationBody: Encodable { let deviceID: String?; let operationID: UUID }

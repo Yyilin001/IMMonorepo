@@ -43,6 +43,130 @@ groups:
           summary: IM V2 fan-out delivery work is paused pending operator replay
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
+      - alert: IMV2PausedContentReview
+        expr: max(im_v2_content_review_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 content-review work is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2PausedMediaScan
+        expr: max(im_v2_media_scan_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 media scan work is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2PausedMediaPurge
+        expr: max(im_v2_media_purge_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 media cleanup work is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2PausedReadReceiptPreferencePropagation
+        expr: max(im_v2_read_receipt_preference_propagation_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 read-receipt privacy propagation is paused pending operator replay
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2PausedUserProjection
+        expr: max(im_v2_user_projection_backlog{state="paused"}) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 canonical user projection is paused on poison input
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2UserProjectionLag
+        expr: max(im_v2_user_projection_maximum_lag_records) > 10000
+        for: 10m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 canonical projection is falling behind sync append
+          runbook: IMV2/docs/10-operations/observability.md
+
+      - alert: IMV2SnapshotBuildStalled
+        expr: max(im_v2_snapshot_oldest_building_age_seconds) > 900
+        for: 5m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 snapshot artifact build has stalled
+          runbook: IMV2/docs/10-operations/observability.md
+
+      - alert: IMV2SnapshotBuildFailures
+        expr: max(im_v2_snapshot_artifacts{state="failed"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 has failed snapshot artifacts awaiting expiry cleanup
+          runbook: IMV2/docs/10-operations/observability.md
+
+      - alert: IMV2ProjectionGCBacklog
+        expr: max(im_v2_projection_version_gc_backlog_estimated_rows) > 1000000
+        for: 30m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 closed projection versions are not being reclaimed
+          runbook: IMV2/docs/10-operations/observability.md
+
+      - alert: IMV2SyncCompactionBacklog
+        expr: max(im_v2_sync_uncompacted_projected_records) > 10000000
+        for: 30m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 retained sync floors are falling behind projection
+          runbook: IMV2/docs/10-operations/observability.md
+
+      # This table is the stable result side of control-operation
+      # idempotency, not replayable sync history. Alert on capacity instead of
+      # deleting it with the ordered-log compactor.
+      - alert: IMV2ProjectionEffectStorageHigh
+        expr: max(im_v2_user_projection_effects_relation_bytes) > 10737418240
+        for: 30m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 stable projection-effect storage exceeded 10 GiB
+          runbook: IMV2/docs/10-operations/observability.md
+
       # Device-revocation events close already-authenticated gateway channels
       # after an account or device fence. A short non-zero interval is normal
       # during consumption; persistence means a gateway may retain a revoked

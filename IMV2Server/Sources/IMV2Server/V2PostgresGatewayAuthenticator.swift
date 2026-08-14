@@ -52,6 +52,14 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
     }
 
     public func authenticate(accessToken: String, deviceID: DeviceID) async throws -> UserID {
+        try await authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
+    }
+
+    public func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date? {
+        try await authenticateSession(accessToken: accessToken, deviceID: deviceID).expiresAt
+    }
+
+    public func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
         guard !accessToken.isEmpty, let database = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.unauthenticated
         }
@@ -59,7 +67,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
             throw V2GatewayAuthenticationError.unauthenticated
         }
         guard let row = try await database.raw("""
-            SELECT token.user_id
+            SELECT token.user_id, token.expires_at
             FROM im_v2.device_access_tokens AS token
             JOIN im_v2.auth_devices AS device
               ON device.user_id = token.user_id AND device.device_id = token.device_id
@@ -74,7 +82,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
                   WHERE special.account_user_id = token.user_id
                     AND special.status = 'active'
               )
-            """).first(decoding: V2AuthenticatedUserRow.self)
+            """).first(decoding: V2AuthenticatedSessionRow.self)
         else { throw V2GatewayAuthenticationError.unauthenticated }
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
@@ -84,40 +92,12 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         // turn account-edge reads into an unbounded write load.
         let observedAt = now()
         try? await database.raw("UPDATE im_v2.auth_devices SET last_active_at = \(bind: observedAt) WHERE device_id = \(bind: deviceUUID) AND (last_active_at IS NULL OR last_active_at < \(bind: observedAt.addingTimeInterval(-60)))").run()
-        return userID
-    }
-
-    public func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date? {
-        guard !accessToken.isEmpty, let database = database as? any SQLDatabase,
-              let deviceUUID = UUID(uuidString: deviceID.rawValue)
-        else { throw V2GatewayAuthenticationError.unauthenticated }
-        guard let row = try await database.raw("""
-            SELECT token.expires_at
-            FROM im_v2.device_access_tokens AS token
-            JOIN im_v2.auth_devices AS device
-              ON device.user_id = token.user_id AND device.device_id = token.device_id
-            WHERE token.token_hmac = \(bind: tokenKey.digest(accessToken))
-              AND token.device_id = \(bind: deviceUUID)
-              AND token.expires_at > \(bind: now())
-              AND token.revoked_at IS NULL
-              AND device.revoked_at IS NULL
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM im_v2.special_accounts AS special
-                  WHERE special.account_user_id = token.user_id
-                    AND special.status = 'active'
-              )
-            """).first(decoding: V2AuthenticatedExpiryRow.self)
-        else { throw V2GatewayAuthenticationError.unauthenticated }
-        return row.expiresAt
+        return .init(userID: userID, expiresAt: row.expiresAt)
     }
 }
 
-private struct V2AuthenticatedUserRow: Decodable {
+private struct V2AuthenticatedSessionRow: Decodable {
     let userID: UUID
-    enum CodingKeys: String, CodingKey { case userID = "user_id" }
-}
-private struct V2AuthenticatedExpiryRow: Decodable {
     let expiresAt: Date
-    enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case userID = "user_id", expiresAt = "expires_at" }
 }

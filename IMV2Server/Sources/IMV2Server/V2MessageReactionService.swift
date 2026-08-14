@@ -57,5 +57,6 @@ public enum V2MessageReactionStoreError: Error, Equatable, Sendable {
     case messageNotFound
     case actorNotMember
     case messageWithdrawn
+    case reactionLimitReached
     case corruptPersistenceState
 }

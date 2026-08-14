@@ -6,6 +6,12 @@ import Observation
 @MainActor
 @Observable
 final class V2ConversationDetailStore {
+    private static let initialTimelinePageSize = 80
+    private static let timelinePageSize = 80
+    /// Keeps SwiftUI diffing and duplicate render models bounded while still
+    /// allowing arbitrarily old history through a sliding keyset window.
+    private static let maximumRetainedTimelineItems = 800
+
     enum State: Equatable {
         case loading
         case loaded
@@ -48,6 +54,11 @@ final class V2ConversationDetailStore {
     let directAccountKind: V2AccountKind
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var timeline: [V2ConversationTimelineItem] = []
+    private(set) var timelineRevision: UInt64 = 0
+    private(set) var canLoadOlderTimeline = false
+    private(set) var isLoadingOlderTimeline = false
+    private(set) var isBrowsingHistoricalTimeline = false
+    private(set) var isReturningToLatestTimeline = false
     private(set) var canSendInDirectConversation: Bool?
     private(set) var state: State = .loading
     private(set) var sendFeedback: String?
@@ -76,6 +87,7 @@ final class V2ConversationDetailStore {
     private(set) var typingUserIDs: Set<UserID> = []
     private var nextGroupMemberCursor: String?
     private var refreshGeneration = 0
+    private var newerTimelineBoundary: V2ConversationTimelineCursor?
     private var inFlightMessageActionIDs: Set<String> = []
     private(set) var isSelectingMessagesForForward = false
     private(set) var selectedForwardMessageIDs: Set<String> = []
@@ -91,43 +103,45 @@ final class V2ConversationDetailStore {
 
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
-    init(dataSource: any V2ConversationDataSource, messageSearcher: (any V2ConversationMessageSearching)? = nil, sender: (any V2ConversationSending)?, messageWithdrawer: (any V2MessageWithdrawing)? = nil, messageReactionChanger: (any V2MessageReactionChanging)? = nil, messageEditor: (any V2MessageEditing)? = nil, readReceiptReporter: (any V2ConversationReadReporting)? = nil, messageFavoriter: (any V2MessageFavoriting)? = nil, groupMessagePinner: (any V2GroupMessagePinning)? = nil, messageForwarder: (any V2MessageForwarding)? = nil, forwardTargets: [V2ConversationForwardTarget] = [], groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil, groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil, groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil, groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil, groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil, groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil, conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil, userID: String, roomID: String, title: String = "会话", isGroupConversation: Bool = false, directAccountKind: V2AccountKind = .regular, groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil, groupMembershipChanger: (any V2GroupMembershipChanging)? = nil, groupMemberMuter: (any V2GroupMemberMuting)? = nil, moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil, publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil, attachmentStager: (any V2ConversationAttachmentStaging)? = nil, attachmentUploader: (any V2ConversationAttachmentUploading)? = nil, mediaDownloader: (any V2ConversationMediaDownloading)? = nil, projectionChangeNotifier: V2ProjectionChangeNotifier? = nil, activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil, initialDraft: String? = nil, initialMentionHandles: String? = nil) {
-        self.dataSource = dataSource
-        self.sendingCapabilityReader = dataSource as? any V2ConversationSendingCapabilityReading
-        self.messageSearcher = messageSearcher
-        self.sender = sender
-        self.messageWithdrawer = messageWithdrawer
-        self.messageReactionChanger = messageReactionChanger
-        self.messageEditor = messageEditor
-        self.readReceiptReporter = readReceiptReporter
-        self.messageFavoriter = messageFavoriter
-        self.groupMessagePinner = groupMessagePinner
-        self.messageForwarder = messageForwarder
-        self.forwardTargets = forwardTargets
-        self.groupAnnouncementReader = groupAnnouncementReader
-        self.groupAnnouncementManager = groupAnnouncementManager
-        self.groupMemberRoleChanger = groupMemberRoleChanger
-        self.groupRolePolicyReader = groupRolePolicyReader
-        self.groupRolePolicyChanger = groupRolePolicyChanger
-        self.groupReadReceiptReader = groupReadReceiptReader
-        self.conversationLiveActivity = conversationLiveActivity
-        self.userID = userID
-        self.roomID = roomID
-        self.title = title
-        self.isGroupConversation = isGroupConversation
-        self.directAccountKind = directAccountKind
-        self.groupMemberDirectory = groupMemberDirectory
-        self.groupMembershipChanger = groupMembershipChanger
-        self.groupMemberMuter = groupMemberMuter
-        self.moderatedGroupMemberRemover = moderatedGroupMemberRemover
-        self.publicIdentityResolver = publicIdentityResolver
-        self.attachmentStager = attachmentStager
-        self.attachmentUploader = attachmentUploader
-        self.mediaDownloader = mediaDownloader
-        self.projectionChangeNotifier = projectionChangeNotifier
-        self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
-        draft = initialDraft ?? ""
-        mentionHandlesText = initialMentionHandles ?? ""
+    init(environment: V2ConversationFeatureEnvironment, context: V2ConversationDetailContext) {
+        dataSource = environment.projections.dataSource
+        sendingCapabilityReader = environment.projections.dataSource as? any V2ConversationSendingCapabilityReading
+        messageSearcher = environment.projections.messageSearcher
+        sender = environment.messages.sender
+        messageWithdrawer = environment.messages.withdrawer
+        messageReactionChanger = environment.messages.reactionChanger
+        messageEditor = environment.messages.editor
+        readReceiptReporter = environment.messages.readReceiptReporter
+        messageFavoriter = environment.messages.favoriter
+        groupMessagePinner = environment.messages.groupPinner
+        messageForwarder = environment.messages.forwarder
+        forwardTargets = context.forwardTargets
+        groupAnnouncementReader = environment.projections.groupAnnouncementReader
+            ?? (environment.projections.dataSource as? any V2GroupAnnouncementReading)
+        groupAnnouncementManager = environment.groups.announcementManager
+        groupMemberRoleChanger = environment.groups.memberRoleChanger
+        groupRolePolicyReader = environment.projections.groupRolePolicyReader
+            ?? (environment.projections.dataSource as? any V2GroupRolePolicyReading)
+        groupRolePolicyChanger = environment.groups.rolePolicyChanger
+        groupReadReceiptReader = environment.groups.readReceiptReader
+        conversationLiveActivity = environment.runtime.liveActivity
+        userID = environment.userID
+        roomID = context.roomID
+        title = context.title
+        isGroupConversation = context.isGroupConversation
+        directAccountKind = context.directAccountKind
+        groupMemberDirectory = environment.groups.memberDirectory
+        groupMembershipChanger = environment.groups.membershipChanger
+        groupMemberMuter = environment.groups.memberMuter
+        moderatedGroupMemberRemover = environment.groups.moderatedMemberRemover
+        publicIdentityResolver = environment.discovery.publicIdentityResolver
+        attachmentStager = environment.media.attachmentStager
+        attachmentUploader = environment.media.attachmentUploader
+        mediaDownloader = environment.media.downloader
+        projectionChangeNotifier = environment.runtime.projectionChangeNotifier
+        activeHybridGroupSynchronizer = environment.runtime.activeHybridGroupSynchronizer
+        draft = context.initialDraft ?? ""
+        mentionHandlesText = context.initialMentionHandles ?? ""
     }
 
     func messageSearchStore() -> V2ConversationSearchStore? {
@@ -138,10 +152,22 @@ final class V2ConversationDetailStore {
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        state = .loading
+        if timeline.isEmpty { state = .loading }
         do {
-            let refreshedMessages = try await dataSource.messages(in: roomID, for: userID)
-            let refreshedTimeline = try await dataSource.timeline(in: roomID, for: userID)
+            // Preserve only the window the user explicitly loaded. The normal
+            // path remains a small page, while edits/withdrawals inside the
+            // visible window are refreshed from one SQLite snapshot.
+            let page = try await dataSource.timelinePage(
+                in: roomID,
+                for: userID,
+                before: newerTimelineBoundary,
+                limit: min(
+                    Self.maximumRetainedTimelineItems,
+                    max(Self.initialTimelinePageSize, timeline.count)
+                )
+            )
+            let refreshedTimeline = page.items
+            let refreshedMessages = Self.messages(in: refreshedTimeline)
             let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
                 try await sendingCapabilityReader.directSendingCapability(in: roomID)
             } else {
@@ -157,6 +183,9 @@ final class V2ConversationDetailStore {
             await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages)
             messages = refreshedMessages
             timeline = refreshedTimeline
+            timelineRevision &+= 1
+            canLoadOlderTimeline = page.olderCursor != nil
+            isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
             canSendInDirectConversation = refreshedCanSend
             groupAnnouncement = refreshedAnnouncement
             let visibleMediaIDs = Set(refreshedMessages.lazy
@@ -169,7 +198,92 @@ final class V2ConversationDetailStore {
             return
         } catch {
             guard generation == refreshGeneration else { return }
-            state = .failed
+            if timeline.isEmpty {
+                state = .failed
+            } else {
+                state = .loaded
+                messageActionFeedback = "无法刷新当前会话。"
+            }
+        }
+    }
+
+    func loadOlderTimeline() async {
+        guard !isLoadingOlderTimeline, !isReturningToLatestTimeline,
+              canLoadOlderTimeline,
+              let first = timeline.first
+        else { return }
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        isLoadingOlderTimeline = true
+        defer { isLoadingOlderTimeline = false }
+        do {
+            let page = try await dataSource.timelinePage(
+                in: roomID,
+                for: userID,
+                before: .init(timelineSequence: first.timelineSequence, itemID: first.storageItemID),
+                limit: Self.timelinePageSize
+            )
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            let existingIDs = Set(timeline.map(\.id))
+            let older = page.items.filter { !existingIDs.contains($0.id) }
+            let combined = older + timeline
+            if combined.count > Self.maximumRetainedTimelineItems {
+                let boundaryItem = combined[Self.maximumRetainedTimelineItems]
+                newerTimelineBoundary = .init(
+                    timelineSequence: boundaryItem.timelineSequence,
+                    itemID: boundaryItem.storageItemID
+                )
+                timeline = Array(combined.prefix(Self.maximumRetainedTimelineItems))
+                isBrowsingHistoricalTimeline = true
+            } else {
+                timeline = combined
+            }
+            messages = Self.messages(in: timeline)
+            timelineRevision &+= 1
+            canLoadOlderTimeline = page.olderCursor != nil
+        } catch is CancellationError {
+            return
+        } catch {
+            messageActionFeedback = "无法加载更早的消息。"
+        }
+    }
+
+    func returnToLatestTimeline() async {
+        guard !isLoadingOlderTimeline, !isReturningToLatestTimeline,
+              let previousBoundary = newerTimelineBoundary
+        else { return }
+        isReturningToLatestTimeline = true
+        defer { isReturningToLatestTimeline = false }
+        newerTimelineBoundary = nil
+        await refresh()
+        if isBrowsingHistoricalTimeline {
+            // A failed/cancelled latest-page read keeps the historical window
+            // and its retry boundary coherent.
+            newerTimelineBoundary = previousBoundary
+        }
+    }
+
+    /// Search navigation may target a message outside the initial window. It
+    /// advances bounded keyset pages and preserves cancellation instead of
+    /// falling back to one unbounded history query.
+    func loadTimeline(containing messageID: String) async {
+        while !Task.isCancelled,
+              !messages.contains(where: { $0.id == messageID }),
+              canLoadOlderTimeline {
+            let previousCount = timeline.count
+            await loadOlderTimeline()
+            guard timeline.count > previousCount else { return }
+            await Task.yield()
+        }
+    }
+
+    private static func messages(
+        in timeline: [V2ConversationTimelineItem]
+    ) -> [V2ConversationMessageItem] {
+        timeline.compactMap { item in
+            guard case .message(let message, _) = item else { return nil }
+            return message
         }
     }
 
@@ -462,7 +576,7 @@ final class V2ConversationDetailStore {
                 groupReadReceiptPage = try .init(
                     roomID: page.roomID,
                     messageRoomSequence: page.messageRoomSequence,
-                    readerCount: page.readerCount,
+                    readerCount: existing.readerCount ?? page.readerCount,
                     readers: existing.readers + page.readers,
                     nextCursor: page.nextCursor
                 )
@@ -1056,33 +1170,53 @@ final class V2ConversationDetailStore {
             groupMemberFeedback = "成员目录暂不可用。"
             return
         }
-        let cursor = reset ? nil : nextGroupMemberCursor
+        var cursor = reset ? nil : nextGroupMemberCursor
         if !reset, cursor == nil, !groupMembers.isEmpty { return }
+        var replaceCurrentRoster = reset
         isLoadingGroupMembers = true
         defer { isLoadingGroupMembers = false }
-        do {
-            let page = try await groupMemberDirectory.members(in: roomID, cursor: cursor)
-            try Task.checkCancellation()
-            if reset {
-                groupMembers = []
-                groupActorRole = nil
-            }
-            let known = Set(groupMembers.map(\.id))
-            let incoming = Set(page.members.map(\.id))
-            guard incoming.count == page.members.count, known.isDisjoint(with: incoming) else {
-                groupMemberFeedback = "成员目录返回了重复数据。"
+        for attempt in 0..<2 {
+            do {
+                let page = try await groupMemberDirectory.members(in: roomID, cursor: cursor)
+                try Task.checkCancellation()
+                // A defensive client-side fence protects older or mixed
+                // server deployments too. Restart once instead of ever
+                // appending pages from different membership revisions.
+                if cursor != nil,
+                   let loadedRevision = groupMemberRevision,
+                   loadedRevision != page.membershipRevision,
+                   attempt == 0 {
+                    cursor = nil
+                    replaceCurrentRoster = true
+                    continue
+                }
+                if replaceCurrentRoster {
+                    groupMembers = []
+                    groupActorRole = nil
+                }
+                let known = Set(groupMembers.map(\.id))
+                let incoming = Set(page.members.map(\.id))
+                guard incoming.count == page.members.count, known.isDisjoint(with: incoming) else {
+                    groupMemberFeedback = "成员目录返回了重复数据。"
+                    return
+                }
+                groupMembers += page.members
+                groupMemberRevision = page.membershipRevision
+                groupActorRole = page.actorRole
+                nextGroupMemberCursor = page.nextCursor
+                canLoadMoreGroupMembers = page.nextCursor != nil
+                groupMemberFeedback = nil
+                return
+            } catch is CancellationError {
+                return
+            } catch V2RealtimeTransportError.server(let code, _, _, _) where code == "REVISION_CONFLICT" && cursor != nil && attempt == 0 {
+                cursor = nil
+                replaceCurrentRoster = true
+                continue
+            } catch {
+                groupMemberFeedback = "无法读取群成员，请检查网络后重试。"
                 return
             }
-            groupMembers += page.members
-            groupMemberRevision = page.membershipRevision
-            groupActorRole = page.actorRole
-            nextGroupMemberCursor = page.nextCursor
-            canLoadMoreGroupMembers = page.nextCursor != nil
-            groupMemberFeedback = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            groupMemberFeedback = "无法读取群成员，请检查网络后重试。"
         }
     }
 

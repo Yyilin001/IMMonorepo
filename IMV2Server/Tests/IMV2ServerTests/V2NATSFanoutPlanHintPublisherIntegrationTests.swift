@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
+import Synchronization
 @testable import IMV2Server
 import Testing
 
@@ -36,7 +37,8 @@ struct V2NATSFanoutPlanHintPublisherIntegrationTests {
                 sourceEventID: .init("00000000-0000-0000-0000-000000000971"),
                 planID: .init("00000000-0000-0000-0000-000000000972")
             )
-            try await V2NATSFanoutPlanHintPublisher(configuration: configuration).publishHint(trigger)
+            let publisher = V2NATSFanoutPlanHintPublisher(configuration: configuration)
+            try await publisher.publishHint(trigger)
 
             let payload = try await handler.awaitPayload()
             #expect(try JSONDecoder().decode(V2NATSFanoutPlanHint.self, from: payload) == .init(trigger: trigger))
@@ -44,6 +46,51 @@ struct V2NATSFanoutPlanHintPublisherIntegrationTests {
             try await eventLoopGroup.shutdownGracefully()
         } catch {
             try? await channel.close().get()
+            try? await eventLoopGroup.shutdownGracefully()
+            throw error
+        }
+    }
+
+    @Test("successive hints reuse one connection and answer broker keepalive PING")
+    func reusesConnectionAndAnswersBrokerPing() async throws {
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let recorder = NATSReuseBrokerRecorder(eventLoop: eventLoopGroup.next())
+        let server = try await ServerBootstrap(group: eventLoopGroup)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(NATSReuseBrokerHandler(recorder: recorder))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        do {
+            let port = try #require(server.localAddress?.port)
+            let configuration = try V2NATSFanoutHintConfiguration(
+                url: try #require(URL(string: "nats://127.0.0.1:\(port)")),
+                subject: "imv2.test.fanout.reuse",
+                acknowledgementTimeout: 1
+            )
+            let publisher = V2NATSFanoutPlanHintPublisher(configuration: configuration)
+            let first = try V2FanoutPlanTrigger(
+                sourceEventID: .init("00000000-0000-0000-0000-000000000977"),
+                planID: .init("00000000-0000-0000-0000-000000000978")
+            )
+            let second = try V2FanoutPlanTrigger(
+                sourceEventID: .init("00000000-0000-0000-0000-000000000979"),
+                planID: .init("00000000-0000-0000-0000-000000000980")
+            )
+
+            try await publisher.publishHint(first)
+            try await publisher.publishHint(second)
+            try await recorder.awaitClientPong()
+
+            #expect(recorder.observation() == .init(
+                connectionCount: 1,
+                publishPingCount: 2,
+                clientPongCount: 1
+            ))
+            try await server.close().get()
+            try await eventLoopGroup.shutdownGracefully()
+        } catch {
+            try? await server.close().get()
             try? await eventLoopGroup.shutdownGracefully()
             throw error
         }
@@ -143,6 +190,118 @@ private final class NATSSilentBrokerHandler: ChannelInboundHandler, @unchecked S
 
     func channelRead(context _: ChannelHandlerContext, data _: NIOAny) {
         // Deliberately consume every client byte without returning a PONG.
+    }
+}
+
+private final class NATSReuseBrokerRecorder: Sendable {
+    struct Observation: Equatable, Sendable {
+        let connectionCount: Int
+        let publishPingCount: Int
+        let clientPongCount: Int
+    }
+
+    private struct State: Sendable {
+        var connectionCount = 0
+        var publishPingCount = 0
+        var clientPongCount = 0
+    }
+
+    private let state = Mutex(State())
+    private let clientPong: EventLoopPromise<Void>
+
+    init(eventLoop: any EventLoop) {
+        clientPong = eventLoop.makePromise(of: Void.self)
+    }
+
+    func recordConnection() {
+        state.withLock { $0.connectionCount += 1 }
+    }
+
+    func recordPublishPing() -> Int {
+        state.withLock { state in
+            state.publishPingCount += 1
+            return state.publishPingCount
+        }
+    }
+
+    func recordClientPong() {
+        let isFirst = state.withLock { state in
+            state.clientPongCount += 1
+            return state.clientPongCount == 1
+        }
+        if isFirst { clientPong.succeed(()) }
+    }
+
+    func awaitClientPong() async throws {
+        try await clientPong.futureResult.get()
+    }
+
+    func observation() -> Observation {
+        state.withLock {
+            .init(
+                connectionCount: $0.connectionCount,
+                publishPingCount: $0.publishPingCount,
+                clientPongCount: $0.clientPongCount
+            )
+        }
+    }
+}
+
+private final class NATSReuseBrokerHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let recorder: NATSReuseBrokerRecorder
+    private var pendingBytes = Data()
+    private var expectedPayloadLength: Int?
+
+    init(recorder: NATSReuseBrokerRecorder) {
+        self.recorder = recorder
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        recorder.recordConnection()
+        context.fireChannelActive()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        guard let received = buffer.readData(length: buffer.readableBytes) else { return }
+        pendingBytes.append(received)
+        consumePendingFrames(context: context)
+    }
+
+    private func consumePendingFrames(context: ChannelHandlerContext) {
+        while true {
+            if let expectedPayloadLength {
+                guard pendingBytes.count >= expectedPayloadLength + 2 else { return }
+                pendingBytes.removeFirst(expectedPayloadLength + 2)
+                self.expectedPayloadLength = nil
+                continue
+            }
+            guard let delimiter = pendingBytes.range(of: Data([13, 10])),
+                  let line = String(data: pendingBytes[..<delimiter.lowerBound], encoding: .utf8)
+            else { return }
+            pendingBytes.removeSubrange(..<delimiter.upperBound)
+            let components = line.split(separator: " ")
+            if components.first == "PUB", components.count == 3,
+               let length = Int(components[2]), length >= 0
+            {
+                expectedPayloadLength = length
+            } else if line == "PING" {
+                let publishPingCount = recorder.recordPublishPing()
+                var response = context.channel.allocator.buffer(capacity: 12)
+                if publishPingCount == 1 {
+                    response.writeString("PING\r\n")
+                }
+                response.writeString("PONG\r\n")
+                context.writeAndFlush(NIOAny(response), promise: nil)
+                if publishPingCount == 2 {
+                    context.close(promise: nil)
+                }
+            } else if line == "PONG" {
+                recorder.recordClientPong()
+            }
+        }
     }
 }
 

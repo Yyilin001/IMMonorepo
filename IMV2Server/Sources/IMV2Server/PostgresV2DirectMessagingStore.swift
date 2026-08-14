@@ -28,6 +28,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
 
             let pair = directPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
+            let activeAccountCount = try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.public_user_profiles AS profile WHERE (profile.user_id = \(bind: actorID) OR profile.user_id = \(bind: targetID)) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)").first(decoding: DirectCountRow.self)?.value ?? 0
+            guard activeAccountCount == 2 else { return .unavailable }
             if let existingPair = try await sql.raw("SELECT room_id, created_at FROM im_v2.direct_room_pairs WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").first(decoding: DirectPairRow.self) {
                 let result = try existingPair.directRoom(actor: command.actorUserID, target: command.targetUserID)
                 try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: existingPair.roomID, createdAt: existingPair.createdAt, sql: sql)
@@ -38,7 +40,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let profiles = try await sql.raw("""
                 SELECT user_id, public_handle, display_name, account_kind, revision, updated_at
                 FROM im_v2.public_user_profiles
-                WHERE user_id = \(bind: actorID) OR user_id = \(bind: targetID)
+                WHERE (user_id = \(bind: actorID) OR user_id = \(bind: targetID))
+                  AND state = 'active'
                 """).all(decoding: DirectPublicProfileRow.self)
             guard profiles.count == 2,
                   let targetProfile = profiles.first(where: { $0.userID == targetID })
@@ -157,6 +160,7 @@ private struct DirectPairRow: Decodable {
     enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at" }
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
+private struct DirectCountRow: Decodable { let value: Int }
 private struct DirectShardLeaseRow: Decodable {
     let leaseID: UUID; let generation: Int64; let validUntil: Date
     enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until" }

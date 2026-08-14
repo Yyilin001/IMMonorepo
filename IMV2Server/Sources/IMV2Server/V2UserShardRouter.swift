@@ -48,6 +48,18 @@ public protocol V2UserShardRouter: Sendable {
     func routes(for users: [UserID]) async throws -> [V2UserShardRoute]
 }
 
+/// Serializes a routed user-store operation with cutover/rollback. The body
+/// runs while a shared lock is held on the control-plane route generation;
+/// route mutations take the corresponding exclusive lock. Cross-store I/O is
+/// intentionally permitted here: this is the bounded per-user cutover fence,
+/// not a general database transaction abstraction.
+public protocol V2UserShardRouteFencing: Sendable {
+    func withCurrentRoute<Result: Sendable>(
+        for userID: UserID,
+        _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result
+    ) async throws -> Result
+}
+
 public enum V2UserShardRouterError: Error, Equatable, Sendable {
     case invalidRoute
     case resultCountMismatch
@@ -114,6 +126,37 @@ public struct V2PostgresUserShardRouter: V2UserShardRouter {
     }
 }
 
+extension V2PostgresUserShardRouter: V2UserShardRouteFencing {
+    public func withCurrentRoute<Result: Sendable>(
+        for userID: UserID,
+        _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result
+    ) async throws -> Result {
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase,
+                  let userUUID = UUID(uuidString: userID.rawValue)
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await sql.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: userID.rawValue), 0))").run()
+            guard let configuration = try await sql.raw("""
+                SELECT router_epoch, default_write_bucket, default_read_fallback_bucket
+                FROM im_v2.user_shard_router_configuration
+                WHERE configuration_key = TRUE
+                """).first(decoding: V2PostgresFencedRouterConfigurationRow.self)
+            else { throw V2UserShardRouteControlError.missingRouterConfiguration }
+            let override = try await sql.raw("""
+                SELECT write_bucket, read_fallback_bucket, router_epoch
+                FROM im_v2.user_shard_route_overrides
+                WHERE user_id = \(bind: userUUID)
+                """).first(decoding: V2UserShardRouteOverrideRow.self)
+            let route = try V2UserShardRoute(
+                bucket: override?.writeBucket ?? configuration.defaultWriteBucket,
+                observedRouterEpoch: override?.routerEpoch ?? configuration.routerEpoch,
+                readFallbackBucket: override?.readFallbackBucket ?? configuration.defaultReadFallbackBucket
+            )
+            return try await operation(route, transaction)
+        }
+    }
+}
+
 /// Serialized, idempotent control-plane operation for one user's logical
 /// write owner. Data copy/verification is deliberately outside this API: the
 /// caller must complete that evidence before it invokes a cutover.
@@ -140,6 +183,7 @@ public enum V2UserShardRouteControlError: Error, Equatable, Sendable {
     case missingRouterConfiguration
     case migrationNotVerified
     case migrationConflict
+    case finalVerificationFailed
 }
 
 public struct V2UserShardRouteCutoverResult: Equatable, Sendable {
@@ -180,13 +224,19 @@ public struct V2PostgresUserShardRouteControl: Sendable {
     private let database: any Database
     private let operatorPrincipal: String
     private let retentionWindow: TimeInterval
+    private let finalizer: (any V2UserShardCutoverFinalizing)?
 
-    public init(database: any Database, operatorPrincipal: String, retentionWindow: TimeInterval = 86_400) {
+    public init(
+        database: any Database, operatorPrincipal: String,
+        retentionWindow: TimeInterval = 86_400,
+        finalizer: (any V2UserShardCutoverFinalizing)? = nil
+    ) {
         precondition(V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal))
         precondition(retentionWindow > 0)
         self.database = database
         self.operatorPrincipal = operatorPrincipal
         self.retentionWindow = retentionWindow
+        self.finalizer = finalizer
     }
 
     public func cutOver(_ command: V2UserShardRouteCutover, now: Date = Date()) async throws -> V2UserShardRouteCutoverResult {
@@ -209,6 +259,7 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                 """).first(decoding: V2PostgresRouterConfigurationRow.self)
             else { throw V2UserShardRouteControlError.missingRouterConfiguration }
             guard configuration.routerEpoch == command.expectedRouterEpoch else { throw V2UserShardRouteControlError.staleRouterEpoch }
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: command.userID.rawValue), 0))").run()
             guard let migration = try await sql.raw("""
                 SELECT migration_id, source_bucket, target_bucket, source_router_epoch, phase, cutover_operation_id
                 FROM im_v2.user_shard_migrations
@@ -223,6 +274,17 @@ public struct V2PostgresUserShardRouteControl: Sendable {
             guard migration.phase == .verified else { throw V2UserShardRouteControlError.migrationNotVerified }
             guard migration.cutoverOperationID == nil || migration.cutoverOperationID == command.operationID else {
                 throw V2UserShardRouteControlError.operationConflict
+            }
+            guard let finalizer else { throw V2UserShardRouteControlError.finalVerificationFailed }
+            do {
+                try await finalizer.finalizeForCutover(
+                    migrationID: migration.migrationID, userID: command.userID,
+                    sourceBucket: migration.sourceBucket, targetBucket: migration.targetBucket,
+                    sourceRouterEpoch: migration.sourceRouterEpoch,
+                    controlTransaction: transaction
+                )
+            } catch {
+                throw V2UserShardRouteControlError.finalVerificationFailed
             }
             let cutoverPhase = try V2UserShardMigrationStateMachine.transition(from: migration.phase, by: .cutOver)
             let migrationPhase = try V2UserShardMigrationStateMachine.transition(from: cutoverPhase, by: .beginRetention)
@@ -288,6 +350,18 @@ public struct V2PostgresUserShardRouteControl: Sendable {
             guard migration.phase == .retention,
                   let retentionUntil = migration.retentionUntil, retentionUntil > now
             else { throw V2UserShardRouteControlError.migrationNotVerified }
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: command.userID.rawValue), 0))").run()
+            guard let finalizer else { throw V2UserShardRouteControlError.finalVerificationFailed }
+            do {
+                try await finalizer.finalizeForRollback(
+                    migrationID: migration.migrationID, userID: command.userID,
+                    sourceBucket: migration.sourceBucket, targetBucket: migration.targetBucket,
+                    sourceRouterEpoch: migration.sourceRouterEpoch,
+                    controlTransaction: transaction
+                )
+            } catch {
+                throw V2UserShardRouteControlError.finalVerificationFailed
+            }
             guard let configuration = try await sql.raw("""
                 SELECT router_epoch FROM im_v2.user_shard_router_configuration
                 WHERE configuration_key = TRUE FOR UPDATE
@@ -365,6 +439,17 @@ private struct V2PostgresUserShardRouteRow: Decodable {
 private struct V2PostgresRouterConfigurationRow: Decodable {
     let routerEpoch: Int64
     enum CodingKeys: String, CodingKey { case routerEpoch = "router_epoch" }
+}
+
+private struct V2PostgresFencedRouterConfigurationRow: Decodable {
+    let routerEpoch: Int64
+    let defaultWriteBucket: String
+    let defaultReadFallbackBucket: String?
+    enum CodingKeys: String, CodingKey {
+        case routerEpoch = "router_epoch"
+        case defaultWriteBucket = "default_write_bucket"
+        case defaultReadFallbackBucket = "default_read_fallback_bucket"
+    }
 }
 
 private struct V2UserShardRouteOperationRow: Decodable {

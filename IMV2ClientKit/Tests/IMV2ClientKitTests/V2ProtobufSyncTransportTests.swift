@@ -10,17 +10,18 @@ struct V2ProtobufSyncTransportTests {
             snapshotID: .init("00000000-0000-0000-0000-000000000301"),
             generation: 2,
             baseSequence: 7,
-            manifestDigest: "manifest-digest",
             expiresAt: .distantFuture
         )
         let wire = ScriptedSyncWire(reset: reset)
         let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
 
         let manifest = try await transport.fetchSnapshotManifest(for: reset)
-        #expect(manifest.pageDigests.count == 1)
+        #expect(manifest.pageCount == 1)
+        #expect(manifest.totalItems == 1)
         #expect(manifest.capabilityProfile == "base")
         let page = try await transport.fetchSnapshotPage(for: manifest, index: 0)
-        #expect(page.payload == Data("hello".utf8))
+        #expect(page.itemCount == 1)
+        #expect(try V2SnapshotProjectionV3Codec.decode(page.payload).items.count == 1)
         try await transport.acknowledgeSnapshot(manifest)
         #expect(await wire.commands() == [.syncSnapshot, .snapshotPagePull, .snapshotAck])
     }
@@ -124,7 +125,6 @@ struct V2ProtobufSyncTransportTests {
             snapshotID: .init("00000000-0000-0000-0000-000000000317"),
             generation: 2,
             baseSequence: 7,
-            manifestDigest: "manifest-digest",
             expiresAt: .distantFuture
         )
         let transport = V2ProtobufSyncTransport(wire: ScriptedSyncWire(reset: reset, schemaVersion: 1), protocolVersion: 1)
@@ -188,6 +188,31 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.members.last?.publicIdentity?.handle.rawValue == "member_2")
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
+    }
+
+    @Test("read-receipt total is first-page-only and later cursor pages omit it")
+    func readReceiptReaderCountPresenceRoundTrips() async throws {
+        let wire = ReadReceiptReadersWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000343")
+
+        let first = try await transport.listReadReceiptReaders(
+            roomID: roomID, messageRoomSequence: 7, cursor: nil, pageSize: 1
+        )
+        guard let cursor = first.nextCursor else {
+            Issue.record("expected a first-page cursor")
+            return
+        }
+        let second = try await transport.listReadReceiptReaders(
+            roomID: roomID, messageRoomSequence: 7,
+            cursor: cursor, pageSize: 1
+        )
+
+        #expect(first.readerCount == 2)
+        #expect(first.readers.count == 1)
+        #expect(second.readerCount == nil)
+        #expect(second.readers.count == 1)
+        #expect(second.nextCursor == nil)
     }
 
     @Test("Hybrid group subscription maps its cursor and best-effort unsubscribe")
@@ -266,6 +291,32 @@ private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
     }
 
     func requestedPageSize() -> UInt32 { pageSize }
+}
+
+private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .listReadReceiptReaders(let command)? = request.body else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        let isFirstPage = command.cursor.isEmpty
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = request.protocolVersion
+        response.readReceiptReadersPage = .init()
+        response.readReceiptReadersPage.roomID = command.roomID
+        response.readReceiptReadersPage.messageRoomSequence = command.messageRoomSequence
+        if isFirstPage { response.readReceiptReadersPage.readerCount = 2 }
+        response.readReceiptReadersPage.readers = [.with {
+            $0.userID = isFirstPage
+                ? "00000000-0000-0000-0000-000000000344"
+                : "00000000-0000-0000-0000-000000000345"
+            $0.readThroughRoomSequence = 7
+            $0.recordedAtMs = 1_750_000_000_000
+        }]
+        response.readReceiptReadersPage.nextCursor = isFirstPage ? "opaque-cursor" : ""
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+    }
 }
 
 private actor MemberMuteWire: V2AuthenticatedFrameTransport {
@@ -481,10 +532,42 @@ private actor ScriptedSyncWire: V2AuthenticatedFrameTransport {
     private let reset: V2ClientResetRequired
     private let schemaVersion: UInt32
     private var recorded: [V2FrameCommand] = []
+    private let pagePayload: Data
+    private let pageDigest: String
+    private let rootDigest: String
+    private let firstKey: V2SnapshotProjectionKey
+    private let lastKey: V2SnapshotProjectionKey
 
-    init(reset: V2ClientResetRequired, schemaVersion: UInt32 = V2SnapshotProjectionCodec.schemaVersion) {
+    init(reset: V2ClientResetRequired, schemaVersion: UInt32 = V2SnapshotProjectionV3Codec.schemaVersion) {
         self.reset = reset
         self.schemaVersion = schemaVersion
+        let key = try! V2SnapshotProjectionKey(
+            projectionKind: "relationship",
+            entityKey: "00000000-0000-0000-0000-000000000302"
+        )
+        let item = try! V2SnapshotProjectionItem(
+            key: key,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000303"),
+            sequence: 1,
+            payload: JSONSerialization.data(withJSONObject: [
+                "target_user_id": key.entityKey,
+                "state": "accepted",
+                "updated_at_ms": 1_750_000_000_000,
+            ], options: [.sortedKeys])
+        )
+        let page = try! V2SnapshotProjectionV3Page(items: [item])
+        pagePayload = try! V2SnapshotProjectionV3Codec.encode(page)
+        pageDigest = V2SnapshotV3Digest.page(pagePayload)
+        firstKey = page.firstKey
+        lastKey = page.lastKey
+        rootDigest = V2SnapshotV3Digest.next(
+            previous: V2SnapshotV3Digest.initial(baseSequence: reset.baseSequence, capabilityProfile: "base"),
+            pageIndex: 0,
+            pageDigest: pageDigest,
+            firstKey: page.firstKey,
+            lastKey: page.lastKey,
+            itemCount: 1
+        )
     }
 
     func request(_ frame: V2Frame) throws -> V2Frame {
@@ -499,10 +582,12 @@ private actor ScriptedSyncWire: V2AuthenticatedFrameTransport {
             response.snapshotManifest.snapshotID = reset.snapshotID.rawValue
             response.snapshotManifest.generation = reset.generation
             response.snapshotManifest.baseUserSyncSequence = reset.baseSequence
-            response.snapshotManifest.manifestDigest = reset.manifestDigest
+            response.snapshotManifest.rootDigest = rootDigest
             response.snapshotManifest.schemaVersion = schemaVersion
             response.snapshotManifest.capabilityProfile = "base"
-            response.snapshotManifest.pageDigests = ["2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"]
+            response.snapshotManifest.pageCount = 1
+            response.snapshotManifest.totalItems = 1
+            response.snapshotManifest.totalBytes = UInt64(pagePayload.count)
             response.snapshotManifest.nextSyncToken = "next-token"
             response.snapshotManifest.syncReceipt = "snapshot-receipt"
             response.snapshotManifest.expiresAtMs = Int64(Date.distantFuture.timeIntervalSince1970 * 1_000)
@@ -510,10 +595,15 @@ private actor ScriptedSyncWire: V2AuthenticatedFrameTransport {
             response.snapshotPage = .init()
             response.snapshotPage.snapshotID = reset.snapshotID.rawValue
             response.snapshotPage.generation = reset.generation
-            response.snapshotPage.manifestDigest = reset.manifestDigest
+            response.snapshotPage.rootDigest = rootDigest
             response.snapshotPage.pageIndex = 0
-            response.snapshotPage.pageDigest = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-            response.snapshotPage.payload = Data("hello".utf8)
+            response.snapshotPage.pageDigest = pageDigest
+            response.snapshotPage.firstProjectionKind = firstKey.projectionKind
+            response.snapshotPage.firstEntityKey = firstKey.entityKey
+            response.snapshotPage.lastProjectionKind = lastKey.projectionKind
+            response.snapshotPage.lastEntityKey = lastKey.entityKey
+            response.snapshotPage.itemCount = 1
+            response.snapshotPage.payload = pagePayload
         case .snapshotAck:
             response.acknowledged = .init()
         default:

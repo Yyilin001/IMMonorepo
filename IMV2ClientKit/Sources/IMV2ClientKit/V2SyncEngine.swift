@@ -30,7 +30,26 @@ public actor V2SyncEngine: V2SyncDriving {
     public func synchronizeOnce() async throws -> V2SyncCycleResult {
         try Task.checkCancellation()
         let cursorBeforePull = try await store.cursor()
-        let pull = try await transport.pull(syncToken: cursorBeforePull?.syncToken, maxRecords: maxRecords)
+        // A restart may happen after the server committed the snapshot ACK but
+        // before the local shadow projection was activated. Do not send the
+        // old continuation token in that state; resume the durable import and
+        // replay the idempotent snapshot ACK first.
+        if let cursorBeforePull, let reset = cursorBeforePull.pendingReset {
+            return .resetPending(reset)
+        }
+        let pull: V2ClientPullResult
+        do {
+            pull = try await transport.pull(
+                syncToken: cursorBeforePull?.syncToken,
+                maxRecords: maxRecords
+            )
+        } catch let error as V2RealtimeTransportError {
+            guard case .server(code: "SYNC_TOKEN_INVALID", retryable: false, _, _) = error,
+                  let cursorBeforePull
+            else { throw error }
+            try await store.discardSyncCapabilities(generation: cursorBeforePull.generation)
+            pull = try await transport.pull(syncToken: nil, maxRecords: maxRecords)
+        }
         switch pull {
         case .ready(let batch):
             guard batch.capabilityProfile == capabilityProfile else { throw V2ClientSyncError.unsupportedCapabilityProfile }
@@ -59,27 +78,72 @@ public actor V2SyncEngine: V2SyncDriving {
         }
     }
 
-    /// Pages become durable one by one before the server ACK. A later call
-    /// resumes matching staged pages and atomically swaps only after every
-    /// manifest page is present and verified by the transport/store fences.
+    /// Each page is decoded and applied into a durable shadow projection in a
+    /// bounded SQLite transaction. The server generation is committed before
+    /// the live local projection is replaced, closing the otherwise unsafe
+    /// activate-before-ACK crash window.
     public func completePendingReset() async throws {
         guard let cursor = try await store.cursor(), let reset = cursor.pendingReset else {
             throw V2ClientSyncError.noResetPending
         }
-        guard reset.expiresAt > Date() else { throw V2ClientSyncError.snapshotExpired }
-        let manifest = try await transport.fetchSnapshotManifest(for: reset)
+        let manifest: V2ClientSnapshotManifest
+        if let imported = try await store.importedSnapshotManifest(for: reset) {
+            manifest = imported
+        } else {
+            do {
+                manifest = try await transport.fetchSnapshotManifest(for: reset)
+            } catch let error as V2RealtimeTransportError {
+                try await cancelResetIfRejected(error, reset: reset)
+                throw error
+            }
+        }
         guard manifest.reset == reset else { throw V2ClientSyncError.snapshotMismatch }
         guard manifest.capabilityProfile == capabilityProfile else { throw V2ClientSyncError.unsupportedCapabilityProfile }
-        try await store.beginSnapshotStaging(manifest)
-        let staged = try await store.stagedSnapshotPageIndexes(for: manifest)
-        for index in manifest.pageDigests.indices where !staged.contains(index) {
+        try await store.beginSnapshotImport(
+            manifest,
+            initialDigest: V2SnapshotV3Digest.initial(
+                baseSequence: manifest.reset.baseSequence,
+                capabilityProfile: manifest.capabilityProfile
+            )
+        )
+        var index = try await store.nextSnapshotPageIndex(for: manifest)
+        while index < manifest.pageCount {
             try Task.checkCancellation()
-            let page = try await transport.fetchSnapshotPage(for: manifest, index: index)
-            try await store.stageSnapshotPage(page, for: manifest)
+            let page: V2ClientSnapshotPage
+            do {
+                page = try await transport.fetchSnapshotPage(for: manifest, index: index)
+            } catch let error as V2RealtimeTransportError {
+                try await cancelResetIfRejected(error, reset: reset)
+                throw error
+            }
+            try await store.applySnapshotPage(page, for: manifest)
+            index += 1
         }
-        try await store.commitStagedSnapshot(manifest)
         try Task.checkCancellation()
-        try await transport.acknowledgeSnapshot(manifest)
-        try await store.markSnapshotAcknowledged(snapshotID: reset.snapshotID, generation: reset.generation, baseSequence: reset.baseSequence, receipt: manifest.receipt)
+        try await store.prepareSnapshotActivation(manifest)
+        do {
+            try await transport.acknowledgeSnapshot(manifest)
+        } catch let error as V2RealtimeTransportError {
+            try await cancelResetIfRejected(error, reset: reset)
+            throw error
+        }
+        try await store.activateAcknowledgedSnapshot(manifest)
+        // Reclaiming the old b-trees can touch every retired page. It is safe
+        // to run after the cursor fence is visible and must never extend the
+        // acknowledged-snapshot activation transaction.
+        Task { try? await store.cleanupRetiredSnapshotTables() }
     }
+
+    private func cancelResetIfRejected(
+        _ error: V2RealtimeTransportError,
+        reset: V2ClientResetRequired
+    ) async throws {
+        // RESET_REQUIRED is a terminal fence result for this exact reset: the
+        // server either expired and rolled it back or superseded it. The live
+        // projection was never replaced, so restoring the old cursor is safe.
+        if case .server(code: "RESET_REQUIRED", retryable: false, _, _) = error {
+            try await store.cancelReset(reset)
+        }
+    }
+
 }

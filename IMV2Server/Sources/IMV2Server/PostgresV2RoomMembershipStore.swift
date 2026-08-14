@@ -35,6 +35,9 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 guard prior.matches(command: command, roomID: roomID, targetID: targetID) else { return .idempotencyConflict }
                 return .idempotent(try prior.change())
             }
+            guard try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: actorID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true else {
+                throw V2RoomMembershipStoreError.actorNotOwner
+            }
 
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, delivery_mode
@@ -62,37 +65,14 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 let configuredPermissions = try await v2ResolvedGroupPermissions(roomID: roomID, role: actorRole, sql: sql)
                 guard V2GroupPermissionDefaults.allows(role: actorRole, permission: requiredPermission, configured: configuredPermissions) else { throw V2RoomMembershipStoreError.actorNotOwner }
             }
-            let currentTargets = try await sql.raw("""
+            let currentTarget = try await sql.raw("""
                 SELECT user_id, role FROM im_v2.room_memberships
-                WHERE room_id = \(bind: roomID) AND joined_revision <= \(bind: room.membershipRevision)
+                WHERE room_id = \(bind: roomID) AND user_id = \(bind: targetID)
+                  AND joined_revision <= \(bind: room.membershipRevision)
                   AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
-                ORDER BY user_id
-                """).all(decoding: MembershipTargetRow.self)
-            let currentTarget = currentTargets.first { $0.userID == targetID }
-            let audience: [UUID]
-            let nextEligibleCount: Int
-            switch command.action {
-            case .add:
-                guard currentTarget == nil else { return .targetAlreadyMember }
-                let modeMaximum = V2GroupDeliveryPolicy().maximumMembers(for: room.deliveryMode)
-                guard currentTargets.count + 1 <= capacityProfile.limits.maxEligibleMembers,
-                      currentTargets.count + 1 <= modeMaximum
-                else { return .memberLimitReached }
-                audience = (currentTargets.map(\.userID) + [targetID]).sorted { $0.uuidString < $1.uuidString }
-                nextEligibleCount = currentTargets.count + 1
-            case .remove:
-                guard let currentTarget else { return .targetNotMember }
-                // V2 starts with one non-transferable owner; removing it would
-                // leave the group without an authorization authority.
-                guard currentTarget.role != "owner" else { throw V2RoomMembershipStoreError.actorNotOwner }
-                audience = currentTargets.map(\.userID)
-                nextEligibleCount = currentTargets.count - 1
-            }
-            // A large-group membership mutation produces a finite control
-            // projection only for the added/removed user. Existing members
-            // observe the ordered event through the room log, so this path
-            // never reintroduces a group-wide fan-out.
-            let deliveryAudience = room.deliveryMode == .largeGroupHybrid ? [targetID] : audience
+                ORDER BY joined_revision DESC LIMIT 1
+                FOR UPDATE
+                """).first(decoding: MembershipTargetRow.self)
 
             guard let admission = try await sql.raw("""
                 SELECT eligible_member_count, command_window_limit, command_window_used,
@@ -109,11 +89,34 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID)
                 FOR UPDATE
                 """).first(decoding: MembershipShardRow.self) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            guard admission.shardLeaseID == shard.leaseID, admission.shardLeaseGeneration == shard.generation,
-                  admission.eligibleMemberCount == currentTargets.count
+            guard admission.shardLeaseID == shard.leaseID,
+                  admission.shardLeaseGeneration == shard.generation,
+                  admission.eligibleMemberCount > 0
             else { throw V2RoomMembershipStoreError.corruptPersistenceState }
+            let nextEligibleCount: Int
+            let deliveryTargetCount: Int
+            switch command.action {
+            case .add:
+                guard try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: targetID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true else {
+                    throw V2RoomMembershipStoreError.targetUnavailable
+                }
+                guard currentTarget == nil else { return .targetAlreadyMember }
+                nextEligibleCount = admission.eligibleMemberCount + 1
+                let modeMaximum = V2GroupDeliveryPolicy().maximumMembers(for: room.deliveryMode)
+                guard nextEligibleCount <= capacityProfile.limits.maxEligibleMembers,
+                      nextEligibleCount <= modeMaximum
+                else { return .memberLimitReached }
+                deliveryTargetCount = room.deliveryMode == .largeGroupHybrid ? 1 : nextEligibleCount
+            case .remove:
+                guard let currentTarget else { return .targetNotMember }
+                // V2 starts with one non-transferable owner; removing it would
+                // leave the group without an authorization authority.
+                guard currentTarget.role != "owner" else { throw V2RoomMembershipStoreError.actorNotOwner }
+                nextEligibleCount = admission.eligibleMemberCount - 1
+                deliveryTargetCount = room.deliveryMode == .largeGroupHybrid ? 1 : admission.eligibleMemberCount
+            }
             let reservation = try FanoutAdmissionEvaluator.reserve(
-                request: .init(targetRule: .exactTargetCount(deliveryAudience.count)),
+                request: .init(targetRule: .exactTargetCount(deliveryTargetCount)),
                 profile: capacityProfile.limits,
                 roomState: try admission.state(),
                 shardState: try shard.state(),
@@ -193,13 +196,37 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                      target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
                 VALUES (\(bind: planUUID), \(bind: eventUUID), \(bind: roomID), \(bind: nextSequence), \(bind: nextRevision),
                         '{"kind":"frozen_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                        \(bind: deliveryAudience.count), \(bind: deliveryAudience.count), 'planning', \(bind: now))
+                        \(bind: deliveryTargetCount), \(bind: deliveryTargetCount), 'planning', \(bind: now))
                 """).run()
-            let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: deliveryAudience.map(\.uuidString)), encoding: .utf8)!
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
-                SELECT \(bind: eventUUID), value::uuid FROM jsonb_array_elements_text(\(bind: targetsJSON)::jsonb) AS value
-                """).run()
+            if room.deliveryMode == .largeGroupHybrid {
+                try await sql.raw("INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id) VALUES (\(bind: eventUUID), \(bind: targetID))").run()
+            } else {
+                // Freeze directly from the historical interval at the prior
+                // revision. A removal therefore still notifies the removed
+                // member; an add unions the newly joined target. No roster is
+                // materialized in application memory.
+                switch command.action {
+                case .add:
+                    try await sql.raw("""
+                        INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
+                        SELECT \(bind: eventUUID), membership.user_id
+                        FROM im_v2.room_memberships AS membership
+                        WHERE membership.room_id = \(bind: roomID)
+                          AND membership.joined_revision <= \(bind: room.membershipRevision)
+                          AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: room.membershipRevision))
+                        UNION ALL SELECT \(bind: eventUUID), \(bind: targetID)
+                        """).run()
+                case .remove:
+                    try await sql.raw("""
+                        INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
+                        SELECT \(bind: eventUUID), membership.user_id
+                        FROM im_v2.room_memberships AS membership
+                        WHERE membership.room_id = \(bind: roomID)
+                          AND membership.joined_revision <= \(bind: room.membershipRevision)
+                          AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: room.membershipRevision))
+                        """).run()
+                }
+            }
             try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventUUID), \(bind: planUUID), 'pending', \(bind: now))").run()
             try await sql.raw("""
                 INSERT INTO im_v2.room_membership_operations

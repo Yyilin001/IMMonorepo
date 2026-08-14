@@ -34,6 +34,11 @@ public struct V2FanoutDeliveryLease: Equatable, Sendable {
 
 public enum V2FanoutDeliveryCommit: Equatable, Sendable {
     case staleLease
+    /// The target projection may already have committed on the old physical
+    /// owner, but the control-store route fence observed a newer write owner
+    /// before terminalization. The same durable delivery row has been moved
+    /// to that owner and released for an idempotent replay.
+    case rerouted(V2UserShardRoute)
     case committed(userSyncSequence: UInt64, releasedCompletionUnit: Bool, closedPlan: Bool)
 }
 
@@ -316,6 +321,8 @@ public struct V2FanoutDeliveryWorker: Sendable {
                 for (lease, commit) in zip(batch, commits) {
                     switch commit {
                     case .staleLease: stale += 1
+                    case .rerouted:
+                        staleRoute += 1
                     case .committed(let sequence, _, _):
                         committed += 1
                         await liveNotifier?.notifySyncAvailable(userID: lease.targetUserID, eventID: sequence, highWatermark: sequence)

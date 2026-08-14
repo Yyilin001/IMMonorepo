@@ -58,6 +58,25 @@ struct V2FanoutDeliveryWorkerTests {
         #expect(await store.releaseCount() == 0)
     }
 
+    @Test("a route fence handoff after projection is counted without a live notification")
+    func postProjectionRouteFenceHandoffDoesNotNotify() async throws {
+        let currentRoute = try V2UserShardRoute(
+            bucket: "users-next", observedRouterEpoch: 3,
+            readFallbackBucket: "users-primary"
+        )
+        let store = DeliveryStore(
+            lease: try fixtureLease(), commit: .rerouted(currentRoute)
+        )
+        let notifier = RecordingNotifier()
+        let worker = V2FanoutDeliveryWorker(store: store, liveNotifier: notifier)
+
+        #expect(try await worker.runOnce(limit: 1) == .init(
+            claimedCount: 1, committedCount: 0, staleCount: 0,
+            staleRouteCount: 1, releasedCount: 0
+        ))
+        #expect(await notifier.hints().isEmpty)
+    }
+
     @Test("projection failure releases only the lease for a later retry")
     func failedCommitReleasesLease() async throws {
         let store = DeliveryStore(lease: try fixtureLease(), failure: true)

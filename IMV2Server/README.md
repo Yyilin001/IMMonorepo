@@ -149,9 +149,13 @@ evidence remains local-stack coverage, not a production deployment approval.
 
 ## Operational notes
 
-- `IM_V2_MAX_FRAME_BYTES`, `IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH`, in-flight requests, and inbound queued bytes are
-  hard bounds; queue pressure closes the connection and clients recover by
-  sync.
+- `IM_V2_MAX_CONNECTIONS` bounds all accepted TLS sockets, including clients
+  that have not authenticated. `IM_V2_MAX_FRAME_BYTES`, protobuf depth,
+  in-flight requests, inbound queued bytes, and queued chunk count are hard
+  per-connection bounds; queue pressure closes the connection and clients
+  recover by sync.
+- `IM_V2_AUTHENTICATION_TIMEOUT_MS` is an absolute accepted-to-authenticated
+  deadline. Sending a slow stream of fragments cannot extend it.
 - `IM_V2_IDLE_TIMEOUT_MS` closes a silent TLS session. Foreground clients send
   application-owned heartbeats; background clients rely on reconnect and sync.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the

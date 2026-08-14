@@ -63,35 +63,98 @@ public struct V2PushWakeWorker: Sendable {
     private let store: any V2PushWakeStore
     private let provider: any V2PushWakeProvider
     private let leaseDuration: TimeInterval
+    private let sendTimeout: TimeInterval
+    private let maximumConcurrency: Int
     private let now: @Sendable () -> Date
 
-    public init(store: any V2PushWakeStore, provider: any V2PushWakeProvider, leaseDuration: TimeInterval = 30, now: @escaping @Sendable () -> Date = Date.init) {
-        precondition(leaseDuration > 0)
+    public init(
+        store: any V2PushWakeStore,
+        provider: any V2PushWakeProvider,
+        leaseDuration: TimeInterval = 30,
+        sendTimeout: TimeInterval = 10,
+        maximumConcurrency: Int = 8,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        precondition(
+            leaseDuration.isFinite && sendTimeout.isFinite &&
+            leaseDuration > sendTimeout && sendTimeout > 0 && maximumConcurrency > 0
+        )
         self.store = store
         self.provider = provider
         self.leaseDuration = leaseDuration
+        self.sendTimeout = sendTimeout
+        self.maximumConcurrency = maximumConcurrency
         self.now = now
     }
 
     public func runOnce(limit: Int) async throws -> V2PushWakeReport {
         precondition(limit > 0)
         let leases = try await store.claimAdmitted(now: now(), leaseDuration: leaseDuration, limit: limit)
-        var sent = 0
-        var released = 0
-        for lease in leases {
-            do {
-                switch try await provider.send(lease.wake) {
-                case .sent:
-                    try await store.markSent(lease, now: now())
-                    sent += 1
-                case .suppressed(let reason):
-                    try await store.suppress(lease, reason: reason)
-                }
-            } catch {
-                try await store.release(lease)
-                released += 1
+        let counts = try await withThrowingTaskGroup(
+            of: PushProcessingResult.self,
+            returning: (sent: Int, released: Int).self
+        ) { group in
+            var nextIndex = 0
+            let initialCount = min(maximumConcurrency, leases.count)
+            for _ in 0..<initialCount {
+                let lease = leases[nextIndex]
+                nextIndex += 1
+                group.addTask { try await process(lease) }
             }
+            var sent = 0
+            var released = 0
+            while let result = try await group.next() {
+                switch result {
+                case .sent: sent += 1
+                case .suppressed: break
+                case .released: released += 1
+                }
+                if nextIndex < leases.count {
+                    let lease = leases[nextIndex]
+                    nextIndex += 1
+                    group.addTask { try await process(lease) }
+                }
+            }
+            return (sent, released)
         }
-        return .init(admittedCount: leases.count, sentCount: sent, releasedCount: released)
+        return .init(admittedCount: leases.count, sentCount: counts.sent, releasedCount: counts.released)
     }
+
+    private func process(_ lease: V2PushWakeLease) async throws -> PushProcessingResult {
+        do {
+            try Task.checkCancellation()
+            let outcome = try await withThrowingTaskGroup(of: V2PushWakeProviderOutcome.self) { group in
+                group.addTask { try await provider.send(lease.wake) }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(sendTimeout))
+                    throw V2PushWakeWorkerError.sendTimedOut
+                }
+                guard let result = try await group.next() else { throw V2PushWakeWorkerError.sendTimedOut }
+                group.cancelAll()
+                return result
+            }
+            switch outcome {
+            case .sent:
+                try await store.markSent(lease, now: now())
+                return .sent
+            case .suppressed(let reason):
+                try await store.suppress(lease, reason: reason)
+                return .suppressed
+            }
+        } catch is CancellationError {
+            try? await store.release(lease)
+            throw CancellationError()
+        } catch {
+            try await store.release(lease)
+            return .released
+        }
+    }
+}
+
+private enum V2PushWakeWorkerError: Error, Sendable { case sendTimedOut }
+
+private enum PushProcessingResult: Sendable {
+    case sent
+    case suppressed
+    case released
 }

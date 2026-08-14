@@ -7,9 +7,9 @@ PROJECT_FILE="${IMAPP_PROJECT_FILE:-${PROJECT_DIR}/IMApp.xcodeproj}"
 SCHEME="${IMAPP_SCHEME:-IMApp}"
 CONFIGURATION="${IMAPP_CONFIGURATION:-Debug}"
 # The UI suite uses a signed-out launch fixture and no real network. Keep the
-# destination configurable for a local simulator while selecting the current
-# compatible runtime in CI.
-DESTINATION="${IMAPP_UI_TEST_DESTINATION:-platform=iOS Simulator,name=iPhone 17}"
+# destination configurable for a local simulator while keeping CI on the
+# app's explicit minimum supported runtime.
+DESTINATION="${IMAPP_UI_TEST_DESTINATION:-platform=iOS Simulator,name=iPhone 17,OS=26.2}"
 
 xcodebuild test \
   -project "${PROJECT_FILE}" \

@@ -16,6 +16,7 @@ public struct V2DeviceSnapshotResetHTTPRequest: Content, Sendable {
 public struct V2DeviceSnapshotResetHTTPResponse: Content, Equatable, Sendable {
     public let operationID: UUID
     public let generation: UInt64
+    public let state: V2DeviceSnapshotResetBuildState
     public let wasIdempotent: Bool
 }
 
@@ -41,7 +42,7 @@ public struct V2VaporDeviceSnapshotResetOperatorRoutes: Sendable {
             catch V2DeviceSnapshotResetError.deviceUnavailable { throw Abort(.notFound) }
             catch V2DeviceSnapshotResetError.resetAlreadyPending { throw Abort(.conflict) }
             catch { throw Abort(.serviceUnavailable) }
-            let data = try JSONEncoder().encode(V2DeviceSnapshotResetHTTPResponse(operationID: command.operationID, generation: result.generation, wasIdempotent: result.wasIdempotent))
+            let data = try JSONEncoder().encode(V2DeviceSnapshotResetHTTPResponse(operationID: command.operationID, generation: result.generation, state: result.state, wasIdempotent: result.wasIdempotent))
             var headers = HTTPHeaders()
             headers.replaceOrAdd(name: .contentType, value: "application/json")
             headers.replaceOrAdd(name: .cacheControl, value: "no-store")

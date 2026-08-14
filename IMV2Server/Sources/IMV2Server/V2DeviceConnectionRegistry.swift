@@ -9,44 +9,103 @@ public actor V2DeviceConnectionRegistry {
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
+    /// Every registration gets a fresh token. Actor methods revalidate it
+    /// after external awaits so an older continuation cannot resurrect state
+    /// after unregister or a later registration of the same connection ID.
+    private var lifecycleByConnection: [UUID: UUID] = [:]
     /// Foreground group viewers are intentionally process-local soft state.
     /// The durable room event log and normal per-user sync remain recovery
     /// sources after a process or connection failure.
     private var streamsByForegroundGroup: [RoomID: [UUID: V2GatewayByteStream]] = [:]
     private var foregroundGroupByConnection: [UUID: RoomID] = [:]
+    private var foregroundMutationByConnection: [UUID: UUID] = [:]
     private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
     private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
     private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
     private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
+    private var presenceMutationByConnection: [UUID: UUID] = [:]
     private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var typingRoomByConnection: [UUID: RoomID] = [:]
+    private var typingMutationByConnection: [UUID: UUID] = [:]
     private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
     public init() {}
 
     public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async {
+        guard identityByConnection[connectionID] == nil else { return }
+        let lifecycle = UUID()
+        lifecycleByConnection[connectionID] = lifecycle
         identityByConnection[connectionID] = identity
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
         streamsByUser[identity.userID, default: [:]][connectionID] = stream
-        guard let livePresenceLeases,
-              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()),
-              (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true
-        else { return }
+        guard let livePresenceLeases else { return }
+        guard let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()) else { return }
+        guard lifecycleByConnection[connectionID] == lifecycle else {
+            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+            return
+        }
+        guard (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true else {
+            if lifecycleByConnection[connectionID] == lifecycle {
+                _ = try? await livePresenceLeases.removePresence(connectionID: connectionID, now: Date())
+            }
+            return
+        }
+        guard lifecycleByConnection[connectionID] == lifecycle else {
+            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+            return
+        }
         await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
+        if lifecycleByConnection[connectionID] != lifecycle {
+            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+        }
     }
 
     public func unregister(connectionID: UUID) async {
         guard let identity = identityByConnection.removeValue(forKey: connectionID) else { return }
+        lifecycleByConnection.removeValue(forKey: connectionID)
         streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)
         if streamsByDevice[identity.deviceID]?.isEmpty == true { streamsByDevice.removeValue(forKey: identity.deviceID) }
         streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
         if streamsByUser[identity.userID]?.isEmpty == true { streamsByUser.removeValue(forKey: identity.userID) }
-        await removeForegroundGroupSubscription(connectionID: connectionID)
-        await removePresenceSubscription(connectionID: connectionID)
-        await removeTypingSubscription(connectionID: connectionID)
+        do {
+            let mutation = UUID()
+            foregroundMutationByConnection[connectionID] = mutation
+            defer {
+                if foregroundMutationByConnection[connectionID] == mutation {
+                    foregroundMutationByConnection.removeValue(forKey: connectionID)
+                }
+            }
+            await removeForegroundGroupSubscription(connectionID: connectionID)
+        }
+        guard lifecycleByConnection[connectionID] == nil else { return }
+        do {
+            let mutation = UUID()
+            presenceMutationByConnection[connectionID] = mutation
+            defer {
+                if presenceMutationByConnection[connectionID] == mutation {
+                    presenceMutationByConnection.removeValue(forKey: connectionID)
+                }
+            }
+            await removePresenceSubscription(connectionID: connectionID)
+        }
+        guard lifecycleByConnection[connectionID] == nil else { return }
+        do {
+            let mutation = UUID()
+            typingMutationByConnection[connectionID] = mutation
+            defer {
+                if typingMutationByConnection[connectionID] == mutation {
+                    typingMutationByConnection.removeValue(forKey: connectionID)
+                }
+            }
+            await removeTypingSubscription(connectionID: connectionID)
+        }
+        // A later registration may have reused the ID while the broker
+        // teardown awaited. Its new lease must not be deleted by this older
+        // continuation.
+        guard lifecycleByConnection[connectionID] == nil else { return }
         let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? (streamsByUser[identity.userID] != nil)
-        if !remainsOnline {
+        if !remainsOnline, lifecycleByConnection[connectionID] == nil {
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
         }
     }
@@ -68,28 +127,57 @@ public actor V2DeviceConnectionRegistry {
     /// moving it tears down its previous local interest atomically.
     public func configureForegroundGroupInterestManager(_ manager: any V2GroupEventWakeInterestManaging) async {
         foregroundGroupInterestManager = manager
-        for roomID in streamsByForegroundGroup.keys {
+        for roomID in Array(streamsByForegroundGroup.keys) {
             try? await manager.activate(roomID: roomID)
+            if streamsByForegroundGroup[roomID] == nil {
+                await manager.deactivate(roomID: roomID)
+            }
         }
     }
 
+    public func detachForegroundGroupInterestManager() {
+        foregroundGroupInterestManager = nil
+    }
+
     public func subscribeForegroundGroup(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
-        guard identityByConnection[connectionID] != nil else { return }
+        guard identityByConnection[connectionID] != nil,
+              let lifecycle = lifecycleByConnection[connectionID]
+        else { return }
+        let mutation = UUID()
+        foregroundMutationByConnection[connectionID] = mutation
+        defer {
+            if foregroundMutationByConnection[connectionID] == mutation {
+                foregroundMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         if foregroundGroupByConnection[connectionID] == roomID {
             streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
             return
         }
         await removeForegroundGroupSubscription(connectionID: connectionID)
+        guard lifecycleByConnection[connectionID] == lifecycle,
+              foregroundMutationByConnection[connectionID] == mutation
+        else { return }
         foregroundGroupByConnection[connectionID] = roomID
         let wasInactive = streamsByForegroundGroup[roomID] == nil
         streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
         if wasInactive, let foregroundGroupInterestManager {
             try? await foregroundGroupInterestManager.activate(roomID: roomID)
+            if streamsByForegroundGroup[roomID] == nil {
+                await foregroundGroupInterestManager.deactivate(roomID: roomID)
+            }
         }
     }
 
     public func unsubscribeForegroundGroup(connectionID: UUID, roomID: RoomID) async {
         guard foregroundGroupByConnection[connectionID] == roomID else { return }
+        let mutation = UUID()
+        foregroundMutationByConnection[connectionID] = mutation
+        defer {
+            if foregroundMutationByConnection[connectionID] == mutation {
+                foregroundMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         await removeForegroundGroupSubscription(connectionID: connectionID)
     }
 
@@ -122,39 +210,110 @@ public actor V2DeviceConnectionRegistry {
 
     public func configureLiveActivityBroker(_ broker: any V2LiveActivityInterestManaging & V2LiveActivityPublishing) async {
         liveActivityBroker = broker
-        for userID in presenceWatchersByTarget.keys { try? await broker.activatePresence(targetUserID: userID) }
-        for roomID in typingWatchersByRoom.keys { try? await broker.activateTyping(roomID: roomID) }
+        for userID in Array(presenceWatchersByTarget.keys) {
+            try? await broker.activatePresence(targetUserID: userID)
+            if presenceWatchersByTarget[userID] == nil { await broker.deactivatePresence(targetUserID: userID) }
+        }
+        for roomID in Array(typingWatchersByRoom.keys) {
+            try? await broker.activateTyping(roomID: roomID)
+            if typingWatchersByRoom[roomID] == nil { await broker.deactivateTyping(roomID: roomID) }
+        }
+    }
+
+    public func detachLiveActivityBroker() {
+        liveActivityBroker = nil
     }
 
     public func refreshLivePresence(connectionID: UUID) async {
-        guard let identity = identityByConnection[connectionID], let livePresenceLeases,
-              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()),
-              (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true
+        guard let identity = identityByConnection[connectionID],
+              let lifecycle = lifecycleByConnection[connectionID],
+              let livePresenceLeases,
+              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date())
+        else { return }
+        guard lifecycleByConnection[connectionID] == lifecycle else {
+            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+            return
+        }
+        guard (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true,
+              lifecycleByConnection[connectionID] == lifecycle
         else { return }
         await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
+        if lifecycleByConnection[connectionID] != lifecycle {
+            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+        }
     }
 
     public func subscribePresence(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, targetUserID: UserID) async {
+        guard identityByConnection[connectionID] != nil,
+              let lifecycle = lifecycleByConnection[connectionID]
+        else { return }
+        let mutation = UUID()
+        presenceMutationByConnection[connectionID] = mutation
+        defer {
+            if presenceMutationByConnection[connectionID] == mutation {
+                presenceMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         await removePresenceSubscription(connectionID: connectionID)
+        guard lifecycleByConnection[connectionID] == lifecycle,
+              presenceMutationByConnection[connectionID] == mutation
+        else { return }
         presenceByConnection[connectionID] = (roomID, targetUserID)
         presenceWatchersByTarget[targetUserID, default: [:]][connectionID] = stream
-        if presenceWatchersByTarget[targetUserID]?.count == 1 { try? await liveActivityBroker?.activatePresence(targetUserID: targetUserID) }
+        if presenceWatchersByTarget[targetUserID]?.count == 1, let liveActivityBroker {
+            try? await liveActivityBroker.activatePresence(targetUserID: targetUserID)
+            if presenceWatchersByTarget[targetUserID] == nil {
+                await liveActivityBroker.deactivatePresence(targetUserID: targetUserID)
+            }
+        }
     }
 
     public func unsubscribePresence(connectionID: UUID, roomID: RoomID) async {
         guard presenceByConnection[connectionID]?.roomID == roomID else { return }
+        let mutation = UUID()
+        presenceMutationByConnection[connectionID] = mutation
+        defer {
+            if presenceMutationByConnection[connectionID] == mutation {
+                presenceMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         await removePresenceSubscription(connectionID: connectionID)
     }
 
     public func subscribeTyping(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
+        guard identityByConnection[connectionID] != nil,
+              let lifecycle = lifecycleByConnection[connectionID]
+        else { return }
+        let mutation = UUID()
+        typingMutationByConnection[connectionID] = mutation
+        defer {
+            if typingMutationByConnection[connectionID] == mutation {
+                typingMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         await removeTypingSubscription(connectionID: connectionID)
+        guard lifecycleByConnection[connectionID] == lifecycle,
+              typingMutationByConnection[connectionID] == mutation
+        else { return }
         typingRoomByConnection[connectionID] = roomID
         typingWatchersByRoom[roomID, default: [:]][connectionID] = stream
-        if typingWatchersByRoom[roomID]?.count == 1 { try? await liveActivityBroker?.activateTyping(roomID: roomID) }
+        if typingWatchersByRoom[roomID]?.count == 1, let liveActivityBroker {
+            try? await liveActivityBroker.activateTyping(roomID: roomID)
+            if typingWatchersByRoom[roomID] == nil {
+                await liveActivityBroker.deactivateTyping(roomID: roomID)
+            }
+        }
     }
 
     public func unsubscribeTyping(connectionID: UUID, roomID: RoomID) async {
         guard typingRoomByConnection[connectionID] == roomID else { return }
+        let mutation = UUID()
+        typingMutationByConnection[connectionID] = mutation
+        defer {
+            if typingMutationByConnection[connectionID] == mutation {
+                typingMutationByConnection.removeValue(forKey: connectionID)
+            }
+        }
         await removeTypingSubscription(connectionID: connectionID)
     }
 
@@ -173,20 +332,31 @@ public actor V2DeviceConnectionRegistry {
     }
 
     public func applyLiveActivityPreferences(connectionID: UUID, allowsOnlinePresence: Bool) async {
-        guard let identity = identityByConnection[connectionID] else { return }
+        guard let identity = identityByConnection[connectionID],
+              let lifecycle = lifecycleByConnection[connectionID]
+        else { return }
         if allowsOnlinePresence {
             await refreshLivePresence(connectionID: connectionID)
         } else {
+            let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? false
+            guard lifecycleByConnection[connectionID] == lifecycle else {
+                await refreshLivePresence(connectionID: connectionID)
+                return
+            }
+            guard !remainsOnline else { return }
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
         }
     }
 
     private func notifyTypingWatchers(_ state: V2TypingState) async {
         let streams = typingWatchersByRoom[state.roomID].map { Array($0) } ?? []
-        for (connectionID, stream) in streams {
-            guard let observer = identityByConnection[connectionID]?.userID, observer != state.userID,
-                  await mayObserve(roomID: state.roomID, observerUserID: observer, subjectUserID: state.userID)
-            else { continue }
+        let candidates = streams.compactMap { connectionID, stream -> (V2LiveObservationKey, V2GatewayByteStream)? in
+            guard let observer = identityByConnection[connectionID]?.userID, observer != state.userID else { return nil }
+            return (.init(roomID: state.roomID, observerUserID: observer, subjectUserID: state.userID), stream)
+        }
+        let authorized = await authorizedObservationKeys(Set(candidates.map(\.0)))
+        for (key, stream) in candidates where authorized.contains(key) {
+            guard typingWatchersByRoom[state.roomID]?.values.contains(where: { $0 === stream }) == true else { continue }
             await stream.sendTypingState(state)
         }
     }
@@ -196,30 +366,74 @@ public actor V2DeviceConnectionRegistry {
         await liveActivityBroker?.publishPresence(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
     }
 
+    private func compensateStalePresence(connectionID: UUID, userID: UserID) async {
+        let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? (streamsByUser[userID] != nil)
+        guard !remainsOnline,
+              identityByConnection[connectionID]?.userID != userID
+        else { return }
+        await routePresence(targetUserID: userID, isOnline: false, expiresAt: Date())
+    }
+
     private func notifyPresenceWatchers(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
         let streams = presenceWatchersByTarget[targetUserID].map { Array($0) } ?? []
-        for (connectionID, stream) in streams {
+        let candidates = streams.compactMap { connectionID, stream -> (V2LiveObservationKey, V2GatewayByteStream)? in
             guard let watch = presenceByConnection[connectionID],
                   let observer = identityByConnection[connectionID]?.userID,
-                  watch.targetUserID == targetUserID,
-                  await mayObserve(roomID: watch.roomID, observerUserID: observer, subjectUserID: targetUserID)
-            else { continue }
-            await stream.sendPresenceState(.init(roomID: watch.roomID, targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt))
+                  watch.targetUserID == targetUserID
+            else { return nil }
+            return (.init(roomID: watch.roomID, observerUserID: observer, subjectUserID: targetUserID), stream)
+        }
+        let authorized = await authorizedObservationKeys(Set(candidates.map(\.0)))
+        for (key, stream) in candidates where authorized.contains(key) {
+            guard presenceWatchersByTarget[targetUserID]?.values.contains(where: { $0 === stream }) == true else { continue }
+            await stream.sendPresenceState(.init(roomID: key.roomID, targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt))
         }
     }
 
-    private func mayObserve(roomID: RoomID, observerUserID: UserID, subjectUserID: UserID) async -> Bool {
-        guard let liveActivityObservationAuthorizer else { return true }
-        do {
-            try await liveActivityObservationAuthorizer.authorizeObservation(
-                roomID: roomID,
-                viewerUserID: observerUserID,
-                subjectUserID: subjectUserID,
-                now: Date()
-            )
-            return true
-        } catch {
-            return false
+    /// Authorization is identical for all devices owned by one observer. Run
+    /// each unique database check once with a small concurrency ceiling rather
+    /// than serializing every watcher behind this registry actor.
+    private func authorizedObservationKeys(_ keys: Set<V2LiveObservationKey>) async -> Set<V2LiveObservationKey> {
+        guard let liveActivityObservationAuthorizer else { return keys }
+        let values = Array(keys)
+        return await withTaskGroup(of: (V2LiveObservationKey, Bool).self) { group in
+            var nextIndex = 0
+            let maximumConcurrency = min(8, values.count)
+            for index in 0..<maximumConcurrency {
+                let key = values[index]
+                group.addTask {
+                    do {
+                        try await liveActivityObservationAuthorizer.authorizeObservation(
+                            roomID: key.roomID,
+                            viewerUserID: key.observerUserID,
+                            subjectUserID: key.subjectUserID,
+                            now: Date()
+                        )
+                        return (key, true)
+                    } catch { return (key, false) }
+                }
+                nextIndex += 1
+            }
+            var allowed: Set<V2LiveObservationKey> = []
+            while let (key, isAllowed) = await group.next() {
+                if isAllowed { allowed.insert(key) }
+                if nextIndex < values.count {
+                    let key = values[nextIndex]
+                    group.addTask {
+                        do {
+                            try await liveActivityObservationAuthorizer.authorizeObservation(
+                                roomID: key.roomID,
+                                viewerUserID: key.observerUserID,
+                                subjectUserID: key.subjectUserID,
+                                now: Date()
+                            )
+                            return (key, true)
+                        } catch { return (key, false) }
+                    }
+                    nextIndex += 1
+                }
+            }
+            return allowed
         }
     }
 
@@ -228,7 +442,12 @@ public actor V2DeviceConnectionRegistry {
         presenceWatchersByTarget[previous.targetUserID]?.removeValue(forKey: connectionID)
         if presenceWatchersByTarget[previous.targetUserID]?.isEmpty == true {
             presenceWatchersByTarget.removeValue(forKey: previous.targetUserID)
-            await liveActivityBroker?.deactivatePresence(targetUserID: previous.targetUserID)
+            if let liveActivityBroker {
+                await liveActivityBroker.deactivatePresence(targetUserID: previous.targetUserID)
+                if presenceWatchersByTarget[previous.targetUserID] != nil {
+                    try? await liveActivityBroker.activatePresence(targetUserID: previous.targetUserID)
+                }
+            }
         }
     }
 
@@ -237,7 +456,12 @@ public actor V2DeviceConnectionRegistry {
         typingWatchersByRoom[roomID]?.removeValue(forKey: connectionID)
         if typingWatchersByRoom[roomID]?.isEmpty == true {
             typingWatchersByRoom.removeValue(forKey: roomID)
-            await liveActivityBroker?.deactivateTyping(roomID: roomID)
+            if let liveActivityBroker {
+                await liveActivityBroker.deactivateTyping(roomID: roomID)
+                if typingWatchersByRoom[roomID] != nil {
+                    try? await liveActivityBroker.activateTyping(roomID: roomID)
+                }
+            }
         }
     }
 
@@ -248,10 +472,28 @@ public actor V2DeviceConnectionRegistry {
             streamsByForegroundGroup.removeValue(forKey: roomID)
             if let foregroundGroupInterestManager {
                 await foregroundGroupInterestManager.deactivate(roomID: roomID)
+                if streamsByForegroundGroup[roomID] != nil {
+                    try? await foregroundGroupInterestManager.activate(roomID: roomID)
+                }
             }
         }
     }
 
+    /// Internal invariant probe used by churn tests. Mutation generations are
+    /// transient reentrancy fences and must never become a connection-history
+    /// ledger.
+    func transientMutationTokenCount() -> Int {
+        foregroundMutationByConnection.count
+            + presenceMutationByConnection.count
+            + typingMutationByConnection.count
+    }
+
+}
+
+private struct V2LiveObservationKey: Hashable, Sendable {
+    let roomID: RoomID
+    let observerUserID: UserID
+    let subjectUserID: UserID
 }
 
 extension V2DeviceConnectionRegistry: V2LiveSyncNotifier {}

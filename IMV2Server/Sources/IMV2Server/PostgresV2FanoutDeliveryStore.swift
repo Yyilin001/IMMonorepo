@@ -248,6 +248,23 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     /// log and delivery-terminal update in the group. The worker then retries
     /// the whole group under the usual lease fence.
     public func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
+        try await commitBatch(leases, fenceCurrentRoutes: false, now: now)
+    }
+
+    /// Production cross-store composition uses this path even when the target
+    /// happens to be co-located with the control schema. The route comparison
+    /// and projection/terminalization share one control transaction, so a
+    /// cutover either waits for this old-owner commit or atomically reroutes
+    /// the delivery before any old-owner projection is created.
+    public func commitBatchFencedToCurrentRoutes(
+        _ leases: [V2FanoutDeliveryLease], now: Date
+    ) async throws -> [V2FanoutDeliveryCommit] {
+        try await commitBatch(leases, fenceCurrentRoutes: true, now: now)
+    }
+
+    private func commitBatch(
+        _ leases: [V2FanoutDeliveryLease], fenceCurrentRoutes: Bool, now: Date
+    ) async throws -> [V2FanoutDeliveryCommit] {
         guard !leases.isEmpty else { return [] }
         let ordered = try leases.enumerated().map { index, lease in
             BatchFanoutDeliveryLease(index: index, lease: lease, key: try deliveryKey(for: lease))
@@ -260,9 +277,29 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             var results = Array<V2FanoutDeliveryCommit?>(repeating: nil, count: leases.count)
-            let prepared = try await projectAndTerminalizeBatch(sql: sql, ordered: ordered, now: now)
+            let committable: [BatchFanoutDeliveryLease]
+            if fenceCurrentRoutes {
+                let routes = try await currentRoutes(
+                    for: ordered.map { $0.lease.targetUserID }, sql: sql
+                )
+                var accepted: [BatchFanoutDeliveryLease] = []
+                accepted.reserveCapacity(ordered.count)
+                for (item, route) in zip(ordered, routes) {
+                    guard route.writeIdentity != item.lease.observedRoute.writeIdentity else {
+                        accepted.append(item)
+                        continue
+                    }
+                    results[item.index] = try await handoffClaimed(
+                        item.lease, to: route, sql: sql
+                    ) ? .rerouted(route) : .staleLease
+                }
+                committable = accepted
+            } else {
+                committable = ordered
+            }
+            let prepared = try await projectAndTerminalizeBatch(sql: sql, ordered: committable, now: now)
             let committedIndexes = Set(prepared.map(\.index))
-            for item in ordered where !committedIndexes.contains(item.index) {
+            for item in committable where !committedIndexes.contains(item.index) {
                 results[item.index] = .staleLease
             }
             for (index, commit) in try await completeBatch(sql: sql, prepared: prepared, now: now) {
@@ -386,6 +423,11 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         let targetUserID = try uuid(lease.targetUserID)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let currentRoute = try await currentRoutes(for: [lease.targetUserID], sql: sql)[0]
+            if currentRoute.writeIdentity != lease.observedRoute.writeIdentity {
+                return try await handoffClaimed(lease, to: currentRoute, sql: sql)
+                    ? .rerouted(currentRoute) : .staleLease
+            }
             guard let delivery = try await claimedDelivery(
                 sql: sql, sourceEventID: sourceEventID, targetUserID: targetUserID, lease: lease
             )
@@ -412,14 +454,30 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     ) async throws -> [V2FanoutDeliveryCommit] {
         guard !acknowledgements.isEmpty else { return [] }
         let ordered = try externalBatchAcknowledgementInputs(acknowledgements)
-        let inputJSON = try batchJSON(ordered)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let currentRoutes = try await currentRoutes(
+                for: acknowledgements.map { $0.lease.targetUserID }, sql: sql
+            )
+            var results = Array<V2FanoutDeliveryCommit?>(repeating: nil, count: acknowledgements.count)
+            var committable: [ExternalBatchAcknowledgementInput] = []
+            committable.reserveCapacity(ordered.count)
+            for (input, route) in zip(ordered, currentRoutes) {
+                let lease = acknowledgements[input.ordinal].lease
+                guard route.writeIdentity != lease.observedRoute.writeIdentity else {
+                    committable.append(input)
+                    continue
+                }
+                results[input.ordinal] = try await handoffClaimed(
+                    lease, to: route, sql: sql
+                ) ? .rerouted(route) : .staleLease
+            }
+            let committableJSON = try batchJSON(committable)
             let terminalized = try await sql.raw("""
                 WITH input AS (
                     SELECT ordinal, source_event_id, target_user_id, projection_kind,
                            claim_token, user_sync_sequence
-                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                    FROM jsonb_to_recordset(\(bind: committableJSON)::jsonb) AS value(
                         ordinal integer, source_event_id uuid, target_user_id uuid,
                         projection_kind text, claim_token uuid, user_sync_sequence bigint
                     )
@@ -449,9 +507,8 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                           claimed.target_shard_bucket, claimed.observed_router_epoch,
                           claimed.retry_count, claimed.user_sync_sequence
                 """).all(decoding: ExternalBatchTerminalizedRow.self)
-            var results = Array<V2FanoutDeliveryCommit?>(repeating: nil, count: acknowledgements.count)
             let terminalizedIndexes = Set(terminalized.map(\.ordinal))
-            for input in ordered where !terminalizedIndexes.contains(input.ordinal) {
+            for input in committable where !terminalizedIndexes.contains(input.ordinal) {
                 results[input.ordinal] = .staleLease
             }
             var prepared: [PreparedFanoutDeliveryCommit] = []
@@ -508,9 +565,72 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
 
     public func handoff(_ lease: V2FanoutDeliveryLease, to route: V2UserShardRoute) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        _ = try await handoffClaimed(lease, to: route, sql: sql)
+    }
+
+    /// Per-user advisory share locks are the cutover barrier. Route control
+    /// takes the exclusive form before changing that user's override. The
+    /// global configuration row remains readable so an unrelated user's
+    /// routed operation never serializes every user in the deployment.
+    private func currentRoutes(
+        for users: [UserID], sql: any SQLDatabase
+    ) async throws -> [V2UserShardRoute] {
+        guard !users.isEmpty else { return [] }
+        let requested = try users.enumerated().map { index, user in
+            guard let userID = UUID(uuidString: user.rawValue) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return RouterFenceInput(ordinal: index, userID: userID)
+        }
+        // The global configuration lock prevents an epoch change. Per-user
+        // advisory locks let unrelated users continue while serializing this
+        // batch with route finalization/cutover for exactly these identities.
+        let lockUsers = Array(Set(users.map(\.rawValue))).sorted()
+        for user in lockUsers {
+            try await sql.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: user), 0))").run()
+        }
+        guard try await sql.raw("""
+            SELECT router_epoch
+            FROM im_v2.user_shard_router_configuration
+            WHERE configuration_key = TRUE
+            """).first(decoding: RouterFenceConfigurationRow.self) != nil
+        else { throw V2UserShardRouteControlError.missingRouterConfiguration }
+        let inputJSON = try batchJSON(requested)
+        let rows = try await sql.raw("""
+            WITH input AS (
+                SELECT ordinal, user_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                    ordinal integer, user_id uuid
+                )
+            )
+            SELECT input.ordinal,
+                   COALESCE(route.write_bucket, config.default_write_bucket) AS write_bucket,
+                   COALESCE(route.router_epoch, config.router_epoch) AS router_epoch,
+                   COALESCE(route.read_fallback_bucket, config.default_read_fallback_bucket) AS read_fallback_bucket
+            FROM input
+            CROSS JOIN im_v2.user_shard_router_configuration AS config
+            LEFT JOIN im_v2.user_shard_route_overrides AS route ON route.user_id = input.user_id
+            WHERE config.configuration_key = TRUE
+            ORDER BY input.ordinal
+            """).all(decoding: RouterFenceRouteRow.self)
+        guard rows.count == users.count else { throw V2UserShardRouterError.resultCountMismatch }
+        return try rows.enumerated().map { index, row in
+            guard row.ordinal == index else { throw V2UserShardRouterError.resultCountMismatch }
+            return try .init(
+                bucket: row.writeBucket, observedRouterEpoch: row.routerEpoch,
+                readFallbackBucket: row.readFallbackBucket
+            )
+        }
+    }
+
+    @discardableResult
+    private func handoffClaimed(
+        _ lease: V2FanoutDeliveryLease, to route: V2UserShardRoute,
+        sql: any SQLDatabase
+    ) async throws -> Bool {
         let sourceEventID = try uuid(lease.sourceEventID)
         let targetUserID = try uuid(lease.targetUserID)
-        try await sql.raw("""
+        return try await sql.raw("""
             UPDATE im_v2.fanout_deliveries
             SET target_shard_bucket = \(bind: route.bucket),
                 observed_router_epoch = \(bind: route.observedRouterEpoch),
@@ -521,7 +641,8 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
               AND target_user_id = \(bind: targetUserID)
               AND projection_kind = \(bind: lease.projectionKind)
               AND state = 'pending' AND claim_token = \(bind: lease.claimToken)
-        """).run()
+            RETURNING source_event_id
+        """).first(decoding: HandoffClaimedRow.self) != nil
     }
 
     public func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
@@ -652,6 +773,14 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
             """).first(decoding: UserSyncSequenceRow.self) != nil else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        try await sql.raw("""
+            UPDATE im_v2.consumer_inbox
+            SET user_sync_sequence = \(bind: sequence.nextSequence)
+            WHERE consumer_name = \(bind: consumerName)
+              AND source_event_id = \(bind: sourceEventID)
+              AND target_user_id = \(bind: targetUserID)
+              AND projection_kind = \(bind: lease.projectionKind)
+            """).run()
         return .init(delivery: delivery, userSyncSequence: try unsigned(sequence.nextSequence))
     }
 
@@ -681,12 +810,18 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         // plus any concurrently committed one without taking a no-op row
         // update lock on the common source event.
         try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
+        let insertedInboxCount = try await insertClaimedInboxes(
+            sql: sql, inputJSON: inputJSON, now: now
+        )
+        guard insertedInboxCount == ordered.count else {
+            throw V2FanoutDeliveryError.inboxAlreadyCommitted
+        }
         let sequenceReservationCTEs = usesDistinctTargetFastPath
             ? """
             reserved_sequence AS (
                 INSERT INTO im_v2.user_sync_sequences AS sequence (user_id, next_sequence)
                 SELECT target_user_id, 1
-                FROM inserted_inbox
+                FROM pending_inbox
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = sequence.next_sequence + 1
                 RETURNING user_id, next_sequence
@@ -695,7 +830,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                        claimed.projection_kind, claimed.claim_token, claimed.completion_unit_id,
                        reserved_sequence.next_sequence AS user_sync_sequence
                 FROM claimed
-                JOIN inserted_inbox
+                JOIN pending_inbox
                   USING (source_event_id, target_user_id, projection_kind)
                 JOIN reserved_sequence ON reserved_sequence.user_id = claimed.target_user_id
             )
@@ -703,7 +838,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
             : """
             per_user AS (
                 SELECT target_user_id AS user_id, COUNT(*)::bigint AS sequence_count
-                FROM inserted_inbox
+                FROM pending_inbox
                 GROUP BY target_user_id
             ), reserved_sequence AS (
                 INSERT INTO im_v2.user_sync_sequences AS sequence (user_id, next_sequence)
@@ -722,7 +857,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                              ORDER BY claimed.source_event_id, claimed.target_user_id, claimed.projection_kind
                            ) AS user_sync_sequence
                 FROM claimed
-                JOIN inserted_inbox
+                JOIN pending_inbox
                   USING (source_event_id, target_user_id, projection_kind)
                 JOIN per_user ON per_user.user_id = claimed.target_user_id
                 JOIN reserved_sequence ON reserved_sequence.user_id = claimed.target_user_id
@@ -745,13 +880,14 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                  AND delivery.projection_kind = input.projection_kind
                 WHERE delivery.state = 'pending' AND delivery.claim_token = input.claim_token
                 FOR UPDATE OF delivery
-            ), inserted_inbox AS (
-                INSERT INTO im_v2.consumer_inbox
-                    (consumer_name, source_event_id, target_user_id, projection_kind, committed_at)
-                SELECT \(bind: consumerName), source_event_id, target_user_id, projection_kind, \(bind: now)
-                FROM claimed
-                ON CONFLICT DO NOTHING
-                RETURNING source_event_id, target_user_id, projection_kind
+            ), pending_inbox AS MATERIALIZED (
+                SELECT inbox.source_event_id, inbox.target_user_id,
+                       inbox.projection_kind
+                FROM im_v2.consumer_inbox AS inbox
+                JOIN claimed
+                  USING (source_event_id, target_user_id, projection_kind)
+                WHERE inbox.consumer_name = \(bind: consumerName)
+                  AND inbox.user_sync_sequence IS NULL
             ), \(unsafeRaw: sequenceReservationCTEs), payload_keys AS MATERIALIZED (
                 -- A batch commonly contains many target users for the same
                 -- source event. Deduplicate the keys *before* evaluating the
@@ -789,16 +925,26 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                   ON verified_payloads.source_event_id = numbered.source_event_id
                  AND verified_payloads.projection_kind = numbered.projection_kind
                 RETURNING user_id, user_sync_sequence, source_event_id, projection_kind
+            ), recorded_inbox AS (
+                UPDATE im_v2.consumer_inbox AS inbox
+                SET user_sync_sequence = inserted_log.user_sync_sequence
+                FROM inserted_log
+                WHERE inbox.consumer_name = \(bind: consumerName)
+                  AND inbox.source_event_id = inserted_log.source_event_id
+                  AND inbox.target_user_id = inserted_log.user_id
+                  AND inbox.projection_kind = inserted_log.projection_kind
+                RETURNING inbox.source_event_id, inbox.target_user_id,
+                          inbox.projection_kind, inbox.user_sync_sequence
             ), terminalized AS (
                 UPDATE im_v2.fanout_deliveries AS delivery
                 SET state = 'terminal', claim_token = NULL, lease_expires_at = NULL,
                     next_attempt_at = NULL, paused_at = NULL, last_failure_code = NULL
                 FROM numbered
-                JOIN inserted_log
-                  ON inserted_log.user_id = numbered.target_user_id
-                 AND inserted_log.user_sync_sequence = numbered.user_sync_sequence
-                 AND inserted_log.source_event_id = numbered.source_event_id
-                 AND inserted_log.projection_kind = numbered.projection_kind
+                JOIN recorded_inbox
+                  ON recorded_inbox.target_user_id = numbered.target_user_id
+                 AND recorded_inbox.user_sync_sequence = numbered.user_sync_sequence
+                 AND recorded_inbox.source_event_id = numbered.source_event_id
+                 AND recorded_inbox.projection_kind = numbered.projection_kind
                 WHERE delivery.source_event_id = numbered.source_event_id
                   AND delivery.target_user_id = numbered.target_user_id
                   AND delivery.projection_kind = numbered.projection_kind
@@ -815,9 +961,9 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                        claimed.projection_kind, claimed.completion_unit_id, NULL::bigint,
                        'inbox_conflict'::text AS outcome
                 FROM claimed
-                LEFT JOIN inserted_inbox
+                LEFT JOIN pending_inbox
                   USING (source_event_id, target_user_id, projection_kind)
-                WHERE inserted_inbox.source_event_id IS NULL
+                WHERE pending_inbox.source_event_id IS NULL
             )
             SELECT ordinal, source_event_id, target_user_id, projection_kind,
                    completion_unit_id, user_sync_sequence, outcome
@@ -855,6 +1001,44 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
             ))
         }
         return prepared
+    }
+
+    /// PostgreSQL data-modifying CTE siblings share one snapshot and cannot
+    /// update a row inserted by another sibling except through RETURNING.
+    /// Persist inbox fences in their own statement first, while remaining in
+    /// the same transaction, so the set-based log/update/terminalize statement
+    /// can see and record every allocated sequence.
+    private func insertClaimedInboxes(
+        sql: any SQLDatabase, inputJSON: String, now: Date
+    ) async throws -> Int {
+        try await sql.raw("""
+            WITH input AS (
+                SELECT source_event_id, target_user_id, projection_kind, claim_token
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                    ordinal integer, source_event_id uuid, target_user_id uuid,
+                    projection_kind text, claim_token uuid
+                )
+            ), claimed AS MATERIALIZED (
+                SELECT input.source_event_id, input.target_user_id,
+                       input.projection_kind
+                FROM input
+                JOIN im_v2.fanout_deliveries AS delivery
+                  ON delivery.source_event_id = input.source_event_id
+                 AND delivery.target_user_id = input.target_user_id
+                 AND delivery.projection_kind = input.projection_kind
+                WHERE delivery.state = 'pending'
+                  AND delivery.claim_token = input.claim_token
+                FOR UPDATE OF delivery
+            )
+            INSERT INTO im_v2.consumer_inbox
+                (consumer_name, source_event_id, target_user_id,
+                 projection_kind, committed_at)
+            SELECT \(bind: consumerName), source_event_id, target_user_id,
+                   projection_kind, \(bind: now)
+            FROM claimed
+            ON CONFLICT DO NOTHING
+            RETURNING source_event_id
+            """).all(decoding: InboxInsertRow.self).count
     }
 
     private func ensureSharedPayloads(sql: any SQLDatabase, inputJSON: String, now: Date) async throws {
@@ -1226,6 +1410,31 @@ private struct ExternalBatchAcknowledgementInput: Encodable {
         case claimToken = "claim_token"
         case userSyncSequence = "user_sync_sequence"
     }
+}
+private struct RouterFenceConfigurationRow: Decodable {
+    let routerEpoch: Int64
+    enum CodingKeys: String, CodingKey { case routerEpoch = "router_epoch" }
+}
+private struct RouterFenceInput: Encodable {
+    let ordinal: Int
+    let userID: UUID
+    enum CodingKeys: String, CodingKey { case ordinal; case userID = "user_id" }
+}
+private struct RouterFenceRouteRow: Decodable {
+    let ordinal: Int
+    let writeBucket: String
+    let routerEpoch: Int64
+    let readFallbackBucket: String?
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case writeBucket = "write_bucket"
+        case routerEpoch = "router_epoch"
+        case readFallbackBucket = "read_fallback_bucket"
+    }
+}
+private struct HandoffClaimedRow: Decodable {
+    let sourceEventID: UUID
+    enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" }
 }
 private struct ExternalBatchTerminalizedRow: Decodable {
     let ordinal: Int

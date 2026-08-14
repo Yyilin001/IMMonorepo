@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Core
 #if canImport(Security)
 import Security
 #endif
@@ -134,7 +135,7 @@ public actor V2LocalStoreBootstrapper {
         self.makeBinding = makeBinding
     }
 
-    public func open(databaseURL: URL) async throws -> GRDBV2LocalSyncStore {
+    public func open(databaseURL: URL, userID: UserID? = nil) async throws -> GRDBV2LocalSyncStore {
         var binding: V2LocalInstallationBinding
         do {
             if let existing = try await bindingStore.load() {
@@ -162,13 +163,13 @@ public actor V2LocalStoreBootstrapper {
         }
 
         do {
-            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding)
+            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID)
         } catch V2ClientLocalStorageError.installationBindingMismatch {
             // Existing device anchor plus a non-matching database is an import
             // or restore, not a migratable cache. Recreate once with the same
             // device anchor; a second failure is surfaced to the caller.
             try eraseDatabaseArtifacts(at: databaseURL)
-            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding)
+            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID)
         }
     }
 

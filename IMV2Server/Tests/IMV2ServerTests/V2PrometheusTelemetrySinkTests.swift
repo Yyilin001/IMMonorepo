@@ -58,11 +58,13 @@ struct V2PrometheusTelemetrySinkTests {
         metrics.observeQueuedInboundBytes(1_024)
         metrics.observeQueuedInboundBytes(-1)
         metrics.connectionClosed(reason: .idleTimeout)
+        metrics.connectionRejected(reason: .connectionLimit)
 
         let snapshot = metrics.gatewayTransportMetricsSnapshot()
         #expect(snapshot.activeConnections == 1)
         #expect(snapshot.peakQueuedInboundBytes == 1_024)
         #expect(snapshot.closureCount(for: .idleTimeout) == 1)
+        #expect(snapshot.closureCount(for: .connectionLimit) == 1)
         #expect(snapshot.closureCount(for: .frameLimitViolation) == 0)
         #expect(snapshot.closureCount(for: .requestFailure) == 0)
 
@@ -108,11 +110,38 @@ struct V2PrometheusTelemetrySinkTests {
             pausedRoomOutboxRows: 4,
             readyDirectProfileUpdates: 15,
             leasedDirectProfileUpdates: 16,
+            readyReadReceiptPreferencePropagations: 29,
+            leasedReadReceiptPreferencePropagations: 30,
+            scheduledReadReceiptPreferencePropagations: 31,
+            pausedReadReceiptPreferencePropagations: 32,
             openFanoutPlans: 5,
             readyFanoutDeliveries: 6,
             leasedFanoutDeliveries: 7,
             scheduledFanoutDeliveries: 8,
             pausedFanoutDeliveries: 9,
+            readyContentReviews: 17,
+            leasedContentReviews: 18,
+            scheduledContentReviews: 19,
+            pausedContentReviews: 20,
+            readyMediaScans: 21,
+            leasedMediaScans: 22,
+            scheduledMediaScans: 23,
+            pausedMediaScans: 24,
+            readyMediaPurges: 25,
+            leasedMediaPurges: 26,
+            scheduledMediaPurges: 27,
+            pausedMediaPurges: 28,
+            userSyncLogEstimatedRows: 34,
+            userSyncLogRelationBytes: 35,
+            readyUserProjections: 36,
+            scheduledUserProjections: 37,
+            pausedUserProjections: 38,
+            maximumUserProjectionLag: 39,
+            buildingSnapshotArtifacts: 40,
+            failedSnapshotArtifacts: 41,
+            oldestBuildingSnapshotAgeSeconds: 42,
+            projectionVersionGCBacklogEstimatedRows: 43,
+            uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
             readyPushWakes: 12,
@@ -129,11 +158,33 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"paused\"} 4"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
+        #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 29"))
+        #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} 30"))
+        #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} 31"))
+        #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"paused\"} 32"))
         #expect(rendered.contains("im_v2_fanout_plans_open 5"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"ready\"} 6"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 7"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
+        #expect(rendered.contains("im_v2_content_review_backlog{state=\"ready\"} 17"))
+        #expect(rendered.contains("im_v2_content_review_backlog{state=\"leased\"} 18"))
+        #expect(rendered.contains("im_v2_content_review_backlog{state=\"scheduled\"} 19"))
+        #expect(rendered.contains("im_v2_content_review_backlog{state=\"paused\"} 20"))
+        #expect(rendered.contains("im_v2_media_scan_backlog{state=\"ready\"} 21"))
+        #expect(rendered.contains("im_v2_media_scan_backlog{state=\"paused\"} 24"))
+        #expect(rendered.contains("im_v2_media_purge_backlog{state=\"ready\"} 25"))
+        #expect(rendered.contains("im_v2_media_purge_backlog{state=\"paused\"} 28"))
+        #expect(rendered.contains("im_v2_user_sync_log_estimated_rows 34"))
+        #expect(rendered.contains("im_v2_user_sync_log_relation_bytes 35"))
+        #expect(rendered.contains("im_v2_user_projection_effects_estimated_rows 0"))
+        #expect(rendered.contains("im_v2_user_projection_effects_relation_bytes 0"))
+        #expect(rendered.contains("im_v2_user_projection_backlog{state=\"paused\"} 38"))
+        #expect(rendered.contains("im_v2_user_projection_maximum_lag_records 39"))
+        #expect(rendered.contains("im_v2_snapshot_artifacts{state=\"building\"} 40"))
+        #expect(rendered.contains("im_v2_snapshot_oldest_building_age_seconds 42"))
+        #expect(rendered.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
+        #expect(rendered.contains("im_v2_sync_uncompacted_projected_records 44"))
         #expect(rendered.contains("im_v2_sync_pending_records_across_devices 10"))
         #expect(rendered.contains("im_v2_sync_reset_pending_devices 11"))
         #expect(rendered.contains("im_v2_push_wake_backlog{state=\"ready\"} 12"))

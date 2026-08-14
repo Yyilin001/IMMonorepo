@@ -132,13 +132,26 @@ public struct V2Frame: Equatable, Sendable {
 
 public struct V2FrameLimits: Equatable, Sendable {
     public let maximumPayloadBytes: Int
+    /// A transport read may coalesce arbitrary TCP packets. Bounding the
+    /// number of complete frames decoded from one read keeps the resulting
+    /// command/response batch finite even when every frame has an empty body.
+    public let maximumFramesPerAppend: Int
     public let acceptedVersions: Set<UInt8>
 
-    public init(maximumPayloadBytes: Int, acceptedVersions: Set<UInt8>) throws {
-        guard maximumPayloadBytes >= 0, !acceptedVersions.isEmpty else {
+    public init(
+        maximumPayloadBytes: Int,
+        maximumFramesPerAppend: Int = 256,
+        acceptedVersions: Set<UInt8>
+    ) throws {
+        guard maximumPayloadBytes >= 0,
+              maximumFramesPerAppend > 0,
+              maximumFramesPerAppend <= 4_096,
+              !acceptedVersions.isEmpty
+        else {
             throw V2FrameCodecError.invalidLimits
         }
         self.maximumPayloadBytes = maximumPayloadBytes
+        self.maximumFramesPerAppend = maximumFramesPerAppend
         self.acceptedVersions = acceptedVersions
     }
 }
@@ -149,6 +162,7 @@ public enum V2FrameCodecError: Error, Equatable, Sendable {
     case unsupportedVersion(UInt8)
     case declaredPayloadTooLarge(Int)
     case payloadTooLarge(Int)
+    case tooManyFramesInBatch(Int)
     case trailingPartialFrame
     case expectedSingleFrame
 }
@@ -165,33 +179,43 @@ public struct V2FrameDecoder: Sendable {
     public mutating func append(_ bytes: Data) throws -> [V2Frame] {
         buffered.append(bytes)
         var result: [V2Frame] = []
-        while buffered.count >= V2Frame.headerLength {
-            guard readUInt16(buffered, at: 0) == V2Frame.magic else {
+        var consumedBytes = 0
+        while buffered.count - consumedBytes >= V2Frame.headerLength {
+            guard result.count < limits.maximumFramesPerAppend else {
+                throw V2FrameCodecError.tooManyFramesInBatch(limits.maximumFramesPerAppend)
+            }
+            guard readUInt16(buffered, at: consumedBytes) == V2Frame.magic else {
                 throw V2FrameCodecError.invalidMagic
             }
-            let version = readUInt8(buffered, at: 2)
+            let version = readUInt8(buffered, at: consumedBytes + 2)
             guard limits.acceptedVersions.contains(version) else {
                 throw V2FrameCodecError.unsupportedVersion(version)
             }
-            let declaredLength = Int(readUInt32(buffered, at: 14))
+            let declaredLength = Int(readUInt32(buffered, at: consumedBytes + 14))
             guard declaredLength <= limits.maximumPayloadBytes else {
                 throw V2FrameCodecError.declaredPayloadTooLarge(declaredLength)
             }
             let fullLength = V2Frame.headerLength + declaredLength
-            guard buffered.count >= fullLength else { break }
+            guard buffered.count - consumedBytes >= fullLength else { break }
+            let frameStart = consumedBytes
             let frame = V2Frame(
                 version: version,
-                flags: .init(rawValue: readUInt8(buffered, at: 3)),
-                command: .init(rawValue: readUInt16(buffered, at: 4)),
-                requestID: readUInt64(buffered, at: 6),
-                payload: dataSlice(buffered, from: V2Frame.headerLength, to: fullLength)
+                flags: .init(rawValue: readUInt8(buffered, at: frameStart + 3)),
+                command: .init(rawValue: readUInt16(buffered, at: frameStart + 4)),
+                requestID: readUInt64(buffered, at: frameStart + 6),
+                payload: dataSlice(
+                    buffered,
+                    from: frameStart + V2Frame.headerLength,
+                    to: frameStart + fullLength
+                )
             )
-            // Data's integer subscript is based on `startIndex`, which is not
-            // guaranteed to reset after removeFirst on every platform.
-            // Rebuilding the remaining buffer keeps later header reads
-            // independent of its internal index origin.
-            buffered = Data(buffered.dropFirst(fullLength))
+            consumedBytes += fullLength
             result.append(frame)
+        }
+        // Compact once per transport read. Rebuilding the suffix for every
+        // frame makes a dense coalesced read quadratic in total bytes.
+        if consumedBytes > 0 {
+            buffered = Data(buffered.dropFirst(consumedBytes))
         }
         return result
     }

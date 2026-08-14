@@ -13,16 +13,6 @@ public struct V2ClientModerationProjection: Equatable, Sendable {
     public let muteUntil: Date
     public let createdAt: Date
 
-    init(snapshotProjection: V2SnapshotModerationProjection) {
-        sourceEventID = snapshotProjection.sourceEventID
-        roomID = snapshotProjection.roomID
-        roomSequence = snapshotProjection.roomSequence
-        actorUserID = snapshotProjection.actorUserID
-        targetUserID = snapshotProjection.targetUserID
-        muteUntil = snapshotProjection.muteUntil
-        createdAt = snapshotProjection.createdAt
-    }
-
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String

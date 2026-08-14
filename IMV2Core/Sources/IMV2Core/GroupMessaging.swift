@@ -91,14 +91,21 @@ public struct V2GroupRoom: Equatable, Sendable {
     public let ownerUserID: UserID
     public let title: String
     public let deliveryMode: V2GroupDeliveryMode
+    /// Authoritative total count. Staged 100k creation does not materialize
+    /// every member identifier in the application response merely to report
+    /// this scalar.
+    public let memberCount: Int
     public let memberUserIDs: [UserID]
     public let createdAt: Date
 
-    public init(roomID: RoomID, ownerUserID: UserID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], createdAt: Date) {
+    public init(roomID: RoomID, ownerUserID: UserID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], memberCount: Int? = nil, createdAt: Date) {
+        let resolvedMemberCount = memberCount ?? memberUserIDs.count
+        precondition(resolvedMemberCount >= memberUserIDs.count && resolvedMemberCount > 0)
         self.roomID = roomID
         self.ownerUserID = ownerUserID
         self.title = title
         self.deliveryMode = deliveryMode
+        self.memberCount = resolvedMemberCount
         self.memberUserIDs = memberUserIDs.sorted()
         self.createdAt = createdAt
     }

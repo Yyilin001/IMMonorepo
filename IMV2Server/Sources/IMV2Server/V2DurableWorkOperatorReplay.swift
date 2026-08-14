@@ -1,12 +1,17 @@
 import Foundation
 import IMV2Core
 
-/// The only two durable-work shapes that an operator may replay.  This is a
+/// The closed durable-work shapes that an operator may replay.  This is a
 /// closed vocabulary so the control plane can never turn an arbitrary table
 /// update into an administrative API.
 public enum V2DurableWorkReplayTargetKind: String, CaseIterable, Codable, Equatable, Sendable {
     case roomOutbox = "room_outbox"
     case fanoutDelivery = "fanout_delivery"
+    case contentReview = "content_review"
+    case mediaScan = "media_scan"
+    case mediaPurge = "media_purge"
+    case readReceiptPreferencePropagation = "read_receipt_preference_propagation"
+    case userProjection = "user_projection"
 }
 
 /// A bounded, reviewable statement of why an operator has cleared a paused
@@ -31,8 +36,12 @@ public struct V2DurableWorkReplayTarget: Equatable, Sendable {
         projectionKind: String? = nil
     ) throws {
         switch kind {
-        case .roomOutbox:
+        case .roomOutbox, .contentReview, .mediaScan, .mediaPurge:
             guard targetUserID == nil, projectionKind == nil else {
+                throw V2DurableWorkReplayValidationError.invalidTargetShape
+            }
+        case .readReceiptPreferencePropagation, .userProjection:
+            guard targetUserID != nil, projectionKind == nil else {
                 throw V2DurableWorkReplayValidationError.invalidTargetShape
             }
         case .fanoutDelivery:

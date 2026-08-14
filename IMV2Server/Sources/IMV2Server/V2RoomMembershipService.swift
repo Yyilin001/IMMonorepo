@@ -84,5 +84,6 @@ public struct V2RoomMembershipService: Sendable {
 public enum V2RoomMembershipStoreError: Error, Equatable, Sendable {
     case roomNotFound
     case actorNotOwner
+    case targetUnavailable
     case corruptPersistenceState
 }

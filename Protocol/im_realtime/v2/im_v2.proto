@@ -6,7 +6,8 @@ option swift_prefix = "IMV2";
 option java_package = "com.xmtx.imclientkit.generated.im.realtime.v2";
 option java_multiple_files = true;
 
-// V2 owns an independent wire shape and a single current protocol version.
+// V2 is an independent protocol. It intentionally has no V1 compatibility
+// fields or fallback messages.
 message Envelope {
   uint64 request_id = 1;
   uint32 protocol_version = 2;
@@ -697,7 +698,9 @@ message ReadReceiptReader {
 message ReadReceiptReadersPage {
   string room_id = 1;
   uint64 message_room_sequence = 2;
-  uint32 reader_count = 3;
+  // Exact total is returned only on the first page. Later pages inherit the
+  // first page's total and avoid repeating an O(group size) count scan.
+  optional uint32 reader_count = 3;
   repeated ReadReceiptReader readers = 4;
   string next_cursor = 5;
 }
@@ -785,52 +788,62 @@ message ResetRequired {
   string snapshot_id = 1;
   uint64 generation = 2;
   uint64 base_user_sync_sequence = 3;
-  string manifest_digest = 4;
-  int64 expires_at_ms = 5;
+  int64 expires_at_ms = 4;
 }
 
 message SnapshotAck {
+  // Commits the server generation before the client atomically activates its
+  // durable shadow projection. Exact replay must succeed after that commit,
+  // including while a later generation is already being prepared.
   string snapshot_id = 1;
   uint64 generation = 2;
   uint64 base_user_sync_sequence = 3;
   string snapshot_receipt = 4;
 }
 
-// The reset fence is established before any page is exposed. A manifest and
-// each page request are bound to the authenticated device and its immutable
-// snapshot generation.
+// While a durable artifact is being built, SyncPull returns RESET_PREPARING.
+// No partial descriptor or page is exposed.
 message SyncSnapshot {
   string snapshot_id = 1;
   uint64 generation = 2;
 }
 
 message SnapshotManifest {
+  // The client persists this descriptor together with its shadow import so a
+  // crash after server ACK does not need a stale-token pull or page refetch.
   string snapshot_id = 1;
   uint64 generation = 2;
   uint64 base_user_sync_sequence = 3;
-  string manifest_digest = 4;
+  string root_digest = 4;
   uint32 schema_version = 5;
   string capability_profile = 6;
-  repeated string page_digests = 7;
-  string next_sync_token = 8;
-  string sync_receipt = 9;
-  int64 expires_at_ms = 10;
+  uint32 page_count = 7;
+  uint64 total_items = 8;
+  uint64 total_bytes = 9;
+  string next_sync_token = 10;
+  string sync_receipt = 11;
+  int64 expires_at_ms = 12;
 }
 
 message SnapshotPagePull {
   string snapshot_id = 1;
   uint64 generation = 2;
-  string manifest_digest = 3;
+  string root_digest = 3;
   uint32 page_index = 4;
 }
 
 message SnapshotPage {
   string snapshot_id = 1;
   uint64 generation = 2;
-  string manifest_digest = 3;
+  string root_digest = 3;
   uint32 page_index = 4;
-  string page_digest = 5;
-  bytes payload = 6;
+  string first_projection_kind = 5;
+  string first_entity_key = 6;
+  string last_projection_kind = 7;
+  string last_entity_key = 8;
+  uint32 item_count = 9;
+  string page_digest = 10;
+  bytes payload = 11;
 }
 
 // An asynchronous availability hint always uses request_id = 0. It contains

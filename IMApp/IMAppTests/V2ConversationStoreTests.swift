@@ -63,7 +63,7 @@ struct V2ConversationStoreTests {
             ],
             messages: []
         )
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
         await store.refresh()
 
         #expect(!store.detailStore(for: "room-direct").isGroupConversation)
@@ -78,7 +78,7 @@ struct V2ConversationStoreTests {
             ],
             messages: []
         )
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
 
         await store.refresh()
 
@@ -89,7 +89,7 @@ struct V2ConversationStoreTests {
 
     @Test func listRefreshIgnoresAResponseSupersededByANewerRefresh() async {
         let source = V2SequencedConversationDataSource()
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
         let staleItem = V2ConversationListItem(id: "room-stale", title: "旧会话", preview: "旧消息", lastActivity: .now, isOutgoing: false)
         let currentItem = V2ConversationListItem(id: "room-current", title: "新会话", preview: "新消息", lastActivity: .now, isOutgoing: false)
 
@@ -109,7 +109,7 @@ struct V2ConversationStoreTests {
 
     @Test func messageRefreshIgnoresAResponseSupersededByANewerRefresh() async {
         let source = V2SequencedConversationDataSource()
-        let store = V2ConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
         let staleMessage = V2ConversationMessageItem(id: "message-stale", revision: 1, text: "旧消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
         let currentMessage = V2ConversationMessageItem(id: "message-current", revision: 1, text: "新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
 
@@ -129,7 +129,7 @@ struct V2ConversationStoreTests {
 
     @Test func messageRefreshIgnoresAFailureSupersededByANewerRefresh() async {
         let source = V2SequencedConversationDataSource()
-        let store = V2ConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
         let currentMessage = V2ConversationMessageItem(id: "message-current", revision: 1, text: "新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
 
         let firstRefresh = Task { await store.refresh() }
@@ -146,10 +146,46 @@ struct V2ConversationStoreTests {
         #expect(store.messages == [currentMessage])
     }
 
+    @Test func longConversationUsesABoundedSlidingWindowAndCanReturnToLatest() async {
+        let history = (1 ... 1_000).map { sequence in
+            V2ConversationMessageItem(
+                id: String(format: "message-%04d", sequence),
+                roomSequence: UInt64(sequence),
+                revision: 1,
+                text: "message \(sequence)",
+                createdAt: Date(timeIntervalSince1970: TimeInterval(sequence)),
+                isOutgoing: false,
+                isWithdrawn: false
+            )
+        }
+        let source = V2ConversationDataSourceFake(summaries: [], messages: history)
+        let store = makeConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-a"
+        )
+
+        await store.refresh()
+        #expect(store.messages.map(\.roomSequence) == Array(921 ... 1_000).map(UInt64.init))
+
+        for _ in 0..<10 { await store.loadOlderTimeline() }
+        #expect(store.messages.count == 800)
+        #expect(store.messages.first?.roomSequence == 121)
+        #expect(store.messages.last?.roomSequence == 920)
+        #expect(store.isBrowsingHistoricalTimeline)
+
+        await store.returnToLatestTimeline()
+        #expect(store.messages.count == 800)
+        #expect(store.messages.first?.roomSequence == 201)
+        #expect(store.messages.last?.roomSequence == 1_000)
+        #expect(!store.isBrowsingHistoricalTimeline)
+    }
+
     @Test func detailRefreshesItsLocalProjectionAfterASynchronizedUpdate() async {
         let source = V2SequencedConversationDataSource()
         let notifier = V2ProjectionChangeNotifier()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -203,7 +239,7 @@ struct V2ConversationStoreTests {
             isWithdrawn: false
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -234,7 +270,7 @@ struct V2ConversationStoreTests {
             fileURL: URL(fileURLWithPath: "/tmp/opaque-local-media")
         )
         let downloader = V2ConversationMediaDownloaderFake(result: .success(downloaded))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -264,7 +300,7 @@ struct V2ConversationStoreTests {
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let downloader = V2ConversationMediaDownloaderFake(result: .failure)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -302,7 +338,7 @@ struct V2ConversationStoreTests {
         )
         let source = V2SequencedConversationDataSource()
         let downloader = V2ConversationMediaCacheDiscardingFake()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -327,7 +363,7 @@ struct V2ConversationStoreTests {
     @Test func messageSendClearsDraftAndReportsDurableRetry() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .queuedForRetry)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -345,7 +381,7 @@ struct V2ConversationStoreTests {
     @Test func messageSendAllowsOnlyOneDurableSubmissionAtATime() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2SuspendingConversationSender()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -369,7 +405,7 @@ struct V2ConversationStoreTests {
     @Test func messageSendIgnoresLateSuccessAfterCancellation() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2SuspendingConversationSender()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -391,7 +427,7 @@ struct V2ConversationStoreTests {
     @Test func messageSendExplainsRateLimitWithoutDiscardingTheDraft() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .rejected(code: "RATE_LIMITED"))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -409,7 +445,7 @@ struct V2ConversationStoreTests {
     @Test func messageSendKeepsPrivacyDenialReasonOpaque() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .rejected(code: "FORBIDDEN"))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -437,7 +473,7 @@ struct V2ConversationStoreTests {
         let sender = V2ConversationSenderFake(result: .queuedForRetry)
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
         let uploader = V2ConversationAttachmentUploaderFake(result: .success(reference))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -468,7 +504,7 @@ struct V2ConversationStoreTests {
         let sender = V2ConversationSenderFake(result: .accepted)
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
         let uploader = V2ConversationAttachmentUploaderFake(result: .failure(V2AttachmentUploadFailure.failed))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -502,7 +538,7 @@ struct V2ConversationStoreTests {
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
         let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000613"))
         let uploader = V2ConversationAttachmentUploaderFake(result: .success(reference))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -530,7 +566,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_a": "member-a"])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -554,7 +590,7 @@ struct V2ConversationStoreTests {
     @Test func groupMessageSendsEveryoneMentionWhenTheIdentityDirectoryIsUnavailable() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -577,7 +613,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_a": "member-a"])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
@@ -673,6 +709,12 @@ struct V2ConversationStoreTests {
         #expect(try Data(contentsOf: downloaded.fileURL) == Data([1, 2, 3, 4]))
         #expect(!downloaded.fileURL.lastPathComponent.contains(reference.mediaID.rawValue))
         #expect(downloaded.fileURL.pathExtension == "media")
+
+        try Data([9, 9, 9, 9]).write(to: downloaded.fileURL)
+        let replaced = try await downloader.download(reference)
+        #expect(replaced.fileURL == downloaded.fileURL)
+        #expect(try Data(contentsOf: replaced.fileURL) == Data([1, 2, 3, 4]))
+        #expect(!fileManager.fileExists(atPath: replaced.fileURL.deletingLastPathComponent().appendingPathComponent(".00000000-0000-0000-0000-000000000711.partial").path))
     }
 
     @Test func foregroundMediaDownloaderPurgesOnlyIncompleteCacheTransfers() async throws {
@@ -702,6 +744,33 @@ struct V2ConversationStoreTests {
         #expect(fileManager.fileExists(atPath: retained.path))
     }
 
+    @Test func foregroundMediaDownloaderEvictsLeastRecentCompleteEntriesAtItsCapacityBoundary() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("v2-media-cache-capacity-" + UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let target = try V2ClientMediaTransferTarget(
+            url: #require(URL(string: "https://media.invalid/object")),
+            expiresAt: .distantFuture,
+            expectedByteCount: 4
+        )
+        let downloader = try V2ForegroundConversationMediaDownloader(
+            downloader: .init(
+                targetResolver: V2MediaDownloadTargetResolverFake(target: target),
+                byteTransfer: V2MediaByteTransferFake(downloadedData: Data([1, 2, 3, 4]))
+            ),
+            directory: root,
+            cachePolicy: .init(maximumByteCount: 8, maximumEntryCount: 1, maximumAge: 3_600)
+        )
+        let first = try await downloader.download(.init(mediaID: .init("cache-first")))
+        let second = try await downloader.download(.init(mediaID: .init("cache-second")))
+
+        #expect(!fileManager.fileExists(atPath: first.fileURL.path))
+        #expect(fileManager.fileExists(atPath: second.fileURL.path))
+        #expect(try fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "media" }.count == 1)
+    }
+
     @Test func messageWithdrawalUsesProjectionRevisionAndRefreshesAfterAcknowledgement() async {
         let message = V2ConversationMessageItem(
             id: "message-a",
@@ -713,7 +782,7 @@ struct V2ConversationStoreTests {
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let withdrawer = V2MessageWithdrawerFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageWithdrawer: withdrawer,
@@ -739,7 +808,7 @@ struct V2ConversationStoreTests {
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let withdrawer = V2SuspendingMessageWithdrawer(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageWithdrawer: withdrawer,
@@ -767,7 +836,7 @@ struct V2ConversationStoreTests {
     @Test func messageWithdrawalIsNotAvailableForIncomingOrWithdrawnMessages() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let withdrawer = V2MessageWithdrawerFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageWithdrawer: withdrawer,
@@ -800,7 +869,7 @@ struct V2ConversationStoreTests {
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let changer = V2MessageReactionChangerFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageReactionChanger: changer,
@@ -823,7 +892,7 @@ struct V2ConversationStoreTests {
         let message = V2ConversationMessageItem(id: "message-a", revision: 2, text: "消息已撤回", createdAt: .now, isOutgoing: true, isWithdrawn: true)
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let changer = V2MessageReactionChangerFake(result: .accepted)
-        let store = V2ConversationDetailStore(dataSource: source, sender: nil, messageReactionChanger: changer, userID: "current-user", roomID: "room-a")
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, messageReactionChanger: changer, userID: "current-user", roomID: "room-a")
 
         await store.changeReaction("👍", on: message)
 
@@ -835,7 +904,7 @@ struct V2ConversationStoreTests {
         let message = V2ConversationMessageItem(id: "message-a", revision: 5, text: "原文", createdAt: .now, isOutgoing: true, isWithdrawn: false)
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let editor = V2MessageEditorFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageEditor: editor,
@@ -855,7 +924,7 @@ struct V2ConversationStoreTests {
         let message = V2ConversationMessageItem(id: "message-a", revision: 5, text: "原文", createdAt: .now, isOutgoing: true, isWithdrawn: false)
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let editor = V2MessageEditorFake(result: .rejected(code: "REVISION_CONFLICT"))
-        let store = V2ConversationDetailStore(dataSource: source, sender: nil, messageEditor: editor, userID: "current-user", roomID: "room-a")
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, messageEditor: editor, userID: "current-user", roomID: "room-a")
 
         let shouldDismissEditor = await store.editMessage(message, text: "新文本")
 
@@ -870,7 +939,7 @@ struct V2ConversationStoreTests {
             .init(id: "message-b", roomSequence: 9, revision: 1, text: "最新", createdAt: .now, isOutgoing: true, isWithdrawn: false)
         ])
         let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
-        let store = V2ConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
 
         await store.refresh()
         await store.reportVisibleMessage(try #require(store.messages.last))
@@ -883,7 +952,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener,
@@ -900,7 +969,7 @@ struct V2ConversationStoreTests {
     @Test func directConversationRejectsBlankTargetBeforeNetwork() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener
@@ -917,7 +986,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
         let resolver = V2SuspendingConversationPublicIdentityResolver()
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener,
@@ -937,7 +1006,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
         let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener,
@@ -958,7 +1027,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2SuspendingDirectConversationOpener(roomID: "room-direct")
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener,
@@ -978,7 +1047,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2SuspendingDirectConversationOpener(roomID: "room-direct")
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["other_user": "other-user"])
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             directConversationOpener: opener,
@@ -1001,7 +1070,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
         let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             publicIdentityResolver: resolver,
@@ -1022,7 +1091,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .created(roomID: "room-group"))
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["user_a": "user-a", "user_b": "user-b"])
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user", publicIdentityResolver: resolver, groupConversationCreator: creator)
+        let store = makeConversationListStore(dataSource: source, userID: "current-user", publicIdentityResolver: resolver, groupConversationCreator: creator)
 
         let roomID = await store.createGroupConversation(title: " 项目群 ", memberHandlesText: " @user_a,\n@user_b ")
 
@@ -1034,7 +1103,7 @@ struct V2ConversationStoreTests {
     @Test func groupConversationKeepsDurableRetryVisible() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .queuedForRetry(operationID: "group-operation-1"))
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
+        let store = makeConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
 
         let roomID = await store.createGroupConversation(title: "项目群", memberHandlesText: "")
 
@@ -1055,7 +1124,7 @@ struct V2ConversationStoreTests {
             result: .queuedForRetry(operationID: "unused"),
             restoredStatus: .finalizing(operationID: "group-operation-2")
         )
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
+        let store = makeConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
 
         await store.refresh()
 
@@ -1066,7 +1135,7 @@ struct V2ConversationStoreTests {
     @Test func groupConversationAllowsOnlyOneInFlightCreation() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2SuspendingGroupConversationCreator(result: .created(roomID: "room-group"))
-        let store = V2ConversationListStore(
+        let store = makeConversationListStore(
             dataSource: source,
             userID: "current-user",
             groupConversationCreator: creator
@@ -1105,7 +1174,7 @@ struct V2ConversationStoreTests {
                 nextCursor: nil
             )
         ])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1133,7 +1202,7 @@ struct V2ConversationStoreTests {
             members: [.init(id: "owner", role: "群主")],
             nextCursor: nil
         ))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1156,6 +1225,45 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == nil)
     }
 
+    @Test func groupMemberDirectoryRestartsWhenMembershipChangesBetweenPages() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let reader = V2ScriptedGroupMemberDirectory(results: [
+            .success(.init(
+                membershipRevision: 3,
+                actorRole: "群主",
+                members: [.init(id: "old-owner", role: "群主")],
+                nextCursor: "opaque-revision-3"
+            )),
+            .failure(.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 4)),
+            .success(.init(
+                membershipRevision: 4,
+                actorRole: "群主",
+                members: [
+                    .init(id: "current-owner", role: "群主"),
+                    .init(id: "current-member", role: "成员")
+                ],
+                nextCursor: nil
+            ))
+        ])
+        let store = makeConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-group",
+            isGroupConversation: true,
+            groupMemberDirectory: reader
+        )
+
+        await store.loadGroupMembers(reset: true)
+        await store.loadGroupMembers()
+
+        #expect(await reader.requestedCursors() == [nil, "opaque-revision-3", nil])
+        #expect(store.groupMembers.map(\.id) == ["current-owner", "current-member"])
+        #expect(store.groupMemberRevision == 4)
+        #expect(!store.canLoadMoreGroupMembers)
+        #expect(store.groupMemberFeedback == nil)
+    }
+
     @Test func groupMembershipChangeUsesTheDirectoryRevisionAndRefreshes() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let page = V2GroupMemberPage(
@@ -1167,7 +1275,7 @@ struct V2ConversationStoreTests {
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let changer = V2GroupMembershipChangerFake(result: .accepted)
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_b": "member-b"])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1197,7 +1305,7 @@ struct V2ConversationStoreTests {
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let changer = V2SuspendingGroupMembershipChanger(result: .queuedForRetry)
         let resolver = V2ConversationPublicIdentityResolverFake(values: ["member_b": "member-b"])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1232,7 +1340,7 @@ struct V2ConversationStoreTests {
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let changer = V2SuspendingGroupMembershipChanger(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1265,7 +1373,7 @@ struct V2ConversationStoreTests {
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let changer = V2GroupMembershipChangerFake(result: .accepted)
         let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1298,7 +1406,7 @@ struct V2ConversationStoreTests {
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let muter = V2GroupMemberMuterFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1330,7 +1438,7 @@ struct V2ConversationStoreTests {
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let remover = V2ModeratedGroupMemberRemoverFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1360,7 +1468,7 @@ struct V2ConversationStoreTests {
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let remover = V2SuspendingModeratedGroupMemberRemover(result: .accepted)
         let changer = V2GroupMembershipChangerFake(result: .accepted)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1396,7 +1504,7 @@ struct V2ConversationStoreTests {
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
         let muter = V2GroupMemberMuterFake(result: .rejected(code: "TARGET_POLICY"))
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1654,7 +1762,7 @@ struct V2ConversationStoreTests {
     @Test func visibleHybridGroupPollStopsForANonHybridRoomWithoutNetworkLoop() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let synchronizer = V2ActiveHybridGroupSynchronizerFake(outcomes: [.notHybridRoom])
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1671,7 +1779,7 @@ struct V2ConversationStoreTests {
     @Test func visibleHybridGroupUsesATLSWakeBeforeTheNextCursorPullAndUnsubscribesOnExit() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let synchronizer = V2SubscribedHybridGroupSynchronizerFake()
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             userID: "current-user",
@@ -1735,7 +1843,7 @@ struct V2ConversationStoreTests {
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f05")
         let peerID: UserID = try .init("00000000-0000-0000-0000-000000000f06")
         let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let store = V2ConversationDetailStore(
+        let store = makeConversationDetailStore(
             dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil,
             userID: "current-user",
@@ -1762,12 +1870,34 @@ struct V2ConversationStoreTests {
             ],
             messages: []
         )
-        let store = V2ConversationListStore(dataSource: source, userID: "current-user")
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
 
         await store.refresh()
         #expect(store.visibleItems.map(\.id) == ["inbox"])
-        store.isShowingArchived = true
+        await store.toggleArchivedConversations()
         #expect(store.visibleItems.map(\.id) == ["archive"])
+    }
+
+    @Test func conversationListLoadsAdditionalKeysetPagesWithoutDuplicates() async {
+        let summaries = (1 ... 51).map { index in
+            V2ConversationListItem(
+                id: String(format: "00000000-0000-0000-0000-%012d", index),
+                title: "Room \(index)",
+                preview: "Message",
+                lastActivity: Date(timeIntervalSince1970: TimeInterval(1_750_000_000 + index)),
+                isOutgoing: false
+            )
+        }
+        let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+
+        await store.refresh()
+        #expect(store.items.count == 50)
+        #expect(store.conversationNextCursor != nil)
+        await store.loadMoreConversations()
+        #expect(store.items.count == 51)
+        #expect(Set(store.items.map(\.id)).count == 51)
+        #expect(store.conversationNextCursor == nil)
     }
 
     @Test func messageSearchStoreShowsIndexingUntilTheBackgroundBuildCompletes() async {
@@ -1784,7 +1914,7 @@ struct V2ConversationStoreTests {
     @Test func currentConversationMessageSearchUsesTheRoomScope() async throws {
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f11")
         let searcher = V2MessageSearchFake(result: .success(.init(hits: [], nextCursor: nil)))
-        let detail = V2ConversationDetailStore(
+        let detail = makeConversationDetailStore(
             dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             messageSearcher: searcher,
             sender: nil,
@@ -1798,6 +1928,175 @@ struct V2ConversationStoreTests {
 
         #expect(await searcher.requests().map(\.scope) == [.room(roomID)])
     }
+}
+
+/// Test-only composition helpers keep individual tests focused on the one
+/// capability they replace while production uses the grouped feature
+/// environment directly.
+@MainActor
+private func makeConversationDetailStore(
+    dataSource: any V2ConversationDataSource,
+    messageSearcher: (any V2ConversationMessageSearching)? = nil,
+    sender: (any V2ConversationSending)?,
+    messageWithdrawer: (any V2MessageWithdrawing)? = nil,
+    messageReactionChanger: (any V2MessageReactionChanging)? = nil,
+    messageEditor: (any V2MessageEditing)? = nil,
+    readReceiptReporter: (any V2ConversationReadReporting)? = nil,
+    messageFavoriter: (any V2MessageFavoriting)? = nil,
+    groupMessagePinner: (any V2GroupMessagePinning)? = nil,
+    messageForwarder: (any V2MessageForwarding)? = nil,
+    forwardTargets: [V2ConversationForwardTarget] = [],
+    groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil,
+    groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil,
+    groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil,
+    groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil,
+    groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil,
+    groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil,
+    conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil,
+    userID: String,
+    roomID: String,
+    title: String = "会话",
+    isGroupConversation: Bool = false,
+    directAccountKind: V2AccountKind = .regular,
+    groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
+    groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
+    groupMemberMuter: (any V2GroupMemberMuting)? = nil,
+    moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
+    publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil,
+    attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
+    attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
+    mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
+    projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
+    activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil,
+    initialDraft: String? = nil,
+    initialMentionHandles: String? = nil
+) -> V2ConversationDetailStore {
+    let environment = V2ConversationFeatureEnvironment(
+        userID: userID,
+        projections: .init(
+            dataSource: dataSource,
+            messageSearcher: messageSearcher,
+            groupAnnouncementReader: groupAnnouncementReader,
+            groupRolePolicyReader: groupRolePolicyReader
+        ),
+        messages: .init(
+            sender: sender,
+            withdrawer: messageWithdrawer,
+            reactionChanger: messageReactionChanger,
+            editor: messageEditor,
+            readReceiptReporter: readReceiptReporter,
+            favoriter: messageFavoriter,
+            groupPinner: groupMessagePinner,
+            forwarder: messageForwarder
+        ),
+        groups: .init(
+            announcementManager: groupAnnouncementManager,
+            memberRoleChanger: groupMemberRoleChanger,
+            rolePolicyChanger: groupRolePolicyChanger,
+            readReceiptReader: groupReadReceiptReader,
+            memberDirectory: groupMemberDirectory,
+            membershipChanger: groupMembershipChanger,
+            memberMuter: groupMemberMuter,
+            moderatedMemberRemover: moderatedGroupMemberRemover
+        ),
+        discovery: .init(publicIdentityResolver: publicIdentityResolver),
+        media: .init(
+            attachmentStager: attachmentStager,
+            attachmentUploader: attachmentUploader,
+            downloader: mediaDownloader
+        ),
+        runtime: .init(
+            liveActivity: conversationLiveActivity,
+            projectionChangeNotifier: projectionChangeNotifier,
+            activeHybridGroupSynchronizer: activeHybridGroupSynchronizer
+        )
+    )
+    return .init(
+        environment: environment,
+        context: .init(
+            roomID: roomID,
+            title: title,
+            isGroupConversation: isGroupConversation,
+            directAccountKind: directAccountKind,
+            forwardTargets: forwardTargets,
+            initialDraft: initialDraft,
+            initialMentionHandles: initialMentionHandles
+        )
+    )
+}
+
+@MainActor
+private func makeConversationListStore(
+    dataSource: any V2ConversationDataSource,
+    messageSearcher: (any V2ConversationMessageSearching)? = nil,
+    userID: String,
+    sender: (any V2ConversationSending)? = nil,
+    messageWithdrawer: (any V2MessageWithdrawing)? = nil,
+    messageReactionChanger: (any V2MessageReactionChanging)? = nil,
+    messageEditor: (any V2MessageEditing)? = nil,
+    readReceiptReporter: (any V2ConversationReadReporting)? = nil,
+    conversationStateChanger: (any V2ConversationStateChanging)? = nil,
+    messageFavoriter: (any V2MessageFavoriting)? = nil,
+    groupMessagePinner: (any V2GroupMessagePinning)? = nil,
+    messageForwarder: (any V2MessageForwarding)? = nil,
+    groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil,
+    groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil,
+    groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil,
+    groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil,
+    conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil,
+    directConversationOpener: (any V2DirectConversationOpening)? = nil,
+    publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil,
+    groupConversationCreator: (any V2GroupConversationCreating)? = nil,
+    groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
+    groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
+    groupMemberMuter: (any V2GroupMemberMuting)? = nil,
+    moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
+    attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
+    attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
+    mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
+    projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
+    activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
+) -> V2ConversationListStore {
+    .init(environment: .init(
+        userID: userID,
+        projections: .init(dataSource: dataSource, messageSearcher: messageSearcher),
+        messages: .init(
+            sender: sender,
+            withdrawer: messageWithdrawer,
+            reactionChanger: messageReactionChanger,
+            editor: messageEditor,
+            readReceiptReporter: readReceiptReporter,
+            stateChanger: conversationStateChanger,
+            favoriter: messageFavoriter,
+            groupPinner: groupMessagePinner,
+            forwarder: messageForwarder
+        ),
+        groups: .init(
+            announcementManager: groupAnnouncementManager,
+            memberRoleChanger: groupMemberRoleChanger,
+            rolePolicyChanger: groupRolePolicyChanger,
+            readReceiptReader: groupReadReceiptReader,
+            conversationCreator: groupConversationCreator,
+            memberDirectory: groupMemberDirectory,
+            membershipChanger: groupMembershipChanger,
+            memberMuter: groupMemberMuter,
+            moderatedMemberRemover: moderatedGroupMemberRemover
+        ),
+        discovery: .init(
+            directConversationOpener: directConversationOpener,
+            publicIdentityResolver: publicIdentityResolver
+        ),
+        media: .init(
+            attachmentStager: attachmentStager,
+            attachmentUploader: attachmentUploader,
+            downloader: mediaDownloader
+        ),
+        runtime: .init(
+            liveActivity: conversationLiveActivity,
+            projectionChangeNotifier: projectionChangeNotifier,
+            activeHybridGroupSynchronizer: activeHybridGroupSynchronizer
+        )
+    ))
 }
 
 private func testPresentation(for reference: V2MediaReference) throws -> V2MediaPresentation {
@@ -1906,17 +2205,39 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
         self.messages = messages
     }
 
-    func conversationSummaries(for userID: String) async throws -> [V2ConversationListItem] {
-        summaries
+    func conversationSummaryPage(
+        for _: String,
+        isArchived: Bool,
+        before cursor: V2ClientConversationListCursor?,
+        limit: Int
+    ) async throws -> V2ConversationListPage {
+        let candidates = summaries
+            .filter { $0.isArchived == isArchived }
+            .filter { item in
+                guard let cursor else { return true }
+                if item.isPinned != cursor.isPinned { return !item.isPinned && cursor.isPinned }
+                if item.lastActivity != cursor.lastActivity { return item.lastActivity < cursor.lastActivity }
+                return item.id > cursor.roomID.rawValue
+            }
+            .sorted { lhs, rhs in
+                if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+                if lhs.lastActivity != rhs.lastActivity { return lhs.lastActivity > rhs.lastActivity }
+                return lhs.id < rhs.id
+            }
+        let items = Array(candidates.prefix(limit))
+        let nextCursor = candidates.count > limit ? try items.last.map {
+            V2ClientConversationListCursor(
+                isPinned: $0.isPinned,
+                lastActivity: $0.lastActivity,
+                roomID: try .init($0.id)
+            )
+        } : nil
+        return .init(items: items, nextCursor: nextCursor)
     }
 
     func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem] {
         requestedMessageCount += 1
         return messages
-    }
-
-    func timeline(in _: String, for _: String) async throws -> [V2ConversationTimelineItem] {
-        messages.map { .message($0, timelineSequence: $0.roomSequence) }
     }
 
     func messageRequestCount() -> Int { requestedMessageCount }
@@ -1941,12 +2262,17 @@ private actor V2MessageSearchFake: V2ConversationMessageSearching {
 private actor V2SequencedConversationDataSource: V2ConversationDataSource {
     private var summaryRequestCount = 0
     private var summaryRequestWaiters: [CheckedContinuation<Void, Never>] = []
-    private var summaryContinuations: [CheckedContinuation<[V2ConversationListItem], Never>?] = []
+    private var summaryContinuations: [CheckedContinuation<V2ConversationListPage, Never>?] = []
     private var messageRequestCount = 0
     private var messageRequestWaiters: [CheckedContinuation<Void, Never>] = []
     private var messageContinuations: [CheckedContinuation<Result<[V2ConversationMessageItem], V2SequencedConversationDataSourceFailure>, Never>?] = []
 
-    func conversationSummaries(for _: String) async throws -> [V2ConversationListItem] {
+    func conversationSummaryPage(
+        for _: String,
+        isArchived _: Bool,
+        before _: V2ClientConversationListCursor?,
+        limit _: Int
+    ) async throws -> V2ConversationListPage {
         summaryRequestCount += 1
         let waiters = summaryRequestWaiters
         summaryRequestWaiters = []
@@ -1966,10 +2292,6 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
         }.get()
     }
 
-    func timeline(in _: String, for _: String) async throws -> [V2ConversationTimelineItem] {
-        []
-    }
-
     func waitUntilSummaryRequestCount(_ expectedCount: Int) async {
         while summaryRequestCount < expectedCount {
             await withCheckedContinuation { summaryRequestWaiters.append($0) }
@@ -1981,7 +2303,7 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
             return
         }
         summaryContinuations[index] = nil
-        continuation.resume(returning: items)
+        continuation.resume(returning: .init(items: items, nextCursor: nil))
     }
 
     func waitUntilMessageRequestCount(_ expectedCount: Int) async {
@@ -2514,6 +2836,23 @@ private actor V2SuspendingGroupMemberDirectory: V2GroupMemberDirectoryReading {
     func complete() {
         completion?.resume()
         completion = nil
+    }
+
+    func requestedCursors() -> [String?] { cursors }
+}
+
+private actor V2ScriptedGroupMemberDirectory: V2GroupMemberDirectoryReading {
+    private var results: [Result<V2GroupMemberPage, V2RealtimeTransportError>]
+    private var cursors: [String?] = []
+
+    init(results: [Result<V2GroupMemberPage, V2RealtimeTransportError>]) {
+        self.results = results
+    }
+
+    func members(in _: String, cursor: String?) async throws -> V2GroupMemberPage {
+        cursors.append(cursor)
+        guard !results.isEmpty else { throw CancellationError() }
+        return try results.removeFirst().get()
     }
 
     func requestedCursors() -> [String?] { cursors }

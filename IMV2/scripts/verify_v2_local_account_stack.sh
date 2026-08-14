@@ -417,6 +417,12 @@ for metric in \
   'im_v2_fanout_delivery_backlog{state="leased"}' \
   'im_v2_fanout_delivery_backlog{state="scheduled"}' \
   'im_v2_fanout_delivery_backlog{state="paused"}' \
+  'im_v2_content_review_backlog{state="ready"}' \
+  'im_v2_content_review_backlog{state="leased"}' \
+  'im_v2_content_review_backlog{state="scheduled"}' \
+  'im_v2_content_review_backlog{state="paused"}' \
+  'im_v2_user_sync_log_estimated_rows ' \
+  'im_v2_user_sync_log_relation_bytes ' \
   'im_v2_push_wake_backlog{state="ready"}' \
   'im_v2_push_wake_backlog{state="leased"}' \
   'im_v2_push_wake_backlog{state="suppressed"}'; do

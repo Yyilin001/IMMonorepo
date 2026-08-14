@@ -16,9 +16,29 @@ command -v rg >/dev/null 2>&1 || {
 }
 
 sql_tables() {
-  rg -No --glob '*.sql' 'CREATE TABLE(?: IF NOT EXISTS)? im_v2\.([a-z0-9_]+)' "${sql_dir}" \
-    | sed -E 's/.*im_v2\.([a-z0-9_]+)/\1/' \
-    | sort -u
+  # Replay the numbered migrations in filename order so tables removed by a
+  # later protocol migration are not mistaken for part of the final schema.
+  # A table dropped and recreated later in the chain remains present.
+  awk '
+    /^[[:space:]]*CREATE TABLE( IF NOT EXISTS)? im_v2\.[a-z0-9_]+/ {
+      table = $0
+      sub(/^[[:space:]]*CREATE TABLE( IF NOT EXISTS)? im_v2\./, "", table)
+      sub(/[^a-z0-9_].*$/, "", table)
+      tables[table] = 1
+      next
+    }
+    /^[[:space:]]*DROP TABLE( IF EXISTS)? im_v2\.[a-z0-9_]+/ {
+      table = $0
+      sub(/^[[:space:]]*DROP TABLE( IF EXISTS)? im_v2\./, "", table)
+      sub(/[^a-z0-9_].*$/, "", table)
+      delete tables[table]
+    }
+    END {
+      for (table in tables) {
+        print table
+      }
+    }
+  ' "${sql_dir}"/*.sql | sort
 }
 
 readiness_tables() {

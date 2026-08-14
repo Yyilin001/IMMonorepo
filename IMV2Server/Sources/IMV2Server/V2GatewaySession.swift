@@ -3,15 +3,34 @@ import IMV2Core
 
 /// Authentication is an injected server boundary; the gateway never decodes a
 /// user ID from an unauthenticated protobuf payload.
+public struct V2GatewayAuthentication: Equatable, Sendable {
+    public let userID: UserID
+    public let expiresAt: Date?
+
+    public init(userID: UserID, expiresAt: Date?) {
+        self.userID = userID
+        self.expiresAt = expiresAt
+    }
+}
+
 public protocol V2GatewayAuthenticator: Sendable {
     func authenticate(accessToken: String, deviceID: DeviceID) async throws -> UserID
     /// Production authenticators return the verified access-token expiry. A
     /// nil value is reserved for non-expiring test/auth adapters.
     func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date?
+    /// Production implementations override this combined read so identity and
+    /// expiry come from one revocation-consistent database snapshot.
+    func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication
 }
 
 public extension V2GatewayAuthenticator {
     func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) async throws -> Date? { nil }
+    func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
+        .init(
+            userID: try await authenticate(accessToken: accessToken, deviceID: deviceID),
+            expiresAt: try await authenticatedSessionExpiresAt(accessToken: accessToken, deviceID: deviceID)
+        )
+    }
 }
 
 public enum V2GatewaySessionError: Error, Equatable, Sendable {
@@ -80,8 +99,12 @@ public actor V2GatewaySession {
             try state.receiveAuthenticate(frame)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
-            let userID = try await authenticator.authenticate(accessToken: request.accessToken, deviceID: deviceID)
-            let expiresAt = try await authenticator.authenticatedSessionExpiresAt(accessToken: request.accessToken, deviceID: deviceID)
+            let authentication = try await authenticator.authenticateSession(
+                accessToken: request.accessToken,
+                deviceID: deviceID
+            )
+            let userID = authentication.userID
+            let expiresAt = authentication.expiresAt
             guard expiresAt.map({ $0 > now() }) ?? true else { throw V2GatewaySessionError.sessionExpired }
             try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile))
             authenticatedSessionExpiresAt = expiresAt

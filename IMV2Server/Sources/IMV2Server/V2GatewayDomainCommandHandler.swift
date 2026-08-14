@@ -171,6 +171,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
                 return successEnvelope()
             default: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
             }
+        } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
+            return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
         } catch V2CoreError.invalidIdentifier, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
@@ -185,6 +187,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipStoreError.actorNotOwner {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
+        } catch V2RoomMembershipStoreError.targetUnavailable {
+            return errorEnvelope(code: "NOT_FOUND", retryable: false)
         } catch V2ConversationCapabilitiesStoreError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2ConversationCapabilitiesStoreError.roomNotFound, V2ConversationCapabilitiesStoreError.messageNotFound {
@@ -212,6 +216,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         } catch V2LiveActivityStoreError.corruptPersistenceState {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2GroupEventLogError.actorNotMember {
+            return errorEnvelope(code: "FORBIDDEN", retryable: false)
+        } catch V2SocialRelationshipStoreError.actorInactive {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2SocialRelationshipStoreError.corruptPersistenceState {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
@@ -255,7 +261,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "NOT_FOUND", retryable: false)
         } catch V2MessageReactionStoreError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
-        } catch V2MessageReactionStoreError.messageWithdrawn {
+        } catch V2MessageReactionStoreError.messageWithdrawn,
+                V2MessageReactionStoreError.reactionLimitReached {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2SyncStoreError.invalidOrExpiredSyncToken {
             // A token is only an opaque continuation capability.  Its expiry
@@ -661,6 +668,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         case .created(let room), .idempotent(let room):
             return groupRoomCreatedEnvelope(room)
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
+        case .invalidMembers: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         case .memberLimitReached: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
         case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
@@ -682,7 +690,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         response.groupRoomCreated.title = room.title
         response.groupRoomCreated.createdAtMs = Int64(room.createdAt.timeIntervalSince1970 * 1_000)
         response.groupRoomCreated.deliveryMode = room.deliveryMode == .standardFanout ? .standardFanout : .largeGroupHybrid
-        response.groupRoomCreated.memberCount = UInt32(room.memberUserIDs.count)
+        response.groupRoomCreated.memberCount = UInt32(room.memberCount)
         return response
     }
 
@@ -812,7 +820,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         var response = IMV2Envelope(); response.readReceiptReadersPage = .init()
         response.readReceiptReadersPage.roomID = page.roomID.rawValue
         response.readReceiptReadersPage.messageRoomSequence = page.messageRoomSequence
-        response.readReceiptReadersPage.readerCount = UInt32(page.readerCount)
+        if let readerCount = page.readerCount {
+            guard let wireCount = UInt32(exactly: readerCount) else {
+                return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+            }
+            response.readReceiptReadersPage.readerCount = wireCount
+        }
         response.readReceiptReadersPage.nextCursor = page.nextCursor ?? ""
         response.readReceiptReadersPage.readers = page.readers.map { reader in
             var wire = IMV2ReadReceiptReader(); wire.userID = reader.userID.rawValue
@@ -924,9 +937,11 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             response.syncBatch.records = records.map { record in var value = IMV2SyncRecord(); value.userSyncSequence = record.sequence; value.sourceEventID = record.sourceEventID.rawValue; value.projectionKind = record.projectionKind; value.payload = Data(record.payloadJSON.utf8); return value }
             response.syncBatch.nextSyncToken = nextToken.rawValue; response.syncBatch.syncReceipt = receipt.rawValue; response.syncBatch.hasMore_p = hasMore; response.syncBatch.capabilityProfile = identity.capabilityProfile
             return response
-        case .resetRequired(let snapshotID, let generation, let base, let digest, let expiry):
-            var response = IMV2Envelope(); response.resetRequired = .init(); response.resetRequired.snapshotID = snapshotID.rawValue; response.resetRequired.generation = generation; response.resetRequired.baseUserSyncSequence = base; response.resetRequired.manifestDigest = digest; response.resetRequired.expiresAtMs = Int64(expiry.timeIntervalSince1970 * 1_000)
+        case .resetRequired(let snapshotID, let generation, let base, let expiry):
+            var response = IMV2Envelope(); response.resetRequired = .init(); response.resetRequired.snapshotID = snapshotID.rawValue; response.resetRequired.generation = generation; response.resetRequired.baseUserSyncSequence = base; response.resetRequired.expiresAtMs = Int64(expiry.timeIntervalSince1970 * 1_000)
             return response
+        case .resetPreparing:
+            return errorEnvelope(code: "RESET_PREPARING", retryable: true, retryAfter: 1)
         }
     }
 
@@ -940,10 +955,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         response.snapshotManifest.snapshotID = manifest.snapshotID.rawValue
         response.snapshotManifest.generation = manifest.generation
         response.snapshotManifest.baseUserSyncSequence = manifest.baseSequence
-        response.snapshotManifest.manifestDigest = manifest.manifestDigest
+        response.snapshotManifest.rootDigest = manifest.rootDigest
         response.snapshotManifest.schemaVersion = manifest.schemaVersion
         response.snapshotManifest.capabilityProfile = manifest.capabilityProfile
-        response.snapshotManifest.pageDigests = manifest.pageDigests
+        response.snapshotManifest.pageCount = manifest.pageCount
+        response.snapshotManifest.totalItems = manifest.totalItems
+        response.snapshotManifest.totalBytes = manifest.totalBytes
         response.snapshotManifest.nextSyncToken = manifest.nextSyncToken.rawValue
         response.snapshotManifest.syncReceipt = manifest.receipt.rawValue
         response.snapshotManifest.expiresAtMs = Int64(manifest.expiresAt.timeIntervalSince1970 * 1_000)
@@ -951,13 +968,18 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     }
 
     private func handleSnapshotPage(_ request: IMV2SnapshotPagePull, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let page = try await sync.fetchSnapshotPage(userID: identity.userID, deviceID: identity.deviceID, snapshotID: try .init(request.snapshotID), generation: request.generation, manifestDigest: request.manifestDigest, index: request.pageIndex)
+        let page = try await sync.fetchSnapshotPage(userID: identity.userID, deviceID: identity.deviceID, snapshotID: try .init(request.snapshotID), generation: request.generation, rootDigest: request.rootDigest, index: request.pageIndex)
         var response = IMV2Envelope()
         response.snapshotPage = .init()
         response.snapshotPage.snapshotID = page.snapshotID.rawValue
         response.snapshotPage.generation = page.generation
-        response.snapshotPage.manifestDigest = page.manifestDigest
+        response.snapshotPage.rootDigest = page.rootDigest
         response.snapshotPage.pageIndex = page.index
+        response.snapshotPage.firstProjectionKind = page.firstKey.projectionKind
+        response.snapshotPage.firstEntityKey = page.firstKey.entityKey
+        response.snapshotPage.lastProjectionKind = page.lastKey.projectionKind
+        response.snapshotPage.lastEntityKey = page.lastKey.entityKey
+        response.snapshotPage.itemCount = page.itemCount
         response.snapshotPage.pageDigest = page.digest
         response.snapshotPage.payload = page.payload
         return response

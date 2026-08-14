@@ -3,99 +3,61 @@ import IMV2Core
 @testable import IMV2Server
 import Testing
 
-@Suite("V2 snapshot staging contract")
+@Suite("V2 snapshot V3 service contract")
 struct V2SyncServiceSnapshotTests {
-    @Test("malformed snapshot pages are rejected before the store receives a reset request")
-    func rejectsInvalidSnapshotBeforePersistence() async throws {
-        let store = RecordingSnapshotStore()
+    @Test("manifest and page requests preserve the V3 generation and root fence")
+    func forwardsManifestAndPageFence() async throws {
+        let store = RecordingSnapshotV3Store()
         let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
-        let stage = try invalidStage()
+        let userID = try UserID("00000000-0000-0000-0000-000000000801")
+        let deviceID = try DeviceID("00000000-0000-0000-0000-000000000802")
+        let snapshotID = try SnapshotID("00000000-0000-0000-0000-000000000803")
 
-        await #expect(throws: V2SnapshotProjectionError.invalidPage) {
-            _ = try await service.stageReset(userID: .init("00000000-0000-0000-0000-000000000801"), deviceID: .init("00000000-0000-0000-0000-000000000802"), snapshot: stage)
-        }
-        #expect(await store.stagedCount() == 0)
-    }
-
-    @Test("valid deterministic projection pages reach the durable staging boundary")
-    func validSnapshotReachesStore() async throws {
-        let store = RecordingSnapshotStore()
-        let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
-        let page = try V2SnapshotProjectionCodec.encode(.init(
-            messages: [],
-            relationships: [try .init(targetUserID: .init("00000000-0000-0000-0000-000000000804"), state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)],
-            userBlocks: [.init(targetUserID: try .init("00000000-0000-0000-0000-000000000805"), isBlocked: true, updatedAt: .distantFuture)],
-            strangerMessagePreference: .init(allowsStrangerMessages: true, updatedAt: .distantFuture),
-            moderationActions: [],
-            roomControls: []
-        ))
-        let stage = try validStage(page: page)
-
-        #expect(try await service.stageReset(userID: .init("00000000-0000-0000-0000-000000000801"), deviceID: .init("00000000-0000-0000-0000-000000000802"), snapshot: stage) == 2)
-        #expect(await store.stagedCount() == 1)
-    }
-
-    @Test("the server rejects duplicate social state across staged snapshot pages")
-    func rejectsDuplicateSocialStateAcrossPages() async throws {
-        let store = RecordingSnapshotStore()
-        let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
-        let target = try UserID("00000000-0000-0000-0000-000000000806")
-        let first = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
-        let second = try V2SnapshotProjectionCodec.encode(.init(messages: [], relationships: [try .init(targetUserID: target, state: .accepted, requestedByUserID: nil, updatedAt: .distantFuture)], userBlocks: [], strangerMessagePreference: nil, moderationActions: [], roomControls: []))
-        let stage = try validStage(pages: [first, second])
-
-        await #expect(throws: V2SnapshotProjectionError.invalidPage) {
-            _ = try await service.stageReset(userID: .init("00000000-0000-0000-0000-000000000801"), deviceID: .init("00000000-0000-0000-0000-000000000802"), snapshot: stage)
-        }
-        #expect(await store.stagedCount() == 0)
-    }
-
-    @Test("the server rejects a snapshot that assigns one room sequence to a message and moderation action")
-    func rejectsConflictingRoomEventPositions() async throws {
-        let store = RecordingSnapshotStore()
-        let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000807")
-        let message = try V2SnapshotMessageProjection(sourceEventID: .init("00000000-0000-0000-0000-000000000808"), messageID: .init("00000000-0000-0000-0000-000000000809"), roomID: roomID, roomSequence: 3, senderUserID: .init("00000000-0000-0000-0000-000000000810"), text: "message", createdAt: Date(timeIntervalSince1970: 1_750_000_000))
-        let action = try V2SnapshotModerationProjection(sourceEventID: .init("00000000-0000-0000-0000-000000000811"), roomID: roomID, roomSequence: 3, actorUserID: .init("00000000-0000-0000-0000-000000000812"), targetUserID: .init("00000000-0000-0000-0000-000000000813"), muteUntil: Date(timeIntervalSince1970: 1_750_000_100), createdAt: Date(timeIntervalSince1970: 1_750_000_001))
-        let page = try V2SnapshotProjectionCodec.encode(.init(messages: [message], relationships: [], userBlocks: [], strangerMessagePreference: nil, moderationActions: [action], roomControls: []))
-
-        await #expect(throws: V2SnapshotProjectionError.invalidPage) {
-            _ = try await service.stageReset(userID: .init("00000000-0000-0000-0000-000000000801"), deviceID: .init("00000000-0000-0000-0000-000000000802"), snapshot: validStage(page: page))
-        }
-        #expect(await store.stagedCount() == 0)
-    }
-
-    private func invalidStage() throws -> V2SnapshotStage {
-        try validStage(page: Data("not-a-snapshot".utf8))
-    }
-
-    private func validStage(page: Data) throws -> V2SnapshotStage {
-        try validStage(pages: [page])
-    }
-
-    private func validStage(pages: [Data]) throws -> V2SnapshotStage {
-        try .init(
-            snapshotID: .init("00000000-0000-0000-0000-000000000803"),
-            baseSequence: 0,
-            manifestDigest: "snapshot-manifest",
-            nextSyncToken: .init("snapshot-token"),
-            receipt: .init("snapshot-receipt"),
-            expiresAt: .distantFuture,
-            schemaVersion: V2SnapshotProjectionCodec.schemaVersion,
-            capabilityProfile: "base",
-            pages: pages.enumerated().map { .init(digest: "page-digest-\($0.offset)", payload: $0.element) }
+        let manifest = try await service.fetchSnapshotManifest(
+            userID: userID, deviceID: deviceID, snapshotID: snapshotID, generation: 7
         )
+        let page = try await service.fetchSnapshotPage(
+            userID: userID, deviceID: deviceID, snapshotID: snapshotID,
+            generation: 7, rootDigest: manifest.rootDigest, index: 0
+        )
+
+        #expect(manifest.schemaVersion == V2SnapshotProjectionV3Codec.schemaVersion)
+        #expect(page.rootDigest == manifest.rootDigest)
+        #expect(page.firstKey == page.lastKey)
+        #expect(await store.requestedRootDigest() == manifest.rootDigest)
+    }
+
+    @Test("snapshot acknowledgement forwards the exact base and receipt fence")
+    func forwardsAcknowledgementFence() async throws {
+        let store = RecordingSnapshotV3Store()
+        let service = V2SyncService(store: store, now: { Date(timeIntervalSince1970: 1_750_000_000) })
+        try await service.acknowledgeSnapshot(
+            userID: .init("00000000-0000-0000-0000-000000000801"),
+            deviceID: .init("00000000-0000-0000-0000-000000000802"),
+            snapshotID: .init("00000000-0000-0000-0000-000000000803"),
+            generation: 7, baseSequence: 42, receipt: .init("snapshot-receipt")
+        )
+        #expect(await store.acknowledgedFence() == .init(generation: 7, base: 42, receipt: "snapshot-receipt"))
     }
 }
 
-private actor RecordingSnapshotStore: V2SyncStore {
-    private var staged = 0
+private actor RecordingSnapshotV3Store: V2SyncStore {
+    struct Ack: Equatable { let generation: UInt64; let base: UInt64; let receipt: String }
+    private var root: String?
+    private var ack: Ack?
 
     func pull(userID _: UserID, deviceID _: DeviceID, syncToken _: V2SyncToken?, maxRecords _: Int, now _: Date) throws -> V2SyncPullResult { throw V2SyncStoreError.invalidOrExpiredSyncToken }
     func acknowledge(userID _: UserID, deviceID _: DeviceID, generation _: UInt64, highestContiguousSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) {}
-    func stageReset(userID _: UserID, deviceID _: DeviceID, snapshot _: V2SnapshotStage, now _: Date) -> UInt64 { staged += 1; return 2 }
-    func fetchSnapshotManifest(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, now _: Date) throws -> V2SnapshotManifest { throw V2SyncStoreError.snapshotExpiredOrInvalid }
-    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, manifestDigest _: String, index _: UInt32, now _: Date) throws -> V2SnapshotPage { throw V2SyncStoreError.snapshotExpiredOrInvalid }
-    func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, baseSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) {}
-    func stagedCount() -> Int { staged }
+    func fetchSnapshotManifest(userID _: UserID, deviceID _: DeviceID, snapshotID: SnapshotID, generation: UInt64, now _: Date) throws -> V2SnapshotManifest {
+        let digest = V2SnapshotV3Digest.initial(baseSequence: 42, capabilityProfile: "base")
+        return .init(snapshotID: snapshotID, generation: generation, baseSequence: 42, rootDigest: digest, schemaVersion: V2SnapshotProjectionV3Codec.schemaVersion, capabilityProfile: "base", pageCount: 1, totalItems: 1, totalBytes: 10, nextSyncToken: try .init("snapshot-token"), receipt: try .init("snapshot-receipt"), expiresAt: .distantFuture)
+    }
+    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID: SnapshotID, generation: UInt64, rootDigest: String, index: UInt32, now _: Date) throws -> V2SnapshotPage {
+        self.root = rootDigest
+        let key = try V2SnapshotProjectionKey(projectionKind: "relationship", entityKey: "00000000-0000-0000-0000-000000000804")
+        return .init(snapshotID: snapshotID, generation: generation, rootDigest: rootDigest, index: index, firstKey: key, lastKey: key, itemCount: 1, digest: String(repeating: "a", count: 64), payload: Data("page".utf8))
+    }
+    func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation: UInt64, baseSequence: UInt64, receipt: V2SyncReceipt, now _: Date) { ack = .init(generation: generation, base: baseSequence, receipt: receipt.rawValue) }
+    func requestedRootDigest() -> String? { root }
+    func acknowledgedFence() -> Ack? { ack }
 }

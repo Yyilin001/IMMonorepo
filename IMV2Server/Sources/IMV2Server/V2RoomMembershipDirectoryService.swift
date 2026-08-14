@@ -28,8 +28,8 @@ public struct V2RoomMembershipDirectoryPage: Equatable, Sendable {
     /// a large roster merely to discover its authenticated actor's role.
     public let actorRole: V2RoomMembershipRole
     public let entries: [V2RoomMembershipDirectoryEntry]
-    /// Opaque to UI callers.  The server currently encodes a UUID boundary,
-    /// but clients must only echo it to obtain the next stable page.
+    /// Opaque to callers. It binds the seek boundary to this room and one
+    /// membership revision, so pages from changing rosters are never mixed.
     public let nextCursor: String?
 
     public init(roomID: RoomID, membershipRevision: UInt64, actorRole: V2RoomMembershipRole, entries: [V2RoomMembershipDirectoryEntry], nextCursor: String?) {
@@ -43,6 +43,7 @@ public struct V2RoomMembershipDirectoryPage: Equatable, Sendable {
 
 public struct V2RoomMembershipDirectoryRequest: Equatable, Sendable {
     public static let maximumPageSize = 100
+    public static let maximumCursorBytes = 512
 
     public let roomID: RoomID
     public let actorUserID: UserID
@@ -52,7 +53,7 @@ public struct V2RoomMembershipDirectoryRequest: Equatable, Sendable {
     public init(roomID: RoomID, actorUserID: UserID, cursor: String?, pageSize: Int) throws {
         let trimmedCursor = cursor?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard pageSize > 0, pageSize <= Self.maximumPageSize,
-              trimmedCursor.map({ !$0.isEmpty }) ?? true
+              trimmedCursor.map({ !$0.isEmpty && $0.utf8.count <= Self.maximumCursorBytes }) ?? true
         else { throw V2RoomMembershipDirectoryError.invalidRequest }
         self.roomID = roomID
         self.actorUserID = actorUserID
@@ -85,5 +86,6 @@ public enum V2RoomMembershipDirectoryError: Error, Equatable, Sendable {
     case roomNotFound
     case actorNotMember
     case invalidCursor
+    case revisionConflict(currentRevision: UInt64)
     case corruptPersistenceState
 }

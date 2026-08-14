@@ -37,6 +37,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             let roomID = try uuid(command.roomID)
             let senderID = try uuid(command.senderUserID)
             let clientMessageID = try uuid(command.clientMessageID)
+            // `messages` and `direct_message_denials` share the same client
+            // operation namespace.  Serialize that namespace before taking a
+            // room lock so two commands reusing one ID in different rooms
+            // cannot race through both existence checks.
+            let operationLockKey = "v2-message-operation:" + senderID.uuidString + ":" + clientMessageID.uuidString
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
 
             guard let room = try await sql.raw("""
                 SELECT room_kind, room_shard_id, room_sequence, timeline_sequence, membership_revision, capacity_profile_id, delivery_mode, frozen_at
@@ -80,6 +86,17 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     ? .idempotent(accepted)
                     : .idempotencyConflict
             }
+            if let priorDenial = try await existingDirectMessageDenial(
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                sql: sql
+            ) {
+                return priorDenial.roomID == command.roomID
+                    ? .denied(priorDenial)
+                    : .idempotencyConflict
+            }
+            let senderIsActive = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: senderID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
+            guard senderIsActive else { throw V2RoomWriteStoreError.actorNotEligible }
             guard room.frozenAt == nil else {
                 throw V2RoomWriteStoreError.roomFrozen
             }
@@ -136,12 +153,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 """).first(decoding: MuteAuthorizationRow.self)?.muted ?? false
             guard !actorIsMuted else {
                 throw V2RoomWriteStoreError.actorMuted
-            }
-            // Denials have the same immutable operation semantics as
-            // acceptances. A later policy change must not turn one offline
-            // client message ID from a terminal rejection into a new send.
-            if room.kind == "direct", let priorDenial = try await existingDirectMessageDenial(roomID: command.roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql) {
-                return .denied(priorDenial)
             }
             if room.kind == "direct", let restriction = try await directMessageRestriction(roomID: roomID, senderID: senderID, sql: sql) {
                 let denied = try await persistDirectMessageDenied(
@@ -308,6 +319,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
         else { throw V2RoomWriteStoreError.actorNotEligible }
 
+        let recipientIsActive = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: recipientID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
+        guard recipientIsActive else { return .generic }
+
         let blocked = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_blocks WHERE (blocker_user_id = \(bind: senderID) AND blocked_user_id = \(bind: recipientID)) OR (blocker_user_id = \(bind: recipientID) AND blocked_user_id = \(bind: senderID))) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? true
         guard !blocked else { return .generic }
         let special = try await sql.raw("SELECT account_user_id, account_kind, status, allows_customer_messages, allows_service_messages FROM im_v2.special_accounts WHERE account_user_id = \(bind: senderID) OR account_user_id = \(bind: recipientID) FOR KEY SHARE").all(decoding: DirectSpecialAccountRow.self)
@@ -370,18 +384,34 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         reason: V2DirectMessageDenied.Reason,
         sql: any SQLDatabase
     ) async throws -> V2DirectMessageDenied {
-        if let existing = try await existingDirectMessageDenial(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql) { return existing }
         let timelineSequence = try signed(nextTimelineSequence)
+        let activityType = directMessageTimelineActivityType(for: reason)
         try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence = \(bind: timelineSequence) WHERE room_id = \(bind: roomUUID)").run()
+        // The denial row references its private timeline activity. Insert the
+        // referenced fact first; both rows still commit atomically inside the
+        // surrounding message transaction.
+        try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: activityType), \(bind: senderID), \(bind: createdAt))").run()
         try await sql.raw("INSERT INTO im_v2.direct_message_denials (sender_user_id, client_message_id, room_id, source_event_id, timeline_sequence, created_at, reason) VALUES (\(bind: senderID), \(bind: clientMessageID), \(bind: roomUUID), \(bind: sourceEventID), \(bind: timelineSequence), \(bind: createdAt), \(bind: reason.rawValue))").run()
-        try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: reason.rawValue), \(bind: senderID), \(bind: createdAt))").run()
-        let activityPayload = try JSONSerialization.data(withJSONObject: ["event_type": reason.rawValue, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": Int64(createdAt.timeIntervalSince1970 * 1_000)])
+        let activityPayload = try JSONSerialization.data(withJSONObject: ["event_type": activityType, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": Int64(createdAt.timeIntervalSince1970 * 1_000)])
         try await appendPrivateSyncRecord(userID: senderID, sourceEventID: sourceEventID, projectionKind: "timeline_activity", payload: activityPayload, createdAt: createdAt, sql: sql)
         try await appendDirectSendingCapability(roomID: roomUUID, recipientID: senderID, sourceEventID: sourceEventID, canSend: false, createdAt: createdAt, sql: sql)
         return try .init(roomID: roomID, sourceEventID: .init(sourceEventID.uuidString), timelineSequence: nextTimelineSequence, createdAt: createdAt, reason: reason)
     }
 
-    private func existingDirectMessageDenial(roomID: RoomID, senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws -> V2DirectMessageDenied? {
+    /// The public denial reason deliberately hides whether a block, stranger
+    /// preference, or inactive special account caused the rejection. The
+    /// private timeline still uses the stable projection vocabulary consumed
+    /// by SQLite and constrained by PostgreSQL.
+    private func directMessageTimelineActivityType(for reason: V2DirectMessageDenied.Reason) -> String {
+        switch reason {
+        case .generic:
+            "direct_message_restricted"
+        case .systemAccountReadOnly:
+            "system_account_read_only"
+        }
+    }
+
+    private func existingDirectMessageDenial(senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws -> V2DirectMessageDenied? {
         guard let existing = try await sql.raw("SELECT room_id, source_event_id, timeline_sequence, created_at, reason FROM im_v2.direct_message_denials WHERE sender_user_id = \(bind: senderID) AND client_message_id = \(bind: clientMessageID) FOR UPDATE").first(decoding: DirectMessageDenialRow.self), let reason = V2DirectMessageDenied.Reason(rawValue: existing.reason) else { return nil }
         return try .init(roomID: .init(existing.roomID.uuidString), sourceEventID: .init(existing.sourceEventID.uuidString), timelineSequence: unsigned(existing.timelineSequence), createdAt: existing.createdAt, reason: reason)
     }
@@ -433,15 +463,16 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         else { throw V2RoomWriteStoreError.actorNotEligible }
         let alreadyVisible = try await sql.raw("""
             SELECT EXISTS (
-                SELECT 1 FROM im_v2.user_sync_log
-                WHERE user_id = \(bind: recipientID) AND projection_kind = 'direct_room_profile'
+                SELECT 1 FROM im_v2.user_projection_effects
+                WHERE user_id = \(bind: recipientID)
+                  AND projection_kind = 'direct_room_profile'
                   AND payload->>'room_id' = \(bind: roomID.uuidString)
             ) AS value
             """).first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
         guard !alreadyVisible else { return }
         guard let profile = try await sql.raw("""
             SELECT public_handle, display_name, account_kind, revision, updated_at
-            FROM im_v2.public_user_profiles WHERE user_id = \(bind: senderID)
+            FROM im_v2.public_user_profiles WHERE user_id = \(bind: senderID) AND state = 'active'
             """).first(decoding: DirectMessageSenderProfileRow.self), profile.revision > 0 else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }

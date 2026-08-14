@@ -169,6 +169,7 @@ public protocol V2ClientMembershipDirectoryTransport: Sendable {
 
 public enum V2ClientRoomMembersPageLimits {
     public static let maximumPageSize = 100
+    public static let maximumCursorBytes = 512
 }
 
 public struct V2ClientDirectRoom: Equatable, Sendable {
@@ -447,20 +448,17 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
     private let wire: any V2AuthenticatedFrameTransport
     private let protocolVersion: UInt8
-    private let maximumSnapshotPages: Int
     private let pageDigestVerifier: any V2SnapshotPageDigestVerifier
     private var nextRequestID: UInt64 = 1
 
     public init(
         wire: any V2AuthenticatedFrameTransport,
         protocolVersion: UInt8,
-        maximumSnapshotPages: Int = 10_000,
         pageDigestVerifier: any V2SnapshotPageDigestVerifier = V2SHA256SnapshotPageDigestVerifier()
     ) {
-        precondition(protocolVersion > 0 && maximumSnapshotPages > 0)
+        precondition(protocolVersion > 0)
         self.wire = wire
         self.protocolVersion = protocolVersion
-        self.maximumSnapshotPages = maximumSnapshotPages
         self.pageDigestVerifier = pageDigestVerifier
     }
 
@@ -477,7 +475,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             }
             return .ready(try .init(generation: batch.generation, records: records, nextSyncToken: .init(batch.nextSyncToken), receipt: .init(batch.syncReceipt), hasMore: batch.hasMore_p, capabilityProfile: batch.capabilityProfile))
         case .resetRequired(let reset):
-            return .resetRequired(try .init(snapshotID: .init(reset.snapshotID), generation: reset.generation, baseSequence: reset.baseUserSyncSequence, manifestDigest: reset.manifestDigest, expiresAt: Date(timeIntervalSince1970: TimeInterval(reset.expiresAtMs) / 1_000)))
+            return .resetRequired(try .init(snapshotID: .init(reset.snapshotID), generation: reset.generation, baseSequence: reset.baseUserSyncSequence, expiresAt: Date(timeIntervalSince1970: TimeInterval(reset.expiresAtMs) / 1_000)))
         default:
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
@@ -521,41 +519,41 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         guard manifest.snapshotID == reset.snapshotID.rawValue,
               manifest.generation == reset.generation,
               manifest.baseUserSyncSequence == reset.baseSequence,
-              manifest.manifestDigest == reset.manifestDigest,
-              manifest.schemaVersion == V2SnapshotProjectionCodec.schemaVersion,
+              manifest.schemaVersion == V2SnapshotProjectionV3Codec.schemaVersion,
               manifest.expiresAtMs > Int64(Date().timeIntervalSince1970 * 1_000),
+              manifest.rootDigest.count == 64,
               !manifest.nextSyncToken.isEmpty,
               !manifest.syncReceipt.isEmpty,
-              !manifest.capabilityProfile.isEmpty,
-              manifest.pageDigests.count <= maximumSnapshotPages,
-              !manifest.pageDigests.isEmpty
+              !manifest.capabilityProfile.isEmpty
         else { throw V2RealtimeTransportError.invalidSnapshotManifest }
 
-        return try .init(reset: reset, pageDigests: manifest.pageDigests, nextSyncToken: .init(manifest.nextSyncToken), receipt: .init(manifest.syncReceipt), capabilityProfile: manifest.capabilityProfile)
+        return try .init(reset: reset, rootDigest: manifest.rootDigest, pageCount: Int(manifest.pageCount), totalItems: manifest.totalItems, totalBytes: manifest.totalBytes, nextSyncToken: .init(manifest.nextSyncToken), receipt: .init(manifest.syncReceipt), capabilityProfile: manifest.capabilityProfile)
     }
 
     public func fetchSnapshotPage(for manifest: V2ClientSnapshotManifest, index: Int) async throws -> V2ClientSnapshotPage {
-        guard manifest.pageDigests.indices.contains(index) else { throw V2RealtimeTransportError.invalidSnapshotPage }
+        guard (0 ..< manifest.pageCount).contains(index) else { throw V2RealtimeTransportError.invalidSnapshotPage }
         var request = IMV2Envelope()
         request.snapshotPagePull = .init()
         request.snapshotPagePull.snapshotID = manifest.reset.snapshotID.rawValue
         request.snapshotPagePull.generation = manifest.reset.generation
-        request.snapshotPagePull.manifestDigest = manifest.reset.manifestDigest
+        request.snapshotPagePull.rootDigest = manifest.rootDigest
         request.snapshotPagePull.pageIndex = UInt32(index)
         let response = try await requestEnvelope(request)
         guard case .snapshotPage(let page)? = response.body else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
-        let expectedDigest = manifest.pageDigests[index]
-        guard page.snapshotID == manifest.reset.snapshotID.rawValue,
+        guard let firstKey = try? V2SnapshotProjectionKey(projectionKind: page.firstProjectionKind, entityKey: page.firstEntityKey),
+              let lastKey = try? V2SnapshotProjectionKey(projectionKind: page.lastProjectionKind, entityKey: page.lastEntityKey),
+              page.snapshotID == manifest.reset.snapshotID.rawValue,
               page.generation == manifest.reset.generation,
-              page.manifestDigest == manifest.reset.manifestDigest,
+              page.rootDigest == manifest.rootDigest,
               page.pageIndex == UInt32(index),
-              page.pageDigest == expectedDigest,
-              pageDigestVerifier.matches(payload: page.payload, expectedDigest: expectedDigest)
+              page.itemCount > 0,
+              firstKey <= lastKey,
+              pageDigestVerifier.matches(payload: page.payload, expectedDigest: page.pageDigest)
         else { throw V2RealtimeTransportError.snapshotDigestMismatch }
-        return .init(index: index, digest: expectedDigest, payload: page.payload)
+        return .init(index: index, digest: page.pageDigest, firstKey: firstKey, lastKey: lastKey, itemCount: Int(page.itemCount), payload: page.payload)
     }
 
     public func acknowledgeSnapshot(_ manifest: V2ClientSnapshotManifest) async throws {
@@ -701,7 +699,9 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
     }
 
     public func listRoomMembers(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2ClientRoomMembersPage {
-        guard pageSize > 0, pageSize <= V2ClientRoomMembersPageLimits.maximumPageSize else {
+        guard pageSize > 0, pageSize <= V2ClientRoomMembersPageLimits.maximumPageSize,
+              cursor.map({ !$0.isEmpty && $0.utf8.count <= V2ClientRoomMembersPageLimits.maximumCursorBytes }) ?? true
+        else {
             throw V2RealtimeTransportError.unexpectedResponse
         }
         var request = IMV2Envelope(); request.listRoomMembers = .init()
@@ -714,7 +714,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
         guard page.roomID == roomID.rawValue, page.membershipRevision > 0,
               page.members.count <= pageSize,
-              page.nextCursor.isEmpty || UUID(uuidString: page.nextCursor) != nil
+              page.nextCursor.utf8.count <= V2ClientRoomMembersPageLimits.maximumCursorBytes
         else { throw V2RealtimeTransportError.unexpectedResponse }
         let actorRole = try Self.membershipRole(from: page.actorRole)
         let members: [V2ClientRoomMember] = try page.members.map { member in
@@ -1060,8 +1060,10 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         request.listReadReceiptReaders.pageSize = UInt32(pageSize)
         let response = try await requestEnvelope(request)
         guard case .readReceiptReadersPage(let page)? = response.body,
-              page.roomID == roomID.rawValue, page.messageRoomSequence == messageRoomSequence,
-              page.readerCount >= page.readers.count
+              page.roomID == roomID.rawValue,
+              page.messageRoomSequence == messageRoomSequence,
+              page.hasReaderCount == (cursor == nil),
+              !page.hasReaderCount || page.readerCount >= page.readers.count
         else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let readers = try page.readers.map { reader -> V2ReadReceiptReader in
             guard reader.readThroughRoomSequence >= messageRoomSequence, reader.recordedAtMs >= 0 else { throw V2RealtimeTransportError.unexpectedResponse }
@@ -1075,7 +1077,13 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             }
             return .init(userID: userID, publicIdentity: identity, readThroughRoomSequence: reader.readThroughRoomSequence, recordedAt: Date(timeIntervalSince1970: TimeInterval(reader.recordedAtMs) / 1_000))
         }
-        return try .init(roomID: roomID, messageRoomSequence: messageRoomSequence, readerCount: Int(page.readerCount), readers: readers, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)
+        return try .init(
+            roomID: roomID,
+            messageRoomSequence: messageRoomSequence,
+            readerCount: page.hasReaderCount ? Int(page.readerCount) : nil,
+            readers: readers,
+            nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor
+        )
     }
 
     public func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences {

@@ -22,20 +22,30 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
                 WITH candidates AS (
                     SELECT media_id, reason
                     FROM im_v2.media_purge_outbox
-                    WHERE (state = 'pending' OR (state = 'claimed' AND lease_expires_at <= \(bind: now)))
+                    WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= \(bind: now)))
+                       OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
                     ORDER BY created_at, media_id
                     LIMIT \(bind: limit)
                     FOR UPDATE SKIP LOCKED
                 )
                 UPDATE im_v2.media_purge_outbox AS outbox
-                SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt), retry_count = outbox.retry_count + 1
+                SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt),
+                    next_attempt_at = NULL, paused_at = NULL, retry_count = outbox.retry_count + 1
                 FROM candidates
                 WHERE outbox.media_id = candidates.media_id
-                RETURNING outbox.media_id, outbox.reason
+                RETURNING outbox.media_id, outbox.reason, outbox.retry_count
                 """).all(decoding: MediaPurgeRow.self)
             return try rows.map {
                 guard let reason = V2MediaPurgeReason(rawValue: $0.reason) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                return try .init(mediaID: .init($0.mediaID.uuidString), reason: reason, claimToken: token)
+                guard $0.retryCount > 0, $0.retryCount <= Int64(Int.max) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return try .init(
+                    mediaID: .init($0.mediaID.uuidString),
+                    reason: reason,
+                    claimToken: token,
+                    attempt: Int($0.retryCount)
+                )
             }
         }
     }
@@ -44,29 +54,47 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
             UPDATE im_v2.media_purge_outbox
-            SET state = 'completed', completed_at = \(bind: now), claim_token = NULL, lease_expires_at = NULL
+            SET state = 'completed', completed_at = \(bind: now), claim_token = NULL,
+                lease_expires_at = NULL, next_attempt_at = NULL, paused_at = NULL
             WHERE media_id = \(bind: try mediaPurgeUUID(lease.mediaID))
               AND state = 'claimed'
               AND claim_token = \(bind: lease.claimToken)
             """).run()
     }
 
-    public func release(_ lease: V2MediaPurgeLease) async throws {
+    public func scheduleRetry(_ lease: V2MediaPurgeLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        try await sql.raw("""
-            UPDATE im_v2.media_purge_outbox
-            SET state = 'pending', claim_token = NULL, lease_expires_at = NULL
-            WHERE media_id = \(bind: try mediaPurgeUUID(lease.mediaID))
-              AND state = 'claimed'
-              AND claim_token = \(bind: lease.claimToken)
-            """).run()
+        let mediaID = try mediaPurgeUUID(lease.mediaID)
+        switch disposition {
+        case .retry(let retryAt):
+            try await sql.raw("""
+                UPDATE im_v2.media_purge_outbox
+                SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                    next_attempt_at = \(bind: retryAt), paused_at = NULL
+                WHERE media_id = \(bind: mediaID)
+                  AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                """).run()
+        case .pause:
+            try await sql.raw("""
+                UPDATE im_v2.media_purge_outbox
+                SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
+                    next_attempt_at = NULL, paused_at = \(bind: now)
+                WHERE media_id = \(bind: mediaID)
+                  AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                """).run()
+        }
     }
 }
 
 private struct MediaPurgeRow: Decodable {
     let mediaID: UUID
     let reason: String
-    enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case reason }
+    let retryCount: Int64
+    enum CodingKeys: String, CodingKey {
+        case mediaID = "media_id"
+        case reason
+        case retryCount = "retry_count"
+    }
 }
 
 private func mediaPurgeUUID(_ identifier: MediaID) throws -> UUID {

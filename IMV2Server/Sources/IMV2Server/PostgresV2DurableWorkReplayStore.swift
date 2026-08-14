@@ -79,6 +79,67 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                       AND state = 'paused'
                     RETURNING source_event_id
                     """).first(decoding: ReplayTargetRow.self) != nil
+            case .contentReview:
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.content_review_jobs
+                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, paused_at = NULL, retry_count = 0
+                    WHERE message_id = \(bind: sourceEventID)
+                      AND state = 'paused'
+                    RETURNING message_id AS source_event_id
+                    """).first(decoding: ReplayTargetRow.self) != nil
+            case .mediaScan:
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.media_scan_outbox
+                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, paused_at = NULL, retry_count = 0
+                    WHERE media_id = \(bind: sourceEventID)
+                      AND state = 'paused'
+                    RETURNING media_id AS source_event_id
+                    """).first(decoding: ReplayTargetRow.self) != nil
+            case .mediaPurge:
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.media_purge_outbox
+                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, paused_at = NULL, retry_count = 0
+                    WHERE media_id = \(bind: sourceEventID)
+                      AND state = 'paused'
+                    RETURNING media_id AS source_event_id
+                    """).first(decoding: ReplayTargetRow.self) != nil
+            case .readReceiptPreferencePropagation:
+                guard let targetUserID else {
+                    throw V2DurableWorkReplayStoreError.corruptPersistenceState
+                }
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.read_receipt_preference_propagation_outbox
+                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, paused_at = NULL, last_failure_code = NULL,
+                        retry_count = 0
+                    WHERE actor_user_id = \(bind: targetUserID)
+                      AND operation_id = \(bind: sourceEventID)
+                      AND state = 'paused'
+                    RETURNING operation_id AS source_event_id
+                    """).first(decoding: ReplayTargetRow.self) != nil
+            case .userProjection:
+                guard let targetUserID else {
+                    throw V2DurableWorkReplayStoreError.corruptPersistenceState
+                }
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.user_projection_checkpoints AS checkpoint
+                    SET state = 'ready', failure_count = 0, failed_sequence = NULL,
+                        next_attempt_at = NULL, last_failure_code = NULL,
+                        paused_at = NULL, updated_at = \(bind: now)
+                    WHERE checkpoint.user_id = \(bind: targetUserID)
+                      AND checkpoint.state = 'paused'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM im_v2.user_sync_log AS log
+                          WHERE log.user_id = checkpoint.user_id
+                            AND log.user_sync_sequence = checkpoint.failed_sequence
+                            AND log.source_event_id = \(bind: sourceEventID)
+                      )
+                    RETURNING \(bind: sourceEventID) AS source_event_id
+                    """).first(decoding: ReplayTargetRow.self) != nil
             }
             let outcome: V2DurableWorkReplayOutcome = didRequeue ? .requeued : .notPaused
             try await sql.raw("""

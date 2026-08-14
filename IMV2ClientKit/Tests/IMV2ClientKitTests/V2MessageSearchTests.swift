@@ -129,35 +129,71 @@ struct V2MessageSearchTests {
         let snapshotRoomID = try RoomID("00000000-0000-0000-0000-000000000c11")
         let snapshotSenderID = try UserID("00000000-0000-0000-0000-000000000c12")
         let snapshotMessageID = try MessageID("00000000-0000-0000-0000-000000000c13")
-        let snapshotMessage = try V2SnapshotMessageProjection(
-            sourceEventID: .init("00000000-0000-0000-0000-000000000c14"),
-            messageID: snapshotMessageID,
-            roomID: snapshotRoomID,
-            roomSequence: 7,
-            senderUserID: snapshotSenderID,
-            text: "快照后文本",
-            createdAt: Date(timeIntervalSince1970: 1_750_000_100)
-        )
-        let payload = try V2SnapshotProjectionCodec.encode(messages: [snapshotMessage])
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "event_type": "message.accepted",
+            "message_id": snapshotMessageID.rawValue,
+            "room_id": snapshotRoomID.rawValue,
+            "room_sequence": 7,
+            "timeline_sequence": 7,
+            "message_revision": 1,
+            "sender_user_id": snapshotSenderID.rawValue,
+            "text": "快照后文本",
+            "media_ids": [],
+            "media_presentations": [],
+            "mention_user_ids": [],
+            "mentions_everyone": false,
+            "entities": [],
+            "server_created_at_ms": 1_750_000_100_000,
+            "is_withdrawn": false,
+            "reactions": [],
+        ], options: [.sortedKeys])
         let reset = try V2ClientResetRequired(
             snapshotID: .init("message-search-snapshot"),
             generation: 2,
             baseSequence: 1,
-            manifestDigest: "message-search-manifest",
             expiresAt: .distantFuture
         )
-        let pageDigest = "message-search-page"
+        let page = try V2SnapshotProjectionV3Page(items: [
+            .init(
+                key: .init(projectionKind: "message", entityKey: snapshotMessageID.rawValue),
+                sourceEventID: .init("00000000-0000-0000-0000-000000000c14"),
+                sequence: 1,
+                payload: payload
+            )
+        ])
+        let encodedPage = try V2SnapshotProjectionV3Codec.encode(page)
+        let pageDigest = V2SnapshotV3Digest.page(encodedPage)
+        let initialDigest = V2SnapshotV3Digest.initial(baseSequence: 1, capabilityProfile: "base")
+        let rootDigest = V2SnapshotV3Digest.next(
+            previous: initialDigest,
+            pageIndex: 0,
+            pageDigest: pageDigest,
+            firstKey: page.firstKey,
+            lastKey: page.lastKey,
+            itemCount: 1
+        )
         let manifest = try V2ClientSnapshotManifest(
             reset: reset,
-            pageDigests: [pageDigest],
+            rootDigest: rootDigest,
+            pageCount: 1,
+            totalItems: 1,
+            totalBytes: UInt64(encodedPage.count),
             nextSyncToken: .init("message-search-snapshot-token"),
             receipt: .init("message-search-snapshot-receipt"),
             capabilityProfile: "base"
         )
         try await store.beginReset(reset)
-        try await store.beginSnapshotStaging(manifest)
-        try await store.stageSnapshotPage(.init(index: 0, digest: pageDigest, payload: payload), for: manifest)
-        try await store.commitStagedSnapshot(manifest)
+        try await store.beginSnapshotImport(manifest, initialDigest: initialDigest)
+        try await store.applySnapshotPage(.init(
+            index: 0,
+            digest: pageDigest,
+            firstKey: page.firstKey,
+            lastKey: page.lastKey,
+            itemCount: 1,
+            payload: encodedPage
+        ), for: manifest)
+        try await store.prepareSnapshotActivation(manifest)
+        try await store.activateAcknowledgedSnapshot(manifest)
 
         #expect(try await store.messageSearchIndexState() == .building)
         try await store.rebuildMessageSearchIndex()

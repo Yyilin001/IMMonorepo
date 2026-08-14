@@ -5,6 +5,7 @@ public enum V2CreateGroupRoomOutcome: Equatable, Sendable {
     case created(V2GroupRoom)
     case idempotent(V2GroupRoom)
     case idempotencyConflict
+    case invalidMembers
     case memberLimitReached
     case rateLimited(retryAfterSeconds: Int)
     case unavailable
@@ -23,6 +24,58 @@ public protocol V2GroupMessagingStore: Sendable {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome
+}
+
+/// Optional storage capability for audiences that have already been staged
+/// and frozen in PostgreSQL. The application process carries only the
+/// authoritative count; the store consumes the immutable member relation
+/// with set-based SQL inside the room bootstrap transaction.
+public protocol V2StagedGroupMessagingStore: Sendable {
+    func createStaged(
+        command: V2StagedGroupRoomCommand,
+        capacityProfile: V2CapacityProfile,
+        roomShardID: String,
+        roomID: RoomID,
+        eventID: EventID,
+        planID: FanoutPlanID,
+        now: Date
+    ) async throws -> V2CreateGroupRoomOutcome
+}
+
+public struct V2StagedGroupRoomCommand: Equatable, Sendable {
+    public let actorUserID: UserID
+    public let operationID: GroupRoomOperationID
+    public let title: String
+    public let deliveryMode: V2GroupDeliveryMode
+    /// Excludes the owner, matching the staged draft relation.
+    public let stagedMemberCount: Int
+
+    public init(
+        actorUserID: UserID,
+        operationID: GroupRoomOperationID,
+        title: String,
+        deliveryMode: V2GroupDeliveryMode,
+        stagedMemberCount: Int
+    ) throws {
+        // Reuse the public command's exact title normalization contract.
+        let validated = try V2CreateGroupRoomCommand(
+            actorUserID: actorUserID,
+            operationID: operationID,
+            title: title,
+            deliveryMode: deliveryMode,
+            initialMemberUserIDs: []
+        )
+        guard stagedMemberCount >= 0 else {
+            throw V2GroupMessagingPolicyError.invalidInitialMembership
+        }
+        self.actorUserID = actorUserID
+        self.operationID = operationID
+        self.title = validated.title
+        self.deliveryMode = deliveryMode
+        self.stagedMemberCount = stagedMemberCount
+    }
+
+    public var allMemberCount: Int { stagedMemberCount + 1 }
 }
 
 public struct V2GroupMessagingIDFactory: Sendable {
@@ -104,6 +157,40 @@ public struct V2GroupMessagingService: Sendable {
         let ids = try identifiers.make()
         return try await store.create(
             command: derivedCommand,
+            capacityProfile: capacityProfile,
+            roomShardID: roomShardID,
+            roomID: ids.roomID,
+            eventID: ids.eventID,
+            planID: ids.planID,
+            now: now()
+        )
+    }
+
+    public func createStaged(
+        actorUserID: UserID,
+        operationID: GroupRoomOperationID,
+        title: String,
+        stagedMemberCount: Int
+    ) async throws -> V2CreateGroupRoomOutcome {
+        guard stagedMemberCount < Int.max else { return .memberLimitReached }
+        let memberCount = stagedMemberCount + 1
+        guard memberCount <= capacityProfile.limits.maxEligibleMembers,
+              let deliveryMode = deliveryPolicy.deliveryMode(forInitialMemberCount: memberCount),
+              deliveryPolicy.acceptsInitialMemberCount(memberCount, mode: deliveryMode)
+        else { return .memberLimitReached }
+        let command = try V2StagedGroupRoomCommand(
+            actorUserID: actorUserID,
+            operationID: operationID,
+            title: title,
+            deliveryMode: deliveryMode,
+            stagedMemberCount: stagedMemberCount
+        )
+        guard let stagedStore = store as? any V2StagedGroupMessagingStore else {
+            return .unavailable
+        }
+        let ids = try identifiers.make()
+        return try await stagedStore.createStaged(
+            command: command,
             capacityProfile: capacityProfile,
             roomShardID: roomShardID,
             roomID: ids.roomID,

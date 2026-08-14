@@ -35,6 +35,15 @@ enum IMV2OperatorServerApp {
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
+            let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
+                storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
+            })
+            let userShardMigrationStore = PostgresV2UserShardMigrationStore(database: database)
+            let userShardMigrationExecutor = V2UserShardProjectionMigrationExecutor(
+                store: userShardMigrationStore,
+                registry: userShardStorage,
+                coLocatedControlBuckets: coLocatedControlBuckets
+            )
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
             V2VaporDurableWorkOperatorReplayRoutes(
@@ -48,17 +57,15 @@ enum IMV2OperatorServerApp {
                 authenticator: configuration.authenticator,
                 control: V2PostgresUserShardRouteControl(
                     database: database,
-                    operatorPrincipal: configuration.operatorPrincipal
+                    operatorPrincipal: configuration.operatorPrincipal,
+                    finalizer: userShardMigrationExecutor
                 )
             ).register(on: app)
             V2VaporUserShardMigrationOperatorRoutes(
                 authenticator: configuration.authenticator,
                 service: V2UserShardMigrationOperatorService(
-                    store: PostgresV2UserShardMigrationStore(database: database),
-                    executor: V2UserShardProjectionMigrationExecutor(
-                        store: PostgresV2UserShardMigrationStore(database: database),
-                        registry: userShardStorage
-                    )
+                    store: userShardMigrationStore,
+                    executor: userShardMigrationExecutor
                 )
             ).register(on: app)
             V2VaporAccountDisableOperatorRoutes(
@@ -73,6 +80,8 @@ enum IMV2OperatorServerApp {
                 service: try V2PostgresDeviceSnapshotResetService(
                     router: V2PostgresUserShardRouter(database: database),
                     registry: userShardStorage,
+                    routeFence: V2PostgresUserShardRouter(database: database),
+                    coLocatedControlBuckets: coLocatedControlBuckets,
                     capabilityProfile: configuration.capabilityProfile
                 )
             ).register(on: app)

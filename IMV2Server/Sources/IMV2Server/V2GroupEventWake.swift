@@ -59,12 +59,18 @@ public struct V2NoopForegroundGroupEventHintPublisher: V2ForegroundGroupEventHin
 /// optional NATS connection or a slow local socket write.
 public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPublishing {
     private let publisher: any V2ForegroundGroupEventHintPublishing
+    private let maximumPendingRooms: Int
     private let signal: AsyncStream<Void>
     private let signalContinuation: AsyncStream<Void>.Continuation
     private var pending: [RoomID: V2GroupEventWake] = [:]
 
-    public init(publisher: any V2ForegroundGroupEventHintPublishing) {
+    public init(
+        publisher: any V2ForegroundGroupEventHintPublishing,
+        maximumPendingRooms: Int = 256
+    ) {
+        precondition(maximumPendingRooms > 0)
         self.publisher = publisher
+        self.maximumPendingRooms = maximumPendingRooms
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         signal = stream.stream
         signalContinuation = stream.continuation
@@ -73,6 +79,14 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {
         if let existing = pending[hint.roomID], existing.highWatermark >= hint.highWatermark {
             return
+        }
+        if pending[hint.roomID] == nil,
+           pending.count >= maximumPendingRooms,
+           let bufferedRoom = pending.keys.first {
+            // Hints are deliberately lossy and durable cursor pulls are the
+            // recovery path. Bound memory under a many-room burst by keeping
+            // the newest work instead of growing with traffic history.
+            pending.removeValue(forKey: bufferedRoom)
         }
         pending[hint.roomID] = hint
         signalContinuation.yield()
@@ -97,6 +111,8 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
         pending.removeAll(keepingCapacity: false)
         signalContinuation.finish()
     }
+
+    func pendingRoomCount() -> Int { pending.count }
 }
 
 public struct V2GroupEventWakeRelayReport: Equatable, Sendable {

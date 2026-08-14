@@ -190,7 +190,7 @@ public struct V2TrustedSafetyModerationService: Sendable {
     }
 
     public func apply(_ request: V2TrustedSafetyRoomControl) async throws -> V2ModerationOutcome {
-        try await apply(.init(
+        try await apply(V2TrustedSafetyModeration(
             roomID: request.roomID,
             operationID: request.operationID,
             action: request.action,

@@ -22,6 +22,7 @@ struct V2ProfileRepositoryTests {
         #expect(try await repository.hydrate([key]) == Set([userID]))
         let removed = await store.profile(userID)
         #expect(removed == nil)
+        #expect(await store.batchApplicationCount() == 1)
     }
 
     @Test("pending invalidations use a bounded direct context and resolve after persistence")
@@ -41,6 +42,25 @@ struct V2ProfileRepositoryTests {
         #expect(resolved.displayName == "已读取")
     }
 
+    @Test("an authorized context wins over an unavailable context for the same user")
+    func authorizedContextWinsWithinBatch() async throws {
+        let userID: UserID = try .init("00000000-0000-0000-0000-000000000a74")
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000a75")
+        let direct = V2ProfileViewLookupKey(userID: userID, context: .directConversation)
+        let room = V2ProfileViewLookupKey(userID: userID, context: .room(roomID))
+        let view = try profile(userID: userID, revision: 2)
+        let store = ProfileProjectionStore()
+        let repository = V2ProfileRepository(
+            store: store,
+            reader: ProfileViewReader(results: [.profile(key: direct, view: view), .unavailable(key: room)])
+        )
+
+        _ = try await repository.hydrate([direct, room])
+
+        #expect(await store.profile(userID) == view)
+        #expect(await store.batchApplicationCount() == 1)
+    }
+
     private func profile(userID: UserID, revision: UInt64) throws -> V2ProfileView {
         try .init(
             userID: userID,
@@ -56,6 +76,7 @@ struct V2ProfileRepositoryTests {
 private actor ProfileProjectionStore: V2ClientProfileProjectionStore {
     private var profiles: [UserID: V2ProfileView] = [:]
     private var invalidations: [V2ProfileInvalidation]
+    private var appliedBatchCount = 0
 
     init(invalidations: [V2ProfileInvalidation] = []) {
         self.invalidations = invalidations
@@ -75,11 +96,20 @@ private actor ProfileProjectionStore: V2ClientProfileProjectionStore {
         profiles.removeValue(forKey: userID)
         invalidations.removeAll { $0.userID == userID }
     }
+    func applyProfileViewResults(_ results: [V2ProfileViewLookupResult]) {
+        appliedBatchCount += 1
+        let batch = V2ProfileViewResultBatch(results)
+        for profile in batch.profiles.values { saveProfileView(profile) }
+        for userID in batch.unavailableUserIDs.subtracting(batch.profiles.keys) {
+            markProfileUnavailable(userID: userID)
+        }
+    }
     func pendingProfileInvalidations(limit: Int) -> [V2ProfileInvalidation] {
         Array(invalidations.prefix(limit))
     }
     func seed(_ profile: V2ProfileView) { profiles[profile.userID] = profile }
     func profile(_ userID: UserID) -> V2ProfileView? { profiles[userID] }
+    func batchApplicationCount() -> Int { appliedBatchCount }
 }
 
 private struct ProfileViewReader: V2ProfileViewReading {

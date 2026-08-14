@@ -29,10 +29,11 @@ struct V2VaporDeviceSessionRoutesTests {
         }) { response async in
             #expect(response.status == .ok)
             #expect(response.headers.first(name: .cacheControl) == "no-store")
-            var values: [V2DeviceSessionHTTPResponse] = []
-            expectContent([V2DeviceSessionHTTPResponse].self, response) { values = $0 }
-            #expect(values.map(\.deviceID) == [currentID.rawValue, otherID.rawValue])
-            #expect(values.map(\.isCurrentDevice) == [true, false])
+            var page: V2DeviceSessionPageHTTPResponse?
+            expectContent(V2DeviceSessionPageHTTPResponse.self, response) { page = $0 }
+            #expect(page?.sessions.map(\.deviceID) == [currentID.rawValue, otherID.rawValue])
+            #expect(page?.sessions.map(\.isCurrentDevice) == [true, false])
+            #expect(page?.nextCursor == nil)
         }
     }
 
@@ -76,7 +77,9 @@ private actor DeviceSessionRouteStore: V2DeviceSessionManaging {
     private let values: [V2DeviceSession]
     private var recorded: Request?
     init(values: [V2DeviceSession]) { self.values = values }
-    func sessions(for _: UserID) -> [V2DeviceSession] { values }
+    func sessions(for _: UserID, cursor _: String?, pageSize _: Int) -> V2DeviceSessionPage {
+        .init(sessions: values, nextCursor: nil)
+    }
     func revokeDevice(actorUserID: UserID, currentDeviceID: DeviceID, targetDeviceID: DeviceID, operationID: UUID) -> V2DeviceSessionMutationOutcome {
         recorded = .init(actor: actorUserID, current: currentDeviceID, target: targetDeviceID, operationID: operationID)
         return .applied

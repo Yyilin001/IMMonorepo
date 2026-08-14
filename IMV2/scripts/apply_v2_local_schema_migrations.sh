@@ -178,6 +178,35 @@ migration_marker() {
     0044_content_review_pipeline.sql)
       printf "%s" "SELECT to_regclass('im_v2.content_review_jobs') IS NOT NULL AND to_regclass('im_v2.content_review_decisions') IS NOT NULL AND to_regclass('im_v2.content_review_findings') IS NOT NULL AND to_regclass('im_v2.content_review_cases') IS NOT NULL"
       ;;
+    0045_content_review_retry_fencing.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'content_review_jobs' AND column_name = 'next_attempt_at') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'content_review_jobs' AND column_name = 'paused_at') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'content_review_jobs' AND column_name = 'finding_category') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'content_review_jobs' AND column_name = 'finding_severity') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'content_review_jobs' AND column_name = 'finding_confidence') AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'im_v2.content_review_jobs'::regclass AND conname = 'content_review_jobs_staged_finding_check')"
+      ;;
+    0046_account_lifecycle_and_profile_state.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'public_profile_update_outbox' AND column_name = 'profile_state') AND to_regclass('im_v2.public_user_profiles_active_handle_idx') IS NOT NULL"
+      ;;
+    0047_hot_path_lookup_indexes.sql)
+      printf "%s" "SELECT to_regclass('im_v2.room_memberships_current_user_rooms_idx') IS NOT NULL AND to_regclass('im_v2.direct_room_pairs_higher_user_idx') IS NOT NULL AND to_regclass('im_v2.user_blocks_blocked_blocker_idx') IS NOT NULL AND to_regclass('im_v2.user_sync_log_direct_room_profile_room_idx') IS NOT NULL AND to_regclass('im_v2.user_sync_log_direct_receipt_event_idx') IS NOT NULL"
+      ;;
+    0048_staged_group_operation_fingerprint.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'group_room_operations' AND column_name = 'audience_kind') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'group_room_operations' AND column_name = 'initial_member_count')"
+      ;;
+    0049_media_worker_retry_fencing.sql)
+      printf "%s" "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'media_scan_outbox' AND column_name = 'next_attempt_at') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'media_purge_outbox' AND column_name = 'paused_at')"
+      ;;
+    0050_bounded_housekeeping_indexes.sql)
+      # Snapshot V3 intentionally drops the V2 sync_snapshots relation and its
+      # cleanup index. The other immutable 0050 indexes remain valid markers.
+      printf "%s" "SELECT to_regclass('im_v2.sync_tokens_expiry_idx') IS NOT NULL AND to_regclass('im_v2.sync_receipts_expiry_idx') IS NOT NULL AND to_regclass('im_v2.fanout_plans_terminal_cleanup_idx') IS NOT NULL"
+      ;;
+    0051_read_receipt_preference_propagation.sql)
+      printf "%s" "SELECT to_regclass('im_v2.read_receipt_preference_propagation_outbox') IS NOT NULL AND to_regclass('im_v2.read_receipt_preference_propagation_claim_idx') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'read_receipt_preference_propagation_outbox' AND column_name = 'paused_at')"
+      ;;
+    0052_snapshot_v3.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_projection_versions') IS NOT NULL AND to_regclass('im_v2.user_projection_effects') IS NOT NULL AND to_regclass('im_v2.user_sync_retention') IS NOT NULL AND to_regclass('im_v2.sync_snapshot_artifacts') IS NOT NULL AND to_regclass('im_v2.device_snapshot_resets') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'read_receipt_operations' AND column_name = 'projection_recipient_user_id') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'user_sync_log_snapshot_v3_projection' AND NOT tgisinternal) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'user_sync_log_projection_effect_v3' AND NOT tgisinternal)"
+      ;;
+    0053_shared_snapshot_and_revoked_device_cleanup.sql)
+      printf "%s" "SELECT to_regclass('im_v2.sync_snapshot_artifacts_reusable_idx') IS NOT NULL AND to_regclass('im_v2.auth_devices_revoked_cleanup_idx') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

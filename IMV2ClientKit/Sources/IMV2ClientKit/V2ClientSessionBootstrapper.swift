@@ -39,14 +39,15 @@ public actor V2ClientSessionBootstrapper {
     /// account provider; callers can render an explicit re-authentication UI
     /// when this reports `authenticationRequired`.
     public func openEstablishedSession() async throws -> GRDBV2LocalSyncStore {
+        let credentials: V2ClientRealtimeCredentials
         do {
-            _ = try await authSession.accessToken()
+            credentials = try await authSession.realtimeCredentials()
         } catch V2AuthSessionError.unauthenticated {
             throw V2ClientSessionBootstrapError.authenticationRequired
         } catch V2AuthSessionError.credentialsUnavailable {
             throw V2ClientSessionBootstrapError.credentialsUnavailable
         }
-        return try await localStoreBootstrapper.open(databaseURL: databaseURL)
+        return try await localStoreBootstrapper.open(databaseURL: databaseURL, userID: credentials.userID)
     }
 
     /// Establishes the first device credential record from a trusted account
@@ -59,6 +60,6 @@ public actor V2ClientSessionBootstrapper {
         if let finalizer = provider as? any V2AccountDeviceCredentialIssueFinalizer {
             try await finalizer.finalizeIssuedDeviceCredentials(credentials)
         }
-        return try await localStoreBootstrapper.open(databaseURL: databaseURL)
+        return try await localStoreBootstrapper.open(databaseURL: databaseURL, userID: credentials.userID)
     }
 }

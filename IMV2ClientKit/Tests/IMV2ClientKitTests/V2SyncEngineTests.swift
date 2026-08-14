@@ -5,6 +5,135 @@ import Testing
 
 @Suite("V2 client sync")
 struct V2SyncEngineTests {
+    @Test("favorite collection uses a stable bounded keyset cursor")
+    func favoriteCollectionPagination() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000180"
+        let messageIDs = [
+            "00000000-0000-0000-0000-000000000181",
+            "00000000-0000-0000-0000-000000000182",
+            "00000000-0000-0000-0000-000000000183",
+        ]
+        var records: [V2ClientSyncRecord] = []
+        for (index, messageID) in messageIDs.enumerated() {
+            records.append(try .init(
+                sequence: UInt64(index + 1),
+                sourceEventID: .init("00000000-0000-0000-0000-00000000018\(index + 4)"),
+                projectionKind: "message",
+                payload: messagePayload(
+                    roomID: roomID,
+                    roomSequence: UInt64(index + 1),
+                    messageID: messageID,
+                    text: "favorite-\(index + 1)",
+                    createdAtMilliseconds: 1_750_000_000_000 + Int64(index)
+                )
+            ))
+        }
+        for (index, messageID) in messageIDs.enumerated() {
+            records.append(try .init(
+                sequence: UInt64(index + 4),
+                sourceEventID: .init("00000000-0000-0000-0000-00000000019\(index + 1)"),
+                projectionKind: "message_favorite",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": roomID,
+                    "message_id": messageID,
+                    "is_favorited": true,
+                    "updated_at_ms": 1_750_000_100_000 + index,
+                ])
+            ))
+        }
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: records,
+            nextSyncToken: .init("favorite-page-token"),
+            receipt: .init("favorite-page-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let first = try await store.favoritedMessages(limit: 2)
+        #expect(first.messages.map(\.messageID.rawValue) == [messageIDs[2], messageIDs[1]])
+        let cursor = try #require(first.nextCursor)
+        let second = try await store.favoritedMessages(before: cursor, limit: 2)
+        #expect(second.messages.map(\.messageID.rawValue) == [messageIDs[0]])
+        #expect(second.nextCursor == nil)
+    }
+
+    @Test("conversation preferences and favorites support room-scoped batch reads")
+    func conversationPreferenceBatchReads() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let firstRoomID = try RoomID("00000000-0000-0000-0000-000000000201")
+        let secondRoomID = try RoomID("00000000-0000-0000-0000-000000000202")
+        let firstMessageID = try MessageID("00000000-0000-0000-0000-000000000203")
+        let secondMessageID = try MessageID("00000000-0000-0000-0000-000000000204")
+        let records = try [
+            V2ClientSyncRecord(
+                sequence: 1,
+                sourceEventID: .init("00000000-0000-0000-0000-000000000205"),
+                projectionKind: "conversation_state",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": firstRoomID.rawValue,
+                    "is_pinned": true,
+                    "is_archived": false,
+                    "mute_until_ms": 1_750_000_100_000,
+                    "updated_at_ms": 1_750_000_000_000,
+                ])
+            ),
+            V2ClientSyncRecord(
+                sequence: 2,
+                sourceEventID: .init("00000000-0000-0000-0000-000000000206"),
+                projectionKind: "conversation_state",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": secondRoomID.rawValue,
+                    "is_pinned": false,
+                    "is_archived": true,
+                    "mute_until_ms": 0,
+                    "updated_at_ms": 1_750_000_000_001,
+                ])
+            ),
+            V2ClientSyncRecord(
+                sequence: 3,
+                sourceEventID: .init("00000000-0000-0000-0000-000000000207"),
+                projectionKind: "message_favorite",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": firstRoomID.rawValue,
+                    "message_id": firstMessageID.rawValue,
+                    "is_favorited": true,
+                    "updated_at_ms": 1_750_000_000_002,
+                ])
+            ),
+            V2ClientSyncRecord(
+                sequence: 4,
+                sourceEventID: .init("00000000-0000-0000-0000-000000000208"),
+                projectionKind: "message_favorite",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": secondRoomID.rawValue,
+                    "message_id": secondMessageID.rawValue,
+                    "is_favorited": true,
+                    "updated_at_ms": 1_750_000_000_003,
+                ])
+            ),
+        ]
+
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: records,
+            nextSyncToken: .init("batch-read-token"),
+            receipt: .init("batch-read-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let states = try await store.conversationStates()
+        #expect(states.count == 2)
+        #expect(states[firstRoomID]?.isPinned == true)
+        #expect(states[firstRoomID]?.muteUntil == Date(timeIntervalSince1970: 1_750_000_100))
+        #expect(states[secondRoomID]?.isArchived == true)
+        #expect(states[secondRoomID]?.muteUntil == nil)
+        #expect(try await store.favoritedMessageIDs(in: firstRoomID) == Set([firstMessageID]))
+        #expect(try await store.favoritedMessageIDs(in: secondRoomID) == Set([secondMessageID]))
+    }
+
     @Test("private activity is projected separately from messages and disables only the direct composer")
     func privateTimelineActivityAndCapabilityAreApplied() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
@@ -37,6 +166,55 @@ struct V2SyncEngineTests {
         #expect(projected.kind == .directMessageRestricted)
         #expect(projected.timelineSequence == 2)
         #expect(try await store.directSendingCapability(roomID: .init(roomID))?.canSend == false)
+    }
+
+    @Test("conversation timeline uses stable keyset pages across messages and activities")
+    func conversationTimelineUsesUnifiedKeysetPages() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let roomID = "00000000-0000-0000-0000-000000000212"
+        let records: [V2ClientSyncRecord] = try (1...5).map { sequence in
+            if sequence.isMultiple(of: 2) {
+                return try .init(
+                    sequence: UInt64(sequence),
+                    sourceEventID: .init(String(format: "00000000-0000-0000-0000-%012d", 220 + sequence)),
+                    projectionKind: "timeline_activity",
+                    payload: JSONSerialization.data(withJSONObject: [
+                        "event_type": "direct_message_restricted",
+                        "room_id": roomID,
+                        "timeline_sequence": sequence,
+                        "server_created_at_ms": 1_750_000_000_000 + sequence,
+                    ])
+                )
+            }
+            return try .init(
+                sequence: UInt64(sequence),
+                sourceEventID: .init(String(format: "00000000-0000-0000-0000-%012d", 220 + sequence)),
+                projectionKind: "message",
+                payload: messagePayload(
+                    roomID: roomID,
+                    roomSequence: UInt64(sequence),
+                    messageID: String(format: "00000000-0000-0000-0000-%012d", 230 + sequence),
+                    text: "message-\(sequence)"
+                )
+            )
+        }
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: records,
+            nextSyncToken: .init("timeline-page-token"),
+            receipt: .init("timeline-page-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let newest = try await store.conversationTimelinePage(in: .init(roomID), limit: 3)
+        #expect((newest.messages.map(\.timelineSequence) + newest.activities.map(\.timelineSequence)).sorted() == [3, 4, 5])
+        let cursor = try #require(newest.olderCursor)
+        #expect(cursor.timelineSequence == 3)
+
+        let older = try await store.conversationTimelinePage(in: .init(roomID), before: cursor, limit: 3)
+        #expect((older.messages.map(\.timelineSequence) + older.activities.map(\.timelineSequence)).sorted() == [1, 2])
+        #expect(older.olderCursor == nil)
     }
 
     @Test("media presentation metadata survives durable message projection")
@@ -159,7 +337,9 @@ struct V2SyncEngineTests {
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("room-token"), receipt: .init("room-receipt"), hasMore: false, capabilityProfile: "base"))
         let profile = try #require(await store.roomProfile(roomID: .init(roomID)))
         #expect(profile.title == "项目群")
-        #expect(try await store.conversationSummaries().isEmpty)
+        let page = try await store.conversationListPage(isArchived: false, limit: 10)
+        #expect(page.entries.map(\.roomID.rawValue) == [roomID])
+        #expect(page.entries.first?.lastMessage == nil)
     }
 
     @Test("a member added after group creation receives a compact room profile")
@@ -226,6 +406,89 @@ struct V2SyncEngineTests {
         #expect(try await store.applyGroupEventPage(page) == 3)
         #expect(try await store.groupEventCursor(roomID: roomID) == 3)
         #expect(try await store.messages(in: roomID).map(\.text) == ["从群日志拉取"])
+    }
+
+    @Test("snapshot reset preserves the authorized hybrid room-log projection and cursor")
+    func snapshotPreservesHybridRoomLogOwnership() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-0000000002b0")
+        let membershipEventID = try EventID("00000000-0000-0000-0000-0000000002b1")
+        let membershipPayload = try JSONSerialization.data(withJSONObject: [
+            "event_type": "membership_changed",
+            "room_id": roomID.rawValue,
+            "title": "重置后仍保留的大群",
+            "owner_user_id": "00000000-0000-0000-0000-0000000002b2",
+            "target_user_id": "00000000-0000-0000-0000-0000000002b3",
+            "action": "add",
+            "membership_revision": 2,
+            "delivery_mode": "large_group_hybrid",
+            "created_at_ms": 1_750_000_000_000,
+            "server_created_at_ms": 1_750_000_001_000,
+        ])
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [.init(
+                sequence: 1,
+                sourceEventID: membershipEventID,
+                projectionKind: "membership",
+                payload: membershipPayload
+            )],
+            nextSyncToken: .init("hybrid-before-reset"),
+            receipt: .init("hybrid-before-reset-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let roomEvent = try V2ClientGroupEvent(
+            sourceEventID: .init("00000000-0000-0000-0000-0000000002b4"),
+            roomSequence: 7,
+            projectionKind: "message",
+            payload: messagePayload(
+                roomID: roomID.rawValue,
+                roomSequence: 7,
+                messageID: "00000000-0000-0000-0000-0000000002b5",
+                text: "room-log-owned"
+            )
+        )
+        let roomPage = V2ClientGroupEventPage(
+            roomID: roomID,
+            events: [roomEvent],
+            nextRoomSequence: 7,
+            hasMore: false
+        )
+        _ = try await store.applyGroupEventPage(roomPage)
+
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-0000000002b6"),
+            generation: 2,
+            baseSequence: 1,
+            expiresAt: .distantFuture
+        )
+        let snapshotItem = try V2SnapshotProjectionItem(
+            key: .init(projectionKind: "room", entityKey: roomID.rawValue),
+            sourceEventID: membershipEventID,
+            sequence: 1,
+            payload: membershipPayload
+        )
+        let transport = try ProjectionSnapshotTransport(
+            reset: reset,
+            pages: [.init(items: [snapshotItem])]
+        )
+        let engine = V2SyncEngine(
+            transport: transport,
+            store: store,
+            capabilityProfile: "base"
+        )
+
+        #expect(try await engine.synchronizeOnce() == .resetPending(reset))
+        try await engine.completePendingReset()
+
+        #expect(try await store.groupEventCursor(roomID: roomID) == 7)
+        #expect(try await store.messages(in: roomID).map(\.text) == ["room-log-owned"])
+        #expect(try await store.applyGroupEventPage(roomPage) == 7)
     }
 
     @Test("one group-log pull reports durable progress for a foreground caller")
@@ -369,10 +632,67 @@ struct V2SyncEngineTests {
         ]
         _ = try await store.apply(.init(generation: 1, records: records, nextSyncToken: .init("summary-token"), receipt: .init("summary-receipt"), hasMore: false, capabilityProfile: "base"))
 
-        let summaries = try await store.conversationSummaries()
-        #expect(summaries.map(\.roomID.rawValue) == [roomA, roomB])
-        #expect(summaries.map(\.lastMessage.text) == ["latest", "other room"])
+        let page = try await store.conversationListPage(isArchived: false, limit: 10)
+        #expect(page.entries.map(\.roomID.rawValue) == [roomA, roomB])
+        #expect(page.entries.compactMap(\.lastMessage?.text) == ["latest", "other room"])
         #expect(try await store.messages(in: try .init(roomA)).map(\.text) == ["older", "latest"])
+    }
+
+    @Test("conversation list uses an indexed stable keyset across pinned, empty, and archived rooms")
+    func conversationListPagination() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let pinned = "00000000-0000-0000-0000-000000000401"
+        let tiedFirst = "00000000-0000-0000-0000-000000000402"
+        let tiedSecond = "00000000-0000-0000-0000-000000000403"
+        let emptyGroup = "00000000-0000-0000-0000-000000000404"
+        let archived = "00000000-0000-0000-0000-000000000405"
+        let records = try [
+            V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000411"), projectionKind: "message", payload: messagePayload(roomID: pinned, roomSequence: 1, messageID: "00000000-0000-0000-0000-000000000421", text: "pinned", createdAtMilliseconds: 1_750_000_001_000)),
+            V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000412"), projectionKind: "message", payload: messagePayload(roomID: tiedFirst, roomSequence: 1, messageID: "00000000-0000-0000-0000-000000000422", text: "tie-a", createdAtMilliseconds: 1_750_000_002_000)),
+            V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000413"), projectionKind: "message", payload: messagePayload(roomID: tiedSecond, roomSequence: 1, messageID: "00000000-0000-0000-0000-000000000423", text: "tie-b", createdAtMilliseconds: 1_750_000_002_000)),
+            V2ClientSyncRecord(sequence: 4, sourceEventID: .init("00000000-0000-0000-0000-000000000414"), projectionKind: "message", payload: messagePayload(roomID: archived, roomSequence: 1, messageID: "00000000-0000-0000-0000-000000000424", text: "archived", createdAtMilliseconds: 1_750_000_003_000)),
+            V2ClientSyncRecord(
+                sequence: 5,
+                sourceEventID: .init("00000000-0000-0000-0000-000000000415"),
+                projectionKind: "room",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "event_type": "room.created",
+                    "room_id": emptyGroup,
+                    "title": "Empty Group",
+                    "owner_user_id": "00000000-0000-0000-0000-000000000406",
+                    "membership_revision": 1,
+                    "created_at_ms": 1_750_000_001_500,
+                ])
+            ),
+            V2ClientSyncRecord(sequence: 6, sourceEventID: .init("00000000-0000-0000-0000-000000000416"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+                "room_id": pinned, "is_pinned": true, "is_archived": false,
+                "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_000,
+            ])),
+            V2ClientSyncRecord(sequence: 7, sourceEventID: .init("00000000-0000-0000-0000-000000000417"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+                "room_id": archived, "is_pinned": false, "is_archived": true,
+                "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_001,
+            ])),
+        ]
+        _ = try await store.apply(.init(generation: 1, records: records, nextSyncToken: .init("conversation-list-1"), receipt: .init("conversation-list-receipt-1"), hasMore: false, capabilityProfile: "base"))
+
+        let first = try await store.conversationListPage(isArchived: false, limit: 2)
+        #expect(first.entries.map(\.roomID.rawValue) == [pinned, tiedFirst])
+        let cursor = try #require(first.nextCursor)
+        let second = try await store.conversationListPage(isArchived: false, before: cursor, limit: 2)
+        #expect(second.entries.map(\.roomID.rawValue) == [tiedSecond, emptyGroup])
+        #expect(second.entries.last?.lastMessage == nil)
+        #expect(second.entries.last?.roomProfile?.title == "Empty Group")
+        #expect(second.nextCursor == nil)
+
+        let archivedPage = try await store.conversationListPage(isArchived: true, limit: 2)
+        #expect(archivedPage.entries.map(\.roomID.rawValue) == [archived])
+
+        let archiveTie = try V2ClientSyncRecord(sequence: 8, sourceEventID: .init("00000000-0000-0000-0000-000000000418"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+            "room_id": tiedFirst, "is_pinned": false, "is_archived": true,
+            "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_002,
+        ]))
+        _ = try await store.apply(.init(generation: 1, records: [archiveTie], nextSyncToken: .init("conversation-list-2"), receipt: .init("conversation-list-receipt-2"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.conversationListPage(isArchived: true, limit: 2).entries.map(\.roomID.rawValue) == [archived, tiedFirst])
     }
 
     @Test("social sync records become durable local privacy and relationship projections")
@@ -389,6 +709,93 @@ struct V2SyncEngineTests {
         #expect(storedRelationship.state == .pending)
         #expect(try await store.blocks().map(\.targetUserID.rawValue) == [target])
         #expect(try await store.strangerMessagePreference()?.allowsStrangerMessages == false)
+    }
+
+    @Test("relationship list uses stable bounded pages for each request scope")
+    func relationshipListPagination() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let currentUserID = try UserID("00000000-0000-0000-0000-000000000450")
+        let acceptedFirst = "00000000-0000-0000-0000-000000000451"
+        let acceptedSecond = "00000000-0000-0000-0000-000000000452"
+        let incoming = "00000000-0000-0000-0000-000000000453"
+        let outgoing = "00000000-0000-0000-0000-000000000454"
+        let records = try [
+            V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000461"), projectionKind: "relationship", payload: socialPayload(["target_user_id": acceptedFirst, "state": "accepted", "updated_at_ms": 1_750_000_003_000])),
+            V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000462"), projectionKind: "relationship", payload: socialPayload(["target_user_id": acceptedSecond, "state": "accepted", "updated_at_ms": 1_750_000_003_000])),
+            V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000463"), projectionKind: "relationship", payload: socialPayload(["target_user_id": incoming, "state": "pending", "requested_by_user_id": incoming, "updated_at_ms": 1_750_000_002_000])),
+            V2ClientSyncRecord(sequence: 4, sourceEventID: .init("00000000-0000-0000-0000-000000000464"), projectionKind: "relationship", payload: socialPayload(["target_user_id": outgoing, "state": "pending", "requested_by_user_id": currentUserID.rawValue, "updated_at_ms": 1_750_000_001_000])),
+        ]
+        _ = try await store.apply(.init(generation: 1, records: records, nextSyncToken: .init("relationship-page"), receipt: .init("relationship-page-receipt"), hasMore: false, capabilityProfile: "base"))
+        let firstIdentity = try V2PublicIdentity(
+            userID: .init(acceptedFirst),
+            handle: .init("alice_one"),
+            displayName: "Alice 张三"
+        )
+        let secondIdentity = try V2PublicIdentity(
+            userID: .init(acceptedSecond),
+            handle: .init("malice_two"),
+            displayName: "Malice"
+        )
+        let revisionOne = try #require(V2ProfileRevision(rawValue: 1))
+        try await store.saveProfileView(.init(
+            userID: firstIdentity.userID,
+            publicIdentity: firstIdentity,
+            avatar: nil,
+            state: .active,
+            revision: revisionOne,
+            visibilityRevision: revisionOne
+        ))
+        try await store.saveProfileView(.init(
+            userID: secondIdentity.userID,
+            publicIdentity: secondIdentity,
+            avatar: nil,
+            state: .active,
+            revision: revisionOne,
+            visibilityRevision: revisionOne
+        ))
+
+        let first = try await store.relationshipPage(scope: .accepted, limit: 1, includeTotalCount: true)
+        #expect(first.relationships.map(\.targetUserID.rawValue) == [acceptedFirst])
+        #expect(first.totalCount == 2)
+        let cursor = try #require(first.nextCursor)
+        let second = try await store.relationshipPage(scope: .accepted, before: cursor, limit: 1)
+        #expect(second.relationships.map(\.targetUserID.rawValue) == [acceptedSecond])
+        #expect(second.nextCursor == nil)
+        #expect(second.totalCount == nil)
+
+        let incomingPage = try await store.relationshipPage(scope: .incomingRequests(currentUserID: currentUserID), limit: 10, includeTotalCount: true)
+        #expect(incomingPage.relationships.map(\.targetUserID.rawValue) == [incoming])
+        #expect(incomingPage.totalCount == 1)
+
+        let outgoingPage = try await store.relationshipPage(scope: .outgoingRequests(currentUserID: currentUserID), limit: 10, includeTotalCount: true)
+        #expect(outgoingPage.relationships.map(\.targetUserID.rawValue) == [outgoing])
+        #expect(outgoingPage.totalCount == 1)
+
+        let firstSearchPage = try await store.relationshipPage(scope: .accepted, matching: "LIC", limit: 1)
+        #expect(firstSearchPage.relationships.map(\.targetUserID.rawValue) == [acceptedFirst])
+        let searchCursor = try #require(firstSearchPage.nextCursor)
+        let secondSearchPage = try await store.relationshipPage(scope: .accepted, matching: "lic", before: searchCursor, limit: 1)
+        #expect(secondSearchPage.relationships.map(\.targetUserID.rawValue) == [acceptedSecond])
+        #expect(secondSearchPage.nextCursor == nil)
+        #expect(try await store.relationshipPage(scope: .accepted, matching: "张三", limit: 10).relationships.map(\.targetUserID.rawValue) == [acceptedFirst])
+
+        let revisionTwo = try #require(V2ProfileRevision(rawValue: 2))
+        let renamedIdentity = try V2PublicIdentity(
+            userID: firstIdentity.userID,
+            handle: .init("carol_one"),
+            displayName: "Carol"
+        )
+        try await store.saveProfileView(.init(
+            userID: renamedIdentity.userID,
+            publicIdentity: renamedIdentity,
+            avatar: nil,
+            state: .active,
+            revision: revisionTwo,
+            visibilityRevision: revisionTwo
+        ))
+        #expect(try await store.relationshipPage(scope: .accepted, matching: "lic", limit: 10).relationships.map(\.targetUserID.rawValue) == [acceptedSecond])
+        try await store.markProfileUnavailable(userID: secondIdentity.userID)
+        #expect(try await store.relationshipPage(scope: .accepted, matching: "lic", limit: 10).relationships.isEmpty)
     }
 
     @Test("malformed message projections roll back the entire sync batch")
@@ -417,6 +824,25 @@ struct V2SyncEngineTests {
         #expect(message.roomSequence == 1)
     }
 
+    @Test("withdrawal clears independently projected reactions")
+    func withdrawalClearsIndependentReactions() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let accepted = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-0000000002c1"), projectionKind: "message", payload: messagePayload(text: "react then withdraw"))
+        let added = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-0000000002c2"), projectionKind: "message_reaction", payload: reactionPayload(action: "add"))
+        let withdrawn = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-0000000002c3"), projectionKind: "message", payload: withdrawalPayload())
+
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [accepted, added, withdrawn],
+            nextSyncToken: .init("withdraw-reaction-token"),
+            receipt: .init("withdraw-reaction-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        #expect(try await store.reactions(for: .init("00000000-0000-0000-0000-000000000001")).isEmpty)
+    }
+
     @Test("moderator redaction becomes the same durable tombstone projection")
     func redactionTombstoneIsApplied() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
@@ -434,8 +860,8 @@ struct V2SyncEngineTests {
     func reactionSetProjectionConverges() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let accepted = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000227"), projectionKind: "message", payload: messagePayload(text: "react to me"))
-        let added = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000228"), projectionKind: "message", payload: reactionPayload(action: "add"))
-        let removed = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000229"), projectionKind: "message", payload: reactionPayload(action: "remove"))
+        let added = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000228"), projectionKind: "message_reaction", payload: reactionPayload(action: "add"))
+        let removed = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000229"), projectionKind: "message_reaction", payload: reactionPayload(action: "remove"))
         _ = try await store.apply(.init(generation: 1, records: [accepted, added, removed], nextSyncToken: .init("reaction-token"), receipt: .init("reaction-receipt"), hasMore: false, capabilityProfile: "base"))
 
         #expect(try await store.reactions(for: .init("00000000-0000-0000-0000-000000000001")).isEmpty)
@@ -516,6 +942,113 @@ struct V2SyncEngineTests {
         #expect(try await store.cursor()?.syncToken == .init("token-2"))
     }
 
+    @Test("an ACK response loss retries by pulling the persisted token before applying again")
+    func lostIncrementalAcknowledgementResponseRecovers() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000263"),
+            projectionKind: "message",
+            payload: messagePayload(text: "ack-retry")
+        )
+        let firstBatch = try V2ClientSyncBatch(
+            generation: 1,
+            records: [record],
+            nextSyncToken: .init("ack-retry-token"),
+            receipt: .init("ack-retry-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        )
+        let retryBatch = try V2ClientSyncBatch(
+            generation: 1,
+            records: [],
+            nextSyncToken: .init("ack-retry-token-2"),
+            receipt: .init("ack-retry-receipt-2"),
+            hasMore: false,
+            capabilityProfile: "base"
+        )
+        let transport = LostIncrementalACKTransport(
+            first: firstBatch,
+            retry: retryBatch
+        )
+        let engine = V2SyncEngine(
+            transport: transport,
+            store: store,
+            capabilityProfile: "base"
+        )
+
+        await #expect(throws: LostIncrementalACKTransport.Failure.responseLost) {
+            _ = try await engine.synchronizeOnce()
+        }
+        #expect(try await store.cursor()?.pendingAcknowledgementReceipt == firstBatch.receipt)
+
+        #expect(try await engine.synchronizeOnce() == .synchronized(
+            appliedThrough: 1,
+            hasMore: false
+        ))
+        #expect(await transport.requestedTokens() == [nil, firstBatch.nextSyncToken])
+        #expect(await transport.acknowledgementReceipts() == [
+            firstBatch.receipt,
+            retryBatch.receipt,
+        ])
+        #expect(try await store.cursor()?.pendingAcknowledgementReceipt == nil)
+        #expect(try await store.events() == [record])
+    }
+
+    @Test("an expired sync token retries once from the server cursor without duplicating local state")
+    func expiredSyncTokenRecoversFromServerCursor() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000264"),
+            projectionKind: "message",
+            payload: messagePayload(text: "expired-token")
+        )
+        let oldReceipt = try V2SyncReceipt("expired-token-old-receipt")
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [record],
+            nextSyncToken: .init("expired-token-old"),
+            receipt: oldReceipt,
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        try await store.markServerAcknowledged(generation: 1, sequence: 1, receipt: oldReceipt)
+
+        let transport = ExpiredSyncTokenTransport(
+            batch: try .init(
+                generation: 1,
+                records: [],
+                nextSyncToken: .init("expired-token-recovered"),
+                receipt: .init("expired-token-recovered-receipt"),
+                hasMore: false,
+                capabilityProfile: "base"
+            )
+        )
+        let engine = V2SyncEngine(
+            transport: transport,
+            store: store,
+            capabilityProfile: "base"
+        )
+
+        #expect(try await engine.synchronizeOnce() == .synchronized(
+            appliedThrough: 1,
+            hasMore: false
+        ))
+        #expect(await transport.requestedTokens() == [
+            try V2SyncToken("expired-token-old"),
+            nil,
+        ])
+        #expect(try await store.cursor()?.syncToken == .init("expired-token-recovered"))
+        #expect(try await store.events() == [record])
+    }
+
     @Test("a mismatched persisted receipt cannot advance the acknowledged watermark")
     func receiptFencesAcknowledgement() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
@@ -594,7 +1127,6 @@ struct V2SyncEngineTests {
             snapshotID: snapshotID,
             generation: 2,
             baseSequence: 7,
-            manifestDigest: "digest",
             expiresAt: .distantFuture
         )
         let transport = FakeTransport(pullResult: .resetRequired(reset))
@@ -611,117 +1143,137 @@ struct V2SyncEngineTests {
         #expect(await transport.snapshotAcknowledgementCount() == 1)
     }
 
-    @Test("verified snapshot swap atomically rebuilds the message projection")
-    func snapshotSwapRebuildsMessages() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
-        let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000000230"), generation: 2, baseSequence: 3, manifestDigest: "snapshot-projection", expiresAt: .distantFuture)
-        let snapshotMessage = try V2SnapshotMessageProjection(
-            sourceEventID: .init("00000000-0000-0000-0000-000000000231"),
-            messageID: .init("00000000-0000-0000-0000-000000000232"),
-            roomID: .init("00000000-0000-0000-0000-000000000233"),
-            roomSequence: 7,
-            messageRevision: 2,
-            senderUserID: .init("00000000-0000-0000-0000-000000000234"),
-            text: "from snapshot",
-            createdAt: Date(timeIntervalSince1970: 1_750_000_000),
-            isWithdrawn: true,
-            reactions: [try .init(actorUserID: .init("00000000-0000-0000-0000-000000000235"), reaction: "👍")]
+    @Test("V3 snapshot atomically replaces typed projections and preserves withdrawn-message privacy")
+    func snapshotV3AtomicallyReplacesProjection() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let old = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000229"),
+            projectionKind: "message",
+            payload: messagePayload(text: "old")
+        )
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [old],
+            nextSyncToken: .init("before-v3-reset"),
+            receipt: .init("before-v3-reset-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-000000000230"),
+            generation: 2,
+            baseSequence: 6,
+            expiresAt: .distantFuture
+        )
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000232")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000233")
+        let relationshipTarget = try UserID("00000000-0000-0000-0000-000000000247")
+        let items = [
+            try V2SnapshotProjectionItem(
+                key: .init(projectionKind: "message", entityKey: messageID.rawValue),
+                sourceEventID: .init("00000000-0000-0000-0000-000000000231"),
+                sequence: 2,
+                payload: snapshotMessagePayload(
+                    messageID: messageID.rawValue,
+                    roomID: roomID.rawValue,
+                    text: "[removed]",
+                    revision: 2,
+                    isWithdrawn: true
+                )
+            ),
+            try V2SnapshotProjectionItem(
+                key: .init(projectionKind: "relationship", entityKey: relationshipTarget.rawValue),
+                sourceEventID: .init("00000000-0000-0000-0000-000000000248"),
+                sequence: 3,
+                payload: socialPayload([
+                    "target_user_id": relationshipTarget.rawValue,
+                    "state": "accepted",
+                    "updated_at_ms": 1_750_000_010_000,
+                ])
+            ),
+        ]
+        let transport = try ProjectionSnapshotTransport(
+            reset: reset,
+            pages: [.init(items: items)]
         )
         let engine = V2SyncEngine(
-            transport: ProjectionSnapshotTransport(reset: reset, payload: try V2SnapshotProjectionCodec.encode(messages: [snapshotMessage])),
+            transport: transport,
             store: store,
             capabilityProfile: "base"
         )
 
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))
         try await engine.completePendingReset()
-        let restored = try #require(await store.messages(in: snapshotMessage.roomID).first)
-        #expect(restored.messageID == snapshotMessage.messageID)
-        #expect(restored.text == "from snapshot")
+
+        #expect(try await store.messages(in: .init("00000000-0000-0000-0000-000000000220")).isEmpty)
+        let restored = try #require(await store.messages(in: roomID).first)
+        #expect(restored.messageID == messageID)
+        #expect(restored.text == "[removed]")
         #expect(restored.messageRevision == 2)
         #expect(restored.isWithdrawn)
-        #expect(try await store.reactions(for: snapshotMessage.messageID) == [.init(roomID: snapshotMessage.roomID, messageID: snapshotMessage.messageID, actorUserID: .init("00000000-0000-0000-0000-000000000235"), reaction: "👍")])
-        #expect(try await store.reactions(in: snapshotMessage.roomID) == [.init(roomID: snapshotMessage.roomID, messageID: snapshotMessage.messageID, actorUserID: .init("00000000-0000-0000-0000-000000000235"), reaction: "👍")])
-        #expect(try await store.cursor()?.appliedSequence == 3)
-    }
-
-    @Test("verified snapshot replaces social projections together with messages")
-    func snapshotSwapRebuildsSocialProjections() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
-        let oldRelationshipTarget = "00000000-0000-0000-0000-000000000241"
-        let oldBlockTarget = "00000000-0000-0000-0000-000000000242"
-        let existing = [
-            try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000243"), projectionKind: "relationship", payload: socialPayload(["target_user_id": oldRelationshipTarget, "state": "pending", "requested_by_user_id": oldRelationshipTarget, "updated_at_ms": 1_750_000_000_000])),
-            try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000244"), projectionKind: "user_block", payload: socialPayload(["target_user_id": oldBlockTarget, "is_blocked": true, "updated_at_ms": 1_750_000_000_000])),
-            try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000245"), projectionKind: "stranger_message_permission", payload: socialPayload(["allows_stranger_messages": false, "updated_at_ms": 1_750_000_000_000]))
-        ]
-        _ = try await store.apply(.init(generation: 1, records: existing, nextSyncToken: .init("before-social-reset"), receipt: .init("before-social-reset-receipt"), hasMore: false, capabilityProfile: "base"))
-
-        let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000000246"), generation: 2, baseSequence: 6, manifestDigest: "social-snapshot", expiresAt: .distantFuture)
-        let relationship = try V2SnapshotRelationshipProjection(targetUserID: .init("00000000-0000-0000-0000-000000000247"), state: .accepted, requestedByUserID: nil, updatedAt: Date(timeIntervalSince1970: 1_750_000_010))
-        let userBlock = V2SnapshotUserBlockProjection(targetUserID: try .init("00000000-0000-0000-0000-000000000248"), isBlocked: true, updatedAt: Date(timeIntervalSince1970: 1_750_000_011))
-        let preference = V2SnapshotStrangerMessagePreference(allowsStrangerMessages: true, updatedAt: Date(timeIntervalSince1970: 1_750_000_012))
-        let page = try V2SnapshotProjectionPage(messages: [], relationships: [relationship], userBlocks: [userBlock], strangerMessagePreference: preference, moderationActions: [], roomControls: [])
-        let engine = V2SyncEngine(transport: ProjectionSnapshotTransport(reset: reset, payload: try V2SnapshotProjectionCodec.encode(page)), store: store, capabilityProfile: "base")
-
-        #expect(try await engine.synchronizeOnce() == .resetPending(reset))
-        try await engine.completePendingReset()
-        #expect(try await store.relationships() == [.init(targetUserID: relationship.targetUserID, state: .accepted, requestedByUserID: nil, updatedAt: relationship.updatedAt)])
-        #expect(try await store.blocks() == [.init(targetUserID: userBlock.targetUserID, isBlocked: true, updatedAt: userBlock.updatedAt)])
-        #expect(try await store.strangerMessagePreference() == .init(allowsStrangerMessages: true, updatedAt: preference.updatedAt))
-        #expect(try await store.events().isEmpty)
-    }
-
-    @Test("verified snapshot replaces moderation projections together with all other reset state")
-    func snapshotSwapRebuildsModerationProjections() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
-        let existingPayload = try JSONSerialization.data(withJSONObject: [
-            "event_type": "member.muted",
-            "room_id": "00000000-0000-0000-0000-000000000251",
-            "room_sequence": 1,
-            "actor_user_id": "00000000-0000-0000-0000-000000000252",
-            "target_user_id": "00000000-0000-0000-0000-000000000253",
-            "mute_until_ms": 1_750_000_100_000,
-            "server_created_at_ms": 1_750_000_000_000,
+        #expect(try await store.reactions(for: messageID).isEmpty)
+        #expect(try await store.relationships() == [
+            .init(
+                targetUserID: relationshipTarget,
+                state: .accepted,
+                requestedByUserID: nil,
+                updatedAt: Date(timeIntervalSince1970: 1_750_000_010)
+            )
         ])
-        let existing = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000254"), projectionKind: "moderation", payload: existingPayload)
-        _ = try await store.apply(.init(generation: 1, records: [existing], nextSyncToken: .init("before-moderation-reset"), receipt: .init("before-moderation-reset-receipt"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.events().isEmpty)
+        #expect(try await store.cursor()?.appliedSequence == 6)
+    }
 
-        let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000000255"), generation: 2, baseSequence: 4, manifestDigest: "moderation-snapshot", expiresAt: .distantFuture)
-        let action = try V2SnapshotModerationProjection(
-            sourceEventID: .init("00000000-0000-0000-0000-000000000256"),
-            roomID: .init("00000000-0000-0000-0000-000000000257"),
-            roomSequence: 2,
-            actorUserID: .init("00000000-0000-0000-0000-000000000258"),
-            targetUserID: .init("00000000-0000-0000-0000-000000000259"),
-            muteUntil: Date(timeIntervalSince1970: 1_750_000_600),
-            createdAt: Date(timeIntervalSince1970: 1_750_000_010)
+    @Test("V3 snapshot restores reactions as independent bounded projection items")
+    func snapshotV3RestoresIndependentReaction() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000001")
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000220")
+        let actorID = try UserID("00000000-0000-0000-0000-000000000222")
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-0000000002d0"),
+            generation: 2,
+            baseSequence: 2,
+            expiresAt: .distantFuture
         )
-        let roomControl = try V2SnapshotRoomControlProjection(
-            sourceEventID: .init("00000000-0000-0000-0000-000000000264"),
-            roomID: .init("00000000-0000-0000-0000-000000000265"),
-            roomSequence: 3,
-            actorUserID: .init("00000000-0000-0000-0000-000000000266"),
-            isFrozen: true,
-            createdAt: Date(timeIntervalSince1970: 1_750_000_011)
-        )
-        let roomProfile = try V2SnapshotRoomProfileProjection(
-            sourceEventID: .init("00000000-0000-0000-0000-000000000267"),
-            roomID: .init("00000000-0000-0000-0000-000000000268"),
-            title: "重置群聊",
-            ownerUserID: .init("00000000-0000-0000-0000-000000000269"),
-            membershipRevision: 1,
-            createdAt: Date(timeIntervalSince1970: 1_750_000_012)
-        )
-        let page = try V2SnapshotProjectionPage(messages: [], relationships: [], userBlocks: [], strangerMessagePreference: nil, moderationActions: [action], roomControls: [roomControl], roomProfiles: [roomProfile])
-        let engine = V2SyncEngine(transport: ProjectionSnapshotTransport(reset: reset, payload: try V2SnapshotProjectionCodec.encode(page)), store: store, capabilityProfile: "base")
+        let reaction = "👍"
+        let items = [
+            try V2SnapshotProjectionItem(
+                key: .init(projectionKind: "message", entityKey: messageID.rawValue),
+                sourceEventID: .init("00000000-0000-0000-0000-0000000002d1"),
+                sequence: 1,
+                payload: snapshotMessagePayload(
+                    messageID: messageID.rawValue,
+                    roomID: roomID.rawValue,
+                    text: "snapshot reaction",
+                    revision: 1,
+                    isWithdrawn: false
+                )
+            ),
+            try V2SnapshotProjectionItem(
+                key: .init(
+                    projectionKind: "message_reaction",
+                    entityKey: "\(messageID.rawValue):\(actorID.rawValue):\(reaction)"
+                ),
+                sourceEventID: .init("00000000-0000-0000-0000-0000000002d2"),
+                sequence: 2,
+                payload: reactionPayload(action: "add")
+            ),
+        ]
+        let transport = try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: items)])
+        let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
 
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))
         try await engine.completePendingReset()
-        #expect(try await store.moderationActions() == [.init(snapshotProjection: action)])
-        #expect(try await store.roomControl(roomID: roomControl.roomID)?.isFrozen == true)
-        #expect(try await store.roomProfile(roomID: roomProfile.roomID)?.title == "重置群聊")
-        #expect(try await store.events().isEmpty)
+
+        #expect(try await store.reactions(for: messageID) == [
+            .init(roomID: roomID, messageID: messageID, actorUserID: actorID, reaction: reaction)
+        ])
     }
 
     @Test("an interrupted snapshot keeps the ready projection and resumes only missing pages")
@@ -729,8 +1281,8 @@ struct V2SyncEngineTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let existing = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000209"), projectionKind: "message", payload: messagePayload(text: "ready"))
         _ = try await store.apply(.init(generation: 1, records: [existing], nextSyncToken: .init("before-reset"), receipt: .init("before-receipt"), hasMore: false, capabilityProfile: "base"))
-        let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000000210"), generation: 2, baseSequence: 4, manifestDigest: "reset-digest", expiresAt: .distantFuture)
-        let transport = ResumableSnapshotTransport(reset: reset)
+        let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000000210"), generation: 2, baseSequence: 4, expiresAt: .distantFuture)
+        let transport = try ResumableSnapshotTransport(reset: reset)
         let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
 
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))
@@ -745,6 +1297,154 @@ struct V2SyncEngineTests {
         #expect(try await store.cursor()?.state == .ready)
         #expect(await transport.pageRequests() == [0, 1, 1])
         #expect(await transport.snapshotAcknowledgements() == 1)
+    }
+
+    @Test("a crash after server snapshot ACK resumes from the durable shadow before pulling")
+    func snapshotAckCrashWindowResumesSafely() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let existing = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000259"),
+            projectionKind: "message",
+            payload: messagePayload(text: "live-until-activation")
+        )
+        let oldReceipt = try V2SyncReceipt("before-ack-crash-receipt")
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [existing],
+            nextSyncToken: .init("before-ack-crash-token"),
+            receipt: oldReceipt,
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        try await store.markServerAcknowledged(generation: 1, sequence: 1, receipt: oldReceipt)
+
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-000000000260"),
+            generation: 2,
+            baseSequence: 1,
+            expiresAt: .distantFuture
+        )
+        let transport = try SnapshotCrashWindowTransport(reset: reset)
+        try await store.beginReset(reset)
+        let manifest = await transport.fetchSnapshotManifest(for: reset)
+        try await store.beginSnapshotImport(
+            manifest,
+            initialDigest: V2SnapshotV3Digest.initial(
+                baseSequence: reset.baseSequence,
+                capabilityProfile: manifest.capabilityProfile
+            )
+        )
+        // This represents the durable server commit followed by process death
+        // before the client can activate its local shadow projection.
+        try await transport.acknowledgeSnapshot(manifest)
+        #expect(try await store.events() == [existing])
+
+        let restarted = V2SyncEngine(
+            transport: transport,
+            store: store,
+            capabilityProfile: "base"
+        )
+        #expect(try await restarted.synchronizeOnce() == .resetPending(reset))
+        #expect(await transport.pullCount() == 0)
+        try await restarted.completePendingReset()
+
+        let cursor = try #require(await store.cursor())
+        #expect(cursor.state == .ready)
+        #expect(cursor.generation == 2)
+        #expect(try await store.events().isEmpty)
+        #expect(await transport.manifestRequestCount() == 1)
+        #expect(await transport.snapshotAcknowledgementCount() == 2)
+    }
+
+    @Test("a server-rejected expired snapshot restores the exact pre-reset cursor")
+    func rejectedSnapshotRestoresPreviousCursor() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let existing = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000261"),
+            projectionKind: "message",
+            payload: messagePayload(text: "preserved-after-expiry")
+        )
+        let oldToken = try V2SyncToken("before-expired-reset-token")
+        let oldReceipt = try V2SyncReceipt("before-expired-reset-receipt")
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [existing],
+            nextSyncToken: oldToken,
+            receipt: oldReceipt,
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        try await store.markServerAcknowledged(generation: 1, sequence: 1, receipt: oldReceipt)
+
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-000000000262"),
+            generation: 2,
+            baseSequence: 1,
+            expiresAt: .distantPast
+        )
+        let transport = try SnapshotCrashWindowTransport(
+            reset: reset,
+            acknowledgementError: .server(
+                code: "RESET_REQUIRED",
+                retryable: false,
+                retryAfterSeconds: 0,
+                currentRevision: nil
+            )
+        )
+        try await store.beginReset(reset)
+        let engine = V2SyncEngine(
+            transport: transport,
+            store: store,
+            capabilityProfile: "base"
+        )
+
+        await #expect(throws: V2RealtimeTransportError.server(
+            code: "RESET_REQUIRED",
+            retryable: false,
+            retryAfterSeconds: 0,
+            currentRevision: nil
+        )) {
+            try await engine.completePendingReset()
+        }
+
+        let cursor = try #require(await store.cursor())
+        #expect(cursor.state == .ready)
+        #expect(cursor.generation == 1)
+        #expect(cursor.appliedSequence == 1)
+        #expect(cursor.serverAcknowledgedSequence == 1)
+        #expect(cursor.syncToken == nil)
+        #expect(cursor.pendingReset == nil)
+        #expect(try await store.events() == [existing])
+
+        let replayTransport = FakeTransport(pullResult: .ready(.init(
+            generation: 1,
+            records: [],
+            nextSyncToken: try .init("after-expired-reset-token"),
+            receipt: try .init("after-expired-reset-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        )))
+        let recoveryEngine = V2SyncEngine(
+            transport: replayTransport,
+            store: store,
+            capabilityProfile: "base"
+        )
+        #expect(try await recoveryEngine.synchronizeOnce() == .synchronized(
+            appliedThrough: 1,
+            hasMore: false
+        ))
+        #expect(await replayTransport.acknowledgements().isEmpty)
+        #expect(try await store.cursor()?.serverAcknowledgedSequence == 1)
+        #expect(try await store.cursor()?.syncToken == .init("after-expired-reset-token"))
+        #expect(try await store.events() == [existing])
     }
 
     @Test("availability-driven sync drains all contiguous batches")
@@ -814,7 +1514,6 @@ struct V2SyncEngineTests {
             snapshotID: .init("00000000-0000-0000-0000-000000000210"),
             generation: 2,
             baseSequence: 7,
-            manifestDigest: "availability-reset",
             expiresAt: .distantFuture
         )
         let transport = FakeTransport(pullResult: .resetRequired(reset))
@@ -834,6 +1533,68 @@ struct V2SyncEngineTests {
         #expect(await transport.snapshotAcknowledgementCount() == 1)
         #expect(await recorder.count() == 1)
     }
+
+    @Test("a second snapshot swaps the already-renamed projection bank")
+    func repeatedSnapshotActivation() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        for generation in UInt64(2) ... 3 {
+            let reset = try V2ClientResetRequired(
+                snapshotID: .init("00000000-0000-0000-0000-0000000002e\(generation)"),
+                generation: generation,
+                baseSequence: generation,
+                expiresAt: .distantFuture
+            )
+            let transport = try ProjectionSnapshotTransport(reset: reset, pages: [])
+            let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
+            #expect(try await engine.synchronizeOnce() == .resetPending(reset))
+            try await engine.completePendingReset()
+            #expect(try await store.cursor()?.generation == generation)
+        }
+    }
+
+    @Test("prepared snapshot fences local projection writers until cancellation")
+    func preparedSnapshotFencesProjectionWrites() async throws {
+        let store = try GRDBV2LocalSyncStore(
+            databaseURL: temporaryDatabaseURL(),
+            installationBinding: testInstallationBinding
+        )
+        let reset = try V2ClientResetRequired(
+            snapshotID: .init("00000000-0000-0000-0000-0000000002e4"),
+            generation: 2,
+            baseSequence: 0,
+            expiresAt: .distantFuture
+        )
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(
+            fixture.manifest,
+            initialDigest: V2SnapshotV3Digest.initial(baseSequence: 0, capabilityProfile: "base")
+        )
+        try await store.prepareSnapshotActivation(fixture.manifest)
+
+        await #expect(throws: V2ClientSyncError.resetPending) {
+            try await store.cacheDirectRoomIdentity(
+                roomID: .init("00000000-0000-0000-0000-0000000002e5"),
+                publicIdentity: .init(
+                    userID: .init("00000000-0000-0000-0000-0000000002e6"),
+                    handle: .init("prepared_fence"),
+                    displayName: "准备阶段 fence"
+                )
+            )
+        }
+        try await store.cancelReset(reset)
+        try await store.cacheDirectRoomIdentity(
+            roomID: .init("00000000-0000-0000-0000-0000000002e5"),
+            publicIdentity: .init(
+                userID: .init("00000000-0000-0000-0000-0000000002e6"),
+                handle: .init("prepared_fence"),
+                displayName: "准备阶段 fence"
+            )
+        )
+    }
 }
 
 private actor FakeTransport: V2ClientSyncTransport {
@@ -844,8 +1605,12 @@ private actor FakeTransport: V2ClientSyncTransport {
     init(pullResult: V2ClientPullResult) { self.pullResult = pullResult }
     func pull(syncToken _: V2SyncToken?, maxRecords _: Int) -> V2ClientPullResult { pullResult }
     func acknowledge(generation: UInt64, highestContiguousSequence: UInt64, receipt: V2SyncReceipt) { acknowledgementsLog.append(.init(generation: generation, sequence: highestContiguousSequence, receipt: receipt)) }
-    func fetchSnapshotManifest(for reset: V2ClientResetRequired) throws -> V2ClientSnapshotManifest { try .init(reset: reset, pageDigests: ["page-0"], nextSyncToken: .init("snapshot-token"), receipt: .init("snapshot-receipt"), capabilityProfile: "base") }
-    func fetchSnapshotPage(for _: V2ClientSnapshotManifest, index: Int) throws -> V2ClientSnapshotPage { .init(index: index, digest: "page-\(index)", payload: emptySnapshotPayload()) }
+    func fetchSnapshotManifest(for reset: V2ClientResetRequired) throws -> V2ClientSnapshotManifest {
+        try makeSnapshotFixture(reset: reset, pages: []).manifest
+    }
+    func fetchSnapshotPage(for _: V2ClientSnapshotManifest, index _: Int) throws -> V2ClientSnapshotPage {
+        throw V2ClientSyncError.snapshotMismatch
+    }
     func acknowledgeSnapshot(_: V2ClientSnapshotManifest) { snapshotAcknowledgements += 1 }
     func acknowledgements() -> [Acknowledgement] { acknowledgementsLog }
     func snapshotAcknowledgementCount() -> Int { snapshotAcknowledgements }
@@ -926,44 +1691,207 @@ private actor SequencedTransport: V2ClientSyncTransport {
     func pullCount() -> Int { pulls }
 }
 
+private actor LostIncrementalACKTransport: V2ClientSyncTransport {
+    enum Failure: Error { case responseLost }
+
+    private let first: V2ClientSyncBatch
+    private let retry: V2ClientSyncBatch
+    private var pulls = 0
+    private var tokens: [V2SyncToken?] = []
+    private var receipts: [V2SyncReceipt] = []
+
+    init(first: V2ClientSyncBatch, retry: V2ClientSyncBatch) {
+        self.first = first
+        self.retry = retry
+    }
+
+    func pull(syncToken: V2SyncToken?, maxRecords _: Int) -> V2ClientPullResult {
+        tokens.append(syncToken)
+        pulls += 1
+        return .ready(pulls == 1 ? first : retry)
+    }
+
+    func acknowledge(
+        generation _: UInt64,
+        highestContiguousSequence _: UInt64,
+        receipt: V2SyncReceipt
+    ) throws {
+        receipts.append(receipt)
+        if receipts.count == 1 { throw Failure.responseLost }
+    }
+
+    func fetchSnapshotManifest(
+        for _: V2ClientResetRequired
+    ) throws -> V2ClientSnapshotManifest { throw V2ClientSyncError.snapshotMismatch }
+
+    func fetchSnapshotPage(
+        for _: V2ClientSnapshotManifest,
+        index _: Int
+    ) throws -> V2ClientSnapshotPage { throw V2ClientSyncError.snapshotMismatch }
+
+    func acknowledgeSnapshot(_: V2ClientSnapshotManifest) {}
+    func requestedTokens() -> [V2SyncToken?] { tokens }
+    func acknowledgementReceipts() -> [V2SyncReceipt] { receipts }
+}
+
+private actor ExpiredSyncTokenTransport: V2ClientSyncTransport {
+    private let batch: V2ClientSyncBatch
+    private var tokens: [V2SyncToken?] = []
+
+    init(batch: V2ClientSyncBatch) { self.batch = batch }
+
+    func pull(syncToken: V2SyncToken?, maxRecords _: Int) throws -> V2ClientPullResult {
+        tokens.append(syncToken)
+        if syncToken != nil {
+            throw V2RealtimeTransportError.server(
+                code: "SYNC_TOKEN_INVALID",
+                retryable: false,
+                retryAfterSeconds: 0,
+                currentRevision: nil
+            )
+        }
+        return .ready(batch)
+    }
+
+    func acknowledge(
+        generation _: UInt64,
+        highestContiguousSequence _: UInt64,
+        receipt _: V2SyncReceipt
+    ) {}
+
+    func fetchSnapshotManifest(
+        for _: V2ClientResetRequired
+    ) throws -> V2ClientSnapshotManifest { throw V2ClientSyncError.snapshotMismatch }
+
+    func fetchSnapshotPage(
+        for _: V2ClientSnapshotManifest,
+        index _: Int
+    ) throws -> V2ClientSnapshotPage { throw V2ClientSyncError.snapshotMismatch }
+
+    func acknowledgeSnapshot(_: V2ClientSnapshotManifest) {}
+    func requestedTokens() -> [V2SyncToken?] { tokens }
+}
+
 private enum SnapshotInterruption: Error { case once }
 
 private actor ResumableSnapshotTransport: V2ClientSyncTransport {
     private let reset: V2ClientResetRequired
+    private let fixture: SnapshotFixture
     private var didInterrupt = false
     private var requestedPages: [Int] = []
     private var acknowledgements = 0
 
-    init(reset: V2ClientResetRequired) { self.reset = reset }
+    init(reset: V2ClientResetRequired) throws {
+        self.reset = reset
+        let target1 = "00000000-0000-0000-0000-000000000211"
+        let target2 = "00000000-0000-0000-0000-000000000212"
+        fixture = try makeSnapshotFixture(reset: reset, pages: [
+            .init(items: [
+                .init(
+                    key: .init(projectionKind: "relationship", entityKey: target1),
+                    sourceEventID: .init("00000000-0000-0000-0000-000000000213"),
+                    sequence: 2,
+                    payload: socialPayload([
+                        "target_user_id": target1,
+                        "state": "accepted",
+                        "updated_at_ms": 1_750_000_000_000,
+                    ])
+                )
+            ]),
+            .init(items: [
+                .init(
+                    key: .init(projectionKind: "user_block", entityKey: target2),
+                    sourceEventID: .init("00000000-0000-0000-0000-000000000214"),
+                    sequence: 3,
+                    payload: socialPayload([
+                        "target_user_id": target2,
+                        "is_blocked": true,
+                        "updated_at_ms": 1_750_000_001_000,
+                    ])
+                )
+            ]),
+        ])
+    }
 
     func pull(syncToken _: V2SyncToken?, maxRecords _: Int) -> V2ClientPullResult { .resetRequired(reset) }
     func acknowledge(generation _: UInt64, highestContiguousSequence _: UInt64, receipt _: V2SyncReceipt) {}
-    func fetchSnapshotManifest(for reset: V2ClientResetRequired) throws -> V2ClientSnapshotManifest {
-        try .init(reset: reset, pageDigests: ["page-0", "page-1"], nextSyncToken: .init("after-reset"), receipt: .init("reset-receipt"), capabilityProfile: "base")
-    }
+    func fetchSnapshotManifest(for _: V2ClientResetRequired) -> V2ClientSnapshotManifest { fixture.manifest }
     func fetchSnapshotPage(for _: V2ClientSnapshotManifest, index: Int) throws -> V2ClientSnapshotPage {
         requestedPages.append(index)
         if index == 1, !didInterrupt {
             didInterrupt = true
             throw SnapshotInterruption.once
         }
-        return .init(index: index, digest: "page-\(index)", payload: emptySnapshotPayload())
+        return fixture.pages[index]
     }
     func acknowledgeSnapshot(_: V2ClientSnapshotManifest) { acknowledgements += 1 }
     func pageRequests() -> [Int] { requestedPages }
     func snapshotAcknowledgements() -> Int { acknowledgements }
 }
 
+private actor SnapshotCrashWindowTransport: V2ClientSyncTransport {
+    private let reset: V2ClientResetRequired
+    private let fixture: SnapshotFixture
+    private let acknowledgementError: V2RealtimeTransportError?
+    private var pulls = 0
+    private var manifestRequests = 0
+    private var snapshotAcknowledgements = 0
+
+    init(
+        reset: V2ClientResetRequired,
+        acknowledgementError: V2RealtimeTransportError? = nil
+    ) throws {
+        self.reset = reset
+        self.acknowledgementError = acknowledgementError
+        fixture = try makeSnapshotFixture(reset: reset, pages: [])
+    }
+
+    func pull(syncToken _: V2SyncToken?, maxRecords _: Int) -> V2ClientPullResult {
+        pulls += 1
+        return .resetRequired(reset)
+    }
+
+    func acknowledge(
+        generation _: UInt64,
+        highestContiguousSequence _: UInt64,
+        receipt _: V2SyncReceipt
+    ) {}
+
+    func fetchSnapshotManifest(for _: V2ClientResetRequired) -> V2ClientSnapshotManifest {
+        manifestRequests += 1
+        return fixture.manifest
+    }
+
+    func fetchSnapshotPage(
+        for _: V2ClientSnapshotManifest,
+        index _: Int
+    ) throws -> V2ClientSnapshotPage {
+        throw V2ClientSyncError.snapshotMismatch
+    }
+
+    func acknowledgeSnapshot(_: V2ClientSnapshotManifest) throws {
+        snapshotAcknowledgements += 1
+        if let acknowledgementError { throw acknowledgementError }
+    }
+
+    func pullCount() -> Int { pulls }
+    func manifestRequestCount() -> Int { manifestRequests }
+    func snapshotAcknowledgementCount() -> Int { snapshotAcknowledgements }
+}
+
 private struct ProjectionSnapshotTransport: V2ClientSyncTransport {
     let reset: V2ClientResetRequired
-    let payload: Data
+    let fixture: SnapshotFixture
+
+    init(reset: V2ClientResetRequired, pages: [V2SnapshotProjectionV3Page]) throws {
+        self.reset = reset
+        fixture = try makeSnapshotFixture(reset: reset, pages: pages)
+    }
 
     func pull(syncToken _: V2SyncToken?, maxRecords _: Int) -> V2ClientPullResult { .resetRequired(reset) }
     func acknowledge(generation _: UInt64, highestContiguousSequence _: UInt64, receipt _: V2SyncReceipt) {}
-    func fetchSnapshotManifest(for reset: V2ClientResetRequired) throws -> V2ClientSnapshotManifest {
-        try .init(reset: reset, pageDigests: ["page-0"], nextSyncToken: .init("projection-token"), receipt: .init("projection-receipt"), capabilityProfile: "base")
-    }
-    func fetchSnapshotPage(for _: V2ClientSnapshotManifest, index: Int) -> V2ClientSnapshotPage { .init(index: index, digest: "page-0", payload: payload) }
+    func fetchSnapshotManifest(for _: V2ClientResetRequired) -> V2ClientSnapshotManifest { fixture.manifest }
+    func fetchSnapshotPage(for _: V2ClientSnapshotManifest, index: Int) -> V2ClientSnapshotPage { fixture.pages[index] }
     func acknowledgeSnapshot(_: V2ClientSnapshotManifest) {}
 }
 
@@ -983,6 +1911,63 @@ private actor AvailabilityFlushRecorder {
     private var flushes = 0
     func record() { flushes += 1 }
     func count() -> Int { flushes }
+}
+
+private struct SnapshotFixture {
+    let manifest: V2ClientSnapshotManifest
+    let pages: [V2ClientSnapshotPage]
+}
+
+private func makeSnapshotFixture(
+    reset: V2ClientResetRequired,
+    pages: [V2SnapshotProjectionV3Page],
+    capabilityProfile: String = "base"
+) throws -> SnapshotFixture {
+    var rolling = V2SnapshotV3Digest.initial(
+        baseSequence: reset.baseSequence,
+        capabilityProfile: capabilityProfile
+    )
+    var totalBytes: UInt64 = 0
+    var totalItems: UInt64 = 0
+    var encoded: [(payload: Data, digest: String, page: V2SnapshotProjectionV3Page)] = []
+    for (index, page) in pages.enumerated() {
+        let payload = try V2SnapshotProjectionV3Codec.encode(page)
+        let digest = V2SnapshotV3Digest.page(payload)
+        rolling = V2SnapshotV3Digest.next(
+            previous: rolling,
+            pageIndex: UInt32(index),
+            pageDigest: digest,
+            firstKey: page.firstKey,
+            lastKey: page.lastKey,
+            itemCount: UInt32(page.items.count)
+        )
+        totalBytes += UInt64(payload.count)
+        totalItems += UInt64(page.items.count)
+        encoded.append((payload, digest, page))
+    }
+    let manifest = try V2ClientSnapshotManifest(
+        reset: reset,
+        rootDigest: rolling,
+        pageCount: pages.count,
+        totalItems: totalItems,
+        totalBytes: totalBytes,
+        nextSyncToken: .init("snapshot-v3-token"),
+        receipt: .init("snapshot-v3-receipt"),
+        capabilityProfile: capabilityProfile
+    )
+    return .init(
+        manifest: manifest,
+        pages: encoded.enumerated().map { index, value in
+            .init(
+                index: index,
+                digest: value.digest,
+                firstKey: value.page.firstKey,
+                lastKey: value.page.lastKey,
+                itemCount: value.page.items.count,
+                payload: value.payload
+            )
+        }
+    )
 }
 
 private func temporaryDatabaseURL() -> URL {
@@ -1098,6 +2083,28 @@ private struct TestWithdrawalPayload: Encodable {
     }
 }
 
-private func emptySnapshotPayload() -> Data {
-    try! V2SnapshotProjectionCodec.encode(messages: [])
+private func snapshotMessagePayload(
+    messageID: String,
+    roomID: String,
+    text: String,
+    revision: UInt64,
+    isWithdrawn: Bool
+) -> Data {
+    try! JSONSerialization.data(withJSONObject: [
+        "event_type": "message.accepted",
+        "message_id": messageID,
+        "room_id": roomID,
+        "room_sequence": 7,
+        "timeline_sequence": 7,
+        "message_revision": revision,
+        "sender_user_id": "00000000-0000-0000-0000-000000000234",
+        "text": text,
+        "media_ids": [],
+        "media_presentations": [],
+        "mention_user_ids": [],
+        "mentions_everyone": false,
+        "entities": [],
+        "server_created_at_ms": 1_750_000_000_000,
+        "is_withdrawn": isWithdrawn,
+    ], options: [.sortedKeys])
 }

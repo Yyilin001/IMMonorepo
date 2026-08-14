@@ -52,10 +52,11 @@ public protocol V2FanoutPlanHintPublishing: Sendable {
 
 /// Minimal Core NATS CONNECT/PUB publisher built only on the runtime's NIO
 /// dependencies. A `PING` after `PUB` requires the broker to parse every
-/// preceding command before the hint is considered published. Each hint obtains
-/// a fresh connection, so a failed channel is never retained. The surrounding
-/// durable wrapper intentionally ignores its error after the PostgreSQL
-/// planner has completed.
+/// preceding command before the hint is considered published. The actor keeps
+/// one serial connection per publisher and discards it on any failure, avoiding
+/// a TCP handshake per hint without allowing a failed channel to poison a
+/// later publish. The surrounding durable wrapper intentionally ignores its
+/// error after the PostgreSQL planner has completed.
 public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
     private struct Connect: Encodable {
         let verbose = false
@@ -63,131 +64,228 @@ public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
         let token: String?
     }
 
+    private struct Connection {
+        let channel: any Channel
+        let handler: V2NATSConnectionHandler
+    }
+
     private let configuration: V2NATSFanoutHintConfiguration
     private let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    private var retainedConnection: Connection?
 
     public init(configuration: V2NATSFanoutHintConfiguration) { self.configuration = configuration }
-    deinit { try? eventLoopGroup.syncShutdownGracefully() }
+    deinit {
+        retainedConnection?.channel.close(promise: nil)
+        try? eventLoopGroup.syncShutdownGracefully()
+    }
 
     public func publishHint(_ trigger: V2FanoutPlanTrigger) async throws {
         let timeout = TimeAmount.nanoseconds(Int64(configuration.acknowledgementTimeout * 1_000_000_000))
-        // The group has one loop, so this promise is created on the same event
-        // loop that invokes the handler. Keeping the state inside the handler
-        // avoids touching NIO objects from the actor executor.
-        let acknowledgement = V2NATSPublishAcknowledgement(eventLoop: eventLoopGroup.next())
-        let channel = try await ClientBootstrap(group: eventLoopGroup)
-            .channelOption(ChannelOptions.connectTimeout, value: timeout)
-            .channelInitializer { channel in channel.pipeline.addHandler(acknowledgement) }
-            .connect(host: configuration.url.host!, port: configuration.url.port ?? 4222)
-            .get()
-        defer { channel.close(promise: nil) }
+        let connection = try await connectedChannel(timeout: timeout)
+        let channel = connection.value.channel
+        let acknowledgement = try connection.value.handler.beginAcknowledgement(
+            eventLoop: channel.eventLoop
+        )
         let watchdog = channel.eventLoop.scheduleTask(in: timeout) {
-            acknowledgement.timeout()
+            if connection.value.handler.timeout(acknowledgement) {
+                channel.close(promise: nil)
+            }
         }
         defer { watchdog.cancel() }
-        let payload = try JSONEncoder().encode(V2NATSFanoutPlanHint(trigger: trigger))
-        let connect = String(decoding: try JSONEncoder().encode(Connect(token: configuration.token)), as: UTF8.self)
-        var buffer = channel.allocator.buffer(capacity: payload.count + connect.utf8.count + configuration.subject.utf8.count + 40)
-        buffer.writeString("CONNECT \(connect)\r\nPUB \(configuration.subject) \(payload.count)\r\n")
-        buffer.writeBytes(payload)
-        buffer.writeString("\r\nPING\r\n")
-        try await channel.writeAndFlush(buffer).get()
-        try await acknowledgement.awaitBrokerConfirmation()
+        do {
+            let payload = try JSONEncoder().encode(V2NATSFanoutPlanHint(trigger: trigger))
+            let connect = String(decoding: try JSONEncoder().encode(Connect(token: configuration.token)), as: UTF8.self)
+            var buffer = channel.allocator.buffer(capacity: payload.count + connect.utf8.count + configuration.subject.utf8.count + 40)
+            if connection.isNew {
+                buffer.writeString("CONNECT \(connect)\r\n")
+            }
+            buffer.writeString("PUB \(configuration.subject) \(payload.count)\r\n")
+            buffer.writeBytes(payload)
+            buffer.writeString("\r\nPING\r\n")
+            try await channel.writeAndFlush(buffer).get()
+            try await acknowledgement.awaitBrokerConfirmation()
+        } catch {
+            await discardRetainedConnection(connection.value)
+            throw error
+        }
+    }
+
+    private func connectedChannel(timeout: TimeAmount) async throws -> (value: Connection, isNew: Bool) {
+        if let retainedConnection, retainedConnection.channel.isActive {
+            return (retainedConnection, false)
+        }
+        retainedConnection = nil
+        let handler = V2NATSConnectionHandler()
+        let channel = try await ClientBootstrap(group: eventLoopGroup)
+            .channelOption(ChannelOptions.connectTimeout, value: timeout)
+            .channelInitializer { channel in
+                channel.pipeline.addHandler(handler)
+            }
+            .connect(host: configuration.url.host!, port: configuration.url.port ?? 4222)
+            .get()
+        let connection = Connection(channel: channel, handler: handler)
+        retainedConnection = connection
+        return (connection, true)
+    }
+
+    private func discardRetainedConnection(_ connection: Connection) async {
+        if retainedConnection?.channel === connection.channel {
+            retainedConnection = nil
+        }
+        try? await connection.channel.close().get()
     }
 }
 
-/// The acknowledgement can be completed by an event-loop callback, the
-/// watchdog, or channel shutdown. A mutex makes that one-shot state explicit
-/// instead of relying on an unchecked Sendable conformance.
-private final class V2NATSPublishAcknowledgement: ChannelInboundHandler, Sendable {
+/// One handler owns the lifetime of a retained Core NATS connection. Besides
+/// correlating the publisher's serial PING/PONG acknowledgement, it answers
+/// broker-initiated PING frames while the connection is otherwise idle.
+private final class V2NATSConnectionHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
 
     private struct State: Sendable {
         var pendingBytes = Data()
-        var didResolve = false
+        var acknowledgement: V2NATSPublishAcknowledgement?
     }
 
-    private enum InboundResolution {
-        case confirmed
-        case invalidFrame
-        case brokerRejected
+    private enum InboundAction {
+        case answerPing
+        case confirm(V2NATSPublishAcknowledgement)
+        case fail(V2NATSPublishAcknowledgement?, V2NATSPublishError)
     }
 
-    private let confirmation: EventLoopPromise<Void>
     private let state = Mutex(State())
 
-    init(eventLoop: any EventLoop) {
-        confirmation = eventLoop.makePromise(of: Void.self)
+    func beginAcknowledgement(eventLoop: any EventLoop) throws -> V2NATSPublishAcknowledgement {
+        let acknowledgement = V2NATSPublishAcknowledgement(eventLoop: eventLoop)
+        let installed = state.withLock { state in
+            guard state.acknowledgement == nil else { return false }
+            state.acknowledgement = acknowledgement
+            return true
+        }
+        guard installed else { throw V2NATSPublishError.overlappingPublish }
+        return acknowledgement
     }
 
-    func channelRead(context _: ChannelHandlerContext, data: NIOAny) {
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
         guard let received = buffer.readData(length: buffer.readableBytes) else { return }
-        switch consumeLines(received) {
-        case .confirmed:
-            confirmation.succeed(())
-        case .invalidFrame:
-            confirmation.fail(V2NATSPublishError.invalidBrokerFrame)
-        case .brokerRejected:
-            confirmation.fail(V2NATSPublishError.brokerRejected)
-        case nil:
-            break
+        for action in consumeLines(received) {
+            switch action {
+            case .answerPing:
+                var response = context.channel.allocator.buffer(capacity: 6)
+                response.writeString("PONG\r\n")
+                context.writeAndFlush(NIOAny(response), promise: nil)
+            case .confirm(let acknowledgement):
+                acknowledgement.succeed()
+            case .fail(let acknowledgement, let error):
+                acknowledgement?.fail(error)
+                context.close(promise: nil)
+            }
         }
     }
 
     func channelInactive(context _: ChannelHandlerContext) {
-        failIfPending(V2NATSPublishError.connectionClosedBeforeConfirmation)
+        failPending(V2NATSPublishError.connectionClosedBeforeConfirmation)
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        failIfPending(error)
+        failPending(error)
         context.close(promise: nil)
+    }
+
+    /// Called only by the channel's own event-loop watchdog.
+    @discardableResult
+    func timeout(_ acknowledgement: V2NATSPublishAcknowledgement) -> Bool {
+        let shouldFail = state.withLock { state in
+            guard state.acknowledgement === acknowledgement else { return false }
+            state.acknowledgement = nil
+            return true
+        }
+        if shouldFail {
+            acknowledgement.fail(V2NATSPublishError.acknowledgementTimedOut)
+        }
+        return shouldFail
+    }
+
+    private func consumeLines(_ received: Data) -> [InboundAction] {
+        state.withLock { state in
+            var actions: [InboundAction] = []
+            state.pendingBytes.append(received)
+            guard state.pendingBytes.count <= 64 * 1_024 else {
+                let acknowledgement = state.acknowledgement
+                state.acknowledgement = nil
+                state.pendingBytes.removeAll(keepingCapacity: false)
+                return [.fail(acknowledgement, .invalidBrokerFrame)]
+            }
+            parsing: while let delimiter = state.pendingBytes.range(of: Data([13, 10])) {
+                let line = String(data: state.pendingBytes[..<delimiter.lowerBound], encoding: .utf8)
+                state.pendingBytes.removeSubrange(..<delimiter.upperBound)
+                guard let line else {
+                    let acknowledgement = state.acknowledgement
+                    state.acknowledgement = nil
+                    actions.append(.fail(acknowledgement, .invalidBrokerFrame))
+                    break parsing
+                }
+                switch line {
+                case "PING":
+                    actions.append(.answerPing)
+                case "PONG":
+                    if let acknowledgement = state.acknowledgement {
+                        state.acknowledgement = nil
+                        actions.append(.confirm(acknowledgement))
+                    }
+                case let error where error.hasPrefix("-ERR"):
+                    let acknowledgement = state.acknowledgement
+                    state.acknowledgement = nil
+                    actions.append(.fail(acknowledgement, .brokerRejected))
+                    break parsing
+                default:
+                    // Initial INFO and optional +OK lines precede the PONG.
+                    continue
+                }
+            }
+            return actions
+        }
+    }
+
+    private func failPending(_ error: any Error) {
+        let acknowledgement = state.withLock { state in
+            defer { state.acknowledgement = nil }
+            return state.acknowledgement
+        }
+        acknowledgement?.fail(error)
+    }
+}
+
+/// The acknowledgement can be completed by an event-loop callback, the
+/// watchdog, or channel shutdown. A mutex keeps completion one-shot.
+private final class V2NATSPublishAcknowledgement: Sendable {
+    private let confirmation: EventLoopPromise<Void>
+    private let didResolve = Mutex(false)
+
+    init(eventLoop: any EventLoop) {
+        confirmation = eventLoop.makePromise(of: Void.self)
     }
 
     func awaitBrokerConfirmation() async throws {
         try await confirmation.futureResult.get()
     }
 
-    /// Called only by the channel's own event-loop watchdog.
-    func timeout() {
-        failIfPending(V2NATSPublishError.acknowledgementTimedOut)
+    func succeed() {
+        guard markResolved() else { return }
+        confirmation.succeed(())
     }
 
-    private func consumeLines(_ received: Data) -> InboundResolution? {
-        state.withLock { state in
-            guard !state.didResolve else { return nil }
-            state.pendingBytes.append(received)
-            while let delimiter = state.pendingBytes.range(of: Data([13, 10])) {
-                let line = String(data: state.pendingBytes[..<delimiter.lowerBound], encoding: .utf8)
-                state.pendingBytes.removeSubrange(..<delimiter.upperBound)
-                guard let line else {
-                    state.didResolve = true
-                    return .invalidFrame
-                }
-                switch line {
-                case "PONG":
-                    state.didResolve = true
-                    return .confirmed
-                case let error where error.hasPrefix("-ERR"):
-                    state.didResolve = true
-                    return .brokerRejected
-                default:
-                    // Initial INFO and optional +OK lines precede the PONG.
-                    continue
-                }
-            }
-            return nil
-        }
+    func fail(_ error: any Error) {
+        guard markResolved() else { return }
+        confirmation.fail(error)
     }
 
-    private func failIfPending(_ error: any Error) {
-        let shouldFail = state.withLock { state in
-            guard !state.didResolve else { return false }
-            state.didResolve = true
+    private func markResolved() -> Bool {
+        didResolve.withLock { didResolve in
+            guard !didResolve else { return false }
+            didResolve = true
             return true
-        }
-        if shouldFail {
-            confirmation.fail(error)
         }
     }
 }
@@ -197,19 +295,51 @@ private enum V2NATSPublishError: Error, Equatable, Sendable {
     case connectionClosedBeforeConfirmation
     case invalidBrokerFrame
     case brokerRejected
+    case overlappingPublish
 }
 
 public struct V2BestEffortFanoutPlanHintPublisher: V2FanoutPlanPublisher {
     private let durablePublisher: any V2FanoutPlanPublisher
-    private let hintPublisher: any V2FanoutPlanHintPublishing
+    private let hints: V2AsynchronousFanoutHintDispatcher
 
     public init(durablePublisher: any V2FanoutPlanPublisher, hintPublisher: any V2FanoutPlanHintPublishing) {
         self.durablePublisher = durablePublisher
-        self.hintPublisher = hintPublisher
+        hints = .init(publisher: hintPublisher)
     }
 
     public func publish(_ trigger: V2FanoutPlanTrigger) async throws {
         try await durablePublisher.publish(trigger)
-        try? await hintPublisher.publishHint(trigger)
+        hints.submit(trigger)
+    }
+}
+
+/// PostgreSQL publication is the correctness boundary. Optional broker PING /
+/// PONG latency belongs to one bounded background lane and never extends an
+/// outbox relay transaction or delays the next durable trigger.
+private final class V2AsynchronousFanoutHintDispatcher: @unchecked Sendable {
+    private let continuation: AsyncStream<V2FanoutPlanTrigger>.Continuation
+    private let worker: Task<Void, Never>
+
+    init(publisher: any V2FanoutPlanHintPublishing, capacity: Int = 256) {
+        precondition(capacity > 0)
+        let (stream, continuation) = AsyncStream<V2FanoutPlanTrigger>.makeStream(
+            bufferingPolicy: .bufferingNewest(capacity)
+        )
+        self.continuation = continuation
+        worker = Task {
+            for await trigger in stream {
+                guard !Task.isCancelled else { break }
+                try? await publisher.publishHint(trigger)
+            }
+        }
+    }
+
+    func submit(_ trigger: V2FanoutPlanTrigger) {
+        continuation.yield(trigger)
+    }
+
+    deinit {
+        continuation.finish()
+        worker.cancel()
     }
 }

@@ -87,9 +87,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                 }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, account_kind, revision, profile_updated_at, created_at)
+                    (source_event_id, source_user_id, public_handle, display_name, account_kind, profile_state, revision, profile_updated_at, created_at)
                     VALUES (\(bind: makeUUID()), \(bind: actorID), \(bind: identity.handle.rawValue),
-                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), \(bind: result.revision.rawValue), \(bind: changedAt), \(bind: changedAt))
+                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 'active', \(bind: result.revision.rawValue), \(bind: changedAt), \(bind: changedAt))
                     """).run()
             } else {
                 result = current

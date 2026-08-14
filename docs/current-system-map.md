@@ -40,23 +40,40 @@ flowchart LR
   不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync
   投影。通过 `@handle` 显式打开私聊时，客户端把该次已授权解析的资料和 direct room
   绑定到本机 SQLite，用于会话列表与详情标题；未知资料只显示“会话”。仅对 active direct
-  room，snapshot v11 会重建权威的对方公开资料；打开私聊时也会写入双方各一条有界资料
+  room，Snapshot V3（projection schema 31）会重建权威的对方公开资料；打开私聊时也会写入双方各一条有界资料
   投影。显示名变更与来源事件在同一 PostgreSQL 事务内写入控制面 outbox，gateway 按接收者
   预算投递、按 checkpoint 恢复，并在迁移 forwarding 期间镜像到目标 user shard。ClientKit
   始终优先使用该服务端同步资料，而非设备本地的显式查询缓存。群 roster 仍保持按需读取，
   不做资料 fan-out。
 - 非好友可以发起私聊，但陌生人消息在服务端持久化事务中按接收方设置和窗口限额准入。默认基线为每个发送者 24 小时 3 条；接收方可关闭此类消息。
 - 联系人页只展示 pending/accepted 关系的公开资料：关系本身来自本地 user-sync 投影，
-  资料读取带 `relationship` 授权上下文并以 100 条为上限。添加、接受、拒绝、撤销、删除
+  accepted/incoming/outgoing 各自以稳定 keyset 每页最多读取 50 条，资料 hydration 不越过当前页；
+  名称与 handle 的包含搜索通过 trigger 维护的单字/双字 character-gram FTS5 索引执行，不扫描
+  全量 profile；
+  资料网络读取带 `relationship` 授权上下文并以 100 条为上限。添加、接受、拒绝、撤销、删除
   与屏蔽先进入 durable social outbox；服务端 ACK 不会乐观修改联系人列表，下一次同步投影
   才是最终可见状态。好友资料可通过幂等 direct-room 打开操作跳转到会话页。
 - 撤回、编辑、reaction、read receipt、mute/freeze 与 moderation 都通过独立、幂等、可同步的命令/投影处理；UI 不以网络响应直接覆盖同步投影。
 
+## Snapshot V3 reset
+
+服务端以连续 checkpoint 驱动每用户 application-MVCC projection。reset 在固定 base sequence
+上按稳定 keyset 生成持久化小页，不再重放完整 `user_sync_log` 或在进程内保留完整快照对象。
+客户端逐页写入 SQLite shadow tables；服务端 ACK 成功后才原子替换 live projection。ACK 前崩溃
+会重用本地 manifest/shadow，过期拒绝则恢复 reset 前游标，因此 generation 与 UI 投影不会分叉。
+`user_sync_log` 只保留 checkpoint 之上的增量尾部与最小 replay window。有界 compactor 在
+token/receipt、迁移 fence、consumer inbox 稳定结果和 shared payload 引用均安全后推进
+retained floor 并分批删除前缀，不扫描历史设备。新设备或低于 floor 的 cursor 在实际 pull 时
+才进入 Snapshot V3；同一用户/profile/schema 可复用仍在 floor 之上的最新 artifact，再通过
+增量同步追上，generation/token/receipt 仍逐设备隔离。已撤销设备的 cursor 与 capability 由
+housekeeping 分批删除。控制投影的稳定
+幂等结果单独保存在 `user_projection_effects`，不再依赖可裁剪日志。
+
 ## 可选 NATS 提示层
 
-默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL 的 durable work；只有同时提供 `IM_V2_NATS_URL` 与 `IM_V2_NATS_SUBJECT` 时，才在持久化 plan 已发布后额外发出一个 Core NATS `CONNECT`/`PUB` JSON hint。可选 `IM_V2_NATS_TOKEN` 仅作为 CONNECT token。
+默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL durable work；启用 NATS 后，fan-out plan hint 仍是持久化完成后的可丢失优化。Hybrid 房间和 presence/typing 使用每个 gateway 一条复用 Core NATS 连接，只订阅本机当前观看/观察的作用域；所有命令以 `PING`/`PONG` 确认，连接失败或 broker 重启后按当前本机兴趣重放订阅。
 
-当前实现为刻意受限的最佳努力优化：每个 hint 新建连接，写入失败被抑制，且没有订阅端、连接复用/重连、NATS TLS/NKey、broker ACK 或 broker 健康指标。它不能确认 broker 已接收消息，也不参与完成、授权、去重或重试决定。NATS 不可用、提示丢失或重复时，durable polling 仍会处理同一 PostgreSQL 工作；代价只是额外延迟。把它用于高频群之前，必须补齐真实 broker 集成、认证/TLS、消费唤醒、可观测性和负载/故障证据。
+当前实现仍不参与完成、授权、去重或重试决定。前台 room hint mailbox、broker payload mailbox 和 pending ACK 均有硬上限；NATS 不可用、提示丢失或重复时，durable polling/cursor pull 会恢复。尚缺 NATS TLS/NKey、broker/reconnect/consumer-lag 指标与代表性负载/故障证据，因此生产热点群仍不能只依赖该提示层。
 
 ## 文档使用方式
 

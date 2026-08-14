@@ -205,19 +205,21 @@ private struct V2SignInView: View {
 
     var body: some View {
         Form {
-            Section {
-                Button {
-                    run { await store.signInWithPasskey() }
-                } label: {
-                    Image(systemName: "key.fill")
+            if store.isPasskeyAuthenticationEnabled {
+                Section {
+                    Button {
+                        run { await store.signInWithPasskey() }
+                    } label: {
+                        Image(systemName: "key.fill")
+                    }
+                    .accessibilityLabel("使用 Passkey 登录")
+                    .accessibilityIdentifier("v2.passkey.sign-in")
+                } footer: {
+                    Text("系统会使用 Face ID、Touch ID 或设备密码。")
                 }
-                .accessibilityLabel("使用 Passkey 登录")
-                .accessibilityIdentifier("v2.passkey.sign-in")
-            } footer: {
-                Text("Passkey 是推荐方式；系统会使用 Face ID、Touch ID 或设备密码。")
             }
 
-            Section("密码兜底") {
+            Section(store.isPasskeyAuthenticationEnabled ? "密码兜底" : "账号密码") {
                 TextField("账号", text: $accountHandle)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

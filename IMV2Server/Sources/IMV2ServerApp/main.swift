@@ -15,6 +15,8 @@ enum IMV2ServerApp {
     static func main() async throws {
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let app = try await Application.make(.production)
+        var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
+        var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         do {
             app.databases.use(
                 try .postgres(
@@ -44,6 +46,37 @@ enum IMV2ServerApp {
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
+            let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
+                storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
+            })
+            var seenSyncStores: Set<String> = []
+            var snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder] = []
+            var userProjectionWorkers: [PostgresV2UserProjectionWorker] = []
+            var projectionVersionGCWorkers: [PostgresV2ProjectionVersionGCWorker] = []
+            var syncLogCompactionWorkers: [PostgresV2UserSyncLogCompactionWorker] = []
+            var userShardMetricsSources: [any V2DurableWorkMetricsSource] = []
+            let syncHousekeepingWorkers: [V2SyncHousekeepingWorker] = zip(configuration.userShardStorage, shardLocations).compactMap { storage, location in
+                let key = storage.databaseURL + "\u{0}" + storage.schema
+                guard seenSyncStores.insert(key).inserted else { return nil }
+                snapshotArtifactBuilders.append(.init(database: location.database, schema: location.schema))
+                userProjectionWorkers.append(.init(
+                    database: location.database, schema: location.schema,
+                    batchSize: configuration.workerBatchSize,
+                    retryPolicy: configuration.durableRetryPolicy
+                ))
+                projectionVersionGCWorkers.append(.init(database: location.database, schema: location.schema))
+                syncLogCompactionWorkers.append(.init(
+                    database: location.database, schema: location.schema
+                ))
+                userShardMetricsSources.append(
+                    PostgresV2UserShardDurableWorkMetricsSource(
+                        database: location.database, schema: location.schema
+                    )
+                )
+                return V2SyncHousekeepingWorker(
+                    store: PostgresV2SyncHousekeepingStore(database: location.database, schema: location.schema)
+                )
+            }
 
             // Metrics intentionally use a distinct loopback-only HTTP
             // listener. The native TLS gateway and public media edge must
@@ -54,9 +87,14 @@ enum IMV2ServerApp {
             let connectionRegistry = V2DeviceConnectionRegistry()
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
-            let durableWorkMetrics = PostgresV2DurableWorkMetricsSource(
-                database: database,
-                gatewayNodeID: configuration.gatewayNodeID
+            let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
+                source: V2AggregateDurableWorkMetricsSource(sources: [
+                    PostgresV2DurableWorkMetricsSource(
+                        database: database,
+                        gatewayNodeID: configuration.gatewayNodeID,
+                        includesUserShardMetrics: false
+                    )
+                ] + userShardMetricsSources)
             )
             V2VaporMetricsRoutes.register(
                 on: app,
@@ -73,7 +111,10 @@ enum IMV2ServerApp {
             try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
             let userShardMigrations = PostgresV2UserShardMigrationStore(database: database)
             let userShardShadowForwarder = V2PostgresUserShardProjectionShadowForwarder(
-                control: database, router: userShardRouter, migrations: userShardMigrations, registry: userShardStorage
+                control: database, router: userShardRouter,
+                migrations: userShardMigrations, registry: userShardStorage,
+                routeFence: userShardRouter,
+                coLocatedControlBuckets: coLocatedControlBuckets
             )
             let sendMessage = V2SendMessageService(
                 store: PostgresV2RoomWriteStore(
@@ -133,27 +174,29 @@ enum IMV2ServerApp {
             case .nats(let nats):
                 let broker = V2NATSGroupEventWakeBroker(
                     configuration: nats,
-                    receiveWake: { wake in
-                        await connectionRegistry.notifyForegroundGroupAvailable(
+                    receiveWake: { [weak connectionRegistry] wake in
+                        await connectionRegistry?.notifyForegroundGroupAvailable(
                             roomID: wake.roomID,
                             highWatermark: wake.highWatermark
                         )
                     }
                 )
+                natsGroupWakeBroker = broker
                 await connectionRegistry.configureForegroundGroupInterestManager(broker)
                 let liveActivityBroker = V2NATSLiveActivityBroker(
                     configuration: nats,
-                    receivePresence: { userID, isOnline, expiresAt in
-                        await connectionRegistry.receivePresence(
+                    receivePresence: { [weak connectionRegistry] userID, isOnline, expiresAt in
+                        await connectionRegistry?.receivePresence(
                             targetUserID: userID,
                             isOnline: isOnline,
                             expiresAt: expiresAt
                         )
                     },
-                    receiveTyping: { state in
-                        await connectionRegistry.receiveTyping(state)
+                    receiveTyping: { [weak connectionRegistry] state in
+                        await connectionRegistry?.receiveTyping(state)
                     }
                 )
+                natsLiveActivityBroker = liveActivityBroker
                 await connectionRegistry.configureLiveActivityBroker(liveActivityBroker)
                 groupEventWakePublisher = broker
                 foregroundGroupEventHintPublisher = broker
@@ -183,7 +226,8 @@ enum IMV2ServerApp {
                         store: PostgresV2ModerationStore(database: database),
                         safetyActorUserID: safetyActor,
                         capacityProfile: configuration.capacityProfile
-                    )
+                    ),
+                    retryPolicy: configuration.durableRetryPolicy
                 )
             } else {
                 contentReviewWorker = nil
@@ -223,13 +267,15 @@ enum IMV2ServerApp {
                 conversationCapabilities: conversationCapabilities,
                 groupCapabilities: groupCapabilities,
                 forwardMessages: forwardMessages,
-                sync: .init(store: V2RoutedSyncStore(router: userShardRouter, registry: userShardStorage)),
+                sync: .init(store: V2RoutedSyncStore(
+                    router: userShardRouter, registry: userShardStorage,
+                    routeFence: userShardRouter,
+                    coLocatedControlBuckets: coLocatedControlBuckets,
+                    capabilityProfile: configuration.capabilityProfile
+                )),
                 telemetry: telemetry
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(database: database)
-            let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
-                storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
-            })
             let durableFanoutPublisher = V2LocalFanoutPlanPublisher(
                 planner: .init(
                     store: PostgresV2FanoutPlanStore(database: database, router: userShardRouter),
@@ -289,6 +335,11 @@ enum IMV2ServerApp {
                 shadowForwarder: userShardShadowForwarder,
                 liveNotifier: connectionRegistry
             )
+            let readReceiptPreferencePropagationWorker = V2ReadReceiptPreferencePropagationWorker(
+                database: database,
+                shadowForwarder: userShardShadowForwarder,
+                liveNotifier: connectionRegistry
+            )
             let deviceRevocationWorker = V2DeviceRevocationWorker(
                 store: V2PostgresDeviceRevocationEventStore(database: database),
                 registry: connectionRegistry,
@@ -300,6 +351,9 @@ enum IMV2ServerApp {
             let mediaRetentionWorker = try V2MediaRetentionWorker(
                 store: PostgresV2MediaRetentionStore(database: database),
                 withdrawnRetention: TimeInterval(configuration.mediaWithdrawnRetentionSeconds)
+            )
+            let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
+                store: PostgresV2ControlPlaneHousekeepingStore(database: database)
             )
             let userShardMigrationRetentionWorker = V2UserShardMigrationRetentionWorker(
                 store: PostgresV2UserShardMigrationStore(database: database),
@@ -341,7 +395,10 @@ enum IMV2ServerApp {
             let server = try V2TLSGatewayServer(
                 configuration: configuration.tls,
                 connectionFactory: factory,
+                maximumConnections: configuration.maximumConnections,
                 maximumQueuedInboundBytes: configuration.maximumQueuedInboundBytes,
+                maximumQueuedInboundChunks: configuration.maximumQueuedInboundChunks,
+                authenticationTimeoutMilliseconds: configuration.authenticationTimeoutMilliseconds,
                 idleTimeoutMilliseconds: configuration.idleTimeoutMilliseconds,
                 transportMetrics: transportMetrics
             )
@@ -374,12 +431,38 @@ enum IMV2ServerApp {
             // transactions; serially placing planning behind it would add the
             // entire drain duration to a newly committed room event.
             let fanoutPlanningTask = Task {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
                 while !Task.isCancelled {
+                    var didWork = false
+                    for worker in userProjectionWorkers {
+                        do {
+                            let report = try await worker.runOnce()
+                            didWork = didWork || report.claimed
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            logger.error("IM V2 user snapshot projection failed; retrying")
+                        }
+                    }
+                    for builder in snapshotArtifactBuilders {
+                        do {
+                            let report = try await builder.runOnce()
+                            didWork = didWork || report.claimed
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            logger.error("IM V2 snapshot artifact build failed; retrying")
+                        }
+                    }
                     do {
-                        _ = try await fanoutPipeline.runRelayAndPlanOnce(
+                        let report = try await fanoutPipeline.runRelayAndPlanOnce(
                             limit: configuration.workerBatchSize,
-                            concurrency: configuration.capacityProfile.limits.maxPlannerConcurrency
+                            concurrency: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxPlannerConcurrency
                         )
+                        didWork = report.claimedCount > 0 || report.publishedCount > 0 ||
+                            report.releasedCount > 0 || report.pausedCount > 0
                     } catch is CancellationError {
                         break
                     } catch {
@@ -390,14 +473,15 @@ enum IMV2ServerApp {
                         // independent from fan-out delivery correctness; keep
                         // it beside the short planning pass rather than after
                         // a potentially long user-projection drain.
-                        _ = try await groupEventWakeRelay.runOnce(limit: configuration.workerBatchSize)
+                        let report = try await groupEventWakeRelay.runOnce(limit: configuration.workerBatchSize)
+                        didWork = didWork || report.claimed > 0 || report.published > 0 || report.retryScheduled > 0
                     } catch is CancellationError {
                         break
                     } catch {
                         logger.error("IM V2 group-event wake relay failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -411,19 +495,26 @@ enum IMV2ServerApp {
             // delayed delivery pass directly increases a standard group's
             // recipient-visible convergence age.
             let fanoutDeliveryTask = Task {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
                 while !Task.isCancelled {
+                    var didWork = false
                     do {
-                        _ = try await fanoutPipeline.runDeliveryOnce(
+                        let report = try await fanoutPipeline.runDeliveryOnce(
                             claimLimit: configuration.fanoutDeliveryClaimBatchSize,
-                            concurrency: configuration.capacityProfile.limits.maxDeliveryConcurrency
+                            concurrency: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxDeliveryConcurrency
                         )
+                        didWork = report.claimedCount > 0 || report.committedCount > 0 ||
+                            report.staleCount > 0 || report.staleRouteCount > 0 ||
+                            report.releasedCount > 0 || report.pausedCount > 0
                     } catch is CancellationError {
                         break
                     } catch {
                         logger.error("IM V2 fan-out delivery failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -436,9 +527,15 @@ enum IMV2ServerApp {
             // message's recipient delivery latency or delay media retention.
             let contentReviewTask = Task {
                 guard let contentReviewWorker else { return }
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
                 while !Task.isCancelled {
+                    var didWork = false
                     do {
-                        _ = try await contentReviewWorker.runOnce(limit: configuration.workerBatchSize)
+                        let report = try await contentReviewWorker.runOnce(limit: configuration.workerBatchSize)
+                        didWork = report.claimedCount > 0 || report.resolvedCount > 0 ||
+                            report.redactedCount > 0 || report.releasedCount > 0
                     } catch is CancellationError {
                         break
                     } catch {
@@ -447,7 +544,34 @@ enum IMV2ServerApp {
                         logger.error("IM V2 content-review worker failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
+            // Push owns external-network latency and retry policy. It must not
+            // serialize revocation, propagation, or database housekeeping.
+            let pushWakeTask = Task {
+                guard let pushWakeWorker else { return }
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
+                while !Task.isCancelled {
+                    var didWork = false
+                    do {
+                        let report = try await pushWakeWorker.runOnce(limit: configuration.workerBatchSize)
+                        didWork = report.admittedCount > 0 || report.sentCount > 0 || report.releasedCount > 0
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        // Provider and endpoint detail must never reach logs.
+                        logger.error("IM V2 Push wake worker failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -457,38 +581,44 @@ enum IMV2ServerApp {
             }
             let maintenanceTask = Task {
                 var nextMaintenanceAt: Date?
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
                 while !Task.isCancelled {
+                    var didWork = false
                     do {
                         // Profile changes are a distinct direct-contact
                         // graph from room-event fan-out. Its work budget is
                         // per recipient, so one very connected account never
                         // turns a maintenance tick into an unbounded loop.
-                        _ = try await directRoomProfilePropagationWorker.runOnce(
+                        let report = try await directRoomProfilePropagationWorker.runOnce(
                             limit: configuration.workerBatchSize
                         )
+                        didWork = report.claimedUpdateCount > 0 || report.projectedRecipientCount > 0 ||
+                            report.completedUpdateCount > 0
                     } catch is CancellationError {
                         break
                     } catch {
                         logger.error("IM V2 direct-profile propagation failed; retrying")
                     }
                     do {
-                        _ = try await deviceRevocationWorker.runOnce(limit: configuration.workerBatchSize)
+                        let report = try await readReceiptPreferencePropagationWorker.runOnce(
+                            limit: configuration.workerBatchSize
+                        )
+                        didWork = didWork || report.claimedOperationCount > 0 ||
+                            report.projectedRoomCount > 0 || report.completedOperationCount > 0 ||
+                            report.releasedOperationCount > 0 || report.pausedOperationCount > 0
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 read-receipt preference propagation failed; retrying")
+                    }
+                    do {
+                        didWork = try await deviceRevocationWorker.runOnce(limit: configuration.workerBatchSize) > 0 || didWork
                     } catch is CancellationError {
                         break
                     } catch {
                         logger.error("IM V2 device revocation worker failed; retrying")
-                    }
-                    if let pushWakeWorker {
-                        do {
-                            _ = try await pushWakeWorker.runOnce(limit: configuration.workerBatchSize)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            // Provider and endpoint detail must never reach a
-                            // log line. The durable worker releases only Push
-                            // work and cannot delay sync/fan-out.
-                            logger.error("IM V2 Push wake worker failed; retrying")
-                        }
                     }
                     let maintenanceNow = Date()
                     if maintenanceCadence.isDue(now: maintenanceNow, nextScheduledAt: nextMaintenanceAt) {
@@ -529,6 +659,45 @@ enum IMV2ServerApp {
                             logger.error("IM V2 media retention worker failed; retrying")
                         }
                         do {
+                            _ = try await controlPlaneHousekeepingWorker.runOnce(
+                                limit: configuration.workerBatchSize
+                            )
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 control-plane housekeeping failed; retrying")
+                        }
+                        for worker in syncHousekeepingWorkers {
+                            do {
+                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 sync capability housekeeping failed; retrying")
+                            }
+                        }
+                        for worker in projectionVersionGCWorkers {
+                            do {
+                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 snapshot projection history cleanup failed; retrying")
+                            }
+                        }
+                        for worker in syncLogCompactionWorkers {
+                            do {
+                                _ = try await worker.runOnce(
+                                    userLimit: min(8, configuration.workerBatchSize),
+                                    rowLimit: configuration.workerBatchSize
+                                )
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 user sync-log compaction failed; retrying")
+                            }
+                        }
+                        do {
                             _ = try await userShardMigrationRetentionWorker.runOnce(limit: configuration.workerBatchSize)
                         } catch is CancellationError {
                             break
@@ -541,7 +710,7 @@ enum IMV2ServerApp {
                         nextMaintenanceAt = maintenanceCadence.nextScheduledAt(after: maintenanceNow)
                     }
                     do {
-                        try await Task.sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds))
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -553,17 +722,25 @@ enum IMV2ServerApp {
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
             contentReviewTask.cancel()
+            pushWakeTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
             await foregroundGroupEventHints.finish()
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value
             await contentReviewTask.value
+            await pushWakeTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
+            await connectionRegistry.detachForegroundGroupInterestManager()
+            await connectionRegistry.detachLiveActivityBroker()
+            await natsLiveActivityBroker?.shutdown()
+            await natsGroupWakeBroker?.shutdown()
             try await server.shutdown()
             try await app.asyncShutdown()
         } catch {
+            await natsLiveActivityBroker?.shutdown()
+            await natsGroupWakeBroker?.shutdown()
             try? await app.asyncShutdown()
             throw error
         }

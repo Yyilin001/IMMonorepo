@@ -5,6 +5,34 @@ import Testing
 
 @Suite("V2 content review worker")
 struct V2ContentReviewWorkerTests {
+    @Test("trusted room control forwards once to the privileged moderation store")
+    func trustedRoomControlForwardsWithoutRecursion() async throws {
+        let moderationStore = RecordingTrustedModerationStore()
+        let service = V2TrustedSafetyModerationService(
+            store: moderationStore,
+            safetyActorUserID: try .init("00000000-0000-0000-0000-000000000793"),
+            capacityProfile: try reviewTestProfile(),
+            identifiers: .init(makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000794")! })
+        )
+        let request = try V2TrustedSafetyRoomControl(
+            roomID: .init("00000000-0000-0000-0000-000000000791"),
+            operationID: .init("00000000-0000-0000-0000-000000000792"),
+            action: .freezeRoom,
+            reasonCode: .init("safety_review")
+        )
+
+        let outcome = try await service.apply(request)
+        let command = try #require(await moderationStore.command())
+
+        #expect(command.action == .freezeRoom)
+        #expect(command.messageID == nil)
+        guard case .applied(let result) = outcome else {
+            Issue.record("expected the room-control command to be applied")
+            return
+        }
+        #expect(result.operationID == request.operationID)
+    }
+
     @Test("a violation uses the stable message ID as its trusted redaction operation")
     func violationRedactsAndResolves() async throws {
         let input = try V2ContentReviewInput(
@@ -34,7 +62,8 @@ struct V2ContentReviewWorkerTests {
         #expect(command.action == .redactMessage)
         #expect(command.messageID == input.messageID)
         #expect(command.operationID.rawValue == input.messageID.rawValue)
-        #expect(await reviewStore.resolvedVerdicts() == [V2ContentReviewVerdict.violation(category: "configured_policy", severity: 4, confidence: 1)])
+        #expect(await reviewStore.stagedFindings() == [try .init(category: "configured_policy", severity: 4, confidence: 1)])
+        #expect(await reviewStore.resolvedVerdicts() == [try V2ContentReviewVerdict.violation(.init(category: "configured_policy", severity: 4, confidence: 1))])
     }
 
     @Test("a stale content revision is superseded without calling moderation")
@@ -82,7 +111,35 @@ struct V2ContentReviewWorkerTests {
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 1, redactedCount: 0, releasedCount: 0))
         #expect(await reviewStore.resolvedVerdicts().isEmpty)
-        #expect(await reviewStore.releasedLeaseCount() == 0)
+        #expect(await reviewStore.retryDispositions().isEmpty)
+    }
+
+    @Test("an applied violation resolves against the claim without treating its own tombstone as superseded")
+    func appliedViolationDoesNotInvalidateItsOwnReview() async throws {
+        let input = try V2ContentReviewInput(
+            messageID: .init("00000000-0000-0000-0000-000000000819"),
+            roomID: .init("00000000-0000-0000-0000-00000000081a"),
+            contentRevision: 1,
+            text: "blocked",
+            mediaCount: 0
+        )
+        let reviewStore = RecordingContentReviewStore(
+            leases: [.init(input: input, claimToken: UUID())],
+            currentResults: [true, false]
+        )
+        let moderation = V2TrustedSafetyModerationService(
+            store: RecordingTrustedModerationStore(),
+            safetyActorUserID: try .init("00000000-0000-0000-0000-00000000081b"),
+            capacityProfile: try reviewTestProfile()
+        )
+        let worker = try V2ContentReviewWorker(
+            store: reviewStore,
+            reviewer: V2ConfiguredContentReviewer(violatingTerms: ["blocked"]),
+            moderation: moderation
+        )
+
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 1, redactedCount: 1, releasedCount: 0))
+        #expect(await reviewStore.resolvedVerdicts().count == 1)
     }
 
     @Test("a reviewer failure releases the lease so durable work can be retried")
@@ -107,7 +164,10 @@ struct V2ContentReviewWorkerTests {
         )
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 0, redactedCount: 0, releasedCount: 1))
-        #expect(await reviewStore.releasedLeaseCount() == 1)
+        guard case .retry = try #require(await reviewStore.retryDispositions().first) else {
+            Issue.record("expected a delayed retry")
+            return
+        }
         #expect(await reviewStore.resolvedVerdicts().isEmpty)
     }
 
@@ -143,7 +203,7 @@ struct V2ContentReviewWorkerTests {
         )
 
         #expect(try await worker.runOnce(limit: 2) == .init(claimedCount: 2, resolvedCount: 1, redactedCount: 0, releasedCount: 1))
-        #expect(await reviewStore.releasedLeaseCount() == 1)
+        #expect(await reviewStore.retryDispositions().count == 1)
         #expect(await reviewStore.resolvedVerdicts() == [.clear])
     }
 
@@ -157,33 +217,83 @@ struct V2ContentReviewWorkerTests {
             mediaCount: 0
         )
 
-        #expect(try await V2ConfiguredContentReviewer(violatingTerms: ["CAFÉ"]).review(input) == .violation(category: "configured_policy", severity: 4, confidence: 1))
+        #expect(try await V2ConfiguredContentReviewer(violatingTerms: ["CAFÉ"]).review(input) == .violation(.init(category: "configured_policy", severity: 4, confidence: 1)))
+    }
+
+    @Test("an exhausted review attempt is durably paused instead of hot-looped")
+    func exhaustedReviewPauses() async throws {
+        let input = try V2ContentReviewInput(
+            messageID: .init("00000000-0000-0000-0000-000000000841"),
+            roomID: .init("00000000-0000-0000-0000-000000000842"),
+            contentRevision: 1,
+            text: "provider unavailable",
+            mediaCount: 0
+        )
+        let reviewStore = RecordingContentReviewStore(leases: [
+            .init(input: input, claimToken: UUID(), attempt: 2)
+        ])
+        let moderation = V2TrustedSafetyModerationService(
+            store: RecordingTrustedModerationStore(),
+            safetyActorUserID: try .init("00000000-0000-0000-0000-000000000843"),
+            capacityProfile: try reviewTestProfile()
+        )
+        let worker = try V2ContentReviewWorker(
+            store: reviewStore,
+            reviewer: FailingContentReviewer(),
+            moderation: moderation,
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0)
+        )
+
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 0, redactedCount: 0, releasedCount: 1))
+        #expect(await reviewStore.retryDispositions() == [.pause])
+    }
+
+    @Test("review findings reject values that cannot satisfy persistence constraints")
+    func reviewFindingIsBoundedAtTheProviderBoundary() {
+        #expect(throws: V2ContentReviewWorkerError.invalidFindingCategory) {
+            try V2ContentReviewFinding(category: "not valid", severity: 1, confidence: 0.5)
+        }
+        #expect(throws: V2ContentReviewWorkerError.invalidFindingSeverity) {
+            try V2ContentReviewFinding(category: "policy", severity: 5, confidence: 0.5)
+        }
+        #expect(throws: V2ContentReviewWorkerError.invalidFindingConfidence) {
+            try V2ContentReviewFinding(category: "policy", severity: 1, confidence: .nan)
+        }
     }
 }
 
 private actor RecordingContentReviewStore: V2ContentReviewStore {
     private let leases: [V2ContentReviewLease]
-    private var currentResults: [Bool]
+    private var validationResults: [V2ContentReviewLeaseValidation]
     private var resolved: [V2ContentReviewVerdict] = []
-    private var releasedLeaseCountValue = 0
+    private var staged: [V2ContentReviewFinding] = []
+    private var scheduledRetries: [V2DurableRetryDisposition] = []
     init(leases: [V2ContentReviewLease], current: Bool = true) {
         self.leases = leases
-        self.currentResults = [current]
+        self.validationResults = [current ? .current : .superseded]
     }
     init(leases: [V2ContentReviewLease], currentResults: [Bool]) {
         self.leases = leases
-        self.currentResults = currentResults
+        self.validationResults = currentResults.map { $0 ? .current : .superseded }
     }
     func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2ContentReviewLease] { Array(leases.prefix(limit)) }
-    func isCurrent(_: V2ContentReviewLease, now _: Date) -> Bool {
-        guard let result = currentResults.first else { return false }
-        if currentResults.count > 1 { currentResults.removeFirst() }
+    func validateAndRenew(_: V2ContentReviewLease, now _: Date, leaseDuration _: TimeInterval) -> V2ContentReviewLeaseValidation {
+        guard let result = validationResults.first else { return .lostLease }
+        if validationResults.count > 1 { validationResults.removeFirst() }
         return result
     }
-    func resolve(_: V2ContentReviewLease, verdict: V2ContentReviewVerdict, now _: Date) { resolved.append(verdict) }
-    func release(_: V2ContentReviewLease) { releasedLeaseCountValue += 1 }
+    func resolve(_: V2ContentReviewLease, verdict: V2ContentReviewVerdict, now _: Date) -> Bool {
+        resolved.append(verdict)
+        return true
+    }
+    func stageViolation(_: V2ContentReviewLease, finding: V2ContentReviewFinding) -> Bool {
+        staged.append(finding)
+        return true
+    }
+    func scheduleRetry(_: V2ContentReviewLease, disposition: V2DurableRetryDisposition, now _: Date) { scheduledRetries.append(disposition) }
     func resolvedVerdicts() -> [V2ContentReviewVerdict] { resolved }
-    func releasedLeaseCount() -> Int { releasedLeaseCountValue }
+    func stagedFindings() -> [V2ContentReviewFinding] { staged }
+    func retryDispositions() -> [V2DurableRetryDisposition] { scheduledRetries }
 }
 
 private struct FailingContentReviewer: V2ContentReviewing {

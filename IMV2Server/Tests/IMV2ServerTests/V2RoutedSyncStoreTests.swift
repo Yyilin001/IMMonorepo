@@ -50,8 +50,7 @@ private struct RoutedSyncStoreFake: V2SyncStore {
     }
 
     func acknowledge(userID _: UserID, deviceID _: DeviceID, generation _: UInt64, highestContiguousSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) async throws { fatalError("not used") }
-    func stageReset(userID _: UserID, deviceID _: DeviceID, snapshot _: V2SnapshotStage, now _: Date) async throws -> UInt64 { fatalError("not used") }
     func fetchSnapshotManifest(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, now _: Date) async throws -> V2SnapshotManifest { fatalError("not used") }
-    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, manifestDigest _: String, index _: UInt32, now _: Date) async throws -> V2SnapshotPage { fatalError("not used") }
+    func fetchSnapshotPage(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, rootDigest _: String, index _: UInt32, now _: Date) async throws -> V2SnapshotPage { fatalError("not used") }
     func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, baseSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) async throws { fatalError("not used") }
 }

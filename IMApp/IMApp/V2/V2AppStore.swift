@@ -176,6 +176,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
+    var isPasskeyAuthenticationEnabled: Bool {
+        configuration?.isPasskeyAuthenticationEnabled == true
+    }
 
     init(
         startupMode: StartupMode = .production,
@@ -339,10 +342,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
     func signInWithPasskey() async {
         guard let configuration,
+              configuration.isPasskeyAuthenticationEnabled,
               let bootstrapper,
               let deviceIdentityProvider,
               let localKeychainService
-        else { return }
+        else {
+            authenticationMessage = "Passkey 服务尚未启用。"
+            return
+        }
         let attemptGeneration = beginAuthenticationAttempt()
         do {
             let passkeyService = try V2HTTPPasskeyAssertionService(
@@ -606,7 +613,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let attachmentStager = try? V2FileConversationAttachmentStager(directory: try Self.attachmentStagingDirectory())
         await attachmentStager?.discardOrphanedStagedFiles()
         try Task.checkCancellation()
-        await realtime.mediaCacheMaintenance.discardOrphanedTemporaryFiles()
+        await realtime.mediaCacheMaintenance.performMaintenance()
         try Task.checkCancellation()
         let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
@@ -615,39 +622,53 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let conversationDataSource = V2GRDBConversationDataSource(localStore: localStore)
         let contactsDataSource = V2GRDBContactsDataSource(
             localStore: localStore,
-            profiles: realtime.profileRepository
+            profiles: realtime.profileRepository,
+            currentUserID: userID
         )
-        let conversations = V2ConversationListStore(
-            dataSource: conversationDataSource,
-            messageSearcher: conversationDataSource,
+        let conversationEnvironment = V2ConversationFeatureEnvironment(
             userID: userID.rawValue,
-            sender: realtime.sender,
-            messageWithdrawer: realtime.messageWithdrawer,
-            messageReactionChanger: realtime.messageReactionChanger,
-            messageEditor: realtime.messageEditor,
-            readReceiptReporter: realtime.readReceiptReporter,
-            conversationStateChanger: realtime.conversationStateChanger,
-            messageFavoriter: realtime.messageFavoriter,
-            groupMessagePinner: realtime.groupMessagePinner,
-            messageForwarder: realtime.messageForwarder,
-            groupAnnouncementManager: realtime.groupAnnouncementManager,
-            groupMemberRoleChanger: realtime.groupMemberRoleChanger,
-            groupRolePolicyChanger: realtime.groupRolePolicyChanger,
-            groupReadReceiptReader: realtime.groupReadReceiptReader,
-            conversationLiveActivity: realtime.conversationLiveActivity,
-            directConversationOpener: realtime.directConversationOpener,
-            publicIdentityResolver: publicIdentityDirectory,
-            groupConversationCreator: realtime.groupConversationCreator,
-            groupMemberDirectory: realtime.groupMemberDirectory,
-            groupMembershipChanger: realtime.groupMembershipChanger,
-            groupMemberMuter: realtime.groupMemberMuter,
-            moderatedGroupMemberRemover: realtime.moderatedGroupMemberRemover,
-            attachmentStager: attachmentStager,
-            attachmentUploader: realtime.attachmentUploader,
-            mediaDownloader: realtime.mediaDownloader,
-            projectionChangeNotifier: realtime.projectionChangeNotifier,
-            activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer
+            projections: .init(
+                dataSource: conversationDataSource,
+                messageSearcher: conversationDataSource
+            ),
+            messages: .init(
+                sender: realtime.sender,
+                withdrawer: realtime.messageWithdrawer,
+                reactionChanger: realtime.messageReactionChanger,
+                editor: realtime.messageEditor,
+                readReceiptReporter: realtime.readReceiptReporter,
+                stateChanger: realtime.conversationStateChanger,
+                favoriter: realtime.messageFavoriter,
+                groupPinner: realtime.groupMessagePinner,
+                forwarder: realtime.messageForwarder
+            ),
+            groups: .init(
+                announcementManager: realtime.groupAnnouncementManager,
+                memberRoleChanger: realtime.groupMemberRoleChanger,
+                rolePolicyChanger: realtime.groupRolePolicyChanger,
+                readReceiptReader: realtime.groupReadReceiptReader,
+                conversationCreator: realtime.groupConversationCreator,
+                memberDirectory: realtime.groupMemberDirectory,
+                membershipChanger: realtime.groupMembershipChanger,
+                memberMuter: realtime.groupMemberMuter,
+                moderatedMemberRemover: realtime.moderatedGroupMemberRemover
+            ),
+            discovery: .init(
+                directConversationOpener: realtime.directConversationOpener,
+                publicIdentityResolver: publicIdentityDirectory
+            ),
+            media: .init(
+                attachmentStager: attachmentStager,
+                attachmentUploader: realtime.attachmentUploader,
+                downloader: realtime.mediaDownloader
+            ),
+            runtime: .init(
+                liveActivity: realtime.conversationLiveActivity,
+                projectionChangeNotifier: realtime.projectionChangeNotifier,
+                activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer
+            )
         )
+        let conversations = V2ConversationListStore(environment: conversationEnvironment)
         let privacySettings = V2PrivacySettingsStore(
             reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
             updater: realtime.strangerMessagePreferenceUpdater,

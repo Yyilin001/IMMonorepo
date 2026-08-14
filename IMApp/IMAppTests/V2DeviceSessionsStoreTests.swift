@@ -49,7 +49,9 @@ private actor DeviceSessionStoreManager: V2ClientDeviceSessionManaging {
     init(sessions: [V2ClientDeviceSession], revokeError: V2ClientDeviceSessionError? = nil) {
         storedSessions = sessions; self.revokeError = revokeError
     }
-    func list() -> [V2ClientDeviceSession] { storedSessions }
+    func list(cursor _: String?, pageSize _: Int) -> V2ClientDeviceSessionPage {
+        .init(sessions: storedSessions, nextCursor: nil)
+    }
     func revoke(deviceID: DeviceID, operationID: UUID) throws {
         if let revokeError { throw revokeError }
         recorded = .init(deviceID: deviceID, operationID: operationID)

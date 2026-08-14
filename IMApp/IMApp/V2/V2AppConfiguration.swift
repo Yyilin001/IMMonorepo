@@ -5,6 +5,9 @@ struct V2AppConfiguration: Sendable {
     let accountBaseURL: URL
     let realtimeEndpoint: V2RealtimeEndpoint
     let passkeyRelyingPartyID: String
+    /// Product capability gate. A relying-party identifier alone does not
+    /// prove the server has deployed challenge storage and WebAuthn checks.
+    let isPasskeyAuthenticationEnabled: Bool
     let keychainService: String
     let pushEndpointEnvironment: V2ClientPushEndpointEnvironment
 
@@ -44,6 +47,7 @@ struct V2AppConfiguration: Sendable {
             realtimeEndpoint = try V2RealtimeEndpoint(host: gatewayHost, port: gatewayPort)
         }
         self.passkeyRelyingPartyID = passkeyRelyingPartyID
+        isPasskeyAuthenticationEnabled = (bundle.object(forInfoDictionaryKey: "IMV2PasskeyAuthenticationEnabled") as? Bool) ?? false
         guard let rawPushEnvironment = bundle.object(forInfoDictionaryKey: "IMV2PushEnvironment") as? String,
               let pushEndpointEnvironment = V2ClientPushEndpointEnvironment(rawValue: rawPushEnvironment)
         else { throw V2AppConfigurationError.invalidPushEnvironment }

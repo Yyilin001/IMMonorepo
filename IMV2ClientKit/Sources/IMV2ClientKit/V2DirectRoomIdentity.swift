@@ -26,12 +26,15 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
     public let revision: UInt64
     public let updatedAt: Date
 
-    public init(snapshotProjection: V2SnapshotDirectRoomProfileProjection) {
-        sourceEventID = snapshotProjection.sourceEventID
-        roomID = snapshotProjection.roomID
-        publicIdentity = snapshotProjection.publicIdentity
-        revision = snapshotProjection.revision
-        updatedAt = snapshotProjection.updatedAt
+    public init(
+        sourceEventID: EventID, roomID: RoomID,
+        publicIdentity: V2PublicIdentity, revision: UInt64, updatedAt: Date
+    ) {
+        self.sourceEventID = sourceEventID
+        self.roomID = roomID
+        self.publicIdentity = publicIdentity
+        self.revision = revision
+        self.updatedAt = updatedAt
     }
 
     public init(record: V2ClientSyncRecord) throws {

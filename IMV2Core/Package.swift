@@ -10,8 +10,14 @@ let package = Package(
     products: [
         .library(name: "IMV2Core", targets: ["IMV2Core"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.9.0"),
+    ],
     targets: [
-        .target(name: "IMV2Core"),
+        .target(
+            name: "IMV2Core",
+            dependencies: [.product(name: "Crypto", package: "swift-crypto")]
+        ),
         .testTarget(name: "IMV2CoreTests", dependencies: ["IMV2Core"]),
     ]
 )

@@ -1,7 +1,7 @@
 # IM V2 实现审计与实施路线图
 
-审计日期：2026-07-26
-审计基线：`main` 分支的当前 V2-only 工作树。
+审计日期：2026-08-13
+审计基线：`codex/message-search` 分支的当前 V2-only 工作树。
 结论：**架构方向可行，核心正确性边界已有较好实现；当前不具备生产发布条件。**
 
 本文是实施优先级与验收计划，不替代 [implementation status](implementation-status.md) 的逐项证据登记。
@@ -26,7 +26,7 @@
 | P0 | Passkey 只有客户端/传输边界；未部署审计级 WebAuthn RP verifier、challenge/counter 存储 | 主认证路径不可用 | WebAuthn 端到端真机与攻击/重放测试通过 |
 | P0 | 本机文件系统 provider/EICAR 扫描夹具已验证媒体合同，但缺生产 provider、扫描器与对象存储 | 附件功能不能作为生产能力交付 | 真实 provider、扫描隔离、失败恢复、滥用测试通过 |
 | P0 | 100k 仅证明单 plan 的 durable 正确性；没有真实并发、SLO、拓扑或故障报告 | 不能宣称支持 10 万人群或高频群 | 经过批准的工作负载、阈值和报告 |
-| P1 | NATS 是最小 best-effort publisher，非完整事件/唤醒系统 | 高频群会退回数据库轮询，延迟与连接开销不可控 | 补齐运行时 consumer、负载与故障证据，或保持关闭 |
+| P1 | NATS 已有连接复用、动态订阅、PONG 确认和断线 replay，但仍是 best-effort 延迟层 | 缺少 TLS/NKey、broker 指标与生产故障注入证据 | 补齐传输认证、可观测性与 soak/failover 验证；持久状态继续以 PostgreSQL 为准 |
 | P1 | APNs、Alertmanager、PITR/灾备、operator bastion/mTLS 未部署验证 | 恢复与告警链不完整 | 真实凭据、演练记录和批准的 RPO/RTO |
 
 ## 2. 设计与实现风险
@@ -41,9 +41,9 @@
 
 ### 2.2 NATS 当前只能当作可关闭的延迟优化
 
-现实现每次 hint 新建 NIO 连接，连接与 broker 确认均有两秒上限，并在 Core NATS `CONNECT`/`PUB` 后发送 `PING`、等待 broker `PONG`，因此不会把“已写入本机 socket”误当成 broker 已解析；没有 consumer、TLS/NKey、连接复用、断路器、重连或 broker 运行指标。隔离 Docker 已有真实 NATS subscriber 回归，证明已发布的 hint 能由 broker 转发并按预期解码；错误仍被故意吞掉，以保证不影响 durable 路径。
+fan-out plan hint 的失败仍被故意吞掉，以保证不影响 durable 路径。Hybrid room wake 与 presence/typing 已使用每个 gateway 一条复用 Core NATS 连接、动态订阅本机活跃作用域并在重连时重放；连接和 broker `PING`/`PONG` 确认有两秒上限。订阅取消与握手/确认的竞态会执行补偿 `UNSUB`，pending ACK、payload mailbox 与前台 distinct-room mailbox 均有硬上限。
 
-因此当前默认的 PostgreSQL polling 是正确选择。静默 broker 的真实 adapter 回归已经确认超时不会阻塞 durable publication；若要用于热点群，仍必须将其升级为独立的 hint adapter：受认证加密连接、运行时订阅端唤醒、重复/丢失注入、broker 重启恢复、连接/发布/消费 lag 指标。即使完成，也不能让 NATS 决定授权、完成或用户可见状态。
+因此当前默认的 PostgreSQL polling/cursor pull 仍是正确性选择。静默 broker、真实 subscriber 和取消竞态回归证明故障不会阻塞 durable publication 或永久留下已取消兴趣；若要用于热点群，仍需完成 NATS TLS/NKey、broker 重启/网络分区 soak、连接/发布/消费 lag 指标与容量报告。即使完成，也不能让 NATS 决定授权、完成或用户可见状态。
 
 ### 2.3 认证与账户服务是首个外部安全阻塞点
 
@@ -61,13 +61,43 @@
 
 **建议**：第一阶段生产只启用一个逻辑 bucket/单 PostgreSQL store；保留迁移代码和 runbook，但不将多 store 作为首发依赖。单 store 稳定后再用演练环境推进迁移能力。
 
+### 2.6 Snapshot V3 与日志 compaction 已关闭历史线性增长风险
+
+本轮实现审计已把会话首页、联系人首页与申请、设备会话、消息时间线/搜索/收藏、群名单与建群、资料批量读取、
+媒体 worker、Push、隐私回执撤回、Snapshot V3 和 housekeeping 改成 keyset 分页、集合 SQL、
+有界并发或可恢复 lease；关闭回执不再在用户请求事务中枚举全部私聊。分片迁移指纹也会
+从正确的源/目标 schema 分页流式计算，不再把完整 sync history 二次拼成内存数组。
+其中会话首页不再先读全量房间、身份和状态再排序，而是由 SQLite 触发器维护
+`(is_archived, is_pinned, last_activity, room_id)` 物化顺序，并只批量 hydration 当前 50 行。
+联系人页同样按 accepted/incoming/outgoing 作用域走复合索引和 50 行稳定 keyset；资料 hydration
+不越过当前页，申请精确计数只在首个收到申请页执行一次，翻页不再重复全作用域统计；
+联系人名称/handle 的包含搜索改为维护单字与双字 character-gram 的本地 FTS5 索引，查询不再
+执行 `%query%` 全表扫描，并由 profile insert/update/delete trigger 保持一致。
+
+原先“分页读取后在应用层折叠完整历史”的 reset 已被替换。服务端现在持续维护每用户
+application-MVCC projection 和连续 checkpoint，在固定 base sequence 上按 projection key 构建
+持久化小页；客户端逐页写 shadow，并使用 server ACK-before-local-activate 状态机。构建、编码、
+解码和页面事务均有硬上限，失败/过期 generation 回退与 ACK 后崩溃恢复已有故障注入。因此
+reset 的进程内内存不再随 `user_sync_log` 历史长度增长。
+
+`user_sync_log` 已不再作为永久幂等数据库：consumer inbox 保存 fan-out 原分配 sequence，
+`user_projection_effects` 保存小型控制投影结果，设备 reset watermark 来自单调 allocator。
+新设备/低游标强制 snapshot 入场；retained floor 同时受连续 checkpoint、inclusive receipt/token、
+最小 replay window 与迁移 fence 保护。有界 worker 先原子 reset 低 cursor，再分批删 log 前缀，
+并只在最后一个引用消失后删除 shared payload。ADR-013 已实施，R-006 已关闭。
+
+仍需产品级决策的是 R-007：operation ledger 与稳定 projection effect 的统一幂等保留窗口。
+它不会造成 snapshot/请求进程内内存增长，且远小于消息历史，但磁盘仍随控制操作数增长；
+当前以跨物理 user store 聚合的 estimate/relation bytes 和容量告警隔离，不能假装已经具备
+引用安全的统一 TTL。
+
 ## 3. 推荐实施顺序
 
 ### 阶段 0：恢复可验证基线（P0，先完成）
 
-1. [已完成，本机 2026-07-25] 显式链接 `IMV2Core` 到 IMApp/IMAppTests，修复 V2-only 清理后的链接缺失；iPhone 17 / iOS 26.5 arm64 已通过 `V2ConversationStoreTests`、`V2PushWakeSettingsTests`，通用 Simulator 双架构 `build-for-testing` 已通过。
-2. [历史记录，远端执行，`c02af08`] 曾通过 generic Simulator build、聚焦运行时测试、Core、ClientKit、Server/PostgreSQL、迁移账本、逻辑恢复、protobuf/SQL manifest、Prometheus 环境契约及本地账号栈冷启动冒烟。当前 GitHub Actions 已运行 Swift/PostgreSQL 集成和 iOS `build-for-testing` 检查；这些历史结果仍不是当前门禁证据。
-3. [已完成，2026-07-26] `implementation-status.md` 记录本机验证的 commit、环境、命令、结果和限制；证据仍不是生产发布批准。
+1. [已完成，本机 2026-08-13] iPhone 17 Pro / iOS 26.5 已执行完整 `IMAppTests`（108 项）；通用 Simulator 构建保持为独立门禁。4 项登录/注册 `IMAppUITests` 已按显式关闭 Passkey 的产品配置通过，覆盖 password-only、最大辅助字体与 Arabic RTL。
+2. [已完成，2026-08-12] GitHub Actions 的 iOS build、unit 和 UI jobs 固定为 `macos-26`、Xcode 26.2、iPhone 17 / iOS 26.2，并调用与本机相同的受版本控制脚本；远端执行结果仍需由 CI 自身提供，不能由本机结果替代。
+3. [已完成，2026-08-12] `implementation-status.md` 记录当前本机环境、命令、结果、限制和明确的生产排除项；这些证据仍不是生产发布批准。
 
 **完成条件**：干净 checkout 上，本机指定模拟器、隔离 PostgreSQL 与本地账号栈可重复成功，并保持 GitHub Actions 的 Swift/PostgreSQL 与 iOS 构建检查通过。
 

@@ -29,6 +29,12 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
 
             let pair = socialPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
+            guard try await socialUserIsActive(actorID, sql: sql) else {
+                throw V2SocialRelationshipStoreError.actorInactive
+            }
+            if command.action == .request || command.action == .accept {
+                guard try await socialUserIsActive(targetID, sql: sql) else { return .forbidden }
+            }
             let blocked = try await isBlocked(actorID, targetID, sql: sql)
             guard !blocked else { return .forbidden }
             if command.action == .request {
@@ -83,6 +89,9 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
 
             let pair = socialPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
+            guard try await socialUserIsActive(actorID, sql: sql) else {
+                throw V2SocialRelationshipStoreError.actorInactive
+            }
             var relationshipWasRemoved = false
             if command.action == .block {
                 relationshipWasRemoved = try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher) RETURNING lower_user_id").first(decoding: DeletedRelationshipRow.self) != nil
@@ -140,7 +149,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     }
 }
 
-public enum V2SocialRelationshipStoreError: Error, Equatable, Sendable { case corruptPersistenceState }
+public enum V2SocialRelationshipStoreError: Error, Equatable, Sendable { case actorInactive, corruptPersistenceState }
 
 private struct RelationshipRow: Decodable { let state: String; let requestedByUserID: UUID; let updatedAt: Date; enum CodingKeys: String, CodingKey { case state; case requestedByUserID = "requested_by_user_id"; case updatedAt = "updated_at" } }
 private struct RelationshipOperationRow: Decodable {
@@ -156,6 +165,9 @@ private struct BlockOperationRow: Decodable {
 private struct DeletedRelationshipRow: Decodable { let lowerUserID: UUID; enum CodingKeys: String, CodingKey { case lowerUserID = "lower_user_id" } }
 private struct SocialBooleanRow: Decodable { let value: Bool }
 private struct SocialSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
+private func socialUserIsActive(_ userID: UUID, sql: any SQLDatabase) async throws -> Bool {
+    try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: userID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: SocialBooleanRow.self)?.value ?? false
+}
 private func socialUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: identifier.rawValue) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }; return result }
 private func socialPair(_ lhs: UUID, _ rhs: UUID) -> (lower: UUID, higher: UUID, lockKey: String) { let left = lhs.uuidString.lowercased(); let right = rhs.uuidString.lowercased(); return left < right ? (lhs, rhs, "\(left)|\(right)") : (rhs, lhs, "\(right)|\(left)") }
 private func socialUserAddPreferenceLockKey(_ userID: UUID) -> String { "v2-user-add-preference:\(userID.uuidString.lowercased())" }

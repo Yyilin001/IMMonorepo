@@ -31,8 +31,26 @@ struct V2ContactProjection: Sendable {
     let publicIdentity: V2PublicIdentity?
 }
 
+enum V2ContactProjectionPageScope: Equatable, Sendable {
+    case friends
+    case incomingRequests
+    case outgoingRequests
+}
+
+struct V2ContactProjectionPage: Sendable {
+    let projections: [V2ContactProjection]
+    let nextCursor: V2ClientRelationshipCursor?
+    let totalCount: Int?
+}
+
 protocol V2ContactsReading: Sendable {
-    func contactProjections() async throws -> [V2ContactProjection]
+    func contactProjectionPage(
+        scope: V2ContactProjectionPageScope,
+        matching query: String?,
+        before cursor: V2ClientRelationshipCursor?,
+        limit: Int,
+        includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionPage
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws
 }
 
@@ -42,18 +60,36 @@ protocol V2ContactsReading: Sendable {
 actor V2GRDBContactsDataSource: V2ContactsReading {
     private let localStore: GRDBV2LocalSyncStore
     private let profiles: V2ProfileRepository
+    private let currentUserID: UserID
 
-    init(localStore: GRDBV2LocalSyncStore, profiles: V2ProfileRepository) {
+    init(localStore: GRDBV2LocalSyncStore, profiles: V2ProfileRepository, currentUserID: UserID) {
         self.localStore = localStore
         self.profiles = profiles
+        self.currentUserID = currentUserID
     }
 
-    func contactProjections() async throws -> [V2ContactProjection] {
-        let relationships = try await localStore.relationships()
-        let active = relationships.filter { $0.state == .pending || $0.state == .accepted }
-        let profileViews = try await localStore.profileViews(userIDs: active.map(\.targetUserID))
-        return active.map {
-            .init(
+    func contactProjectionPage(
+        scope: V2ContactProjectionPageScope,
+        matching query: String?,
+        before cursor: V2ClientRelationshipCursor?,
+        limit: Int,
+        includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionPage {
+        let clientScope: V2ClientRelationshipPageScope = switch scope {
+        case .friends: .accepted
+        case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
+        case .outgoingRequests: .outgoingRequests(currentUserID: currentUserID)
+        }
+        let page = try await localStore.relationshipPage(
+            scope: clientScope,
+            matching: query,
+            before: cursor,
+            limit: limit,
+            includeTotalCount: includeTotalCount
+        )
+        let profileViews = try await localStore.profileViews(userIDs: page.relationships.map(\.targetUserID))
+        let projections: [V2ContactProjection] = page.relationships.map {
+            V2ContactProjection(
                 userID: $0.targetUserID,
                 state: $0.state,
                 requestedByUserID: $0.requestedByUserID,
@@ -61,6 +97,7 @@ actor V2GRDBContactsDataSource: V2ContactsReading {
                 publicIdentity: profileViews[$0.targetUserID]?.publicIdentity
             )
         }
+        return .init(projections: projections, nextCursor: page.nextCursor, totalCount: page.totalCount)
     }
 
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {
@@ -78,6 +115,8 @@ actor V2GRDBContactsDataSource: V2ContactsReading {
 @MainActor
 @Observable
 final class V2ContactsStore {
+    private static let pageSize = 50
+
     enum State: Equatable {
         case loading
         case loaded
@@ -99,14 +138,22 @@ final class V2ContactsStore {
     private let currentUserID: UserID
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private var allItems: [V2ContactListItem] = []
+    private var friendSearchResults: [V2ContactListItem] = []
     private var resolvedAddIdentity: V2PublicIdentity?
     private var refreshingGeneration = 0
+    private var searchGeneration = 0
     private var updatingUserIDs = Set<UserID>()
 
     private(set) var state: State = .loading
     private(set) var friends: [V2ContactListItem] = []
     private(set) var incomingRequests: [V2ContactListItem] = []
     private(set) var outgoingRequests: [V2ContactListItem] = []
+    private(set) var incomingRequestCount = 0
+    private(set) var friendsNextCursor: V2ClientRelationshipCursor?
+    private(set) var incomingRequestsNextCursor: V2ClientRelationshipCursor?
+    private(set) var outgoingRequestsNextCursor: V2ClientRelationshipCursor?
+    private(set) var friendSearchNextCursor: V2ClientRelationshipCursor?
+    private(set) var isLoadingMoreContacts = false
     private(set) var feedback: String?
     private(set) var addFriendState: AddFriendState = .entering
     var searchQuery = ""
@@ -132,14 +179,14 @@ final class V2ContactsStore {
 
     var filteredFriends: [V2ContactListItem] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return friends }
-        return friends.filter {
-            $0.displayName.localizedCaseInsensitiveContains(query)
-                || ($0.handle?.localizedCaseInsensitiveContains(query) ?? false)
-        }
+        return query.isEmpty ? friends : friendSearchResults
     }
 
-    var incomingRequestCount: Int { incomingRequests.count }
+    var canLoadMoreFriends: Bool {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? friendsNextCursor != nil
+            : friendSearchNextCursor != nil
+    }
 
     func item(userID: String) -> V2ContactListItem? {
         allItems.first { $0.id == userID }
@@ -154,36 +201,71 @@ final class V2ContactsStore {
         let generation = refreshingGeneration
         if allItems.isEmpty { state = .loading }
         do {
-            var projections = try await dataSource.contactProjections()
-            try Task.checkCancellation()
-            let profileTargets: [UserID]
-            if revalidateProfiles {
-                profileTargets = projections.map(\.userID)
-            } else {
-                profileTargets = projections.compactMap { $0.publicIdentity == nil ? $0.userID : nil }
-            }
-            if !profileTargets.isEmpty {
-                do {
-                    try await dataSource.hydrateRelationshipProfiles(for: profileTargets)
-                    try Task.checkCancellation()
-                    projections = try await dataSource.contactProjections()
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    // A cached contact list remains useful offline. The row
-                    // itself makes the missing-profile state explicit.
-                    feedback = "部分联系人资料暂不可更新。"
-                }
-            }
+            let friendPage = try await loadProjectionPage(scope: .friends, before: nil, revalidateProfiles: revalidateProfiles)
+            let incomingPage = try await loadProjectionPage(scope: .incomingRequests, before: nil, revalidateProfiles: revalidateProfiles, includeTotalCount: true)
+            let outgoingPage = try await loadProjectionPage(scope: .outgoingRequests, before: nil, revalidateProfiles: revalidateProfiles)
             guard generation == refreshingGeneration else { return }
-            apply(projections)
+            apply(friendPage.projections, scope: .friends, appending: false)
+            apply(incomingPage.projections, scope: .incomingRequests, appending: false)
+            apply(outgoingPage.projections, scope: .outgoingRequests, appending: false)
+            friendsNextCursor = friendPage.nextCursor
+            incomingRequestsNextCursor = incomingPage.nextCursor
+            outgoingRequestsNextCursor = outgoingPage.nextCursor
+            incomingRequestCount = incomingPage.totalCount ?? incomingPage.projections.count
             state = .loaded
+            if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await refreshFriendSearch()
+            }
         } catch is CancellationError {
             return
         } catch {
             guard generation == refreshingGeneration else { return }
             state = .failed
         }
+    }
+
+    func refreshFriendSearch() async {
+        searchGeneration &+= 1
+        let generation = searchGeneration
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            friendSearchResults = []
+            friendSearchNextCursor = nil
+            rebuildAllItems()
+            return
+        }
+        do {
+            let page = try await loadProjectionPage(scope: .friends, matching: query, before: nil, revalidateProfiles: false)
+            try Task.checkCancellation()
+            guard generation == searchGeneration,
+                  query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return }
+            friendSearchResults = makeItems(page.projections)
+            friendSearchNextCursor = page.nextCursor
+            rebuildAllItems()
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == searchGeneration else { return }
+            feedback = "无法搜索联系人。"
+        }
+    }
+
+    func loadMoreFriends() async {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty {
+            await loadMore(scope: .friends, matching: nil, cursor: friendsNextCursor)
+        } else {
+            await loadMore(scope: .friends, matching: query, cursor: friendSearchNextCursor)
+        }
+    }
+
+    func loadMoreIncomingRequests() async {
+        await loadMore(scope: .incomingRequests, matching: nil, cursor: incomingRequestsNextCursor)
+    }
+
+    func loadMoreOutgoingRequests() async {
+        await loadMore(scope: .outgoingRequests, matching: nil, cursor: outgoingRequestsNextCursor)
     }
 
     func observeProjectionChanges() async {
@@ -317,8 +399,110 @@ final class V2ContactsStore {
         }
     }
 
-    private func apply(_ projections: [V2ContactProjection]) {
-        let items = projections.compactMap { projection -> V2ContactListItem? in
+    private func loadProjectionPage(
+        scope: V2ContactProjectionPageScope,
+        matching query: String? = nil,
+        before cursor: V2ClientRelationshipCursor?,
+        revalidateProfiles: Bool,
+        includeTotalCount: Bool = false
+    ) async throws -> V2ContactProjectionPage {
+        var page = try await dataSource.contactProjectionPage(
+            scope: scope,
+            matching: query,
+            before: cursor,
+            limit: Self.pageSize,
+            includeTotalCount: includeTotalCount
+        )
+        let totalCount = page.totalCount
+        let profileTargets = revalidateProfiles
+            ? page.projections.map(\.userID)
+            : page.projections.compactMap { $0.publicIdentity == nil ? $0.userID : nil }
+        guard !profileTargets.isEmpty else { return page }
+        do {
+            try await dataSource.hydrateRelationshipProfiles(for: profileTargets)
+            try Task.checkCancellation()
+            page = try await dataSource.contactProjectionPage(
+                scope: scope,
+                matching: query,
+                before: cursor,
+                limit: Self.pageSize,
+                includeTotalCount: false
+            )
+            page = .init(
+                projections: page.projections,
+                nextCursor: page.nextCursor,
+                totalCount: totalCount
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // A cached page remains useful offline. Missing profiles are
+            // explicit and hydration work never expands beyond this page.
+            feedback = "部分联系人资料暂不可更新。"
+        }
+        return page
+    }
+
+    private func loadMore(
+        scope: V2ContactProjectionPageScope,
+        matching query: String?,
+        cursor: V2ClientRelationshipCursor?
+    ) async {
+        guard let cursor, !isLoadingMoreContacts else { return }
+        let refreshGeneration = refreshingGeneration
+        let currentSearchGeneration = searchGeneration
+        isLoadingMoreContacts = true
+        defer { isLoadingMoreContacts = false }
+        do {
+            let page = try await loadProjectionPage(scope: scope, matching: query, before: cursor, revalidateProfiles: false)
+            try Task.checkCancellation()
+            guard refreshGeneration == refreshingGeneration else { return }
+            if let query {
+                guard currentSearchGeneration == searchGeneration,
+                      query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                else { return }
+            }
+            switch scope {
+            case .friends where query != nil:
+                appendUnique(makeItems(page.projections), to: &friendSearchResults)
+                friendSearchNextCursor = page.nextCursor
+            case .friends:
+                apply(page.projections, scope: .friends, appending: true)
+                friendsNextCursor = page.nextCursor
+            case .incomingRequests:
+                apply(page.projections, scope: .incomingRequests, appending: true)
+                incomingRequestsNextCursor = page.nextCursor
+            case .outgoingRequests:
+                apply(page.projections, scope: .outgoingRequests, appending: true)
+                outgoingRequestsNextCursor = page.nextCursor
+            }
+            rebuildAllItems()
+        } catch is CancellationError {
+            return
+        } catch {
+            feedback = "无法加载更多联系人。"
+        }
+    }
+
+    private func apply(
+        _ projections: [V2ContactProjection],
+        scope: V2ContactProjectionPageScope,
+        appending: Bool
+    ) {
+        let items = makeItems(projections)
+        switch scope {
+        case .friends:
+            if appending { appendUnique(items, to: &friends) } else { friends = items }
+        case .incomingRequests:
+            if appending { appendUnique(items, to: &incomingRequests) } else { incomingRequests = items }
+        case .outgoingRequests:
+            if appending { appendUnique(items, to: &outgoingRequests) } else { outgoingRequests = items }
+        }
+        rebuildAllItems()
+    }
+
+    private func makeItems(_ projections: [V2ContactProjection]) -> [V2ContactListItem] {
+        projections.compactMap { projection -> V2ContactListItem? in
             let relationship: V2ContactListItem.Relationship
             switch projection.state {
             case .accepted:
@@ -335,21 +519,18 @@ final class V2ContactsStore {
                 updatedAt: projection.updatedAt
             )
         }
-        allItems = items
-        friends = items.filter { $0.relationship == .friend }.sorted(by: contactOrdering)
-        incomingRequests = items.filter { $0.relationship == .incomingRequest }.sorted(by: recentFirst)
-        outgoingRequests = items.filter { $0.relationship == .outgoingRequest }.sorted(by: recentFirst)
     }
 
-    private func contactOrdering(_ lhs: V2ContactListItem, _ rhs: V2ContactListItem) -> Bool {
-        let lhsName = lhs.displayName
-        let rhsName = rhs.displayName
-        let result = lhsName.localizedStandardCompare(rhsName)
-        return result == .orderedSame ? lhs.id < rhs.id : result == .orderedAscending
+    private func appendUnique(_ incoming: [V2ContactListItem], to existing: inout [V2ContactListItem]) {
+        let existingIDs = Set(existing.map(\.id))
+        existing.append(contentsOf: incoming.filter { !existingIDs.contains($0.id) })
     }
 
-    private func recentFirst(_ lhs: V2ContactListItem, _ rhs: V2ContactListItem) -> Bool {
-        lhs.updatedAt == rhs.updatedAt ? lhs.id < rhs.id : lhs.updatedAt > rhs.updatedAt
+    private func rebuildAllItems() {
+        allItems = Array(Dictionary(
+            (friends + incomingRequests + outgoingRequests + friendSearchResults).map { ($0.id, $0) },
+            uniquingKeysWith: { _, incoming in incoming }
+        ).values)
     }
 }
 
@@ -440,7 +621,7 @@ struct V2ContactsRootView: View {
             NavigationLink(value: V2ContactsRoute.requests) {
                 Label("新的朋友", systemImage: "person.crop.circle.badge.plus")
             }
-            .accessibilityValue(store.incomingRequestCount == 0 ? "" : "(store.incomingRequestCount) 个待处理申请")
+            .accessibilityValue(store.incomingRequestCount == 0 ? "" : "\(store.incomingRequestCount) 个待处理申请")
             .accessibilityIdentifier("v2.contacts.requests")
 
             Section("我的好友") {
@@ -456,11 +637,38 @@ struct V2ContactsRootView: View {
                         }
                         .accessibilityIdentifier("v2.contacts.friend.\(item.id)")
                     }
+                    if store.canLoadMoreFriends {
+                        contactLoadMoreButton("加载更多好友") { await store.loadMoreFriends() }
+                    }
                 }
             }
         }
         .searchable(text: $store.searchQuery, prompt: "搜索好友")
+        .task(id: store.searchQuery) {
+            guard !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                await store.refreshFriendSearch()
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            await store.refreshFriendSearch()
+        }
         .accessibilityIdentifier("v2.contacts.list")
+    }
+
+    private func contactLoadMoreButton(
+        _ title: String,
+        action: @escaping @MainActor @Sendable () async -> Void
+    ) -> some View {
+        HStack {
+            Spacer()
+            if store.isLoadingMoreContacts {
+                ProgressView().accessibilityLabel("正在加载更多联系人")
+            } else {
+                Button(title) { Task { await action() } }
+            }
+            Spacer()
+        }
     }
 }
 
@@ -489,6 +697,9 @@ private struct V2FriendRequestsView: View {
                         }
                     }
                 }
+                if store.incomingRequestsNextCursor != nil {
+                    loadMoreButton("加载更多收到的申请") { await store.loadMoreIncomingRequests() }
+                }
             }
             Section("已发出的申请") {
                 if store.outgoingRequests.isEmpty {
@@ -503,6 +714,9 @@ private struct V2FriendRequestsView: View {
                             .accessibilityIdentifier("v2.contacts.request.cancel.\(item.id)")
                     }
                 }
+                if store.outgoingRequestsNextCursor != nil {
+                    loadMoreButton("加载更多已发申请") { await store.loadMoreOutgoingRequests() }
+                }
             }
             if let feedback = store.feedback {
                 Section { Text(feedback).foregroundStyle(.secondary) }
@@ -515,6 +729,21 @@ private struct V2FriendRequestsView: View {
     private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
         actionTask?.cancel()
         actionTask = Task { await operation() }
+    }
+
+    private func loadMoreButton(
+        _ title: String,
+        action: @escaping @MainActor @Sendable () async -> Void
+    ) -> some View {
+        HStack {
+            Spacer()
+            if store.isLoadingMoreContacts {
+                ProgressView().accessibilityLabel("正在加载更多联系人")
+            } else {
+                Button(title) { run(action) }
+            }
+            Spacer()
+        }
     }
 }
 

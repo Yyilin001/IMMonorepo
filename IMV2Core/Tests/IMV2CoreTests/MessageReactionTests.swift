@@ -19,7 +19,7 @@ struct MessageReactionTests {
             try V2ChangeMessageReactionCommand(roomID: .init("room"), actorUserID: .init("user"), operationID: .init("operation"), messageID: .init("message"), reaction: " ", action: .add)
         }
         #expect(throws: V2MessageReactionValidationError.invalidReaction) {
-            try V2ChangeMessageReactionCommand(roomID: .init("room"), actorUserID: .init("user"), operationID: .init("operation"), messageID: .init("message"), reaction: String(repeating: "a", count: 65), action: .remove)
+            try V2ChangeMessageReactionCommand(roomID: .init("room"), actorUserID: .init("user"), operationID: .init("operation"), messageID: .init("message"), reaction: String(repeating: "a", count: V2MessageReactionLimits.maximumReactionBytes + 1), action: .remove)
         }
     }
 }

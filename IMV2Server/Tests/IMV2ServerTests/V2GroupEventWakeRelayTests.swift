@@ -48,6 +48,24 @@ struct V2GroupEventWakeRelayTests {
         await dispatcher.finish()
         await task.value
     }
+
+    @Test("foreground dispatcher bounds distinct rooms while publication is stalled")
+    func foregroundDispatcherBoundsDistinctRooms() async throws {
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: ForegroundHintPublisherFake(), maximumPendingRooms: 2
+        )
+        for suffix in 4...6 {
+            let roomID = try RoomID(
+                String(format: "00000000-0000-0000-0000-%012x", suffix)
+            )
+            await dispatcher.publishForegroundHint(
+                .init(roomID: roomID, highWatermark: UInt64(suffix))
+            )
+        }
+
+        #expect(await dispatcher.pendingRoomCount() == 2)
+        await dispatcher.finish()
+    }
 }
 
 private actor GroupWakeStoreFake: V2GroupEventWakeStore {

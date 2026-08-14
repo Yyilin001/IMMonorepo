@@ -18,11 +18,48 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let pausedRoomOutboxRows: Int
     public let readyDirectProfileUpdates: Int
     public let leasedDirectProfileUpdates: Int
+    public let readyReadReceiptPreferencePropagations: Int
+    public let leasedReadReceiptPreferencePropagations: Int
+    public let scheduledReadReceiptPreferencePropagations: Int
+    public let pausedReadReceiptPreferencePropagations: Int
     public let openFanoutPlans: Int
     public let readyFanoutDeliveries: Int
     public let leasedFanoutDeliveries: Int
     public let scheduledFanoutDeliveries: Int
     public let pausedFanoutDeliveries: Int
+    public let readyContentReviews: Int
+    public let leasedContentReviews: Int
+    public let scheduledContentReviews: Int
+    public let pausedContentReviews: Int
+    public let readyMediaScans: Int
+    public let leasedMediaScans: Int
+    public let scheduledMediaScans: Int
+    public let pausedMediaScans: Int
+    public let readyMediaPurges: Int
+    public let leasedMediaPurges: Int
+    public let scheduledMediaPurges: Int
+    public let pausedMediaPurges: Int
+    /// PostgreSQL's cheap planner-statistics estimate. This intentionally
+    /// avoids an exact COUNT(*) scan of the append-heavy retained sync log on
+    /// every Prometheus scrape.
+    public let userSyncLogEstimatedRows: Int
+    /// Heap plus indexes and TOAST bytes retained by user_sync_log. Unlike the
+    /// row estimate this is an exact relation-size lookup, not a table scan.
+    public let userSyncLogRelationBytes: Int
+    /// Stable control-projection idempotency results. These are intentionally
+    /// separate from the compactable ordered log and must be capacity-planned
+    /// with the operation ledgers that retain the same semantic retries.
+    public let userProjectionEffectsEstimatedRows: Int
+    public let userProjectionEffectsRelationBytes: Int
+    public let readyUserProjections: Int
+    public let scheduledUserProjections: Int
+    public let pausedUserProjections: Int
+    public let maximumUserProjectionLag: Int
+    public let buildingSnapshotArtifacts: Int
+    public let failedSnapshotArtifacts: Int
+    public let oldestBuildingSnapshotAgeSeconds: Int
+    public let projectionVersionGCBacklogEstimatedRows: Int
+    public let uncompactedProjectedRecords: Int
     public let pendingSyncRecordsAcrossDevices: Int
     public let resetPendingDevices: Int
     public let readyPushWakes: Int
@@ -41,11 +78,40 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         pausedRoomOutboxRows: Int = 0,
         readyDirectProfileUpdates: Int = 0,
         leasedDirectProfileUpdates: Int = 0,
+        readyReadReceiptPreferencePropagations: Int = 0,
+        leasedReadReceiptPreferencePropagations: Int = 0,
+        scheduledReadReceiptPreferencePropagations: Int = 0,
+        pausedReadReceiptPreferencePropagations: Int = 0,
         openFanoutPlans: Int = 0,
         readyFanoutDeliveries: Int = 0,
         leasedFanoutDeliveries: Int = 0,
         scheduledFanoutDeliveries: Int = 0,
         pausedFanoutDeliveries: Int = 0,
+        readyContentReviews: Int = 0,
+        leasedContentReviews: Int = 0,
+        scheduledContentReviews: Int = 0,
+        pausedContentReviews: Int = 0,
+        readyMediaScans: Int = 0,
+        leasedMediaScans: Int = 0,
+        scheduledMediaScans: Int = 0,
+        pausedMediaScans: Int = 0,
+        readyMediaPurges: Int = 0,
+        leasedMediaPurges: Int = 0,
+        scheduledMediaPurges: Int = 0,
+        pausedMediaPurges: Int = 0,
+        userSyncLogEstimatedRows: Int = 0,
+        userSyncLogRelationBytes: Int = 0,
+        userProjectionEffectsEstimatedRows: Int = 0,
+        userProjectionEffectsRelationBytes: Int = 0,
+        readyUserProjections: Int = 0,
+        scheduledUserProjections: Int = 0,
+        pausedUserProjections: Int = 0,
+        maximumUserProjectionLag: Int = 0,
+        buildingSnapshotArtifacts: Int = 0,
+        failedSnapshotArtifacts: Int = 0,
+        oldestBuildingSnapshotAgeSeconds: Int = 0,
+        projectionVersionGCBacklogEstimatedRows: Int = 0,
+        uncompactedProjectedRecords: Int = 0,
         pendingSyncRecordsAcrossDevices: Int = 0,
         resetPendingDevices: Int = 0,
         readyPushWakes: Int = 0,
@@ -60,11 +126,40 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.pausedRoomOutboxRows = max(0, pausedRoomOutboxRows)
         self.readyDirectProfileUpdates = max(0, readyDirectProfileUpdates)
         self.leasedDirectProfileUpdates = max(0, leasedDirectProfileUpdates)
+        self.readyReadReceiptPreferencePropagations = max(0, readyReadReceiptPreferencePropagations)
+        self.leasedReadReceiptPreferencePropagations = max(0, leasedReadReceiptPreferencePropagations)
+        self.scheduledReadReceiptPreferencePropagations = max(0, scheduledReadReceiptPreferencePropagations)
+        self.pausedReadReceiptPreferencePropagations = max(0, pausedReadReceiptPreferencePropagations)
         self.openFanoutPlans = max(0, openFanoutPlans)
         self.readyFanoutDeliveries = max(0, readyFanoutDeliveries)
         self.leasedFanoutDeliveries = max(0, leasedFanoutDeliveries)
         self.scheduledFanoutDeliveries = max(0, scheduledFanoutDeliveries)
         self.pausedFanoutDeliveries = max(0, pausedFanoutDeliveries)
+        self.readyContentReviews = max(0, readyContentReviews)
+        self.leasedContentReviews = max(0, leasedContentReviews)
+        self.scheduledContentReviews = max(0, scheduledContentReviews)
+        self.pausedContentReviews = max(0, pausedContentReviews)
+        self.readyMediaScans = max(0, readyMediaScans)
+        self.leasedMediaScans = max(0, leasedMediaScans)
+        self.scheduledMediaScans = max(0, scheduledMediaScans)
+        self.pausedMediaScans = max(0, pausedMediaScans)
+        self.readyMediaPurges = max(0, readyMediaPurges)
+        self.leasedMediaPurges = max(0, leasedMediaPurges)
+        self.scheduledMediaPurges = max(0, scheduledMediaPurges)
+        self.pausedMediaPurges = max(0, pausedMediaPurges)
+        self.userSyncLogEstimatedRows = max(0, userSyncLogEstimatedRows)
+        self.userSyncLogRelationBytes = max(0, userSyncLogRelationBytes)
+        self.userProjectionEffectsEstimatedRows = max(0, userProjectionEffectsEstimatedRows)
+        self.userProjectionEffectsRelationBytes = max(0, userProjectionEffectsRelationBytes)
+        self.readyUserProjections = max(0, readyUserProjections)
+        self.scheduledUserProjections = max(0, scheduledUserProjections)
+        self.pausedUserProjections = max(0, pausedUserProjections)
+        self.maximumUserProjectionLag = max(0, maximumUserProjectionLag)
+        self.buildingSnapshotArtifacts = max(0, buildingSnapshotArtifacts)
+        self.failedSnapshotArtifacts = max(0, failedSnapshotArtifacts)
+        self.oldestBuildingSnapshotAgeSeconds = max(0, oldestBuildingSnapshotAgeSeconds)
+        self.projectionVersionGCBacklogEstimatedRows = max(0, projectionVersionGCBacklogEstimatedRows)
+        self.uncompactedProjectedRecords = max(0, uncompactedProjectedRecords)
         self.pendingSyncRecordsAcrossDevices = max(0, pendingSyncRecordsAcrossDevices)
         self.resetPendingDevices = max(0, resetPendingDevices)
         self.readyPushWakes = max(0, readyPushWakes)
@@ -76,6 +171,76 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public static let unavailable = Self(isAvailable: false)
 }
 
+/// Coalesces concurrent Prometheus scrapes and bounds how often the expensive
+/// exact PostgreSQL aggregate is evaluated. Availability failures are cached
+/// for the same short interval so an outage cannot turn scraper retries into a
+/// database reconnect storm.
+public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
+    private let source: any V2DurableWorkMetricsSource
+    private let minimumRefreshInterval: TimeInterval
+    private let now: @Sendable () -> Date
+    private var cached: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: Date)?
+    private var refreshTask: Task<V2DurableWorkMetricsSnapshot, Never>?
+
+    public init(
+        source: any V2DurableWorkMetricsSource,
+        minimumRefreshInterval: TimeInterval = 5,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        precondition(minimumRefreshInterval.isFinite && minimumRefreshInterval > 0)
+        self.source = source
+        self.minimumRefreshInterval = minimumRefreshInterval
+        self.now = now
+    }
+
+    public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
+        let requestedAt = now()
+        if let cached {
+            let age = requestedAt.timeIntervalSince(cached.loadedAt)
+            if age >= 0, age < minimumRefreshInterval {
+                return cached.snapshot
+            }
+        }
+        if let refreshTask { return await refreshTask.value }
+
+        let source = source
+        let task = Task { await source.durableWorkMetricsSnapshot() }
+        refreshTask = task
+        let snapshot = await task.value
+        cached = (snapshot, now())
+        refreshTask = nil
+        return snapshot
+    }
+}
+
+/// Combines the control-plane snapshot with one snapshot for every distinct
+/// physical user store. Sources are queried concurrently; a partial result is
+/// never presented as a healthy global view.
+public struct V2AggregateDurableWorkMetricsSource: V2DurableWorkMetricsSource {
+    private let sources: [any V2DurableWorkMetricsSource]
+
+    public init(sources: [any V2DurableWorkMetricsSource]) {
+        precondition(!sources.isEmpty)
+        self.sources = sources
+    }
+
+    public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
+        let snapshots = await withTaskGroup(
+            of: V2DurableWorkMetricsSnapshot.self,
+            returning: [V2DurableWorkMetricsSnapshot].self
+        ) { group in
+            for source in sources {
+                group.addTask { await source.durableWorkMetricsSnapshot() }
+            }
+            var values: [V2DurableWorkMetricsSnapshot] = []
+            values.reserveCapacity(sources.count)
+            for await snapshot in group { values.append(snapshot) }
+            return values
+        }
+        return v2AggregateDurableWorkMetrics(snapshots)
+    }
+}
+
 /// The snapshot is evaluated at scrape time rather than reconstructed from
 /// worker counters. This preserves visibility across process restarts and
 /// allows alerts to distinguish an idle worker from a growing durable backlog.
@@ -83,13 +248,20 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let database: any Database
     private let deliveryBucket: String?
     private let gatewayNodeID: String?
+    private let includesUserShardMetrics: Bool
 
     /// `nil` is the runtime's all-configured-buckets view. The bucket-scoped
     /// form is retained for focused tests and partitioned deployments.
-    public init(database: any Database, deliveryBucket: String? = nil, gatewayNodeID: String? = nil) {
+    public init(
+        database: any Database,
+        deliveryBucket: String? = nil,
+        gatewayNodeID: String? = nil,
+        includesUserShardMetrics: Bool = true
+    ) {
         self.database = database
         self.deliveryBucket = deliveryBucket
         self.gatewayNodeID = gatewayNodeID
+        self.includesUserShardMetrics = includesUserShardMetrics
     }
 
     /// Exposes the fallible database boundary for focused integration tests.
@@ -107,84 +279,249 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         let includesGatewayRevocationMetrics = gatewayNodeID != nil
         let scopedGatewayNodeID = gatewayNodeID ?? ""
         guard let row = try await sql.raw("""
-                WITH snapshot_now AS (SELECT CURRENT_TIMESTAMP AS value)
-                SELECT
-                    (SELECT COUNT(*)
-                     FROM im_v2.room_outbox, snapshot_now
-                     WHERE state = 'pending'
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
-                       AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value))
-                        AS ready_room_outbox_rows,
-                    (SELECT COUNT(*)
-                     FROM im_v2.room_outbox, snapshot_now
-                     WHERE state = 'pending' AND lease_expires_at > snapshot_now.value)
-                        AS leased_room_outbox_rows,
-                    (SELECT COUNT(*)
-                     FROM im_v2.room_outbox, snapshot_now
-                     WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
-                       AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value))
-                        AS scheduled_room_outbox_rows,
-                    (SELECT COUNT(*) FROM im_v2.room_outbox WHERE state = 'paused')
-                        AS paused_room_outbox_rows,
-                    (SELECT COUNT(*)
-                     FROM im_v2.public_profile_update_outbox, snapshot_now
-                     WHERE state = 'pending'
-                        OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value))
-                        AS ready_direct_profile_updates,
-                    (SELECT COUNT(*)
-                     FROM im_v2.public_profile_update_outbox, snapshot_now
-                     WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value)
-                        AS leased_direct_profile_updates,
-                    (SELECT COUNT(*) FROM im_v2.fanout_plans WHERE state <> 'terminal')
-                        AS open_fanout_plans,
-                    (SELECT COUNT(*)
-                     FROM im_v2.fanout_deliveries, snapshot_now
-                     WHERE (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
-                       AND state = 'pending'
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
-                       AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value))
-                        AS ready_fanout_deliveries,
-                    (SELECT COUNT(*)
-                     FROM im_v2.fanout_deliveries, snapshot_now
-                     WHERE (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
-                       AND state = 'pending' AND lease_expires_at > snapshot_now.value)
-                        AS leased_fanout_deliveries,
-                    (SELECT COUNT(*)
-                     FROM im_v2.fanout_deliveries, snapshot_now
-                     WHERE (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
-                       AND state = 'pending' AND next_attempt_at > snapshot_now.value
-                       AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value))
-                        AS scheduled_fanout_deliveries,
-                    (SELECT COUNT(*)
-                     FROM im_v2.fanout_deliveries
-                     WHERE (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket)) AND state = 'paused')
-                        AS paused_fanout_deliveries,
-                    (SELECT COALESCE(SUM(GREATEST(sequence.next_sequence - 1 - cursor.acknowledged_sequence, 0)), 0)::BIGINT
-                     FROM im_v2.device_sync_cursors AS cursor
-                     JOIN im_v2.user_sync_sequences AS sequence ON sequence.user_id = cursor.user_id
-                     WHERE cursor.state = 'ready')
-                        AS pending_sync_records_across_devices,
-                    (SELECT COUNT(*) FROM im_v2.device_sync_cursors WHERE state = 'reset_pending')
-                        AS reset_pending_devices,
-                    (SELECT COUNT(*)
-                     FROM im_v2.push_wake_outbox, snapshot_now
-                     WHERE state = 'pending'
-                       AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value))
-                        AS ready_push_wakes,
-                    (SELECT COUNT(*)
-                     FROM im_v2.push_wake_outbox, snapshot_now
-                     WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value)
-                        AS leased_push_wakes,
-                    (SELECT COUNT(*) FROM im_v2.push_wake_outbox WHERE state = 'suppressed')
-                        AS suppressed_push_wakes,
-                    (SELECT CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) ELSE 0 END
-                     FROM im_v2.device_revocation_events AS event
-                     WHERE event.event_id > COALESCE((
+                WITH snapshot_now AS (
+                    SELECT CURRENT_TIMESTAMP AS value
+                ),
+                room_outbox_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending'
+                              AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                        ) AS ready_room_outbox_rows,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_room_outbox_rows,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                        ) AS scheduled_room_outbox_rows,
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_room_outbox_rows
+                    FROM im_v2.room_outbox, snapshot_now
+                    WHERE state <> 'terminal'
+                ),
+                profile_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending'
+                               OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
+                        ) AS ready_direct_profile_updates,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_direct_profile_updates
+                    FROM im_v2.public_profile_update_outbox, snapshot_now
+                    WHERE state <> 'completed'
+                ),
+                read_receipt_preference_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value))
+                               OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
+                        ) AS ready_read_receipt_preference_propagations,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_read_receipt_preference_propagations,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                        ) AS scheduled_read_receipt_preference_propagations,
+                        COUNT(*) FILTER (WHERE state = 'paused')
+                            AS paused_read_receipt_preference_propagations
+                    FROM im_v2.read_receipt_preference_propagation_outbox, snapshot_now
+                    WHERE state IN ('pending', 'claimed', 'paused')
+                ),
+                fanout_plan_metrics AS (
+                    SELECT COUNT(*) AS open_fanout_plans
+                    FROM im_v2.fanout_plans
+                    WHERE state <> 'terminal'
+                ),
+                fanout_delivery_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending'
+                              AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                        ) AS ready_fanout_deliveries,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_fanout_deliveries,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                        ) AS scheduled_fanout_deliveries,
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_fanout_deliveries
+                    FROM im_v2.fanout_deliveries, snapshot_now
+                    WHERE state <> 'terminal'
+                      AND (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
+                ),
+                content_review_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value))
+                               OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
+                        ) AS ready_content_reviews,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_content_reviews,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                        ) AS scheduled_content_reviews,
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_content_reviews
+                    FROM im_v2.content_review_jobs, snapshot_now
+                    WHERE state IN ('pending', 'claimed', 'paused')
+                ),
+                media_scan_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value))
+                               OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
+                        ) AS ready_media_scans,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_media_scans,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                        ) AS scheduled_media_scans,
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_media_scans
+                    FROM im_v2.media_scan_outbox, snapshot_now
+                    WHERE state <> 'completed'
+                ),
+                media_purge_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value))
+                               OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
+                        ) AS ready_media_purges,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_media_purges,
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
+                        ) AS scheduled_media_purges,
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_media_purges
+                    FROM im_v2.media_purge_outbox, snapshot_now
+                    WHERE state <> 'completed'
+                ),
+                sync_metrics AS (
+                    SELECT
+                        COALESCE(SUM(
+                            GREATEST(sequence.next_sequence - cursor.acknowledged_sequence, 0)
+                        ) FILTER (WHERE cursor.state = 'ready'), 0)::BIGINT
+                            AS pending_sync_records_across_devices,
+                        COUNT(*) FILTER (
+                            WHERE cursor.state IN ('reset_preparing', 'reset_pending')
+                        )
+                            AS reset_pending_devices
+                    FROM im_v2.device_sync_cursors AS cursor
+                    LEFT JOIN im_v2.user_sync_sequences AS sequence
+                      ON sequence.user_id = cursor.user_id
+                ),
+                sync_log_storage_metrics AS (
+                    SELECT
+                        COALESCE((
+                            SELECT stats.n_live_tup::BIGINT
+                            FROM pg_stat_user_tables AS stats
+                            WHERE stats.schemaname = 'im_v2'
+                              AND stats.relname = 'user_sync_log'
+                        ), 0)::BIGINT AS user_sync_log_estimated_rows,
+                        pg_total_relation_size('im_v2.user_sync_log'::regclass)::BIGINT
+                            AS user_sync_log_relation_bytes
+                ),
+                projection_effect_storage_metrics AS (
+                    SELECT
+                        COALESCE((
+                            SELECT stats.n_live_tup::BIGINT
+                            FROM pg_stat_user_tables AS stats
+                            WHERE stats.schemaname = 'im_v2'
+                              AND stats.relname = 'user_projection_effects'
+                        ), 0)::BIGINT AS user_projection_effects_estimated_rows,
+                        pg_total_relation_size(
+                            'im_v2.user_projection_effects'::regclass
+                        )::BIGINT AS user_projection_effects_relation_bytes
+                ),
+                projection_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE checkpoint.state = 'ready'
+                              AND (checkpoint.next_attempt_at IS NULL
+                                   OR checkpoint.next_attempt_at <= snapshot_now.value)
+                              AND checkpoint.projected_sequence < sequence.next_sequence
+                        ) AS ready_user_projections,
+                        COUNT(*) FILTER (
+                            WHERE checkpoint.state = 'ready'
+                              AND checkpoint.next_attempt_at > snapshot_now.value
+                        ) AS scheduled_user_projections,
+                        COUNT(*) FILTER (WHERE checkpoint.state = 'paused')
+                            AS paused_user_projections,
+                        COALESCE(MAX(GREATEST(
+                            sequence.next_sequence - checkpoint.projected_sequence, 0
+                        )), 0)::BIGINT AS maximum_user_projection_lag
+                    FROM im_v2.user_projection_checkpoints AS checkpoint
+                    JOIN im_v2.user_sync_sequences AS sequence
+                      ON sequence.user_id = checkpoint.user_id,
+                         snapshot_now
+                ),
+                snapshot_artifact_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (WHERE state = 'building')
+                            AS building_snapshot_artifacts,
+                        COUNT(*) FILTER (WHERE state = 'failed')
+                            AS failed_snapshot_artifacts,
+                        COALESCE(EXTRACT(EPOCH FROM (
+                            MAX(snapshot_now.value) - MIN(created_at)
+                                FILTER (WHERE state = 'building')
+                        )), 0)::BIGINT AS oldest_building_snapshot_age_seconds
+                    FROM im_v2.sync_snapshot_artifacts, snapshot_now
+                ),
+                projection_gc_metrics AS (
+                    SELECT COALESCE((
+                        SELECT index_stats.reltuples::BIGINT
+                        FROM pg_class AS index_stats
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = index_stats.relnamespace
+                        WHERE namespace.nspname = 'im_v2'
+                          AND index_stats.relname = 'user_projection_versions_gc_idx'
+                    ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows
+                ),
+                retention_metrics AS (
+                    SELECT COALESCE(SUM(GREATEST(
+                        checkpoint.projected_sequence
+                          - COALESCE(retention.compacted_through_sequence, 0), 0
+                    )), 0)::BIGINT AS uncompacted_projected_records
+                    FROM im_v2.user_projection_checkpoints AS checkpoint
+                    LEFT JOIN im_v2.user_sync_retention AS retention
+                      ON retention.user_id = checkpoint.user_id
+                ),
+                push_metrics AS (
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE state = 'pending'
+                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                        ) AS ready_push_wakes,
+                        COUNT(*) FILTER (
+                            WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
+                        ) AS leased_push_wakes,
+                        COUNT(*) FILTER (WHERE state = 'suppressed') AS suppressed_push_wakes
+                    FROM im_v2.push_wake_outbox, snapshot_now
+                ),
+                revocation_metrics AS (
+                    SELECT CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) ELSE 0 END
+                        AS pending_device_revocation_events
+                    FROM im_v2.device_revocation_events AS event
+                    WHERE event.event_id > COALESCE((
                         SELECT cursor.last_event_id
                         FROM im_v2.gateway_worker_cursors AS cursor
                         WHERE cursor.worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
                           AND cursor.node_id = \(bind: scopedGatewayNodeID)
-                     ), 0)) AS pending_device_revocation_events
+                    ), 0)
+                )
+                SELECT *
+                FROM room_outbox_metrics, profile_metrics, read_receipt_preference_metrics, fanout_plan_metrics,
+                     fanout_delivery_metrics, content_review_metrics, media_scan_metrics,
+                     media_purge_metrics, sync_metrics, sync_log_storage_metrics,
+                     projection_effect_storage_metrics,
+                     projection_metrics, snapshot_artifact_metrics,
+                     projection_gc_metrics, retention_metrics,
+                     push_metrics, revocation_metrics
             """).first(decoding: DurableWorkMetricsRow.self)
         else {
             throw V2DurableWorkMetricsError.emptyResult
@@ -197,13 +534,42 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             pausedRoomOutboxRows: v2MetricCount(row.pausedRoomOutboxRows),
             readyDirectProfileUpdates: v2MetricCount(row.readyDirectProfileUpdates),
             leasedDirectProfileUpdates: v2MetricCount(row.leasedDirectProfileUpdates),
+            readyReadReceiptPreferencePropagations: v2MetricCount(row.readyReadReceiptPreferencePropagations),
+            leasedReadReceiptPreferencePropagations: v2MetricCount(row.leasedReadReceiptPreferencePropagations),
+            scheduledReadReceiptPreferencePropagations: v2MetricCount(row.scheduledReadReceiptPreferencePropagations),
+            pausedReadReceiptPreferencePropagations: v2MetricCount(row.pausedReadReceiptPreferencePropagations),
             openFanoutPlans: v2MetricCount(row.openFanoutPlans),
             readyFanoutDeliveries: v2MetricCount(row.readyFanoutDeliveries),
             leasedFanoutDeliveries: v2MetricCount(row.leasedFanoutDeliveries),
             scheduledFanoutDeliveries: v2MetricCount(row.scheduledFanoutDeliveries),
             pausedFanoutDeliveries: v2MetricCount(row.pausedFanoutDeliveries),
-            pendingSyncRecordsAcrossDevices: v2MetricCount(row.pendingSyncRecordsAcrossDevices),
-            resetPendingDevices: v2MetricCount(row.resetPendingDevices),
+            readyContentReviews: v2MetricCount(row.readyContentReviews),
+            leasedContentReviews: v2MetricCount(row.leasedContentReviews),
+            scheduledContentReviews: v2MetricCount(row.scheduledContentReviews),
+            pausedContentReviews: v2MetricCount(row.pausedContentReviews),
+            readyMediaScans: v2MetricCount(row.readyMediaScans),
+            leasedMediaScans: v2MetricCount(row.leasedMediaScans),
+            scheduledMediaScans: v2MetricCount(row.scheduledMediaScans),
+            pausedMediaScans: v2MetricCount(row.pausedMediaScans),
+            readyMediaPurges: v2MetricCount(row.readyMediaPurges),
+            leasedMediaPurges: v2MetricCount(row.leasedMediaPurges),
+            scheduledMediaPurges: v2MetricCount(row.scheduledMediaPurges),
+            pausedMediaPurges: v2MetricCount(row.pausedMediaPurges),
+            userSyncLogEstimatedRows: includesUserShardMetrics ? v2MetricCount(row.userSyncLogEstimatedRows) : 0,
+            userSyncLogRelationBytes: includesUserShardMetrics ? v2MetricCount(row.userSyncLogRelationBytes) : 0,
+            userProjectionEffectsEstimatedRows: includesUserShardMetrics ? v2MetricCount(row.userProjectionEffectsEstimatedRows) : 0,
+            userProjectionEffectsRelationBytes: includesUserShardMetrics ? v2MetricCount(row.userProjectionEffectsRelationBytes) : 0,
+            readyUserProjections: includesUserShardMetrics ? v2MetricCount(row.readyUserProjections) : 0,
+            scheduledUserProjections: includesUserShardMetrics ? v2MetricCount(row.scheduledUserProjections) : 0,
+            pausedUserProjections: includesUserShardMetrics ? v2MetricCount(row.pausedUserProjections) : 0,
+            maximumUserProjectionLag: includesUserShardMetrics ? v2MetricCount(row.maximumUserProjectionLag) : 0,
+            buildingSnapshotArtifacts: includesUserShardMetrics ? v2MetricCount(row.buildingSnapshotArtifacts) : 0,
+            failedSnapshotArtifacts: includesUserShardMetrics ? v2MetricCount(row.failedSnapshotArtifacts) : 0,
+            oldestBuildingSnapshotAgeSeconds: includesUserShardMetrics ? v2MetricCount(row.oldestBuildingSnapshotAgeSeconds) : 0,
+            projectionVersionGCBacklogEstimatedRows: includesUserShardMetrics ? v2MetricCount(row.projectionVersionGCBacklogEstimatedRows) : 0,
+            uncompactedProjectedRecords: includesUserShardMetrics ? v2MetricCount(row.uncompactedProjectedRecords) : 0,
+            pendingSyncRecordsAcrossDevices: includesUserShardMetrics ? v2MetricCount(row.pendingSyncRecordsAcrossDevices) : 0,
+            resetPendingDevices: includesUserShardMetrics ? v2MetricCount(row.resetPendingDevices) : 0,
             readyPushWakes: v2MetricCount(row.readyPushWakes),
             leasedPushWakes: v2MetricCount(row.leasedPushWakes),
             suppressedPushWakes: v2MetricCount(row.suppressedPushWakes),
@@ -221,6 +587,208 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             return .unavailable
         }
     }
+}
+
+/// Lightweight, schema-aware metrics for a single physical user store. It
+/// does not read control-plane work tables, so several stores can be safely
+/// aggregated without double-counting the control database.
+public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsSource {
+    private let database: any Database
+    private let schema: String
+
+    public init(database: any Database, schema: String) {
+        precondition(schema.range(
+            of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression
+        ) != nil)
+        self.database = database
+        self.schema = schema
+    }
+
+    public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
+        do { return try await load() }
+        catch { return .unavailable }
+    }
+
+    private func load() async throws -> V2DurableWorkMetricsSnapshot {
+        guard let sql = database as? any SQLDatabase else {
+            throw V2DurableWorkMetricsError.sqlUnavailable
+        }
+        let table: (String) -> String = { "\(schema).\($0)" }
+        guard let row = try await sql.raw("""
+            WITH snapshot_now AS (SELECT CURRENT_TIMESTAMP AS value),
+            sync_metrics AS (
+                SELECT
+                    COALESCE(SUM(GREATEST(
+                        sequence.next_sequence - cursor.acknowledged_sequence, 0
+                    )) FILTER (WHERE cursor.state = 'ready'), 0)::BIGINT
+                        AS pending_sync_records_across_devices,
+                    COUNT(*) FILTER (
+                        WHERE cursor.state IN ('reset_preparing', 'reset_pending')
+                    ) AS reset_pending_devices
+                FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                LEFT JOIN \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                  ON sequence.user_id = cursor.user_id
+            ),
+            storage_metrics AS (
+                SELECT
+                    COALESCE((SELECT n_live_tup::BIGINT FROM pg_stat_user_tables
+                              WHERE schemaname = \(bind: schema)
+                                AND relname = 'user_sync_log'), 0)::BIGINT
+                        AS user_sync_log_estimated_rows,
+                    pg_total_relation_size(
+                        \(bind: "\(schema).user_sync_log")::regclass
+                    )::BIGINT AS user_sync_log_relation_bytes,
+                    COALESCE((SELECT n_live_tup::BIGINT FROM pg_stat_user_tables
+                              WHERE schemaname = \(bind: schema)
+                                AND relname = 'user_projection_effects'), 0)::BIGINT
+                        AS user_projection_effects_estimated_rows,
+                    pg_total_relation_size(
+                        \(bind: "\(schema).user_projection_effects")::regclass
+                    )::BIGINT AS user_projection_effects_relation_bytes
+            ),
+            projection_metrics AS (
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE checkpoint.state = 'ready'
+                          AND (checkpoint.next_attempt_at IS NULL
+                               OR checkpoint.next_attempt_at <= snapshot_now.value)
+                          AND checkpoint.projected_sequence < sequence.next_sequence
+                    ) AS ready_user_projections,
+                    COUNT(*) FILTER (
+                        WHERE checkpoint.state = 'ready'
+                          AND checkpoint.next_attempt_at > snapshot_now.value
+                    ) AS scheduled_user_projections,
+                    COUNT(*) FILTER (WHERE checkpoint.state = 'paused')
+                        AS paused_user_projections,
+                    COALESCE(MAX(GREATEST(
+                        sequence.next_sequence - checkpoint.projected_sequence, 0
+                    )), 0)::BIGINT AS maximum_user_projection_lag
+                FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                JOIN \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                  ON sequence.user_id = checkpoint.user_id,
+                     snapshot_now
+            ),
+            artifact_metrics AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE state = 'building')
+                        AS building_snapshot_artifacts,
+                    COUNT(*) FILTER (WHERE state = 'failed')
+                        AS failed_snapshot_artifacts,
+                    COALESCE(EXTRACT(EPOCH FROM (
+                        MAX(snapshot_now.value) - MIN(created_at)
+                            FILTER (WHERE state = 'building')
+                    )), 0)::BIGINT AS oldest_building_snapshot_age_seconds
+                FROM \(unsafeRaw: table("sync_snapshot_artifacts")), snapshot_now
+            ),
+            gc_metrics AS (
+                SELECT COALESCE((
+                    SELECT index_stats.reltuples::BIGINT
+                    FROM pg_class AS index_stats
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_stats.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_stats.relname = 'user_projection_versions_gc_idx'
+                ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows
+            ),
+            retention_metrics AS (
+                SELECT COALESCE(SUM(GREATEST(
+                    checkpoint.projected_sequence
+                      - COALESCE(retention.compacted_through_sequence, 0), 0
+                )), 0)::BIGINT AS uncompacted_projected_records
+                FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                LEFT JOIN \(unsafeRaw: table("user_sync_retention")) AS retention
+                  ON retention.user_id = checkpoint.user_id
+            )
+            SELECT * FROM sync_metrics, storage_metrics, projection_metrics,
+                          artifact_metrics, gc_metrics, retention_metrics
+            """).first(decoding: UserShardDurableWorkMetricsRow.self) else {
+            throw V2DurableWorkMetricsError.emptyResult
+        }
+        return .init(
+            isAvailable: true,
+            userSyncLogEstimatedRows: v2MetricCount(row.userSyncLogEstimatedRows),
+            userSyncLogRelationBytes: v2MetricCount(row.userSyncLogRelationBytes),
+            userProjectionEffectsEstimatedRows: v2MetricCount(row.userProjectionEffectsEstimatedRows),
+            userProjectionEffectsRelationBytes: v2MetricCount(row.userProjectionEffectsRelationBytes),
+            readyUserProjections: v2MetricCount(row.readyUserProjections),
+            scheduledUserProjections: v2MetricCount(row.scheduledUserProjections),
+            pausedUserProjections: v2MetricCount(row.pausedUserProjections),
+            maximumUserProjectionLag: v2MetricCount(row.maximumUserProjectionLag),
+            buildingSnapshotArtifacts: v2MetricCount(row.buildingSnapshotArtifacts),
+            failedSnapshotArtifacts: v2MetricCount(row.failedSnapshotArtifacts),
+            oldestBuildingSnapshotAgeSeconds: v2MetricCount(row.oldestBuildingSnapshotAgeSeconds),
+            projectionVersionGCBacklogEstimatedRows: v2MetricCount(row.projectionVersionGCBacklogEstimatedRows),
+            uncompactedProjectedRecords: v2MetricCount(row.uncompactedProjectedRecords),
+            pendingSyncRecordsAcrossDevices: v2MetricCount(row.pendingSyncRecordsAcrossDevices),
+            resetPendingDevices: v2MetricCount(row.resetPendingDevices)
+        )
+    }
+}
+
+private func v2AggregateDurableWorkMetrics(
+    _ snapshots: [V2DurableWorkMetricsSnapshot]
+) -> V2DurableWorkMetricsSnapshot {
+    guard !snapshots.isEmpty, snapshots.allSatisfy(\.isAvailable) else {
+        return .unavailable
+    }
+    func sum(_ keyPath: KeyPath<V2DurableWorkMetricsSnapshot, Int>) -> Int {
+        snapshots.reduce(0) { partial, snapshot in
+            let value = snapshot[keyPath: keyPath]
+            return partial > Int.max - value ? Int.max : partial + value
+        }
+    }
+    func maximum(_ keyPath: KeyPath<V2DurableWorkMetricsSnapshot, Int>) -> Int {
+        snapshots.map { $0[keyPath: keyPath] }.max() ?? 0
+    }
+    return .init(
+        isAvailable: true,
+        readyRoomOutboxRows: sum(\.readyRoomOutboxRows),
+        leasedRoomOutboxRows: sum(\.leasedRoomOutboxRows),
+        scheduledRoomOutboxRows: sum(\.scheduledRoomOutboxRows),
+        pausedRoomOutboxRows: sum(\.pausedRoomOutboxRows),
+        readyDirectProfileUpdates: sum(\.readyDirectProfileUpdates),
+        leasedDirectProfileUpdates: sum(\.leasedDirectProfileUpdates),
+        readyReadReceiptPreferencePropagations: sum(\.readyReadReceiptPreferencePropagations),
+        leasedReadReceiptPreferencePropagations: sum(\.leasedReadReceiptPreferencePropagations),
+        scheduledReadReceiptPreferencePropagations: sum(\.scheduledReadReceiptPreferencePropagations),
+        pausedReadReceiptPreferencePropagations: sum(\.pausedReadReceiptPreferencePropagations),
+        openFanoutPlans: sum(\.openFanoutPlans),
+        readyFanoutDeliveries: sum(\.readyFanoutDeliveries),
+        leasedFanoutDeliveries: sum(\.leasedFanoutDeliveries),
+        scheduledFanoutDeliveries: sum(\.scheduledFanoutDeliveries),
+        pausedFanoutDeliveries: sum(\.pausedFanoutDeliveries),
+        readyContentReviews: sum(\.readyContentReviews),
+        leasedContentReviews: sum(\.leasedContentReviews),
+        scheduledContentReviews: sum(\.scheduledContentReviews),
+        pausedContentReviews: sum(\.pausedContentReviews),
+        readyMediaScans: sum(\.readyMediaScans),
+        leasedMediaScans: sum(\.leasedMediaScans),
+        scheduledMediaScans: sum(\.scheduledMediaScans),
+        pausedMediaScans: sum(\.pausedMediaScans),
+        readyMediaPurges: sum(\.readyMediaPurges),
+        leasedMediaPurges: sum(\.leasedMediaPurges),
+        scheduledMediaPurges: sum(\.scheduledMediaPurges),
+        pausedMediaPurges: sum(\.pausedMediaPurges),
+        userSyncLogEstimatedRows: sum(\.userSyncLogEstimatedRows),
+        userSyncLogRelationBytes: sum(\.userSyncLogRelationBytes),
+        userProjectionEffectsEstimatedRows: sum(\.userProjectionEffectsEstimatedRows),
+        userProjectionEffectsRelationBytes: sum(\.userProjectionEffectsRelationBytes),
+        readyUserProjections: sum(\.readyUserProjections),
+        scheduledUserProjections: sum(\.scheduledUserProjections),
+        pausedUserProjections: sum(\.pausedUserProjections),
+        maximumUserProjectionLag: maximum(\.maximumUserProjectionLag),
+        buildingSnapshotArtifacts: sum(\.buildingSnapshotArtifacts),
+        failedSnapshotArtifacts: sum(\.failedSnapshotArtifacts),
+        oldestBuildingSnapshotAgeSeconds: maximum(\.oldestBuildingSnapshotAgeSeconds),
+        projectionVersionGCBacklogEstimatedRows: sum(\.projectionVersionGCBacklogEstimatedRows),
+        uncompactedProjectedRecords: sum(\.uncompactedProjectedRecords),
+        pendingSyncRecordsAcrossDevices: sum(\.pendingSyncRecordsAcrossDevices),
+        resetPendingDevices: sum(\.resetPendingDevices),
+        readyPushWakes: sum(\.readyPushWakes),
+        leasedPushWakes: sum(\.leasedPushWakes),
+        suppressedPushWakes: sum(\.suppressedPushWakes),
+        pendingDeviceRevocationEvents: sum(\.pendingDeviceRevocationEvents)
+    )
 }
 
 public enum V2DurableWorkMetricsError: Error, Equatable, Sendable {
@@ -243,6 +811,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# TYPE im_v2_direct_profile_update_backlog gauge",
         "im_v2_direct_profile_update_backlog{state=\"ready\"} \(snapshot.readyDirectProfileUpdates)",
         "im_v2_direct_profile_update_backlog{state=\"leased\"} \(snapshot.leasedDirectProfileUpdates)",
+        "# HELP im_v2_read_receipt_preference_propagation_backlog Durable direct-receipt preference changes awaiting or held by bounded propagation.",
+        "# TYPE im_v2_read_receipt_preference_propagation_backlog gauge",
+        "im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} \(snapshot.readyReadReceiptPreferencePropagations)",
+        "im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} \(snapshot.leasedReadReceiptPreferencePropagations)",
+        "im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} \(snapshot.scheduledReadReceiptPreferencePropagations)",
+        "im_v2_read_receipt_preference_propagation_backlog{state=\"paused\"} \(snapshot.pausedReadReceiptPreferencePropagations)",
         "# HELP im_v2_fanout_plans_open Durable fan-out plans not yet terminal.",
         "# TYPE im_v2_fanout_plans_open gauge",
         "im_v2_fanout_plans_open \(snapshot.openFanoutPlans)",
@@ -252,6 +826,57 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_fanout_delivery_backlog{state=\"leased\"} \(snapshot.leasedFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"scheduled\"} \(snapshot.scheduledFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"paused\"} \(snapshot.pausedFanoutDeliveries)",
+        "# HELP im_v2_content_review_backlog Durable content-review jobs by actionable state.",
+        "# TYPE im_v2_content_review_backlog gauge",
+        "im_v2_content_review_backlog{state=\"ready\"} \(snapshot.readyContentReviews)",
+        "im_v2_content_review_backlog{state=\"leased\"} \(snapshot.leasedContentReviews)",
+        "im_v2_content_review_backlog{state=\"scheduled\"} \(snapshot.scheduledContentReviews)",
+        "im_v2_content_review_backlog{state=\"paused\"} \(snapshot.pausedContentReviews)",
+        "# HELP im_v2_media_scan_backlog Durable media scan jobs by actionable state.",
+        "# TYPE im_v2_media_scan_backlog gauge",
+        "im_v2_media_scan_backlog{state=\"ready\"} \(snapshot.readyMediaScans)",
+        "im_v2_media_scan_backlog{state=\"leased\"} \(snapshot.leasedMediaScans)",
+        "im_v2_media_scan_backlog{state=\"scheduled\"} \(snapshot.scheduledMediaScans)",
+        "im_v2_media_scan_backlog{state=\"paused\"} \(snapshot.pausedMediaScans)",
+        "# HELP im_v2_media_purge_backlog Durable provider-byte cleanup jobs by actionable state.",
+        "# TYPE im_v2_media_purge_backlog gauge",
+        "im_v2_media_purge_backlog{state=\"ready\"} \(snapshot.readyMediaPurges)",
+        "im_v2_media_purge_backlog{state=\"leased\"} \(snapshot.leasedMediaPurges)",
+        "im_v2_media_purge_backlog{state=\"scheduled\"} \(snapshot.scheduledMediaPurges)",
+        "im_v2_media_purge_backlog{state=\"paused\"} \(snapshot.pausedMediaPurges)",
+        "# HELP im_v2_user_sync_log_estimated_rows PostgreSQL planner-statistics estimate of retained user sync-log rows; not an exact count.",
+        "# TYPE im_v2_user_sync_log_estimated_rows gauge",
+        "im_v2_user_sync_log_estimated_rows \(snapshot.userSyncLogEstimatedRows)",
+        "# HELP im_v2_user_sync_log_relation_bytes Heap, indexes, and TOAST bytes retained by the user sync-log relation.",
+        "# TYPE im_v2_user_sync_log_relation_bytes gauge",
+        "im_v2_user_sync_log_relation_bytes \(snapshot.userSyncLogRelationBytes)",
+        "# HELP im_v2_user_projection_effects_estimated_rows PostgreSQL planner-statistics estimate of stable control-projection idempotency results.",
+        "# TYPE im_v2_user_projection_effects_estimated_rows gauge",
+        "im_v2_user_projection_effects_estimated_rows \(snapshot.userProjectionEffectsEstimatedRows)",
+        "# HELP im_v2_user_projection_effects_relation_bytes Heap, indexes, and TOAST bytes retained by stable control-projection idempotency results.",
+        "# TYPE im_v2_user_projection_effects_relation_bytes gauge",
+        "im_v2_user_projection_effects_relation_bytes \(snapshot.userProjectionEffectsRelationBytes)",
+        "# HELP im_v2_user_projection_backlog Users awaiting canonical snapshot projection by actionable state.",
+        "# TYPE im_v2_user_projection_backlog gauge",
+        "im_v2_user_projection_backlog{state=\"ready\"} \(snapshot.readyUserProjections)",
+        "im_v2_user_projection_backlog{state=\"scheduled\"} \(snapshot.scheduledUserProjections)",
+        "im_v2_user_projection_backlog{state=\"paused\"} \(snapshot.pausedUserProjections)",
+        "# HELP im_v2_user_projection_maximum_lag_records Largest per-user canonical projection lag in sync records.",
+        "# TYPE im_v2_user_projection_maximum_lag_records gauge",
+        "im_v2_user_projection_maximum_lag_records \(snapshot.maximumUserProjectionLag)",
+        "# HELP im_v2_snapshot_artifacts Durable snapshot artifacts by actionable state.",
+        "# TYPE im_v2_snapshot_artifacts gauge",
+        "im_v2_snapshot_artifacts{state=\"building\"} \(snapshot.buildingSnapshotArtifacts)",
+        "im_v2_snapshot_artifacts{state=\"failed\"} \(snapshot.failedSnapshotArtifacts)",
+        "# HELP im_v2_snapshot_oldest_building_age_seconds Age of the oldest building snapshot artifact.",
+        "# TYPE im_v2_snapshot_oldest_building_age_seconds gauge",
+        "im_v2_snapshot_oldest_building_age_seconds \(snapshot.oldestBuildingSnapshotAgeSeconds)",
+        "# HELP im_v2_projection_version_gc_backlog_estimated_rows Planner estimate from the closed-version partial index.",
+        "# TYPE im_v2_projection_version_gc_backlog_estimated_rows gauge",
+        "im_v2_projection_version_gc_backlog_estimated_rows \(snapshot.projectionVersionGCBacklogEstimatedRows)",
+        "# HELP im_v2_sync_uncompacted_projected_records Aggregate canonical records above retained floors.",
+        "# TYPE im_v2_sync_uncompacted_projected_records gauge",
+        "im_v2_sync_uncompacted_projected_records \(snapshot.uncompactedProjectedRecords)",
         "# HELP im_v2_sync_pending_records_across_devices Aggregate unacknowledged sync records, counted once per ready device cursor.",
         "# TYPE im_v2_sync_pending_records_across_devices gauge",
         "im_v2_sync_pending_records_across_devices \(snapshot.pendingSyncRecordsAcrossDevices)",
@@ -276,11 +901,40 @@ private struct DurableWorkMetricsRow: Decodable {
     let pausedRoomOutboxRows: Int64
     let readyDirectProfileUpdates: Int64
     let leasedDirectProfileUpdates: Int64
+    let readyReadReceiptPreferencePropagations: Int64
+    let leasedReadReceiptPreferencePropagations: Int64
+    let scheduledReadReceiptPreferencePropagations: Int64
+    let pausedReadReceiptPreferencePropagations: Int64
     let openFanoutPlans: Int64
     let readyFanoutDeliveries: Int64
     let leasedFanoutDeliveries: Int64
     let scheduledFanoutDeliveries: Int64
     let pausedFanoutDeliveries: Int64
+    let readyContentReviews: Int64
+    let leasedContentReviews: Int64
+    let scheduledContentReviews: Int64
+    let pausedContentReviews: Int64
+    let readyMediaScans: Int64
+    let leasedMediaScans: Int64
+    let scheduledMediaScans: Int64
+    let pausedMediaScans: Int64
+    let readyMediaPurges: Int64
+    let leasedMediaPurges: Int64
+    let scheduledMediaPurges: Int64
+    let pausedMediaPurges: Int64
+    let userSyncLogEstimatedRows: Int64
+    let userSyncLogRelationBytes: Int64
+    let userProjectionEffectsEstimatedRows: Int64
+    let userProjectionEffectsRelationBytes: Int64
+    let readyUserProjections: Int64
+    let scheduledUserProjections: Int64
+    let pausedUserProjections: Int64
+    let maximumUserProjectionLag: Int64
+    let buildingSnapshotArtifacts: Int64
+    let failedSnapshotArtifacts: Int64
+    let oldestBuildingSnapshotAgeSeconds: Int64
+    let projectionVersionGCBacklogEstimatedRows: Int64
+    let uncompactedProjectedRecords: Int64
     let pendingSyncRecordsAcrossDevices: Int64
     let resetPendingDevices: Int64
     let readyPushWakes: Int64
@@ -295,17 +949,82 @@ private struct DurableWorkMetricsRow: Decodable {
         case pausedRoomOutboxRows = "paused_room_outbox_rows"
         case readyDirectProfileUpdates = "ready_direct_profile_updates"
         case leasedDirectProfileUpdates = "leased_direct_profile_updates"
+        case readyReadReceiptPreferencePropagations = "ready_read_receipt_preference_propagations"
+        case leasedReadReceiptPreferencePropagations = "leased_read_receipt_preference_propagations"
+        case scheduledReadReceiptPreferencePropagations = "scheduled_read_receipt_preference_propagations"
+        case pausedReadReceiptPreferencePropagations = "paused_read_receipt_preference_propagations"
         case openFanoutPlans = "open_fanout_plans"
         case readyFanoutDeliveries = "ready_fanout_deliveries"
         case leasedFanoutDeliveries = "leased_fanout_deliveries"
         case scheduledFanoutDeliveries = "scheduled_fanout_deliveries"
         case pausedFanoutDeliveries = "paused_fanout_deliveries"
+        case readyContentReviews = "ready_content_reviews"
+        case leasedContentReviews = "leased_content_reviews"
+        case scheduledContentReviews = "scheduled_content_reviews"
+        case pausedContentReviews = "paused_content_reviews"
+        case readyMediaScans = "ready_media_scans"
+        case leasedMediaScans = "leased_media_scans"
+        case scheduledMediaScans = "scheduled_media_scans"
+        case pausedMediaScans = "paused_media_scans"
+        case readyMediaPurges = "ready_media_purges"
+        case leasedMediaPurges = "leased_media_purges"
+        case scheduledMediaPurges = "scheduled_media_purges"
+        case pausedMediaPurges = "paused_media_purges"
+        case userSyncLogEstimatedRows = "user_sync_log_estimated_rows"
+        case userSyncLogRelationBytes = "user_sync_log_relation_bytes"
+        case userProjectionEffectsEstimatedRows = "user_projection_effects_estimated_rows"
+        case userProjectionEffectsRelationBytes = "user_projection_effects_relation_bytes"
+        case readyUserProjections = "ready_user_projections"
+        case scheduledUserProjections = "scheduled_user_projections"
+        case pausedUserProjections = "paused_user_projections"
+        case maximumUserProjectionLag = "maximum_user_projection_lag"
+        case buildingSnapshotArtifacts = "building_snapshot_artifacts"
+        case failedSnapshotArtifacts = "failed_snapshot_artifacts"
+        case oldestBuildingSnapshotAgeSeconds = "oldest_building_snapshot_age_seconds"
+        case projectionVersionGCBacklogEstimatedRows = "projection_version_gc_backlog_estimated_rows"
+        case uncompactedProjectedRecords = "uncompacted_projected_records"
         case pendingSyncRecordsAcrossDevices = "pending_sync_records_across_devices"
         case resetPendingDevices = "reset_pending_devices"
         case readyPushWakes = "ready_push_wakes"
         case leasedPushWakes = "leased_push_wakes"
         case suppressedPushWakes = "suppressed_push_wakes"
         case pendingDeviceRevocationEvents = "pending_device_revocation_events"
+    }
+}
+
+private struct UserShardDurableWorkMetricsRow: Decodable {
+    let userSyncLogEstimatedRows: Int64
+    let userSyncLogRelationBytes: Int64
+    let userProjectionEffectsEstimatedRows: Int64
+    let userProjectionEffectsRelationBytes: Int64
+    let readyUserProjections: Int64
+    let scheduledUserProjections: Int64
+    let pausedUserProjections: Int64
+    let maximumUserProjectionLag: Int64
+    let buildingSnapshotArtifacts: Int64
+    let failedSnapshotArtifacts: Int64
+    let oldestBuildingSnapshotAgeSeconds: Int64
+    let projectionVersionGCBacklogEstimatedRows: Int64
+    let uncompactedProjectedRecords: Int64
+    let pendingSyncRecordsAcrossDevices: Int64
+    let resetPendingDevices: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case userSyncLogEstimatedRows = "user_sync_log_estimated_rows"
+        case userSyncLogRelationBytes = "user_sync_log_relation_bytes"
+        case userProjectionEffectsEstimatedRows = "user_projection_effects_estimated_rows"
+        case userProjectionEffectsRelationBytes = "user_projection_effects_relation_bytes"
+        case readyUserProjections = "ready_user_projections"
+        case scheduledUserProjections = "scheduled_user_projections"
+        case pausedUserProjections = "paused_user_projections"
+        case maximumUserProjectionLag = "maximum_user_projection_lag"
+        case buildingSnapshotArtifacts = "building_snapshot_artifacts"
+        case failedSnapshotArtifacts = "failed_snapshot_artifacts"
+        case oldestBuildingSnapshotAgeSeconds = "oldest_building_snapshot_age_seconds"
+        case projectionVersionGCBacklogEstimatedRows = "projection_version_gc_backlog_estimated_rows"
+        case uncompactedProjectedRecords = "uncompacted_projected_records"
+        case pendingSyncRecordsAcrossDevices = "pending_sync_records_across_devices"
+        case resetPendingDevices = "reset_pending_devices"
     }
 }
 

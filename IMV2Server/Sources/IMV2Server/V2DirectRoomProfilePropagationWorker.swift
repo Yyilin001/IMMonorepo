@@ -110,7 +110,8 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             FROM candidate
             WHERE outbox.source_event_id = candidate.source_event_id
             RETURNING outbox.source_event_id, outbox.source_user_id, outbox.public_handle,
-                      outbox.display_name, outbox.account_kind, outbox.revision, outbox.profile_updated_at,
+                      outbox.display_name, outbox.account_kind, outbox.profile_state,
+                      outbox.revision, outbox.profile_updated_at,
                       outbox.enumeration_checkpoint, outbox.claim_token
             """).first(decoding: ProfileUpdateLeaseRow.self).map(ProfileUpdateLease.init)
     }
@@ -151,13 +152,24 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
             let existingInvalidation = try await sql.raw("""
                 SELECT user_sync_sequence, payload->>'user_id' AS user_id,
-                       (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision
-                FROM im_v2.user_sync_log
+                       (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision,
+                       COALESCE(payload->>'profile_state', 'active') AS profile_state
+                FROM im_v2.user_projection_effects
                 WHERE user_id = \(bind: target.userID) AND source_event_id = \(bind: lease.sourceEventID)
                   AND projection_kind = 'profile_invalidation'
                 """).first(decoding: ExistingProfileInvalidationRow.self)
             if let existingInvalidation, !existingInvalidation.matches(lease: lease) {
                 throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+            }
+            if lease.profileState != "active" {
+                if let existingInvalidation {
+                    return try directProfileUnsigned(existingInvalidation.sequence)
+                }
+                let invalidationSequence = try await allocateSequence(userID: target.userID, sql: sql)
+                try await appendInvalidation(
+                    target: target, lease: lease, sequence: invalidationSequence, sql: sql
+                )
+                return try directProfileUnsigned(invalidationSequence)
             }
             if let existing = try await sql.raw("""
                 SELECT user_sync_sequence, payload->>'room_id' AS room_id,
@@ -167,7 +179,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                        payload->>'account_kind' AS account_kind,
                        (payload->>'revision')::bigint AS revision,
                        (payload->>'updated_at_ms')::bigint AS updated_at_ms
-                FROM im_v2.user_sync_log
+                FROM im_v2.user_projection_effects
                 WHERE user_id = \(bind: target.userID) AND source_event_id = \(bind: lease.sourceEventID)
                   AND projection_kind = 'direct_room_profile'
                 """).first(decoding: ExistingDirectProfileProjectionRow.self) {
@@ -235,7 +247,8 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
             VALUES (\(bind: target.userID), \(bind: sequence), \(bind: lease.sourceEventID), 'profile_invalidation',
                     jsonb_build_object('user_id', \(bind: lease.sourceUserID.uuidString),
-                                       'minimum_profile_revision', \(bind: lease.revision)),
+                                       'minimum_profile_revision', \(bind: lease.revision),
+                                       'profile_state', \(bind: lease.profileState)),
                     \(bind: lease.profileUpdatedAt))
             """).run()
     }
@@ -274,6 +287,7 @@ private struct ProfileUpdateLease: Sendable {
     let publicHandle: String
     let displayName: String
     let accountKind: String
+    let profileState: String
     let revision: Int64
     let profileUpdatedAt: Date
     let enumerationCheckpoint: UUID?
@@ -288,6 +302,7 @@ private struct ProfileUpdateLeaseRow: Decodable {
     let publicHandle: String
     let displayName: String
     let accountKind: String
+    let profileState: String
     let revision: Int64
     let profileUpdatedAt: Date
     let enumerationCheckpoint: UUID?
@@ -299,6 +314,7 @@ private struct ProfileUpdateLeaseRow: Decodable {
         case publicHandle = "public_handle"
         case displayName = "display_name"
         case accountKind = "account_kind"
+        case profileState = "profile_state"
         case revision
         case profileUpdatedAt = "profile_updated_at"
         case enumerationCheckpoint = "enumeration_checkpoint"
@@ -313,6 +329,7 @@ private extension ProfileUpdateLease {
         publicHandle = row.publicHandle
         displayName = row.displayName
         accountKind = row.accountKind
+        profileState = row.profileState
         revision = row.revision
         profileUpdatedAt = row.profileUpdatedAt
         enumerationCheckpoint = row.enumerationCheckpoint
@@ -374,15 +391,18 @@ private struct ExistingProfileInvalidationRow: Decodable {
     let sequence: Int64
     let userID: String
     let minimumProfileRevision: Int64
+    let profileState: String
 
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence"
         case userID = "user_id"
         case minimumProfileRevision = "minimum_profile_revision"
+        case profileState = "profile_state"
     }
 
     func matches(lease: ProfileUpdateLease) -> Bool {
-        userID == lease.sourceUserID.uuidString && minimumProfileRevision == lease.revision
+        userID == lease.sourceUserID.uuidString && minimumProfileRevision == lease.revision &&
+            profileState == lease.profileState
     }
 }
 

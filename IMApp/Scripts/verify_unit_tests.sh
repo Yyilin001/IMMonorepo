@@ -6,9 +6,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_FILE="${IMAPP_PROJECT_FILE:-${PROJECT_DIR}/IMApp.xcodeproj}"
 SCHEME="${IMAPP_SCHEME:-IMApp}"
 CONFIGURATION="${IMAPP_CONFIGURATION:-Debug}"
-# Keep the device name stable while allowing the installed Xcode runtime to
-# select its current compatible iOS version on local machines and CI.
-DESTINATION="${IMAPP_UNIT_TEST_DESTINATION:-platform=iOS Simulator,name=iPhone 17}"
+# Keep the app's minimum supported runtime explicit. Callers with a different
+# installed test runtime can still override the full destination.
+DESTINATION="${IMAPP_UNIT_TEST_DESTINATION:-platform=iOS Simulator,name=iPhone 17,OS=26.2}"
 
 xcodebuild test \
   -project "${PROJECT_FILE}" \

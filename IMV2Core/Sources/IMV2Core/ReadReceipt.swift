@@ -68,12 +68,16 @@ public struct V2ReadReceiptReader: Equatable, Sendable {
 public struct V2ReadReceiptReadersPage: Equatable, Sendable {
     public let roomID: RoomID
     public let messageRoomSequence: UInt64
-    public let readerCount: Int
+    /// Present on the first page only. Consumers retain that value while
+    /// appending later cursor pages.
+    public let readerCount: Int?
     public let readers: [V2ReadReceiptReader]
     public let nextCursor: String?
 
-    public init(roomID: RoomID, messageRoomSequence: UInt64, readerCount: Int, readers: [V2ReadReceiptReader], nextCursor: String?) throws {
-        guard messageRoomSequence > 0, readerCount >= readers.count else { throw V2ReadReceiptValidationError.invalidReaderPage }
+    public init(roomID: RoomID, messageRoomSequence: UInt64, readerCount: Int?, readers: [V2ReadReceiptReader], nextCursor: String?) throws {
+        guard messageRoomSequence > 0,
+              readerCount.map({ $0 >= readers.count }) != false
+        else { throw V2ReadReceiptValidationError.invalidReaderPage }
         self.roomID = roomID; self.messageRoomSequence = messageRoomSequence; self.readerCount = readerCount
         self.readers = readers; self.nextCursor = nextCursor
     }

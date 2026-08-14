@@ -13,6 +13,8 @@ public struct V2GroupAudienceImport: Equatable, Sendable {
     public let operationID: GroupRoomOperationID
     public let title: String
     public let memberUserIDs: [UserID]
+    public let stagedMemberCount: Int
+    public let hasMaterializedMembers: Bool
 
     public init(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, memberUserIDs: [UserID]) throws {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -26,6 +28,23 @@ public struct V2GroupAudienceImport: Equatable, Sendable {
         self.operationID = operationID
         self.title = normalizedTitle
         self.memberUserIDs = memberUserIDs.sorted()
+        stagedMemberCount = memberUserIDs.count
+        hasMaterializedMembers = true
+    }
+
+    public init(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, stagedMemberCount: Int) throws {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty,
+              normalizedTitle.utf8.count <= V2CreateGroupRoomCommand.maximumTitleUTF8Bytes,
+              !normalizedTitle.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              stagedMemberCount >= 0
+        else { throw V2GroupAudienceImportError.invalidInput }
+        self.actorUserID = actorUserID
+        self.operationID = operationID
+        self.title = normalizedTitle
+        memberUserIDs = []
+        self.stagedMemberCount = stagedMemberCount
+        hasMaterializedMembers = false
     }
 }
 
@@ -154,16 +173,25 @@ public struct V2GroupAudienceImportService: Sendable {
 
     public func finalize(actorUserID: UserID, operationID: GroupRoomOperationID) async throws -> V2CreateGroupRoomOutcome {
         let frozen = try await store.freeze(actorUserID: actorUserID, operationID: operationID, policy: policy, now: now())
-        let outcome = try await groupMessaging.create(
-            actorUserID: actorUserID,
-            operationID: operationID,
-            title: frozen.title,
-            initialMemberUserIDs: frozen.memberUserIDs
-        )
+        let outcome = if frozen.hasMaterializedMembers {
+            try await groupMessaging.create(
+                actorUserID: actorUserID,
+                operationID: operationID,
+                title: frozen.title,
+                initialMemberUserIDs: frozen.memberUserIDs
+            )
+        } else {
+            try await groupMessaging.createStaged(
+                actorUserID: actorUserID,
+                operationID: operationID,
+                title: frozen.title,
+                stagedMemberCount: frozen.stagedMemberCount
+            )
+        }
         switch outcome {
         case .created(let room), .idempotent(let room):
             try await store.complete(actorUserID: actorUserID, operationID: operationID, roomID: room.roomID, policy: policy, now: now())
-        case .idempotencyConflict, .memberLimitReached:
+        case .idempotencyConflict, .invalidMembers, .memberLimitReached:
             // The underlying operation is terminal and no room was returned;
             // this frozen audience must not consume the actor's permanent
             // draft quota. Transient outcomes retain it for exact retry.
@@ -232,6 +260,9 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
                 guard row.title == title else { throw V2GroupAudienceImportError.idempotencyConflict }
                 return try row.value(operationID: .init(operationID.uuidString))
             }
+            guard try await audienceUserIsActive(userID: actorID, sql: sql) else {
+                throw V2GroupAudienceImportError.invalidInput
+            }
             let activeDraftCount = try await activeDraftCount(actorID: actorID, now: now, sql: sql)
             guard activeDraftCount < Int64(policy.maximumActiveDraftsPerActor) else {
                 throw V2GroupAudienceImportError.activeDraftLimitReached
@@ -261,6 +292,24 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             guard !members.contains(actorID), Set(members).count == members.count else { throw V2GroupAudienceImportError.invalidInput }
             guard let encoded = String(data: try JSONEncoder().encode(members.map(\.uuidString)), encoding: .utf8) else {
                 throw V2GroupAudienceImportError.corruptPersistenceState
+            }
+            guard try await audienceUserIsActive(userID: actorID, sql: sql) else {
+                throw V2GroupAudienceImportError.invalidInput
+            }
+            let activeRequestedCount = try await sql.raw("""
+                WITH requested AS (
+                    SELECT value::uuid AS user_id
+                    FROM jsonb_array_elements_text(\(bind: encoded)::jsonb) AS value
+                )
+                SELECT COUNT(*)::bigint AS member_count
+                FROM requested
+                INNER JOIN im_v2.public_user_profiles AS profile
+                    ON profile.user_id = requested.user_id AND profile.state = 'active'
+                LEFT JOIN im_v2.account_disables AS disabled ON disabled.user_id = requested.user_id
+                WHERE disabled.user_id IS NULL
+                """).first(decoding: AudienceCountRow.self)?.memberCount ?? -1
+            guard activeRequestedCount == Int64(members.count) else {
+                throw V2GroupAudienceImportError.invalidInput
             }
             try await sql.raw("""
                 INSERT INTO im_v2.group_room_creation_draft_members
@@ -297,6 +346,22 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             try await deleteExpiredDrafts(actorID: actorID, now: now, sql: sql)
             try await audienceLock(actorID: actorID, operationID: operationID, sql: sql)
             guard let row = try await draft(actorID: actorID, operationID: operationID, sql: sql) else { throw V2GroupAudienceImportError.missingDraft }
+            guard try await audienceUserIsActive(userID: actorID, sql: sql) else {
+                throw V2GroupAudienceImportError.invalidInput
+            }
+            let invalidMemberExists = try await sql.raw("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM im_v2.group_room_creation_draft_members AS member
+                    LEFT JOIN im_v2.public_user_profiles AS profile
+                      ON profile.user_id = member.user_id AND profile.state = 'active'
+                    LEFT JOIN im_v2.account_disables AS disabled ON disabled.user_id = member.user_id
+                    WHERE member.actor_user_id = \(bind: actorID)
+                      AND member.operation_id = \(bind: operationID)
+                      AND (profile.user_id IS NULL OR disabled.user_id IS NOT NULL)
+                ) AS value
+                """).first(decoding: AudienceBooleanRow.self)?.value ?? true
+            guard !invalidMemberExists else { throw V2GroupAudienceImportError.invalidInput }
             if row.state == "staging" {
                 try await sql.raw("""
                     UPDATE im_v2.group_room_creation_drafts
@@ -310,16 +375,11 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
                     WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
                     """).run()
             }
-            let memberRows = try await sql.raw("""
-                SELECT user_id FROM im_v2.group_room_creation_draft_members
-                WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
-                ORDER BY user_id
-                """).all(decoding: AudienceMemberRow.self)
             return try .init(
                 actorUserID: actorUserID,
                 operationID: .init(operationID.uuidString),
                 title: row.title,
-                memberUserIDs: memberRows.map { try .init($0.userID.uuidString) }
+                stagedMemberCount: Int(row.memberCount)
             )
         }
     }
@@ -466,6 +526,10 @@ private func activeMemberCount(actorID: UUID, now: Date, sql: any SQLDatabase) a
         """).first(decoding: AudienceCountRow.self)?.memberCount ?? 0
 }
 
+private func audienceUserIsActive(userID: UUID, sql: any SQLDatabase) async throws -> Bool {
+    try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: userID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: AudienceBooleanRow.self)?.value ?? false
+}
+
 private struct AudienceDraftRow: Decodable {
     let title: String
     let state: String
@@ -478,6 +542,7 @@ private struct AudienceDraftRow: Decodable {
 }
 
 private struct AudienceCountRow: Decodable { let memberCount: Int64; enum CodingKeys: String, CodingKey { case memberCount = "member_count" } }
+private struct AudienceBooleanRow: Decodable { let value: Bool }
 private struct AudienceMemberRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }
 private struct AudienceRecoveryRow: Decodable { let actorUserID: UUID; let operationID: UUID; enum CodingKeys: String, CodingKey { case actorUserID = "actor_user_id"; case operationID = "operation_id" } }
 

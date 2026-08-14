@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ClientKit
 import IMV2Core
 import Testing
 @testable import IMApp
@@ -76,6 +77,35 @@ struct V2ContactsStoreTests {
         #expect(rootNavigation.conversationRequest?.roomID == roomID)
     }
 
+    @Test func contactListLoadsStableAdditionalPages() async throws {
+        let currentUserID = try UserID("00000000-0000-0000-0000-000000000831")
+        let date = Date(timeIntervalSince1970: 1_750_000_000)
+        let projections = try (1 ... 51).map { index in
+            let identity = try makeIdentity(
+                userID: String(format: "00000000-0000-0000-0000-%012d", 900 + index),
+                handle: "friend\(index)",
+                displayName: "Friend \(index)"
+            )
+            return V2ContactProjection(
+                userID: identity.userID,
+                state: .accepted,
+                requestedByUserID: currentUserID,
+                updatedAt: date.addingTimeInterval(TimeInterval(index)),
+                publicIdentity: identity
+            )
+        }
+        let source = ContactsDataSourceFake(projections: projections, hydratedProfiles: [:])
+        let store = makeStore(dataSource: source, currentUserID: currentUserID)
+
+        await store.refresh()
+        #expect(store.friends.count == 50)
+        #expect(store.friendsNextCursor != nil)
+        await store.loadMoreFriends()
+        #expect(store.friends.count == 51)
+        #expect(Set(store.friends.map(\.id)).count == 51)
+        #expect(store.friendsNextCursor == nil)
+    }
+
     private func makeStore(
         dataSource: any V2ContactsReading,
         currentUserID: UserID,
@@ -108,8 +138,50 @@ private actor ContactsDataSourceFake: V2ContactsReading {
         self.hydratedProfiles = hydratedProfiles
     }
 
-    func contactProjections() async throws -> [V2ContactProjection] {
-        projections
+    func contactProjectionPage(
+        scope: V2ContactProjectionPageScope,
+        matching query: String?,
+        before cursor: V2ClientRelationshipCursor?,
+        limit: Int,
+        includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionPage {
+        let normalizedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let candidates = projections
+            .filter { projection in
+                switch scope {
+                case .friends:
+                    projection.state == .accepted
+                case .incomingRequests:
+                    projection.state == .pending && projection.requestedByUserID == projection.userID
+                case .outgoingRequests:
+                    projection.state == .pending && projection.requestedByUserID != projection.userID
+                }
+            }
+            .filter { projection in
+                guard !normalizedQuery.isEmpty else { return true }
+                return projection.publicIdentity?.displayName.localizedCaseInsensitiveContains(normalizedQuery) == true
+                    || projection.publicIdentity?.handle.description.localizedCaseInsensitiveContains(normalizedQuery) == true
+            }
+            .filter { projection in
+                guard let cursor else { return true }
+                return projection.updatedAt < cursor.updatedAt
+                    || (projection.updatedAt == cursor.updatedAt && projection.userID > cursor.targetUserID)
+            }
+            .sorted { lhs, rhs in
+                lhs.updatedAt == rhs.updatedAt ? lhs.userID < rhs.userID : lhs.updatedAt > rhs.updatedAt
+            }
+        let page = Array(candidates.prefix(limit))
+        let nextCursor = candidates.count > limit ? page.last.map {
+            V2ClientRelationshipCursor(updatedAt: $0.updatedAt, targetUserID: $0.userID)
+        } : nil
+        let totalCount: Int? = if includeTotalCount {
+            projections.filter { projection in
+                projection.state == .pending && projection.requestedByUserID == projection.userID
+            }.count
+        } else {
+            nil
+        }
+        return .init(projections: page, nextCursor: nextCursor, totalCount: totalCount)
     }
 
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {

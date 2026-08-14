@@ -20,12 +20,26 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
 
     public func claimAdmitted(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2PushWakeLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
-        var leases: [V2PushWakeLease] = []
-        for _ in 0..<limit {
-            guard let lease = try await claimOne(now: now, leaseDuration: leaseDuration) else { break }
-            leases.append(lease)
+        let expiry = now.addingTimeInterval(leaseDuration)
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            // Suppress muted work once per batch, before any budget is spent.
+            // The former per-row transaction repeated this global UPDATE up to
+            // `limit` times on every pass.
+            try await suppressMutedWakes(now: now, on: sql)
+
+            let candidates = try await claimCandidates(now: now, limit: limit, on: sql)
+            var leases: [V2PushWakeLease] = []
+            leases.reserveCapacity(limit)
+            for candidate in candidates {
+                if let lease = try await admit(candidate, now: now, expiry: expiry, on: sql) {
+                    leases.append(lease)
+                }
+            }
+            return leases
         }
-        return leases
     }
 
     public func markSent(_ lease: V2PushWakeLease, now: Date) async throws {
@@ -62,49 +76,38 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
             """).run()
     }
 
-    private func claimOne(now: Date, leaseDuration: TimeInterval) async throws -> V2PushWakeLease? {
-        let token = makeUUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
-        return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            // Push carries only a generic wake hint, so suppressing it for a
-            // muted room cannot affect durable user-sync correctness. Perform
-            // this before admission so a muted wake never consumes device
-            // budget. Expired leases are included because their provider work
-            // is no longer active and they may otherwise be reclaimed.
-            try await sql.raw("""
-                UPDATE im_v2.push_wake_outbox AS wake
-                SET state = 'suppressed', suppression_reason = 'conversation_muted',
-                    claim_token = NULL, lease_expires_at = NULL
-                FROM im_v2.room_events AS event,
-                     im_v2.user_room_preferences AS preference
-                WHERE wake.source_event_id = event.event_id
-                  AND preference.user_id = wake.target_user_id
-                  AND preference.room_id = event.room_id
-                  AND preference.mute_until > \(bind: now)
-                  AND (
-                    wake.state = 'pending'
-                    OR (wake.state = 'claimed' AND wake.lease_expires_at <= \(bind: now))
-                  )
-                """).run()
-            guard let pending = try await sql.raw("""
+    private func claimCandidates(
+        now: Date,
+        limit: Int,
+        on sql: any SQLDatabase
+    ) async throws -> [PendingPushWakeRow] {
+        try await sql.raw("""
                 SELECT dispatch_id, target_device_id, campaign_id, budget_window_started_at,
                        requires_new_key_operation, admitted_at
                 FROM im_v2.push_wake_outbox
                 WHERE state = 'pending'
                    OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
                 ORDER BY created_at, dispatch_id
-                LIMIT 1
+                LIMIT \(bind: limit)
                 FOR UPDATE SKIP LOCKED
-                """).first(decoding: PendingPushWakeRow.self) else { return nil }
-            guard let campaign = try await sql.raw("""
+                """).all(decoding: PendingPushWakeRow.self)
+    }
+
+    private func admit(
+        _ pending: PendingPushWakeRow,
+        now: Date,
+        expiry: Date,
+        on sql: any SQLDatabase
+    ) async throws -> V2PushWakeLease? {
+        let token = makeUUID()
+        guard let campaign = try await sql.raw("""
                 SELECT state FROM im_v2.push_campaigns WHERE campaign_id = \(bind: pending.campaignID) FOR UPDATE
                 """).first(decoding: PushCampaignRow.self), campaign.state == "enabled" else {
-                try await suppress(pending.dispatchID, reason: .campaignDisabled, on: sql)
-                return nil
-            }
-            if pending.admittedAt == nil {
-                guard let budget = try await sql.raw("""
+            try await suppress(pending.dispatchID, reason: .campaignDisabled, on: sql)
+            return nil
+        }
+        if pending.admittedAt == nil {
+            guard let budget = try await sql.raw("""
                     SELECT max_work_units, used_work_units, max_new_key_operations, used_new_key_operations
                     FROM im_v2.push_device_budgets
                     WHERE device_id = \(bind: pending.deviceID)
@@ -112,22 +115,22 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
                       AND window_started_at = \(bind: pending.budgetWindowStartedAt)
                     FOR UPDATE
                     """).first(decoding: PushBudgetRow.self) else {
-                    try await suppress(pending.dispatchID, reason: .deviceBudgetUnavailable, on: sql)
-                    return nil
-                }
-                let request = try V2PushAdmissionRequest(campaignID: .init(rawValue: pending.campaignID), requiresNewKeyOperation: pending.requiresNewKeyOperation)
-                let current = try V2PushDeviceBudget(
-                    maxWorkUnits: budget.maxWorkUnits,
-                    usedWorkUnits: budget.usedWorkUnits,
-                    maxNewKeyOperations: budget.maxNewKeyOperations,
-                    usedNewKeyOperations: budget.usedNewKeyOperations
-                )
-                switch try V2PushAdmissionEvaluator.evaluate(campaignEnabled: true, request: request, budget: current) {
-                case .suppressed(let reason):
-                    try await suppress(pending.dispatchID, reason: reason, on: sql)
-                    return nil
-                case .allowed(let next):
-                    try await sql.raw("""
+                try await suppress(pending.dispatchID, reason: .deviceBudgetUnavailable, on: sql)
+                return nil
+            }
+            let request = try V2PushAdmissionRequest(campaignID: .init(rawValue: pending.campaignID), requiresNewKeyOperation: pending.requiresNewKeyOperation)
+            let current = try V2PushDeviceBudget(
+                maxWorkUnits: budget.maxWorkUnits,
+                usedWorkUnits: budget.usedWorkUnits,
+                maxNewKeyOperations: budget.maxNewKeyOperations,
+                usedNewKeyOperations: budget.usedNewKeyOperations
+            )
+            switch try V2PushAdmissionEvaluator.evaluate(campaignEnabled: true, request: request, budget: current) {
+            case .suppressed(let reason):
+                try await suppress(pending.dispatchID, reason: reason, on: sql)
+                return nil
+            case .allowed(let next):
+                try await sql.raw("""
                         UPDATE im_v2.push_device_budgets
                         SET used_work_units = \(bind: next.usedWorkUnits),
                             used_new_key_operations = \(bind: next.usedNewKeyOperations)
@@ -135,19 +138,39 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
                           AND campaign_id = \(bind: pending.campaignID)
                           AND window_started_at = \(bind: pending.budgetWindowStartedAt)
                         """).run()
-                }
             }
-            try await sql.raw("""
+        }
+        try await sql.raw("""
                 UPDATE im_v2.push_wake_outbox
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiry),
                     retry_count = retry_count + 1, admitted_at = COALESCE(admitted_at, \(bind: now))
                 WHERE dispatch_id = \(bind: pending.dispatchID) AND state IN ('pending', 'claimed')
                 """).run()
-            return try .init(
+        return try .init(
                 wake: .init(dispatchID: pending.dispatchID, deviceID: .init(pending.deviceID.uuidString), campaignID: .init(rawValue: pending.campaignID)),
                 claimToken: token
             )
-        }
+    }
+
+    private func suppressMutedWakes(now: Date, on sql: any SQLDatabase) async throws {
+        // Push carries only a generic wake hint, so suppression cannot affect
+        // durable user-sync correctness. Expired leases are included because
+        // their provider work is no longer active and may be reclaimed.
+        try await sql.raw("""
+            UPDATE im_v2.push_wake_outbox AS wake
+            SET state = 'suppressed', suppression_reason = 'conversation_muted',
+                claim_token = NULL, lease_expires_at = NULL
+            FROM im_v2.room_events AS event,
+                 im_v2.user_room_preferences AS preference
+            WHERE wake.source_event_id = event.event_id
+              AND preference.user_id = wake.target_user_id
+              AND preference.room_id = event.room_id
+              AND preference.mute_until > \(bind: now)
+              AND (
+                wake.state = 'pending'
+                OR (wake.state = 'claimed' AND wake.lease_expires_at <= \(bind: now))
+              )
+            """).run()
     }
 
     private func suppress(_ dispatchID: UUID, reason: V2PushSuppressionReason, on sql: any SQLDatabase) async throws {

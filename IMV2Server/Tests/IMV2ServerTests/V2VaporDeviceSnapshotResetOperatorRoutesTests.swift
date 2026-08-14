@@ -30,7 +30,7 @@ struct V2VaporDeviceSnapshotResetOperatorRoutesTests {
             #expect(response.headers.first(name: .cacheControl) == "no-store")
             var decoded: V2DeviceSnapshotResetHTTPResponse?
             expectContent(V2DeviceSnapshotResetHTTPResponse.self, response) { decoded = $0 }
-            #expect(decoded == .init(operationID: operationID, generation: 3, wasIdempotent: false))
+            #expect(decoded == .init(operationID: operationID, generation: 3, state: .preparing, wasIdempotent: false))
         }
         let command = try #require(await service.command())
         #expect(command.userID == userID)
@@ -56,7 +56,7 @@ private actor SnapshotResetRouteService: V2DeviceSnapshotResetting {
     private var received: V2DeviceSnapshotResetCommand?
     func stage(_ command: V2DeviceSnapshotResetCommand) -> V2DeviceSnapshotResetResult {
         received = command
-        return .init(generation: 3, wasIdempotent: false)
+        return .init(generation: 3, state: .preparing, wasIdempotent: false)
     }
     func command() -> V2DeviceSnapshotResetCommand? { received }
 }

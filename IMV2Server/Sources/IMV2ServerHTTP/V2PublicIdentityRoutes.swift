@@ -47,6 +47,8 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
                 SELECT p.user_id, p.public_handle, p.display_name, p.account_kind
                 FROM im_v2.public_user_profiles p
                 WHERE p.public_handle = \(bind: handle.rawValue)
+                  AND p.state = 'active'
+                  AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables d WHERE d.user_id = p.user_id)
                   AND NOT EXISTS (
                     SELECT 1 FROM im_v2.user_blocks b
                     WHERE b.blocker_user_id = p.user_id
@@ -85,17 +87,19 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             let changedAt = now()
             guard let updated = try await sql.raw("""
                 UPDATE im_v2.public_user_profiles
-                SET display_name = \(bind: validated.displayName), revision = revision + 1, updated_at = \(bind: changedAt)
-                WHERE user_id = \(bind: userUUID) AND display_name IS DISTINCT FROM \(bind: validated.displayName)
+                SET display_name = \(bind: validated.displayName), revision = revision + 1,
+                    visibility_revision = visibility_revision + 1, updated_at = \(bind: changedAt)
+                WHERE user_id = \(bind: userUUID) AND state = 'active'
+                  AND display_name IS DISTINCT FROM \(bind: validated.displayName)
                 RETURNING revision, updated_at
                 """).first(decoding: UpdatedPublicIdentityRow.self) else {
                 return current
             }
             try await sql.raw("""
                 INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, account_kind, revision, profile_updated_at, created_at)
+                    (source_event_id, source_user_id, public_handle, display_name, account_kind, profile_state, revision, profile_updated_at, created_at)
                     VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: validated.handle.rawValue),
-                        \(bind: validated.displayName), \(bind: validated.accountKind.rawValue), \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
+                        \(bind: validated.displayName), \(bind: validated.accountKind.rawValue), 'active', \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
                 """).run()
             return validated
         }
@@ -120,7 +124,7 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
     }
 
     private func profile(sql: any SQLDatabase, userID: UUID) async throws -> V2PublicIdentity? {
-        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name, account_kind FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID)").first(decoding: PublicIdentityRow.self),
+        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name, account_kind FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID) AND state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID))").first(decoding: PublicIdentityRow.self),
               let profileUserID = try? UserID(row.userID.uuidString),
               let accountKind = V2AccountKind(rawValue: row.accountKind),
               let profile = try? V2PublicIdentity(userID: profileUserID, handle: .init(row.handle), displayName: row.displayName, accountKind: accountKind)
@@ -164,14 +168,6 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
             catch { throw Abort(.serviceUnavailable) }
         }
 
-        routes.put("v2", "public-identities", "me") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let input = try request.content.decode(V2PublicIdentityProfileHTTPRequest.self)
-            do {
-                let result = try await directory.updateDisplayName(for: actor.userID, displayName: input.displayName)
-                return try noStoreJSONResponse(.init(userID: result.userID.rawValue, handle: result.handle.rawValue, displayName: result.displayName, accountKind: result.accountKind))
-            } catch { throw Abort(.badRequest) }
-        }
     }
 
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {

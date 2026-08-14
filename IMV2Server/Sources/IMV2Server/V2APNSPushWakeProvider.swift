@@ -35,15 +35,19 @@ public protocol V2PushHTTPClient: Sendable {
 
 public struct V2URLSessionPushHTTPClient: V2PushHTTPClient {
     private let session: URLSession
+    private let requestTimeout: TimeInterval
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = .shared, requestTimeout: TimeInterval = 10) {
+        precondition(requestTimeout.isFinite && requestTimeout > 0 && requestTimeout <= 60)
         self.session = session
+        self.requestTimeout = requestTimeout
     }
 
     public func execute(_ request: V2PushHTTPRequest) async throws -> V2PushHTTPResponse {
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = "POST"
         urlRequest.httpBody = request.body
+        urlRequest.timeoutInterval = requestTimeout
         for (name, value) in request.headers {
             urlRequest.setValue(value, forHTTPHeaderField: name)
         }

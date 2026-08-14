@@ -12,6 +12,21 @@ public struct V2DeviceSessionHTTPResponse: Content, Sendable {
     public let isCurrentDevice: Bool
 }
 
+public struct V2DeviceSessionPageHTTPResponse: Content, Sendable {
+    public let sessions: [V2DeviceSessionHTTPResponse]
+    public let nextCursor: String?
+}
+
+private struct V2DeviceSessionPageHTTPQuery: Content {
+    let cursor: String?
+    let pageSize: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case cursor
+        case pageSize = "page_size"
+    }
+}
+
 public struct V2DeviceSessionMutationHTTPRequest: Content, Sendable {
     public let deviceID: String?
     public let operationID: UUID
@@ -32,9 +47,14 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "devices") { request async throws -> Response in
             let identity = try await authenticate(request)
+            let query: V2DeviceSessionPageHTTPQuery
+            do { query = try request.query.decode(V2DeviceSessionPageHTTPQuery.self) }
+            catch { throw Abort(.badRequest) }
+            let pageSize = query.pageSize ?? 50
+            guard (1 ... 100).contains(pageSize) else { throw Abort(.badRequest) }
             do {
-                let values = try await sessions.sessions(for: identity.userID)
-                let response = try values.map { value in
+                let page = try await sessions.sessions(for: identity.userID, cursor: query.cursor, pageSize: pageSize)
+                let values = try page.sessions.map { value in
                     try V2DeviceSessionHTTPResponse(
                         deviceID: value.deviceID.rawValue,
                         deviceName: value.displayName,
@@ -44,7 +64,9 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
                         isCurrentDevice: value.deviceID == identity.deviceID
                     )
                 }
-                return try noStoreJSON(response)
+                return try noStoreJSON(.init(sessions: values, nextCursor: page.nextCursor))
+            } catch V2DeviceSessionServiceError.invalidRequest {
+                throw Abort(.badRequest)
             } catch {
                 throw Abort(.serviceUnavailable)
             }
@@ -90,7 +112,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
         return Int64(value.rounded(.towardZero))
     }
 
-    private func noStoreJSON(_ body: [V2DeviceSessionHTTPResponse]) throws -> Response {
+    private func noStoreJSON(_ body: V2DeviceSessionPageHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(body)
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: .contentType, value: "application/json")

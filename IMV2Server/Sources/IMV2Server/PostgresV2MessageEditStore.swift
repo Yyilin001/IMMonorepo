@@ -52,7 +52,9 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore {
                 VALUES (\(bind: messageID), \(bind: roomID), \(bind: nextRevision), 'pending', NULL, NULL, NULL, 0, \(bind: now), NULL)
                 ON CONFLICT (message_id) DO UPDATE
                 SET expected_content_revision = EXCLUDED.expected_content_revision, state = 'pending', decision = NULL,
-                    claim_token = NULL, lease_expires_at = NULL, completed_at = NULL
+                    claim_token = NULL, lease_expires_at = NULL, retry_count = 0,
+                    next_attempt_at = NULL, paused_at = NULL, finding_category = NULL,
+                    finding_severity = NULL, finding_confidence = NULL, completed_at = NULL
                 """).run()
             try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), fanout_window_used = \(bind: nextRoom.fanoutWindow.used), outstanding_fanout_units = \(bind: nextRoom.outstandingFanoutUnits), outstanding_plans = \(bind: nextRoom.outstandingPlans), shard_lease_id = \(bind: try editUUID(lease.id)), shard_lease_generation = \(bind: try editSigned(lease.generation)) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used), fanout_window_used = \(bind: lease.fanoutWindow.used), outstanding_fanout_units = \(bind: nextShard.outstandingFanoutUnits), outstanding_plans = \(bind: nextShard.outstandingPlans) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try editUUID(lease.id)) AND generation = \(bind: try editSigned(lease.generation))").run()

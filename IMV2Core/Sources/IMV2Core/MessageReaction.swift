@@ -9,6 +9,16 @@ public enum V2MessageReactionAction: String, Codable, Equatable, Sendable {
     case remove
 }
 
+/// Reaction state must remain bounded independently of room membership. The
+/// palette bound prevents one actor from manufacturing an arbitrary number of
+/// distinct set members, while the message bound protects every fan-out and
+/// snapshot recipient from an unbounded popular-message projection.
+public enum V2MessageReactionLimits {
+    public static let maximumReactionBytes = 16
+    public static let maximumReactionsPerActorPerMessage = 8
+    public static let maximumReactionsPerMessage = 1_024
+}
+
 public struct V2ChangeMessageReactionCommand: Equatable, Sendable {
     public let roomID: RoomID
     public let actorUserID: UserID
@@ -20,7 +30,7 @@ public struct V2ChangeMessageReactionCommand: Equatable, Sendable {
     public init(roomID: RoomID, actorUserID: UserID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) throws {
         let normalized = reaction.precomposedStringWithCanonicalMapping
         guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              normalized.utf8.count <= 64,
+              normalized.utf8.count <= V2MessageReactionLimits.maximumReactionBytes,
               normalized.unicodeScalars.allSatisfy({
                   !CharacterSet.whitespacesAndNewlines.contains($0)
                       && !CharacterSet.controlCharacters.contains($0)

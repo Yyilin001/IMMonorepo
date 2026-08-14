@@ -27,12 +27,20 @@ enum IMV2AccountServerApp {
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
             app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: configuration.edgeAuthorizationSecret))
+            let edgeClientRateLimiter = V2PostgresAccountEdgeClientRateLimiter(
+                database: database,
+                policy: configuration.edgeClientRateLimit,
+                key: configuration.edgeClientRateLimitKey
+            )
             app.middleware.use(V2AccountEdgeClientRateLimitMiddleware(
-                limiter: V2PostgresAccountEdgeClientRateLimiter(
-                    database: database,
-                    policy: configuration.edgeClientRateLimit,
-                    key: configuration.edgeClientRateLimitKey
-                )
+                limiter: edgeClientRateLimiter,
+                limitedPaths: [
+                    "/v2/account-auth/password/register",
+                    "/v2/account-auth/password/assertion",
+                    "/v2/account-auth/passkeys/assertion-options",
+                    "/v2/account-auth/passkeys/assertion",
+                    "/v2/device-credentials"
+                ]
             ))
 
             let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: configuration.accountAssertionKey)
@@ -46,6 +54,22 @@ enum IMV2AccountServerApp {
                 tokenKey: configuration.accessTokenKey
             )
             var localMediaScanTask: Task<Void, Never>?
+            let edgeRateLimitRetentionTask = Task {
+                while !Task.isCancelled {
+                    do {
+                        _ = try await edgeClientRateLimiter.purgeExpired(limit: 1_000)
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        app.logger.error("IM V2 account-edge rate-limit retention failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: .seconds(60))
+                    } catch {
+                        break
+                    }
+                }
+            }
             if let localMediaConfiguration {
                 let provider = try V2LocalFilesystemMediaProvider(
                     rootDirectory: localMediaConfiguration.rootDirectory,
@@ -83,17 +107,23 @@ enum IMV2AccountServerApp {
                     store: PostgresV2MediaScanStore(database: database),
                     provider: V2LocalEICARMediaScanner(provider: provider)
                 )
+                let purger = try V2MediaPurgeWorker(
+                    store: PostgresV2MediaPurgeStore(database: database),
+                    provider: provider
+                )
                 let logger = app.logger
                 localMediaScanTask = Task {
                     while !Task.isCancelled {
                         do {
-                            _ = try await scanner.runOnce(limit: 16)
+                            async let scanReport = scanner.runOnce(limit: 16)
+                            async let purgeReport = purger.runOnce(limit: 16)
+                            _ = try await (scanReport, purgeReport)
                         } catch is CancellationError {
                             break
                         } catch {
                             // This local scanner is deliberately diagnostic
                             // only; never include IDs, paths, or bytes here.
-                            logger.error("IM V2 local media scan worker failed; retrying")
+                            logger.error("IM V2 local media maintenance worker failed; retrying")
                         }
                         do {
                             try await Task.sleep(for: .milliseconds(200))
@@ -151,9 +181,11 @@ enum IMV2AccountServerApp {
             app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
             await TerminationSignal.wait()
             localMediaScanTask?.cancel()
+            edgeRateLimitRetentionTask.cancel()
             if let localMediaScanTask {
                 await localMediaScanTask.value
             }
+            await edgeRateLimitRetentionTask.value
             try await app.asyncShutdown()
         } catch {
             try? await app.asyncShutdown()

@@ -90,6 +90,27 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
             try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_refresh_sessions SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_access_tokens SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
+            if let profile = try await sql.raw("""
+                UPDATE im_v2.public_user_profiles
+                SET state = 'suspended', avatar_media_id = NULL,
+                    revision = revision + 1,
+                    visibility_revision = visibility_revision + 1,
+                    updated_at = \(bind: occurredAt)
+                WHERE user_id = \(bind: userUUID) AND state <> 'deleted'
+                  AND state <> 'suspended'
+                RETURNING public_handle, display_name, account_kind, revision
+                """).first(decoding: DisabledProfileRow.self) {
+                try await sql.raw("""
+                    INSERT INTO im_v2.public_profile_update_outbox
+                        (source_event_id, source_user_id, public_handle,
+                         display_name, account_kind, profile_state, revision,
+                         profile_updated_at, created_at)
+                    VALUES (\(bind: command.operationID), \(bind: userUUID),
+                            \(bind: profile.publicHandle), \(bind: profile.displayName),
+                            \(bind: profile.accountKind), 'suspended',
+                            \(bind: profile.revision), \(bind: occurredAt), \(bind: occurredAt))
+                    """).run()
+            }
             // The durable gateway worker consumes this per-device stream on
             // every gateway replica and closes already-authenticated sockets.
             try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) SELECT user_id, device_id, \(bind: occurredAt) FROM im_v2.auth_devices WHERE user_id = \(bind: userUUID) ON CONFLICT (device_id) DO NOTHING").run()
@@ -112,4 +133,17 @@ private struct DisableRecord: Decodable {
     let userID: UUID
     let disabledAt: Date
     enum CodingKeys: String, CodingKey { case userID = "user_id"; case disabledAt = "disabled_at" }
+}
+
+private struct DisabledProfileRow: Decodable {
+    let publicHandle: String
+    let displayName: String
+    let accountKind: String
+    let revision: Int64
+    enum CodingKeys: String, CodingKey {
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+        case accountKind = "account_kind"
+        case revision
+    }
 }

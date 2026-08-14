@@ -48,8 +48,8 @@ struct V2VaporPublicIdentityRoutesTests {
         }
     }
 
-    @Test("the authenticated owner can update only their display name")
-    func updatesOwnDisplayName() async throws {
+    @Test("the legacy non-idempotent display-name mutation route is not registered")
+    func legacyDisplayNameMutationIsUnavailable() async throws {
         let app = try await Application.make(.testing)
         defer { Task { try? await app.asyncShutdown() } }
         V2VaporPublicIdentityRoutes(
@@ -61,11 +61,8 @@ struct V2VaporPublicIdentityRoutesTests {
             request.headers.bearerAuthorization = .init(token: "access-token")
             request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000901")
             try request.content.encode(V2PublicIdentityProfileHTTPRequest(displayName: "New"))
-        }) { response async throws in
-            #expect(response.status == .ok)
-            let body = try response.content.decode(V2PublicIdentityHTTPResponse.self)
-            #expect(body.handle == "actor_user")
-            #expect(body.displayName == "New")
+        }) { response async in
+            #expect(response.status == .notFound)
         }
     }
 }
