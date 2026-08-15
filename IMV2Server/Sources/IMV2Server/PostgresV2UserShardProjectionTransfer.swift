@@ -66,6 +66,11 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         try await copyProjectionVersions(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyArtifacts(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyArtifactPages(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
+        try await copyRevokedDeviceTombstones(
+            sourceSQL: sourceSQL,
+            userID: userID,
+            token: record.migrationID
+        )
         try await copyDeviceResets(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyCursors(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyTokens(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
@@ -120,6 +125,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
             ("sync_tokens", "user_id"),
             ("sync_receipts", "user_id"),
             ("device_sync_cursors", "user_id"),
+            ("revoked_device_projection_tombstones", "user_id"),
             ("user_projection_versions", "user_id"),
             ("user_projection_effects", "user_id"),
             ("consumer_inbox", "target_user_id"),
@@ -229,7 +235,10 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         // Projection workers are fenced on the target. Every potentially
         // large relation is reclaimed in bounded commits so an interrupted
         // transfer is retryable without a user-sized delete transaction.
-        for table in ["device_snapshot_resets", "sync_tokens", "sync_receipts", "device_sync_cursors"] {
+        for table in [
+            "device_snapshot_resets", "sync_tokens", "sync_receipts",
+            "device_sync_cursors", "revoked_device_projection_tombstones",
+        ] {
             try await deleteTargetRows(
                 sql: sql, table: table, predicate: "user_id",
                 userID: userID, token: token
@@ -545,6 +554,31 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         }
     }
 
+    private func copyRevokedDeviceTombstones(
+        sourceSQL: any SQLDatabase,
+        userID: UUID,
+        token: UUID
+    ) async throws {
+        var after: UUID?
+        while true {
+            var query: SQLQueryString = "SELECT user_id, device_id, revoked_at FROM \(unsafeRaw: sourceTable("revoked_device_projection_tombstones")) WHERE user_id = \(bind: userID)"
+            if let after { query += " AND device_id > \(bind: after)" }
+            query += " ORDER BY device_id LIMIT \(bind: pageSize)"
+            let rows = try await sourceSQL.raw(query)
+                .all(decoding: ProjectionRevokedDeviceTombstoneRow.self)
+            guard !rows.isEmpty else { return }
+            try await insert(rows) { row in
+                "(\(bind: row.userID), \(bind: row.deviceID), \(bind: row.revokedAt))"
+            } prefix: {
+                "INSERT INTO \(unsafeRaw: targetTable("revoked_device_projection_tombstones")) AS tombstone (user_id, device_id, revoked_at) VALUES "
+            } suffix: {
+                " ON CONFLICT (user_id, device_id) DO UPDATE SET revoked_at = LEAST(tombstone.revoked_at, EXCLUDED.revoked_at)"
+            }
+            after = rows.last?.deviceID
+            try await renewFences(userID: userID, token: token)
+        }
+    }
+
     private func copyCursors(sourceSQL: any SQLDatabase, userID: UUID, token: UUID) async throws {
         var after: UUID?
         while true {
@@ -636,6 +670,10 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         try await fingerprintVersions(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
         try await fingerprintArtifacts(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
         try await fingerprintPages(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
+        try await fingerprintRevokedDeviceTombstones(
+            sql: sql, schema: schema, userID: userID,
+            renew: renew, append: append
+        )
         try await fingerprintResets(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
         try await fingerprintCursors(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
         try await fingerprintTokens(sql: sql, schema: schema, userID: userID, renew: renew, append: append)
@@ -724,6 +762,27 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
             guard !rows.isEmpty else { return }
             rows.forEach { append($0.line) }
             after = rows.last.map { .init(deviceID: $0.deviceID, generation: $0.generation) }
+            try await renew()
+        }
+    }
+
+    private func fingerprintRevokedDeviceTombstones(
+        sql: any SQLDatabase,
+        schema: String,
+        userID: UUID,
+        renew: () async throws -> Void,
+        append: (String) -> Void
+    ) async throws {
+        var after: UUID?
+        while true {
+            var query: SQLQueryString = "SELECT user_id, device_id, revoked_at FROM \(unsafeRaw: qualifiedTable("revoked_device_projection_tombstones", schema: schema)) WHERE user_id = \(bind: userID)"
+            if let after { query += " AND device_id > \(bind: after)" }
+            query += " ORDER BY device_id LIMIT \(bind: pageSize)"
+            let rows = try await sql.raw(query)
+                .all(decoding: ProjectionRevokedDeviceTombstoneRow.self)
+            guard !rows.isEmpty else { return }
+            rows.forEach { append($0.line) }
+            after = rows.last?.deviceID
             try await renew()
         }
     }
@@ -851,6 +910,19 @@ private struct ProjectionArtifactRow: ProjectionFingerprintRow { let snapshotID:
 private struct ProjectionPageKey { let snapshotID: UUID; let index: Int }
 private struct ProjectionPageRow: ProjectionFingerprintRow { let snapshotID: UUID; let index: Int; let firstKind: String; let firstKey: String; let lastKind: String; let lastKey: String; let itemCount: Int; let digest: String; let payload: Data; let byteCount: Int; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", index = "page_index", firstKind = "first_projection_kind", firstKey = "first_entity_key", lastKind = "last_projection_kind", lastKey = "last_entity_key", itemCount = "item_count", digest = "page_digest", payload, byteCount = "byte_count" }; var line: String { "page|\(snapshotID)|\(index)|\(firstKind)|\(firstKey)|\(lastKind)|\(lastKey)|\(itemCount)|\(digest)|\(payload.base64EncodedString())|\(byteCount)" } }
 private struct ProjectionResetKey { let deviceID: UUID; let generation: Int64 }
+private struct ProjectionRevokedDeviceTombstoneRow: ProjectionFingerprintRow {
+    let userID: UUID
+    let deviceID: UUID
+    let revokedAt: Date
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case deviceID = "device_id"
+        case revokedAt = "revoked_at"
+    }
+    var line: String {
+        "revoked-device|\(userID)|\(deviceID)|\(projectionDate(revokedAt))"
+    }
+}
 private struct ProjectionResetRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let generation: Int64; let snapshotID: UUID; let state: String; let nextToken: String; let receipt: String; let expiresAt: Date; let createdAt: Date; let acknowledgedAt: Date?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", generation = "reset_generation", snapshotID = "snapshot_id", state, nextToken = "next_sync_token", receipt = "snapshot_receipt", expiresAt = "expires_at", createdAt = "created_at", acknowledgedAt = "acknowledged_at" }; var line: String { "reset|\(userID)|\(deviceID)|\(generation)|\(snapshotID)|\(state)|\(nextToken)|\(receipt)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))|\(projectionOptionalDate(acknowledgedAt))" } }
 private struct ProjectionCursorRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let state: String; let generation: Int64; let acknowledgedSequence: Int64; let pendingSnapshotID: UUID?; let pendingBaseSequence: Int64?; let pendingExpiresAt: Date?; let completedSnapshotID: UUID?; let completedReceipt: String?; let completedGeneration: Int64?; let completedBaseSequence: Int64?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", state, generation = "reset_generation", acknowledgedSequence = "acknowledged_sequence", pendingSnapshotID = "pending_snapshot_id", pendingBaseSequence = "pending_base_sequence", pendingExpiresAt = "pending_snapshot_expires_at", completedSnapshotID = "completed_snapshot_id", completedReceipt = "completed_snapshot_ack_receipt", completedGeneration = "completed_snapshot_generation", completedBaseSequence = "completed_snapshot_base_sequence" }; var line: String { "cursor|\(userID)|\(deviceID)|\(state)|\(generation)|\(acknowledgedSequence)|\(projectionOptional(pendingSnapshotID))|\(projectionOptional(pendingBaseSequence))|\(projectionOptionalDate(pendingExpiresAt))|\(projectionOptional(completedSnapshotID))|\(projectionOptional(completedReceipt))|\(projectionOptional(completedGeneration))|\(projectionOptional(completedBaseSequence))" } }
 private struct ProjectionTokenRow: ProjectionStringKeyedRow { let token: String; let userID: UUID; let deviceID: UUID; let generation: Int64; let watermark: Int64; let expiresAt: Date; let createdAt: Date; enum CodingKeys: String, CodingKey { case token, userID = "user_id", deviceID = "device_id", generation = "reset_generation", watermark, expiresAt = "expires_at", createdAt = "created_at" }; var stringKey: String { token }; var line: String { "token|\(token)|\(userID)|\(deviceID)|\(generation)|\(watermark)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))" } }

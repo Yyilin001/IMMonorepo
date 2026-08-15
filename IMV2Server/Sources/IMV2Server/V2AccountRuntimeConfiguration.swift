@@ -45,6 +45,7 @@ public struct V2AccountEdgeAuthorizationSecret: Sendable {
 /// replay and assertion signing secrets never enter that gateway process.
 public struct V2AccountRuntimeConfiguration: Sendable {
     public let databaseURL: String
+    public let databasePolicy: V2PostgresRuntimePolicy
     public let listener: V2AccountListenerConfiguration
     public let accessTokenKey: V2AccessTokenHMACKey
     public let replayEnvelopeKey: V2CredentialReplayEnvelopeKey
@@ -59,6 +60,8 @@ public struct V2AccountRuntimeConfiguration: Sendable {
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databasePolicy = try .init(environment: environment)
+        try databasePolicy.validate(databaseURLs: [databaseURL])
         listener = try .init(
             host: Self.required("IM_V2_ACCOUNT_LISTEN_HOST", environment: environment),
             port: Self.integer("IM_V2_ACCOUNT_LISTEN_PORT", environment: environment)

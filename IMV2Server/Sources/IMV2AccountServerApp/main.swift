@@ -4,6 +4,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import IMV2ServerHTTP
+import NIOPosix
 import Vapor
 #if canImport(Darwin)
 import Darwin
@@ -16,13 +17,32 @@ enum IMV2AccountServerApp {
     static func main() async throws {
         let configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
-        let app = try await Application.make(.production)
+        let applicationEventLoops = MultiThreadedEventLoopGroup(
+            numberOfThreads: configuration.databasePolicy.eventLoopThreads
+        )
+        let app: Application
+        do {
+            app = try await Application.make(.production, .shared(applicationEventLoops))
+        } catch {
+            try? await applicationEventLoops.shutdownGracefully()
+            throw error
+        }
         do {
             // Keep the password fallback cost explicit. The dummy verifier in
             // the runtime configuration must be generated at this same cost.
             app.passwords.use(.bcrypt(cost: 12))
-            app.databases.use(try .postgres(url: configuration.databaseURL), as: .psql)
+            app.databases.use(
+                try postgresDatabaseConfiguration(
+                    url: configuration.databaseURL,
+                    policy: configuration.databasePolicy
+                ),
+                as: .psql
+            )
             let database = app.db(.psql)
+            try await V2PostgresSessionReadiness.verify(
+                database: database,
+                policy: configuration.databasePolicy
+            )
             try await V2SchemaReadiness.verify(database: database)
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
@@ -187,11 +207,31 @@ enum IMV2AccountServerApp {
             }
             await edgeRateLimitRetentionTask.value
             try await app.asyncShutdown()
+            try await applicationEventLoops.shutdownGracefully()
         } catch {
             try? await app.asyncShutdown()
+            try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
     }
+}
+
+private func postgresDatabaseConfiguration(
+    url: String,
+    policy: V2PostgresRuntimePolicy
+) throws -> DatabaseConfigurationFactory {
+    var configuration = try SQLPostgresConfiguration(url: url)
+    configuration.coreConfiguration.options.connectTimeout = .milliseconds(
+        Int64(policy.connectTimeoutMilliseconds)
+    )
+    configuration.coreConfiguration.options.additionalStartupParameters.append(
+        contentsOf: policy.startupParameters
+    )
+    return .postgres(
+        configuration: configuration,
+        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
+    )
 }
 
 private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {

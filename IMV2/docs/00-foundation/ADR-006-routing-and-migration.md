@@ -66,8 +66,9 @@ source-cleaner；gateway runtime 会从部署专用的
 响应。cleaner 故障只留下可回收 lease，不会提前删除旧 owner 的数据。
 
 已提供的 PostgreSQL adapter 接受 source/target 数据库连接及经校验的 schema 名，
-只复制 fan-out receiver inbox、sync sequence/log、device sync cursor、snapshot/page、
-token 和 receipt；Auth service 的设备凭据不由它搬运。user sync log 以 sequence
+只复制 fan-out receiver inbox、sync sequence/log、device sync cursor、撤销设备的
+单调 projection tombstone、snapshot/page、token 和 receipt；Auth service 的设备凭据
+不由它搬运。user sync log 以 sequence
 分页 copy，其他记录使用 receiver 端唯一约束 `ON CONFLICT DO NOTHING`，随后对
 两端同一投影集合计算 SHA-256 canonical fingerprint。它也实现 source-cleaner，
 并由 runtime bucket registry 调度。operator 的同一映射是必填项；其

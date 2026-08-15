@@ -443,6 +443,14 @@ if printf '%s\n' "${metrics_response}" | grep -Fq 'im_v2_device_revocation_event
   printf 'V2 private metrics listener exposed a label on device-revocation backlog\n' >&2
   exit 1
 fi
+if ! printf '%s\n' "${metrics_response}" | grep -Eq '^im_v2_revoked_device_projection_cleanup_events_pending [0-9]+$'; then
+  printf 'V2 private metrics listener omitted the revoked-device projection cleanup sample\n' >&2
+  exit 1
+fi
+if printf '%s\n' "${metrics_response}" | grep -Fq 'im_v2_revoked_device_projection_cleanup_events_pending{'; then
+  printf 'V2 private metrics listener exposed a label on revoked-device projection cleanup\n' >&2
+  exit 1
+fi
 
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'

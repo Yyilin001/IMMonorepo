@@ -17,7 +17,7 @@ protocol V2ConversationSending: Sendable {
 /// Group receipt details are fetched only after an explicit user action; they
 /// are intentionally not retained in the normal timeline projection.
 protocol V2GroupReadReceiptReading: Sendable {
-    func readers(roomID: String, messageRoomSequence: UInt64, cursor: String?) async throws -> V2ReadReceiptReadersPage
+    func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage
 }
 
 enum V2LiveActivityPreferenceUpdateOutcome: Equatable, Sendable { case accepted, rejected(code: String) }
@@ -671,10 +671,10 @@ actor V2RealtimeGroupReadReceiptReader: V2GroupReadReceiptReading {
 
     init(transport: any V2ClientReadReceiptTransport) { self.transport = transport }
 
-    func readers(roomID: String, messageRoomSequence: UInt64, cursor: String?) async throws -> V2ReadReceiptReadersPage {
+    func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage {
         try await transport.listReadReceiptReaders(
             roomID: .init(roomID),
-            messageRoomSequence: messageRoomSequence,
+            messageID: .init(messageID),
             cursor: cursor,
             pageSize: 50
         )
@@ -1091,6 +1091,12 @@ struct V2AppRealtimeRuntime {
             // sequential requests.
             commandOutbox: nil,
             flushAdditionalDurableCommands: {
+                // This must precede lane selection: once the first-party
+                // retry contract expires, no old operation may get one final
+                // network attempt while the server is free to compact it.
+                try await localStore.expireStalePendingCommands(
+                    now: Date()
+                )
                 let scheduler = V2FairDurableCommandScheduler(lanes: [
                     // Safety and room-authority changes run before normal
                     // sends, but all lanes retain one-quantum fairness.

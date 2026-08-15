@@ -45,21 +45,26 @@ struct V2PendingIntentIndexTests {
         let actual = try database.read { db in
             try String.fetchAll(
                 db,
-                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'v2_pending%terminal_retention_idx'"
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'v2_%terminal_cleanup_idx'"
             )
         }
         #expect(Set(actual) == [
-            "v2_pending_message_commands_terminal_retention_idx",
-            "v2_pending_membership_commands_terminal_retention_idx",
-            "v2_pending_message_withdrawals_terminal_retention_idx",
-            "v2_pending_message_redactions_terminal_retention_idx",
-            "v2_pending_member_mutes_terminal_retention_idx",
-            "v2_pending_moderated_member_removals_terminal_retention_idx",
-            "v2_pending_message_edits_terminal_retention_idx",
-            "v2_pending_read_receipts_terminal_retention_idx",
-            "v2_pending_message_reactions_terminal_retention_idx",
-            "v2_pending_social_commands_terminal_retention_idx",
-            "v2_pending_group_room_creations_terminal_retention_idx"
+            "v2_pending_message_commands_terminal_cleanup_idx",
+            "v2_pending_membership_commands_terminal_cleanup_idx",
+            "v2_pending_message_withdrawals_terminal_cleanup_idx",
+            "v2_pending_message_redactions_terminal_cleanup_idx",
+            "v2_pending_member_mutes_terminal_cleanup_idx",
+            "v2_pending_moderated_member_removals_terminal_cleanup_idx",
+            "v2_pending_message_edits_terminal_cleanup_idx",
+            "v2_pending_read_receipts_terminal_cleanup_idx",
+            "v2_pending_message_reactions_terminal_cleanup_idx",
+            "v2_pending_conversation_states_terminal_cleanup_idx",
+            "v2_pending_message_favorites_terminal_cleanup_idx",
+            "v2_pending_group_capabilities_terminal_cleanup_idx",
+            "v2_pending_forward_messages_terminal_cleanup_idx",
+            "v2_pending_social_commands_terminal_cleanup_idx",
+            "v2_pending_group_room_creations_terminal_cleanup_idx",
+            "v2_forward_message_plans_terminal_cleanup_idx",
         ])
     }
 }

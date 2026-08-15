@@ -74,6 +74,15 @@ struct V2AccountRuntimeConfigurationTests {
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_DATABASE_EVENT_LOOP_THREADS": "2",
+            "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "4",
+            "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS": "16",
+            "IM_V2_MAX_USER_SHARD_STORES": "1",
+            "IM_V2_DATABASE_CONNECT_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_POOL_TIMEOUT_MS": "3000",
+            "IM_V2_DATABASE_STATEMENT_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_LOCK_TIMEOUT_MS": "2000",
+            "IM_V2_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS": "10000",
             "IM_V2_ACCOUNT_LISTEN_HOST": "127.0.0.1",
             "IM_V2_ACCOUNT_LISTEN_PORT": "8444",
             "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64": Data(repeating: 1, count: 32).base64EncodedString(),

@@ -104,6 +104,8 @@ struct V2PrometheusTelemetrySinkTests {
     func rendersDurableWorkMetrics() {
         let snapshot = V2DurableWorkMetricsSnapshot(
             isAvailable: false,
+            servedFromLastKnownGood: true,
+            lastSuccessfulRefreshAgeSeconds: 77,
             readyRoomOutboxRows: -1,
             leasedRoomOutboxRows: 2,
             scheduledRoomOutboxRows: 3,
@@ -152,6 +154,8 @@ struct V2PrometheusTelemetrySinkTests {
         let rendered = v2RenderPrometheusDurableWorkMetrics(snapshot)
 
         #expect(rendered.contains("im_v2_durable_work_metrics_available 0"))
+        #expect(rendered.contains("im_v2_durable_work_metrics_last_known_good 1"))
+        #expect(rendered.contains("im_v2_durable_work_metrics_last_success_age_seconds 77"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"ready\"} 0"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"leased\"} 2"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 3"))

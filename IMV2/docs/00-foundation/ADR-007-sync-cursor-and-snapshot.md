@@ -26,3 +26,9 @@ snapshot/page 能力必须绑定认证 device、generation、页号、digest 与
 未 ACK 的 staged 数据不能替换 ready 投影；服务端已 ACK、客户端未激活时必须优先重放
 该 ACK，不能用旧 token 发起增量 pull。更改 token 保留、snapshot 格式、
 capability profile 或多设备规则时复审。
+
+设备身份与吊销事实属于控制面，不从 user shard 的 `auth_devices` 镜像推断。手工
+reset 先向控制面 authority 校验 active device；吊销事件由独立集群 durable cursor
+重放，并在 current owner/retained fallback 写入单调 tombstone 后删除 device-owned
+capability。同步、reset 与 cleaner 对同一 user/device 使用一致的 advisory transaction
+lock，避免已认证且在途的请求在异步清理后重新创建 cursor。

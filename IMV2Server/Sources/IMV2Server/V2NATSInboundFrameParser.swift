@@ -116,7 +116,7 @@ struct V2NATSInboundFrameParser {
 /// owns the async hop, preserving order without spawning one unstructured Task
 /// per payload. These hints are non-authoritative, so overload coalesces old
 /// payloads and durable sync remains the recovery source.
-final class V2NATSPayloadDispatcher: @unchecked Sendable {
+final class V2NATSPayloadDispatcher: Sendable {
     private let continuation: AsyncStream<Data>.Continuation
     private let worker: Task<Void, Never>
 

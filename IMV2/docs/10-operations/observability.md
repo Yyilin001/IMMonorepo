@@ -54,8 +54,12 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 不保存或输出任意连接 ID、IP、用户、设备或请求 ID。
 
 同一私有 endpoint 还在每次抓取时读取 PostgreSQL 的 durable-work 快照。
-`im_v2_durable_work_metrics_available` 为 `0` 表示本次数据库快照失败，但
-`/metrics` 本身仍保持可抓取；该值必须被单独告警。快照包含
+`im_v2_durable_work_metrics_available` 为 `0` 表示本次数据库快照失败或超过
+`IM_V2_METRICS_REFRESH_TIMEOUT_MS`，但 `/metrics` 本身仍保持可抓取；该值必须被
+单独告警。超时后如存在成功快照，endpoint 返回 last-known-good 数值并设置
+`im_v2_durable_work_metrics_last_known_good=1` 与
+`im_v2_durable_work_metrics_last_success_age_seconds`，而不是挂住所有后续 scrape；
+下一次刷新仍可恢复。快照包含
 `im_v2_room_outbox_backlog`、`im_v2_fanout_plans_open`、
 `im_v2_direct_profile_update_backlog`、`im_v2_fanout_delivery_backlog`、
 `im_v2_read_receipt_preference_propagation_backlog`、
@@ -73,7 +77,12 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 `im_v2_device_revocation_events_pending`：它只统计**当前 scrape 所在 gateway
 节点**尚未消费的 device-revocation event，不含 node、user 或 device 标签。其非零
 短暂出现是正常消费过程；若持续存在，可能有已撤销会话尚未断开，必须按账号禁用
-runbook 处置。Gateway 在绑定 TLS listener 前只为此前未见过的 node ID 原子创建
+runbook 处置。`im_v2_revoked_device_projection_cleanup_events_pending` 则统计集群共享
+cursor 尚未完成的用户分片清理：该消费者从历史起点回放，在路由共享锁内清理当前
+owner 与 retained fallback，并先写单调的 shard-local device tombstone；同步与手工
+reset 以相同 advisory lock 检查该 tombstone，因此已在途请求也不能在清理后重建
+cursor/token/receipt。它独立运行，远端 shard 故障不会阻塞本地 socket 撤销。
+Gateway 在绑定 TLS listener 前只为此前未见过的 node ID 原子创建
 cursor，并把它设为当时的 event watermark：新副本没有存活 socket，无需扫描历史；
 已存在 cursor 绝不在启动时推进，以保留崩溃恢复和防止重复 node ID 跳过工作。
 部署必须为同时运行的 gateway 使用不同、受限且稳定的 node ID；以 scrape target
@@ -99,10 +108,12 @@ poison-paused 用户；snapshot 指标区分正在构建与失败 artifact，并
 使用 closed-version partial index 的 planner estimate，不为 scrape 扫描 MVCC 全表；
 uncompacted records 表示 canonical checkpoint 与 retained floor 的聚合距离。它们共同定位
 增长来自 projector、builder、GC 还是 compactor，不再只能看到最终 relation size。
-`user_projection_effects` 是控制投影的稳定幂等结果，和 operation ledger 同类，不属于可按
-retained floor 删除的增量历史；它的 estimate/bytes 用于容量规划与统一操作结果保留策略。
-默认告警在总 relation size 超过 10 GiB 且持续 30 分钟后触发，上线前必须按批准的操作速率、
-幂等窗口和磁盘预算重新校准，禁止由 sync-log compactor 顺手删除。
+`user_projection_effects` 是控制投影的稳定幂等结果，和 operation ledger 同类，不属于可仅按
+retained floor 删除的增量历史。独立 housekeeping 只在首方重试窗口结束、projector 已物化、
+原 sync-log 行已压缩且 migration fence 失效后按物理 store 分批删除；普通 operation ledger
+采用同一服务端保留期轮转清理。estimate/bytes 仍用于验证实际操作速率与清理吞吐。默认告警在
+总 relation size 超过 10 GiB 且持续 30 分钟后触发，上线前必须按磁盘预算重新校准，禁止由
+sync-log compactor 跳过上述引用条件顺手删除。
 
 ## 隐私与基数约束
 
@@ -141,6 +152,7 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2ProjectionGCBacklog` | closed-version estimate 超过 1,000,000，30 分钟 | warning | 检查活跃 building baseline、migration fence 和 GC cadence |
 | `IMV2SyncCompactionBacklog` | projected-retained 差值超过 10,000,000，30 分钟 | warning | 检查未过期 capability、低 cursor reset 与 compactor cadence |
 | `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
+| `IMV2RevokedDeviceProjectionCleanupBacklog` | 集群分片清理未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 检查 route fence、当前/fallback user store 与 tombstone 写入；不得手工推进 cursor |
 | `IMV2FanoutFailureRate` | 任意 fan-out failure 持续 10 分钟 | warning | 调查依赖、路由与失败 stage，避免演变为 paused |
 
 paused 阈值刻意为零；它代表重试预算已耗尽的正确性事件，不能依靠容量基准把它

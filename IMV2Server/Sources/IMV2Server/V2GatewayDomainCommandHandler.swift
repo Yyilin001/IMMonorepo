@@ -173,6 +173,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             }
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
             return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
+        } catch V2ReadReceiptStoreError.membershipRevisionConflict(let currentRevision) {
+            return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
         } catch V2CoreError.invalidIdentifier, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
@@ -253,6 +255,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2ReadReceiptStoreError.roomNotFound, V2ReadReceiptStoreError.roomSequenceNotFound {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2ReadReceiptStoreError.messageNotFound {
+            return errorEnvelope(code: "NOT_FOUND", retryable: false)
         } catch V2ReadReceiptStoreError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2ReadReceiptStoreError.invalidRequest {
@@ -274,6 +278,11 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             // stale receipt advance a cursor, and make the retry path
             // explicit to the client rather than surfacing a store error.
             return errorEnvelope(code: "SYNC_RECEIPT_INVALID", retryable: false)
+        } catch V2SyncStoreError.deviceRevoked {
+            // The durable shard tombstone can win the race before every
+            // replica has closed its already-authenticated socket. Fail the
+            // in-flight request without exposing any projection data.
+            return errorEnvelope(code: "UNAUTHENTICATED", retryable: false)
         } catch V2SyncStoreError.resetRequired, V2SyncStoreError.generationMismatch {
             return errorEnvelope(code: "RESET_REQUIRED", retryable: false)
         } catch V2SyncStoreError.snapshotExpiredOrInvalid, V2SyncStoreError.snapshotFenceMismatch, V2SyncStoreError.noResetPending {
@@ -816,23 +825,21 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
 
     private func handleReadReceiptReaders(_ request: IMV2ListReadReceiptReaders, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         guard let readReceipt, request.pageSize > 0, request.pageSize <= 100 else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let page = try await readReceipt.readers(roomID: try .init(request.roomID), actorUserID: identity.userID, messageRoomSequence: request.messageRoomSequence, cursor: request.cursor.isEmpty ? nil : request.cursor, pageSize: Int(request.pageSize))
+        let page = try await readReceipt.readers(
+            roomID: try .init(request.roomID),
+            messageID: try .init(request.messageID),
+            actorUserID: identity.userID,
+            cursor: request.cursor.isEmpty ? nil : request.cursor,
+            pageSize: Int(request.pageSize)
+        )
         var response = IMV2Envelope(); response.readReceiptReadersPage = .init()
         response.readReceiptReadersPage.roomID = page.roomID.rawValue
-        response.readReceiptReadersPage.messageRoomSequence = page.messageRoomSequence
-        if let readerCount = page.readerCount {
-            guard let wireCount = UInt32(exactly: readerCount) else {
-                return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-            }
-            response.readReceiptReadersPage.readerCount = wireCount
-        }
+        response.readReceiptReadersPage.messageID = page.messageID.rawValue
         response.readReceiptReadersPage.nextCursor = page.nextCursor ?? ""
         response.readReceiptReadersPage.readers = page.readers.map { reader in
             var wire = IMV2ReadReceiptReader(); wire.userID = reader.userID.rawValue
-            wire.readThroughRoomSequence = reader.readThroughRoomSequence
-            wire.recordedAtMs = Int64(reader.recordedAt.timeIntervalSince1970 * 1_000)
-            wire.publicHandle = reader.publicIdentity?.handle.rawValue ?? ""
-            wire.displayName = reader.publicIdentity?.displayName ?? ""
+            wire.publicHandle = reader.publicIdentity.handle.rawValue
+            wire.displayName = reader.publicIdentity.displayName
             return wire
         }
         return response

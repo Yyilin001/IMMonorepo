@@ -98,61 +98,209 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
         return result.outcome
     }
 
-    public func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        guard messageRoomSequence > 0, (1 ... 100).contains(pageSize) else { throw V2ReadReceiptStoreError.invalidRequest }
+    public func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        guard (1 ... 100).contains(pageSize) else { throw V2ReadReceiptStoreError.invalidRequest }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let room = try receiptUUID(roomID), actor = try receiptUUID(actorUserID)
-            guard let row = try await sql.raw("SELECT room_sequence, membership_revision, room_kind FROM im_v2.rooms WHERE room_id = \(bind: room)").first(decoding: ReceiptReadersRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
-            guard row.roomKind == "group", row.roomSequence >= Int64(messageRoomSequence) else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
-            let membership = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor) AND joined_revision <= \(bind: row.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: row.membershipRevision))").first(decoding: ReceiptExistsRow.self)
+            let room = try receiptUUID(roomID)
+            let message = try receiptUUID(messageID)
+            let actor = try receiptUUID(actorUserID)
+            guard let context = try await sql.raw("""
+                SELECT message.room_sequence,
+                       event.committed_membership_revision,
+                       room.membership_revision AS current_membership_revision
+                FROM im_v2.messages AS message
+                JOIN im_v2.rooms AS room ON room.room_id = message.room_id
+                JOIN im_v2.room_events AS event
+                  ON event.room_id = message.room_id
+                 AND event.room_sequence = message.room_sequence
+                 AND event.event_type = 'message.accepted'
+                WHERE message.message_id = \(bind: message)
+                  AND message.room_id = \(bind: room)
+                  AND room.room_kind = 'group'
+                FOR SHARE OF room
+                """).first(decoding: ReceiptReaderContextRow.self)
+            else { throw V2ReadReceiptStoreError.messageNotFound }
+            guard context.messageRoomSequence > 0,
+                  context.committedMembershipRevision >= 0,
+                  context.currentMembershipRevision >= 0
+            else { throw V2ReadReceiptStoreError.corruptPersistenceState }
+
+            let membership = try await sql.raw("""
+                SELECT 1 AS exists
+                WHERE EXISTS (
+                    SELECT 1 FROM im_v2.room_memberships AS historical
+                    WHERE historical.room_id = \(bind: room)
+                      AND historical.user_id = \(bind: actor)
+                      AND historical.joined_revision <= \(bind: context.committedMembershipRevision)
+                      AND (historical.left_revision IS NULL OR historical.left_revision > \(bind: context.committedMembershipRevision))
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM im_v2.room_memberships AS current
+                    WHERE current.room_id = \(bind: room)
+                      AND current.user_id = \(bind: actor)
+                      AND current.joined_revision <= \(bind: context.currentMembershipRevision)
+                      AND (current.left_revision IS NULL OR current.left_revision > \(bind: context.currentMembershipRevision))
+                )
+                  AND EXISTS (
+                    SELECT 1 FROM im_v2.public_user_profiles AS profile
+                    WHERE profile.user_id = \(bind: actor)
+                      AND profile.state = 'active'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM im_v2.account_disables AS disabled
+                          WHERE disabled.user_id = profile.user_id
+                      )
+                )
+                """).first(decoding: ReceiptExistsRow.self)
             guard membership != nil else { throw V2ReadReceiptStoreError.actorNotMember }
             let cursorValue = try cursor.map(receiptCursor)
             if let cursorValue {
-                guard cursorValue.version == 1,
+                guard cursorValue.version == 2,
                       cursorValue.roomID == room,
-                      cursorValue.messageRoomSequence == messageRoomSequence,
-                      cursorValue.actorUserID == actor
+                      cursorValue.messageID == message,
+                      cursorValue.actorUserID == actor,
+                      cursorValue.messageRoomSequence == context.messageRoomSequence,
+                      cursorValue.committedMembershipRevision == context.committedMembershipRevision
                 else { throw V2ReadReceiptStoreError.invalidRequest }
+                guard cursorValue.currentMembershipRevision == context.currentMembershipRevision else {
+                    throw V2ReadReceiptStoreError.membershipRevisionConflict(
+                        currentRevision: UInt64(context.currentMembershipRevision)
+                    )
+                }
             }
             let rows: [ReceiptReaderRow]
             if let cursorValue {
-                rows = try await sql.raw("SELECT receipt.user_id, receipt.read_through_room_sequence, receipt.updated_at, round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds, NULL::bigint AS total_count, profile.public_handle, profile.display_name FROM im_v2.room_read_receipts AS receipt LEFT JOIN im_v2.user_read_receipt_preferences AS preference ON preference.user_id = receipt.user_id LEFT JOIN im_v2.public_user_profiles AS profile ON profile.user_id = receipt.user_id WHERE receipt.room_id = \(bind: room) AND receipt.user_id <> \(bind: actor) AND receipt.read_through_room_sequence >= \(bind: try receiptSigned(messageRoomSequence)) AND COALESCE(preference.allows_group_read_receipts, TRUE) AND (receipt.updated_at, receipt.user_id) < (TIMESTAMPTZ 'epoch' + \(bind: cursorValue.updatedAtMicroseconds) * INTERVAL '1 microsecond', \(bind: cursorValue.userID)) ORDER BY receipt.updated_at DESC, receipt.user_id DESC LIMIT \(bind: pageSize + 1)").all(decoding: ReceiptReaderRow.self)
+                rows = try await readReceiptReaders(
+                    roomID: room,
+                    actorUserID: actor,
+                    context: context,
+                    after: cursorValue,
+                    limit: pageSize + 1,
+                    sql: sql
+                )
             } else {
-                // The exact count and first page must come from one statement
-                // snapshot; a separate COUNT followed by SELECT can disagree
-                // under PostgreSQL's default READ COMMITTED isolation.
-                rows = try await sql.raw("SELECT receipt.user_id, receipt.read_through_room_sequence, receipt.updated_at, round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds, COUNT(*) OVER ()::bigint AS total_count, profile.public_handle, profile.display_name FROM im_v2.room_read_receipts AS receipt LEFT JOIN im_v2.user_read_receipt_preferences AS preference ON preference.user_id = receipt.user_id LEFT JOIN im_v2.public_user_profiles AS profile ON profile.user_id = receipt.user_id WHERE receipt.room_id = \(bind: room) AND receipt.user_id <> \(bind: actor) AND receipt.read_through_room_sequence >= \(bind: try receiptSigned(messageRoomSequence)) AND COALESCE(preference.allows_group_read_receipts, TRUE) ORDER BY receipt.updated_at DESC, receipt.user_id DESC LIMIT \(bind: pageSize + 1)").all(decoding: ReceiptReaderRow.self)
-            }
-            let count: Int?
-            if cursorValue == nil {
-                let value = rows.first?.totalCount ?? 0
-                guard let exact = Int(exactly: value), exact >= 0 else {
-                    throw V2ReadReceiptStoreError.corruptPersistenceState
-                }
-                count = exact
-            } else {
-                count = nil
+                rows = try await readReceiptReaders(
+                    roomID: room,
+                    actorUserID: actor,
+                    context: context,
+                    after: nil,
+                    limit: pageSize + 1,
+                    sql: sql
+                )
             }
             let pageRows = Array(rows.prefix(pageSize))
             let readers = try pageRows.map { row in
                 let userID = try UserID(row.userID.uuidString)
-                let identity = try row.publicHandle.flatMap { handle in
-                    try row.displayName.map { try V2PublicIdentity(userID: userID, handle: .init(handle), displayName: $0) }
-                }
-                return try V2ReadReceiptReader(userID: userID, publicIdentity: identity, readThroughRoomSequence: receiptUnsigned(row.sequence), recordedAt: row.updatedAt)
+                let identity = try V2PublicIdentity(
+                    userID: userID,
+                    handle: .init(row.publicHandle),
+                    displayName: row.displayName
+                )
+                return V2ReadReceiptReader(userID: userID, publicIdentity: identity)
             }
             let next = rows.count > pageSize ? try receiptCursorString(
-                roomID: room, actorUserID: actor,
-                messageRoomSequence: messageRoomSequence,
+                roomID: room,
+                messageID: message,
+                actorUserID: actor,
+                context: context,
                 updatedAtMicroseconds: pageRows.last!.updatedAtMicroseconds,
-                userID: pageRows.last!.userID,
+                userID: pageRows.last!.userID
             ) : nil
             return try .init(
-                roomID: roomID, messageRoomSequence: messageRoomSequence,
-                readerCount: count, readers: readers, nextCursor: next
+                roomID: roomID,
+                messageID: messageID,
+                readers: readers,
+                nextCursor: next
             )
         }
+    }
+
+    private func readReceiptReaders(
+        roomID: UUID,
+        actorUserID: UUID,
+        context: ReceiptReaderContextRow,
+        after cursor: ReceiptCursor?,
+        limit: Int,
+        sql: any SQLDatabase
+    ) async throws -> [ReceiptReaderRow] {
+        if let cursor {
+            return try await sql.raw("""
+                SELECT receipt.user_id,
+                       round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds,
+                       profile.public_handle,
+                       profile.display_name
+                FROM im_v2.room_read_receipts AS receipt
+                LEFT JOIN im_v2.user_read_receipt_preferences AS preference
+                  ON preference.user_id = receipt.user_id
+                JOIN im_v2.public_user_profiles AS profile
+                  ON profile.user_id = receipt.user_id
+                 AND profile.state = 'active'
+                WHERE receipt.room_id = \(bind: roomID)
+                  AND receipt.user_id <> \(bind: actorUserID)
+                  AND receipt.read_through_room_sequence >= \(bind: context.messageRoomSequence)
+                  AND COALESCE(preference.allows_group_read_receipts, TRUE)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM im_v2.account_disables AS disabled
+                      WHERE disabled.user_id = receipt.user_id
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM im_v2.room_memberships AS historical
+                      WHERE historical.room_id = receipt.room_id
+                        AND historical.user_id = receipt.user_id
+                        AND historical.joined_revision <= \(bind: context.committedMembershipRevision)
+                        AND (historical.left_revision IS NULL OR historical.left_revision > \(bind: context.committedMembershipRevision))
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM im_v2.room_memberships AS current
+                      WHERE current.room_id = receipt.room_id
+                        AND current.user_id = receipt.user_id
+                        AND current.joined_revision <= \(bind: context.currentMembershipRevision)
+                        AND (current.left_revision IS NULL OR current.left_revision > \(bind: context.currentMembershipRevision))
+                  )
+                  AND (receipt.updated_at, receipt.user_id) < (
+                      TIMESTAMPTZ 'epoch' + \(bind: cursor.updatedAtMicroseconds) * INTERVAL '1 microsecond',
+                      \(bind: cursor.userID)
+                  )
+                ORDER BY receipt.updated_at DESC, receipt.user_id DESC
+                LIMIT \(bind: limit)
+                """).all(decoding: ReceiptReaderRow.self)
+        }
+        return try await sql.raw("""
+            SELECT receipt.user_id,
+                   round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds,
+                   profile.public_handle,
+                   profile.display_name
+            FROM im_v2.room_read_receipts AS receipt
+            LEFT JOIN im_v2.user_read_receipt_preferences AS preference
+              ON preference.user_id = receipt.user_id
+            JOIN im_v2.public_user_profiles AS profile
+              ON profile.user_id = receipt.user_id
+             AND profile.state = 'active'
+            WHERE receipt.room_id = \(bind: roomID)
+              AND receipt.user_id <> \(bind: actorUserID)
+              AND receipt.read_through_room_sequence >= \(bind: context.messageRoomSequence)
+              AND COALESCE(preference.allows_group_read_receipts, TRUE)
+              AND NOT EXISTS (
+                  SELECT 1 FROM im_v2.account_disables AS disabled
+                  WHERE disabled.user_id = receipt.user_id
+              )
+              AND EXISTS (
+                  SELECT 1 FROM im_v2.room_memberships AS historical
+                  WHERE historical.room_id = receipt.room_id
+                    AND historical.user_id = receipt.user_id
+                    AND historical.joined_revision <= \(bind: context.committedMembershipRevision)
+                    AND (historical.left_revision IS NULL OR historical.left_revision > \(bind: context.committedMembershipRevision))
+              )
+              AND EXISTS (
+                  SELECT 1 FROM im_v2.room_memberships AS current
+                  WHERE current.room_id = receipt.room_id
+                    AND current.user_id = receipt.user_id
+                    AND current.joined_revision <= \(bind: context.currentMembershipRevision)
+                    AND (current.left_revision IS NULL OR current.left_revision > \(bind: context.currentMembershipRevision))
+              )
+            ORDER BY receipt.updated_at DESC, receipt.user_id DESC
+            LIMIT \(bind: limit)
+            """).all(decoding: ReceiptReaderRow.self)
     }
 
     private func appendDirectProjectionIfVisible(roomID: UUID, readerID: UUID, command: V2RecordReadReceiptCommand, receipt: V2ReadReceipt, sourceEventID: UUID, now: Date, sql: any SQLDatabase) async throws -> UserID? {
@@ -186,13 +334,36 @@ private struct ReceiptPreferenceUserRow: Decodable { let userID: UUID; let allow
 private struct ReceiptPreferenceStateRow: Decodable { let allowsDirect: Bool; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts" } }
 private struct ReceiptPreferenceOperationRow: Decodable { let allowsDirect: Bool; let allowsGroup: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts", allowsGroup = "allows_group_read_receipts", updatedAt = "updated_at" }; func preferences() throws -> V2ReadReceiptPreferences { .init(allowsDirectReadReceipts: allowsDirect, allowsGroupReadReceipts: allowsGroup, updatedAt: updatedAt) } }
 private struct ReceiptSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
-private struct ReceiptReadersRoomRow: Decodable { let roomSequence: Int64; let membershipRevision: Int64; let roomKind: String; enum CodingKeys: String, CodingKey { case roomSequence = "room_sequence", membershipRevision = "membership_revision", roomKind = "room_kind" } }
-private struct ReceiptReaderRow: Decodable { let userID: UUID; let sequence: Int64; let updatedAt: Date; let updatedAtMicroseconds: Int64; let totalCount: Int64?; let publicHandle: String?; let displayName: String?; enum CodingKeys: String, CodingKey { case userID = "user_id", sequence = "read_through_room_sequence", updatedAt = "updated_at", updatedAtMicroseconds = "updated_at_microseconds", totalCount = "total_count", publicHandle = "public_handle", displayName = "display_name" } }
+private struct ReceiptReaderContextRow: Decodable {
+    let messageRoomSequence: Int64
+    let committedMembershipRevision: Int64
+    let currentMembershipRevision: Int64
+    enum CodingKeys: String, CodingKey {
+        case messageRoomSequence = "room_sequence"
+        case committedMembershipRevision = "committed_membership_revision"
+        case currentMembershipRevision = "current_membership_revision"
+    }
+}
+private struct ReceiptReaderRow: Decodable {
+    let userID: UUID
+    let updatedAtMicroseconds: Int64
+    let publicHandle: String
+    let displayName: String
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case updatedAtMicroseconds = "updated_at_microseconds"
+        case publicHandle = "public_handle"
+        case displayName = "display_name"
+    }
+}
 private struct ReceiptCursor: Codable {
     let version: Int
     let roomID: UUID
+    let messageID: UUID
     let actorUserID: UUID
-    let messageRoomSequence: UInt64
+    let messageRoomSequence: Int64
+    let committedMembershipRevision: Int64
+    let currentMembershipRevision: Int64
     let updatedAtMicroseconds: Int64
     let userID: UUID
 }
@@ -226,16 +397,20 @@ func receiptTombstoneSourceEventID(operationID: UUID, roomID: UUID) -> UUID {
 private func receiptCursor(_ value: String) throws -> ReceiptCursor { guard let data = Data(base64Encoded: value), let result = try? JSONDecoder().decode(ReceiptCursor.self, from: data) else { throw V2ReadReceiptStoreError.invalidRequest }; return result }
 private func receiptCursorString(
     roomID: UUID,
+    messageID: UUID,
     actorUserID: UUID,
-    messageRoomSequence: UInt64,
+    context: ReceiptReaderContextRow,
     updatedAtMicroseconds: Int64,
     userID: UUID
 ) throws -> String {
     let encoded = try JSONEncoder().encode(ReceiptCursor(
-        version: 1,
+        version: 2,
         roomID: roomID,
+        messageID: messageID,
         actorUserID: actorUserID,
-        messageRoomSequence: messageRoomSequence,
+        messageRoomSequence: context.messageRoomSequence,
+        committedMembershipRevision: context.committedMembershipRevision,
+        currentMembershipRevision: context.currentMembershipRevision,
         updatedAtMicroseconds: updatedAtMicroseconds,
         userID: userID
     ))

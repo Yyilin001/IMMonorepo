@@ -4200,6 +4200,63 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "CREATE UNIQUE INDEX v2_message_projections_room_timeline_idx ON v2_message_projections (room_id, timeline_sequence)")
             try db.execute(sql: "CREATE TABLE v2_timeline_activity_projections (source_event_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence > 0), event_type TEXT NOT NULL CHECK (event_type IN ('direct_message_restricted', 'system_account_read_only')), server_created_at REAL NOT NULL, UNIQUE (room_id, timeline_sequence)); CREATE INDEX v2_timeline_activity_room_order_idx ON v2_timeline_activity_projections (room_id, timeline_sequence, source_event_id); CREATE TABLE v2_direct_sending_capabilities (room_id TEXT PRIMARY KEY, can_send INTEGER NOT NULL CHECK (can_send IN (0, 1)), updated_at REAL NOT NULL)")
         }
+        migrator.registerMigration("addV2PendingIdempotencyExpiryIndexes") { db in
+            for table in terminalCommandTables {
+                try db.execute(
+                    sql: "CREATE INDEX IF NOT EXISTS \(table)_idempotency_expiry_idx ON \(table) (created_at) WHERE state = 'pending'"
+                )
+            }
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS v2_pending_group_room_creations_active_expiry_idx ON v2_pending_group_room_creations (created_at) WHERE state IN ('finalizing', 'cancelling')")
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS v2_forward_message_plans_active_expiry_idx ON v2_forward_message_plans (created_at) WHERE state = 'active'")
+        }
+        migrator.registerMigration("correctV2TerminalCommandRetentionPolicy") { db in
+            let legacyIndexes = [
+                "v2_pending_message_commands_terminal_retention_idx",
+                "v2_pending_membership_commands_terminal_retention_idx",
+                "v2_pending_message_withdrawals_terminal_retention_idx",
+                "v2_pending_message_redactions_terminal_retention_idx",
+                "v2_pending_member_mutes_terminal_retention_idx",
+                "v2_pending_moderated_member_removals_terminal_retention_idx",
+                "v2_pending_message_edits_terminal_retention_idx",
+                "v2_pending_read_receipts_terminal_retention_idx",
+                "v2_pending_message_reactions_terminal_retention_idx",
+                "v2_pending_social_commands_terminal_retention_idx",
+                "v2_pending_group_room_creations_terminal_retention_idx",
+                "v2_pending_conversation_states_terminal_idx",
+                "v2_pending_message_favorites_terminal_idx",
+                "v2_pending_group_capabilities_terminal_idx",
+            ]
+            for index in legacyIndexes {
+                try db.execute(sql: "DROP INDEX IF EXISTS \(index)")
+            }
+            for table in terminalCommandTables {
+                let isGroupCreation = table == "v2_pending_group_room_creations"
+                let terminalPredicate = isGroupCreation
+                    ? "state IN ('cancelled', 'acknowledged', 'rejected')"
+                    : "state <> 'pending'"
+                let newTerminalPredicate = isGroupCreation
+                    ? "NEW.state IN ('cancelled', 'acknowledged', 'rejected')"
+                    : "NEW.state <> 'pending'"
+                try db.execute(sql: "ALTER TABLE \(table) ADD COLUMN terminal_at REAL NULL")
+                try db.execute(sql: "UPDATE \(table) SET terminal_at = created_at WHERE \(terminalPredicate)")
+                try db.execute(sql: "CREATE INDEX \(table)_terminal_cleanup_idx ON \(table) (terminal_at) WHERE \(terminalPredicate)")
+                // Normal acknowledgement/rejection APIs need no extra clock
+                // parameter. The trigger captures the actual state-transition
+                // time; protocol-window expiry writes its injected `now`
+                // explicitly for deterministic boundary tests.
+                try db.execute(sql: """
+                    CREATE TRIGGER \(table)_set_terminal_at
+                    AFTER UPDATE OF state ON \(table)
+                    WHEN NEW.terminal_at IS NULL AND \(newTerminalPredicate)
+                    BEGIN
+                        UPDATE \(table)
+                        SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
+                        WHERE rowid = NEW.rowid;
+                    END
+                    """)
+            }
+            try db.execute(sql: "CREATE INDEX v2_forward_message_plans_terminal_cleanup_idx ON v2_forward_message_plans (updated_at) WHERE state IN ('completed', 'cancelled')")
+        }
         migrator.registerMigration("addV2SpecialAccountKinds") { db in
             // SQLite 3.37 rejects ADD COLUMN when the added definition contains
             // a CHECK constraint. Keep this migration compatible with the

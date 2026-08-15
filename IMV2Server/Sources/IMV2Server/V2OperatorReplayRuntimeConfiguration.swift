@@ -18,6 +18,7 @@ public struct V2OperatorReplayListenerConfiguration: Equatable, Sendable {
 
 public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     public let databaseURL: String
+    public let databasePolicy: V2PostgresRuntimePolicy
     public let listener: V2OperatorReplayListenerConfiguration
     public let authenticator: V2OperatorReplayBearerAuthenticator
     public let operatorPrincipal: String
@@ -28,6 +29,7 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databasePolicy = try .init(environment: environment)
         listener = try .init(
             host: Self.required("IM_V2_OPERATOR_REPLAY_LISTEN_HOST", environment: environment),
             port: Self.integer("IM_V2_OPERATOR_REPLAY_LISTEN_PORT", environment: environment)
@@ -57,6 +59,10 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
         capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
+        )
+        try databasePolicy.validate(
+            primaryDatabaseURL: databaseURL,
+            userShardStorage: userShardStorage
         )
     }
 

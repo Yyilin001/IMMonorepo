@@ -38,12 +38,50 @@ struct V2CachedDurableWorkMetricsSourceTests {
         #expect(await upstream.loadCount() == 3)
     }
 
+    @Test("a timed-out refresh returns last-known-good data and future refreshes recover")
+    func timesOutWithoutPoisoningTheCache() async {
+        let clock = MetricsTestClock(Date(timeIntervalSince1970: 1_750_000_000))
+        let upstream = FirstThenSuspendingMetricsSource()
+        let cached = V2CachedDurableWorkMetricsSource(
+            source: upstream,
+            minimumRefreshInterval: 1,
+            maximumRefreshDuration: 0.02,
+            now: { clock.now() }
+        )
+
+        let first = await cached.durableWorkMetricsSnapshot()
+        #expect(first.isAvailable)
+        #expect(first.readyRoomOutboxRows == 42)
+
+        clock.advance(by: 1)
+        await withTaskGroup(of: V2DurableWorkMetricsSnapshot.self) { group in
+            for _ in 0..<20 {
+                group.addTask { await cached.durableWorkMetricsSnapshot() }
+            }
+            for await snapshot in group {
+                #expect(!snapshot.isAvailable)
+                #expect(snapshot.servedFromLastKnownGood)
+                #expect(snapshot.lastSuccessfulRefreshAgeSeconds == 1)
+                #expect(snapshot.readyRoomOutboxRows == 42)
+            }
+        }
+        #expect(await upstream.loadCount() == 2)
+
+        clock.advance(by: 1)
+        let recovered = await cached.durableWorkMetricsSnapshot()
+        #expect(recovered.isAvailable)
+        #expect(!recovered.servedFromLastKnownGood)
+        #expect(recovered.readyRoomOutboxRows == 99)
+        #expect(await upstream.loadCount() == 3)
+    }
+
     @Test("aggregates shard totals and maxima and fails closed on partial availability")
     func aggregatesShardMetrics() async {
         let control = FixedMetricsSource(.init(
             isAvailable: true,
             readyRoomOutboxRows: 2,
-            pendingDeviceRevocationEvents: 3
+            pendingDeviceRevocationEvents: 3,
+            pendingRevokedDeviceProjectionCleanupEvents: 4
         ))
         let firstShard = FixedMetricsSource(.init(
             isAvailable: true,
@@ -71,6 +109,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
         #expect(aggregate.isAvailable)
         #expect(aggregate.readyRoomOutboxRows == 2)
         #expect(aggregate.pendingDeviceRevocationEvents == 3)
+        #expect(aggregate.pendingRevokedDeviceProjectionCleanupEvents == 4)
         #expect(aggregate.userSyncLogEstimatedRows == 11)
         #expect(aggregate.userSyncLogRelationBytes == 300)
         #expect(aggregate.userProjectionEffectsEstimatedRows == 15)
@@ -101,6 +140,29 @@ private actor CountingMetricsSource: V2DurableWorkMetricsSource {
         count += 1
         await Task.yield()
         return .init(isAvailable: true, readyRoomOutboxRows: count)
+    }
+
+    func loadCount() -> Int { count }
+}
+
+private actor FirstThenSuspendingMetricsSource: V2DurableWorkMetricsSource {
+    private var count = 0
+
+    func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
+        count += 1
+        switch count {
+        case 1:
+            return .init(isAvailable: true, readyRoomOutboxRows: 42)
+        case 2:
+            do {
+                try await Task.sleep(for: .seconds(60))
+                return .init(isAvailable: true, readyRoomOutboxRows: 77)
+            } catch {
+                return .unavailable
+            }
+        default:
+            return .init(isAvailable: true, readyRoomOutboxRows: 99)
+        }
     }
 
     func loadCount() -> Int { count }

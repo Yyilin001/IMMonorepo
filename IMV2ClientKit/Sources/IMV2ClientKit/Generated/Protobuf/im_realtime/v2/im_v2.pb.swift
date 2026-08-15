@@ -2844,8 +2844,9 @@ public nonisolated struct IMV2ReadReceiptPreferencesSet: Sendable {
 }
 
 /// Group read details are queried on demand instead of broadcasting a receipt
-/// to every member. The cursor is opaque and may only be reused for this exact
-/// room/sequence query.
+/// to every member. A message ID, rather than an arbitrary room sequence, binds
+/// authorization to the message's frozen membership revision. The cursor is
+/// opaque and may only be reused for this exact room/message query.
 public nonisolated struct IMV2ListReadReceiptReaders: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2853,7 +2854,7 @@ public nonisolated struct IMV2ListReadReceiptReaders: Sendable {
 
   public var roomID: String = String()
 
-  public var messageRoomSequence: UInt64 = 0
+  public var messageID: String = String()
 
   public var cursor: String = String()
 
@@ -2871,12 +2872,9 @@ public nonisolated struct IMV2ReadReceiptReader: Sendable {
 
   public var userID: String = String()
 
-  public var readThroughRoomSequence: UInt64 = 0
-
-  public var recordedAtMs: Int64 = 0
-
-  /// Same bounded public identity policy as RoomMember. These values are
-  /// returned only to a current member of the queried group.
+  /// Same bounded public identity policy as RoomMember. Reader rows are emitted
+  /// only for active accounts that belonged to the message audience and remain
+  /// members at the membership revision bound into this page.
   public var publicHandle: String = String()
 
   public var displayName: String = String()
@@ -2893,18 +2891,7 @@ public nonisolated struct IMV2ReadReceiptReadersPage: Sendable {
 
   public var roomID: String = String()
 
-  public var messageRoomSequence: UInt64 = 0
-
-  /// Exact total is returned only on the first page. Later pages inherit the
-  /// first page's total and avoid repeating an O(group size) count scan.
-  public var readerCount: UInt32 {
-    get {_readerCount ?? 0}
-    set {_readerCount = newValue}
-  }
-  /// Returns true if `readerCount` has been explicitly set.
-  public var hasReaderCount: Bool {self._readerCount != nil}
-  /// Clears the value of `readerCount`. Subsequent reads from it will return its default value.
-  public mutating func clearReaderCount() {self._readerCount = nil}
+  public var messageID: String = String()
 
   public var readers: [IMV2ReadReceiptReader] = []
 
@@ -2913,8 +2900,6 @@ public nonisolated struct IMV2ReadReceiptReadersPage: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
-
-  fileprivate var _readerCount: UInt32? = nil
 }
 
 /// The authenticated user is the actor. While a request is pending only its
@@ -8340,7 +8325,7 @@ nonisolated extension IMV2ReadReceiptPreferencesSet: SwiftProtobuf.Message, Swif
 
 nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ListReadReceiptReaders"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_room_sequence\0\u{1}cursor\0\u{3}page_size\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{1}cursor\0\u{3}page_size\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8349,7 +8334,7 @@ nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftPr
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.messageRoomSequence) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.cursor) }()
       case 4: try { try decoder.decodeSingularUInt32Field(value: &self.pageSize) }()
       default: break
@@ -8361,8 +8346,8 @@ nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftPr
     if !self.roomID.isEmpty {
       try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
     }
-    if self.messageRoomSequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.messageRoomSequence, fieldNumber: 2)
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 2)
     }
     if !self.cursor.isEmpty {
       try visitor.visitSingularStringField(value: self.cursor, fieldNumber: 3)
@@ -8375,7 +8360,7 @@ nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftPr
 
   public static func ==(lhs: IMV2ListReadReceiptReaders, rhs: IMV2ListReadReceiptReaders) -> Bool {
     if lhs.roomID != rhs.roomID {return false}
-    if lhs.messageRoomSequence != rhs.messageRoomSequence {return false}
+    if lhs.messageID != rhs.messageID {return false}
     if lhs.cursor != rhs.cursor {return false}
     if lhs.pageSize != rhs.pageSize {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -8385,7 +8370,7 @@ nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftPr
 
 nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ReadReceiptReader"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}read_through_room_sequence\0\u{3}recorded_at_ms\0\u{3}public_handle\0\u{3}display_name\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}public_handle\0\u{3}display_name\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8394,10 +8379,8 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.userID) }()
-      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.readThroughRoomSequence) }()
-      case 3: try { try decoder.decodeSingularInt64Field(value: &self.recordedAtMs) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.publicHandle) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.publicHandle) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
       default: break
       }
     }
@@ -8407,25 +8390,17 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
     if !self.userID.isEmpty {
       try visitor.visitSingularStringField(value: self.userID, fieldNumber: 1)
     }
-    if self.readThroughRoomSequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.readThroughRoomSequence, fieldNumber: 2)
-    }
-    if self.recordedAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.recordedAtMs, fieldNumber: 3)
-    }
     if !self.publicHandle.isEmpty {
-      try visitor.visitSingularStringField(value: self.publicHandle, fieldNumber: 4)
+      try visitor.visitSingularStringField(value: self.publicHandle, fieldNumber: 2)
     }
     if !self.displayName.isEmpty {
-      try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 5)
+      try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 3)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2ReadReceiptReader, rhs: IMV2ReadReceiptReader) -> Bool {
     if lhs.userID != rhs.userID {return false}
-    if lhs.readThroughRoomSequence != rhs.readThroughRoomSequence {return false}
-    if lhs.recordedAtMs != rhs.recordedAtMs {return false}
     if lhs.publicHandle != rhs.publicHandle {return false}
     if lhs.displayName != rhs.displayName {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -8435,7 +8410,7 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
 
 nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ReadReceiptReadersPage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_room_sequence\0\u{3}reader_count\0\u{1}readers\0\u{3}next_cursor\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{1}readers\0\u{3}next_cursor\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8444,42 +8419,33 @@ nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftPr
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.messageRoomSequence) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self._readerCount) }()
-      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.readers) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.nextCursor) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.readers) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.nextCursor) }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.roomID.isEmpty {
       try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
     }
-    if self.messageRoomSequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.messageRoomSequence, fieldNumber: 2)
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 2)
     }
-    try { if let v = self._readerCount {
-      try visitor.visitSingularUInt32Field(value: v, fieldNumber: 3)
-    } }()
     if !self.readers.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.readers, fieldNumber: 4)
+      try visitor.visitRepeatedMessageField(value: self.readers, fieldNumber: 3)
     }
     if !self.nextCursor.isEmpty {
-      try visitor.visitSingularStringField(value: self.nextCursor, fieldNumber: 5)
+      try visitor.visitSingularStringField(value: self.nextCursor, fieldNumber: 4)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2ReadReceiptReadersPage, rhs: IMV2ReadReceiptReadersPage) -> Bool {
     if lhs.roomID != rhs.roomID {return false}
-    if lhs.messageRoomSequence != rhs.messageRoomSequence {return false}
-    if lhs._readerCount != rhs._readerCount {return false}
+    if lhs.messageID != rhs.messageID {return false}
     if lhs.readers != rhs.readers {return false}
     if lhs.nextCursor != rhs.nextCursor {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}

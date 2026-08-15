@@ -47,7 +47,9 @@ POST /internal/v2/accounts/disable
 4. 在每个 gateway 副本的私有 `/metrics` 观察
    `im_v2_device_revocation_events_pending` 回到 `0`，并确认已有 socket 被关闭；该
    指标无 node、user 或 device 标签，须由采集目标而非标签定位副本。再用受控验证
-   证明旧 access token、refresh credential 和已有 assertion 都不能获得新 credential。
+   观察集群级 `im_v2_revoked_device_projection_cleanup_events_pending` 回到 `0`，确认
+   current/fallback user store 已落 tombstone 且不再保留该设备 cursor/capability。
+   再证明旧 access token、refresh credential 和已有 assertion 都不能获得新 credential。
    若任一项失败，停止后续处置并升级安全 incident；不得对撤销事件执行 replay 或
    绕过 cursor。
 

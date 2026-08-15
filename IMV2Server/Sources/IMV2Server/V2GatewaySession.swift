@@ -39,6 +39,7 @@ public enum V2GatewaySessionError: Error, Equatable, Sendable {
     case unsupportedCapabilityProfile
     case unsupportedCommand
     case sessionExpired
+    case authenticatedConnectionLimit
 }
 
 /// Domain router boundary. It receives only a previously authenticated identity
@@ -55,6 +56,7 @@ public actor V2GatewaySession {
     private let supportedVersions: Set<UInt8>
     private let capabilityProfile: String
     private let maximumProtobufMessageDepth: Int
+    private let commandAdmission: (any V2AuthenticatedGatewayCommandAdmitting)?
     private let now: @Sendable () -> Date
     private var authenticatedSessionExpiresAt: Date?
 
@@ -64,6 +66,7 @@ public actor V2GatewaySession {
         supportedVersions: Set<UInt8> = [UInt8(IMV2ProtocolVersion.current)],
         capabilityProfile: String,
         maximumProtobufMessageDepth: Int = V2ServerProtobufFrameCodec.defaultMaximumMessageDepth,
+        commandAdmission: (any V2AuthenticatedGatewayCommandAdmitting)? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.state = .init(limits: limits)
@@ -72,6 +75,7 @@ public actor V2GatewaySession {
         self.capabilityProfile = capabilityProfile
         precondition(maximumProtobufMessageDepth > 0)
         self.maximumProtobufMessageDepth = maximumProtobufMessageDepth
+        self.commandAdmission = commandAdmission
         self.now = now
     }
 
@@ -145,7 +149,14 @@ public actor V2GatewaySession {
         try state.receiveAuthenticatedRequest(frame)
         do {
             var response: IMV2Envelope
-            if case .heartbeat = envelope.body {
+            if let commandAdmission,
+               !(await commandAdmission.admit(identity: identity, now: now())) {
+                response = IMV2Envelope()
+                response.error = .init()
+                response.error.code = "RATE_LIMITED"
+                response.error.retryable = true
+                response.error.retryAfterSeconds = 1
+            } else if case .heartbeat = envelope.body {
                 response = IMV2Envelope()
                 response.heartbeatAck = .init()
                 response.heartbeatAck.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)

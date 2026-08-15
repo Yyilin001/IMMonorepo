@@ -17,7 +17,7 @@ public enum V2SetReadReceiptPreferencesOutcome: Equatable, Sendable {
 public protocol V2ReadReceiptStore: Sendable {
     func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome
     func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome
-    func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
+    func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
 }
 
 /// The original receipt-store seam remains useful for focused watermark
@@ -29,8 +29,8 @@ public extension V2ReadReceiptStore {
         throw V2ReadReceiptStoreError.corruptPersistenceState
     }
 
-    func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        _ = roomID; _ = actorUserID; _ = messageRoomSequence; _ = cursor; _ = pageSize
+    func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        _ = roomID; _ = messageID; _ = actorUserID; _ = cursor; _ = pageSize
         throw V2ReadReceiptStoreError.corruptPersistenceState
     }
 }
@@ -46,9 +46,17 @@ public struct V2ReadReceiptService: Sendable {
         try await store.setPreferences(command: .init(actorUserID: actorUserID, operationID: operationID, allowsDirectReadReceipts: allowsDirectReadReceipts, allowsGroupReadReceipts: allowsGroupReadReceipts), now: now())
     }
 
-    public func readers(roomID: RoomID, actorUserID: UserID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        try await store.readers(roomID: roomID, actorUserID: actorUserID, messageRoomSequence: messageRoomSequence, cursor: cursor, pageSize: pageSize)
+    public func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        try await store.readers(roomID: roomID, messageID: messageID, actorUserID: actorUserID, cursor: cursor, pageSize: pageSize)
     }
 }
 
-public enum V2ReadReceiptStoreError: Error, Equatable, Sendable { case roomNotFound, actorNotMember, roomSequenceNotFound, invalidRequest, corruptPersistenceState }
+public enum V2ReadReceiptStoreError: Error, Equatable, Sendable {
+    case roomNotFound
+    case messageNotFound
+    case actorNotMember
+    case membershipRevisionConflict(currentRevision: UInt64)
+    case roomSequenceNotFound
+    case invalidRequest
+    case corruptPersistenceState
+}

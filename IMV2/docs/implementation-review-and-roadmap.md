@@ -86,10 +86,11 @@ reset 的进程内内存不再随 `user_sync_log` 历史长度增长。
 最小 replay window 与迁移 fence 保护。有界 worker 先原子 reset 低 cursor，再分批删 log 前缀，
 并只在最后一个引用消失后删除 shared payload。ADR-013 已实施，R-006 已关闭。
 
-仍需产品级决策的是 R-007：operation ledger 与稳定 projection effect 的统一幂等保留窗口。
-它不会造成 snapshot/请求进程内内存增长，且远小于消息历史，但磁盘仍随控制操作数增长；
-当前以跨物理 user store 聚合的 estimate/relation bytes 和容量告警隔离，不能假装已经具备
-引用安全的统一 TTL。
+R-007 已按不保留旧协议兼容的决定关闭：首方客户端自动重试窗口为 30 天，服务端普通
+operation/effect 至少保留 35 天并由部署显式配置；到期 pending 在调度前成为可见终态。
+普通 ledger 轮转限量清理，projection effect 还受 projector、sync-log 与 migration fence
+三重引用条件保护；审计和权威记录不套用该 TTL。relation 指标继续用于验证清理吞吐，
+不再作为“永久增长但只告警”的替代方案。
 
 ## 3. 推荐实施顺序
 

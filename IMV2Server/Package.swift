@@ -53,6 +53,7 @@ let package = Package(
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
         .executableTarget(
@@ -62,6 +63,7 @@ let package = Package(
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
         .executableTarget(
@@ -71,6 +73,7 @@ let package = Package(
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
         // This executable belongs only to the local Compose verification

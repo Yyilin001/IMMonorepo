@@ -42,12 +42,41 @@ public protocol V2DeviceSnapshotResetting: Sendable {
     func stage(_ command: V2DeviceSnapshotResetCommand) async throws -> V2DeviceSnapshotResetResult
 }
 
+/// Device credentials are control-plane authority and must never be inferred
+/// from a user-projection shard. Independent shard databases intentionally do
+/// not mirror `auth_devices`.
+public protocol V2DeviceAvailabilityChecking: Sendable {
+    func isAvailable(userID: UserID, deviceID: DeviceID) async throws -> Bool
+}
+
+public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking {
+    private let database: any Database
+
+    public init(database: any Database) {
+        self.database = database
+    }
+
+    public func isAvailable(userID: UserID, deviceID: DeviceID) async throws -> Bool {
+        guard let sql = database as? any SQLDatabase else {
+            throw V2DeviceSnapshotResetError.unavailable
+        }
+        return try await sql.raw("""
+            SELECT 1
+            FROM im_v2.auth_devices
+            WHERE user_id = \(bind: snapshotResetUUID(userID))
+              AND device_id = \(bind: snapshotResetUUID(deviceID))
+              AND revoked_at IS NULL
+            """).first() != nil
+    }
+}
+
 /// Creates only durable build/assignment state. Page materialization belongs
 /// to `PostgresV2SnapshotArtifactBuilder`, so this operator request never holds
 /// a user's full current projection in its task or HTTP response lifecycle.
 public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, Sendable {
     private let router: any V2UserShardRouter
     private let registry: any V2UserShardStorageResolving
+    private let deviceAvailability: any V2DeviceAvailabilityChecking
     private let routeFence: (any V2UserShardRouteFencing)?
     private let coLocatedControlBuckets: Set<String>
     private let capabilityProfile: String
@@ -58,6 +87,7 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     public init(
         router: any V2UserShardRouter,
         registry: any V2UserShardStorageResolving,
+        deviceAvailability: any V2DeviceAvailabilityChecking,
         routeFence: (any V2UserShardRouteFencing)? = nil,
         coLocatedControlBuckets: Set<String> = [],
         capabilityProfile: String,
@@ -67,12 +97,19 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     ) throws {
         let normalized = capabilityProfile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, capabilityLifetime > 0 else { throw V2DeviceSnapshotResetError.unavailable }
-        self.router = router; self.registry = registry; self.routeFence = routeFence
+        self.router = router; self.registry = registry
+        self.deviceAvailability = deviceAvailability; self.routeFence = routeFence
         self.coLocatedControlBuckets = coLocatedControlBuckets; self.capabilityProfile = normalized
         self.capabilityLifetime = capabilityLifetime; self.makeUUID = makeUUID; self.now = now
     }
 
     public func stage(_ command: V2DeviceSnapshotResetCommand) async throws -> V2DeviceSnapshotResetResult {
+        guard try await deviceAvailability.isAvailable(
+            userID: command.userID,
+            deviceID: command.deviceID
+        ) else {
+            throw V2DeviceSnapshotResetError.deviceUnavailable
+        }
         if let routeFence {
             return try await routeFence.withCurrentRoute(for: command.userID) { route, fencedDatabase in
                 var location = try registry.location(for: route.bucket)
@@ -88,24 +125,22 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     private func stage(_ command: V2DeviceSnapshotResetCommand, at location: V2UserShardStorageLocation) async throws -> V2DeviceSnapshotResetResult {
         let userUUID = try snapshotResetUUID(command.userID)
         let deviceUUID = try snapshotResetUUID(command.deviceID)
-        guard let sql = location.database as? any SQLDatabase else { throw V2DeviceSnapshotResetError.unavailable }
-        guard try await sql.raw("SELECT 1 FROM \(unsafeRaw: location.schema).auth_devices WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID) AND revoked_at IS NULL").first() != nil else {
-            throw V2DeviceSnapshotResetError.deviceUnavailable
-        }
-        if let existing = try await existing(operationID: command.operationID, userID: userUUID, deviceID: deviceUUID, schema: location.schema, sql: sql) {
-            switch existing.state {
-            case "preparing":
-                return .init(generation: try unsigned(existing.generation), state: .preparing, wasIdempotent: true)
-            case "ready", "acknowledged":
-                return .init(generation: try unsigned(existing.generation), state: .ready, wasIdempotent: true)
-            default:
-                throw V2DeviceSnapshotResetError.unavailable
-            }
-        }
         let currentTime = now()
         let expiresAt = currentTime.addingTimeInterval(capabilityLifetime)
         return try await location.database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSnapshotResetError.unavailable }
+            try await sql.raw("""
+                SELECT pg_advisory_xact_lock(hashtextextended(
+                    CONCAT(\(bind: userUUID), ':', \(bind: deviceUUID)), 684927
+                ))
+                """).run()
+            guard try await sql.raw("""
+                SELECT 1
+                FROM \(unsafeRaw: location.schema).revoked_device_projection_tombstones
+                WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
+                """).first() == nil else {
+                throw V2DeviceSnapshotResetError.deviceUnavailable
+            }
             try await sql.raw("""
                 INSERT INTO \(unsafeRaw: location.schema).device_sync_cursors
                     (user_id, device_id, state, reset_generation)
@@ -120,9 +155,9 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
                 """).first(decoding: ResetCursorRow.self) else {
                 throw V2DeviceSnapshotResetError.malformedPersistence
             }
-            // The optimistic lookup above is only a fast path. Recheck after
-            // serializing on the device cursor so concurrent retries for the
-            // same operation ID are idempotent rather than reported pending.
+            // Recheck only after serializing on the device cursor so
+            // concurrent retries for the same operation ID are idempotent
+            // rather than reported as a second pending reset.
             if let existing = try await existing(
                 operationID: command.operationID, userID: userUUID,
                 deviceID: deviceUUID, schema: location.schema, sql: sql

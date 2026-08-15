@@ -197,25 +197,16 @@ struct V2GroupReadReceiptsSheet: View {
             Group {
                 if let page = store.groupReadReceiptPage {
                     List {
-                        if let readerCount = page.readerCount {
-                            Section {
-                                Text("\(readerCount) 人已读")
-                                .accessibilityLabel("已有 \(readerCount) 人已读")
-                                .accessibilityIdentifier("v2.message.group-readers.count.\(message.id)")
-                            }
-                        }
                         Section("已读成员") {
                             ForEach(page.readers, id: \.userID) { reader in
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(reader.publicIdentity?.displayName ?? "成员")
-                                    if let handle = reader.publicIdentity?.handle.rawValue {
-                                        Text("@\(handle)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    Text(reader.publicIdentity.displayName)
+                                    Text("@\(reader.publicIdentity.handle.rawValue)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
                                 .accessibilityElement(children: .combine)
-                                .accessibilityLabel(reader.publicIdentity?.displayName ?? "成员已读")
+                                .accessibilityLabel("\(reader.publicIdentity.displayName)已读")
                             }
                             if page.nextCursor != nil {
                                 Button("加载更多") { Task { await store.loadGroupReadReceipts(for: message) } }

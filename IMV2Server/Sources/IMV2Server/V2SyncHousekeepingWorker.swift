@@ -1,54 +1,70 @@
 import Fluent
 import Foundation
+import IMV2Core
 import SQLKit
 
 public struct V2SyncHousekeepingReport: Equatable, Sendable {
     public let expiredTokenCount: Int
     public let expiredReceiptCount: Int
     public let recoveredResetCount: Int
-    public let purgedRevokedDeviceCount: Int
     public let purgedSnapshotCount: Int
+    public let purgedProjectionEffectCount: Int
 
     public init(
         expiredTokenCount: Int,
         expiredReceiptCount: Int,
         recoveredResetCount: Int,
-        purgedRevokedDeviceCount: Int = 0,
-        purgedSnapshotCount: Int
+        purgedSnapshotCount: Int,
+        purgedProjectionEffectCount: Int = 0
     ) {
         self.expiredTokenCount = expiredTokenCount
         self.expiredReceiptCount = expiredReceiptCount
         self.recoveredResetCount = recoveredResetCount
-        self.purgedRevokedDeviceCount = purgedRevokedDeviceCount
         self.purgedSnapshotCount = purgedSnapshotCount
+        self.purgedProjectionEffectCount = purgedProjectionEffectCount
     }
 
     public var didWork: Bool {
         expiredTokenCount > 0 || expiredReceiptCount > 0 ||
-            recoveredResetCount > 0 || purgedRevokedDeviceCount > 0 ||
-            purgedSnapshotCount > 0
+            recoveredResetCount > 0 || purgedSnapshotCount > 0 ||
+            purgedProjectionEffectCount > 0
     }
 }
 
 public protocol V2SyncHousekeepingStore: Sendable {
-    func purgeExpired(now: Date, limit: Int) async throws -> V2SyncHousekeepingReport
+    func purgeExpired(
+        now: Date,
+        projectionEffectRetention: TimeInterval,
+        limit: Int
+    ) async throws -> V2SyncHousekeepingReport
 }
 
 public struct V2SyncHousekeepingWorker: Sendable {
     private let store: any V2SyncHousekeepingStore
+    private let projectionEffectRetention: TimeInterval
     private let now: @Sendable () -> Date
 
     public init(
         store: any V2SyncHousekeepingStore,
+        projectionEffectRetention: TimeInterval = V2IdempotencyPolicy.minimumServerRetention,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
+        precondition(
+            projectionEffectRetention.isFinite &&
+                projectionEffectRetention >= V2IdempotencyPolicy.minimumServerRetention
+        )
         self.store = store
+        self.projectionEffectRetention = projectionEffectRetention
         self.now = now
     }
 
     public func runOnce(limit: Int) async throws -> V2SyncHousekeepingReport {
         guard limit > 0 else { throw V2SyncHousekeepingError.invalidLimit }
-        return try await store.purgeExpired(now: now(), limit: limit)
+        return try await store.purgeExpired(
+            now: now(),
+            projectionEffectRetention: projectionEffectRetention,
+            limit: limit
+        )
     }
 }
 
@@ -70,8 +86,15 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
         self.schema = schema
     }
 
-    public func purgeExpired(now: Date, limit: Int) async throws -> V2SyncHousekeepingReport {
-        guard limit > 0 else { throw V2SyncHousekeepingError.invalidLimit }
+    public func purgeExpired(
+        now: Date,
+        projectionEffectRetention: TimeInterval,
+        limit: Int
+    ) async throws -> V2SyncHousekeepingReport {
+        guard limit > 0,
+              projectionEffectRetention.isFinite,
+              projectionEffectRetention >= V2IdempotencyPolicy.minimumServerRetention
+        else { throw V2SyncHousekeepingError.invalidLimit }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2SyncHousekeepingError.corruptPersistenceState
@@ -92,12 +115,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 now: now,
                 limit: limit
             )
-            let revokedDevices = try await purgeRevokedDeviceState(
-                sql: sql,
-                now: now,
-                limit: limit
-            )
-
             let expiredSnapshots = try await sql.raw("""
                 SELECT snapshot_id
                 FROM \(unsafeRaw: table("sync_snapshot_artifacts"))
@@ -178,82 +195,46 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                       AND state IN ('expired', 'failed') AND expires_at <= \(bind: now)
                     """).run()
             }
+            // An effect is removable only after the projector has materialized
+            // it, incremental replay no longer retains the source row, and no
+            // migration fence can still be copying this user's idempotency
+            // state. The current projection version remains authoritative.
+            let effectCutoff = now.addingTimeInterval(-projectionEffectRetention)
+            let projectionEffects = try await sql.raw("""
+                WITH candidates AS (
+                    SELECT effect.ctid
+                    FROM \(unsafeRaw: table("user_projection_effects")) AS effect
+                    JOIN \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                      ON checkpoint.user_id = effect.user_id
+                     AND checkpoint.projected_sequence >= effect.user_sync_sequence
+                    WHERE effect.created_at <= \(bind: effectCutoff)
+                      AND (checkpoint.migration_fence_expires_at IS NULL
+                           OR checkpoint.migration_fence_expires_at <= \(bind: now))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) AS log
+                          WHERE log.user_id = effect.user_id
+                            AND log.user_sync_sequence = effect.user_sync_sequence
+                            AND log.source_event_id = effect.source_event_id
+                            AND log.projection_kind = effect.projection_kind
+                      )
+                    ORDER BY effect.created_at, effect.user_id,
+                             effect.user_sync_sequence, effect.source_event_id
+                    LIMIT \(bind: limit)
+                    FOR UPDATE OF effect SKIP LOCKED
+                )
+                DELETE FROM \(unsafeRaw: table("user_projection_effects")) AS effect
+                USING candidates
+                WHERE effect.ctid = candidates.ctid
+                RETURNING 1 AS value
+                """).all(decoding: SyncHousekeepingDeletedRow.self).count
             return .init(
                 expiredTokenCount: tokens,
                 expiredReceiptCount: receipts,
                 recoveredResetCount: recovered,
-                purgedRevokedDeviceCount: revokedDevices,
-                purgedSnapshotCount: purgeCandidates.count
+                purgedSnapshotCount: purgeCandidates.count,
+                purgedProjectionEffectCount: projectionEffects
             )
         }
-    }
-
-    /// Revoked device rows cannot authenticate again. Retaining their cursor,
-    /// capabilities and reset assignments only makes compaction/metrics grow
-    /// with account history. Delete the bounded batch in dependency order.
-    private func purgeRevokedDeviceState(
-        sql: any SQLDatabase,
-        now: Date,
-        limit: Int
-    ) async throws -> Int {
-        let candidates = try await sql.raw("""
-            SELECT cursor.user_id, cursor.device_id
-            FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
-            JOIN \(unsafeRaw: table("auth_devices")) AS device
-              ON device.user_id = cursor.user_id
-             AND device.device_id = cursor.device_id
-            WHERE device.revoked_at IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
-                  WHERE checkpoint.user_id = cursor.user_id
-                    AND checkpoint.migration_fence_expires_at > \(bind: now)
-              )
-            ORDER BY device.revoked_at, cursor.user_id, cursor.device_id
-            LIMIT \(bind: limit)
-            FOR UPDATE OF cursor SKIP LOCKED
-            """).all(decoding: SyncHousekeepingRevokedDeviceRow.self)
-        guard !candidates.isEmpty else { return 0 }
-        let encoded = try json(candidates.map {
-            ["user_id": $0.userID.uuidString.lowercased(),
-             "device_id": $0.deviceID.uuidString.lowercased()]
-        })
-        try await sql.raw("""
-            DELETE FROM \(unsafeRaw: table("sync_tokens")) AS target
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_to_recordset(\(bind: encoded)::jsonb)
-                    AS candidate(user_id uuid, device_id uuid)
-                WHERE candidate.user_id = target.user_id
-                  AND candidate.device_id = target.device_id
-            )
-            """).run()
-        try await sql.raw("""
-            DELETE FROM \(unsafeRaw: table("sync_receipts")) AS target
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_to_recordset(\(bind: encoded)::jsonb)
-                    AS candidate(user_id uuid, device_id uuid)
-                WHERE candidate.user_id = target.user_id
-                  AND candidate.device_id = target.device_id
-            )
-            """).run()
-        try await sql.raw("""
-            DELETE FROM \(unsafeRaw: table("device_snapshot_resets")) AS target
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_to_recordset(\(bind: encoded)::jsonb)
-                    AS candidate(user_id uuid, device_id uuid)
-                WHERE candidate.user_id = target.user_id
-                  AND candidate.device_id = target.device_id
-            )
-            """).run()
-        try await sql.raw("""
-            DELETE FROM \(unsafeRaw: table("device_sync_cursors")) AS target
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_to_recordset(\(bind: encoded)::jsonb)
-                    AS candidate(user_id uuid, device_id uuid)
-                WHERE candidate.user_id = target.user_id
-                  AND candidate.device_id = target.device_id
-            )
-            """).run()
-        return candidates.count
     }
 
     private func deleteBounded(
@@ -292,14 +273,6 @@ private struct SyncHousekeepingDeviceRow: Decodable {
     enum CodingKeys: String, CodingKey { case deviceID = "device_id" }
 }
 private struct SyncHousekeepingDeletedRow: Decodable { let value: Int }
-private struct SyncHousekeepingRevokedDeviceRow: Decodable {
-    let userID: UUID
-    let deviceID: UUID
-    enum CodingKeys: String, CodingKey {
-        case userID = "user_id"
-        case deviceID = "device_id"
-    }
-}
 
 private func json<T: Encodable>(_ values: T) throws -> String {
     let data = try JSONEncoder().encode(values)

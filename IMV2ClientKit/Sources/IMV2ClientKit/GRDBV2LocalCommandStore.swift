@@ -98,12 +98,68 @@ extension GRDBV2LocalSyncStore {
     /// eligible for this cleanup.
     public func pruneTerminalCommands(olderThan cutoff: Date) throws {
         try databasePool.write { db in
-            for table in Self.terminalCommandTables {
+            let cutoffValue = cutoff.timeIntervalSince1970
+            for table in Self.terminalCommandTables where table != "v2_pending_group_room_creations" {
                 try db.execute(
-                    sql: "DELETE FROM \(table) WHERE state <> 'pending' AND created_at <= ?",
-                    arguments: [cutoff.timeIntervalSince1970]
+                    sql: "DELETE FROM \(table) WHERE state <> 'pending' AND terminal_at <= ?",
+                    arguments: [cutoffValue]
                 )
             }
+
+            // `finalizing` and `cancelling` remain replay-active protocol
+            // states. Only outcomes that can no longer emit a request are
+            // eligible for diagnostic retention cleanup.
+            try db.execute(
+                sql: "DELETE FROM v2_pending_group_room_creations WHERE state IN ('cancelled', 'acknowledged', 'rejected') AND terminal_at <= ?",
+                arguments: [cutoffValue]
+            )
+
+            // Forward plans own their chunks through a non-cascading foreign
+            // key. Remove children first, and age terminal plans by the time
+            // they became terminal rather than by their original enqueue time.
+            try db.execute(
+                sql: "DELETE FROM v2_forward_message_chunks WHERE plan_id IN (SELECT plan_id FROM v2_forward_message_plans WHERE state IN ('completed', 'cancelled') AND updated_at <= ?)",
+                arguments: [cutoffValue]
+            )
+            try db.execute(
+                sql: "DELETE FROM v2_forward_message_plans WHERE state IN ('completed', 'cancelled') AND updated_at <= ?",
+                arguments: [cutoffValue]
+            )
+        }
+    }
+
+    /// Stops automatic replay before the server is allowed to discard the
+    /// corresponding idempotency result. This transition runs in one local
+    /// transaction and deliberately preserves the rejected rows for UI
+    /// diagnosis instead of silently deleting user intent.
+    public func expireStalePendingCommands(now: Date) throws {
+        try databasePool.write { db in
+            let cutoff = now.addingTimeInterval(-V2IdempotencyPolicy.maximumClientRetryAge)
+            let cutoffValue = cutoff.timeIntervalSince1970
+            for table in Self.terminalCommandTables {
+                try db.execute(
+                    sql: "UPDATE \(table) SET state = 'rejected', terminal_code = ?, terminal_at = ? WHERE state = 'pending' AND created_at <= ?",
+                    arguments: [V2IdempotencyPolicy.expiredClientCommandCode, now.timeIntervalSince1970, cutoffValue]
+                )
+            }
+            // A staged group creation remains replay-active while finalizing
+            // or cancelling even though it is no longer named `pending`.
+            try db.execute(
+                sql: "UPDATE v2_pending_group_room_creations SET state = 'rejected', terminal_code = ?, terminal_at = ? WHERE state IN ('finalizing', 'cancelling') AND created_at <= ?",
+                arguments: [V2IdempotencyPolicy.expiredClientCommandCode, now.timeIntervalSince1970, cutoffValue]
+            )
+
+            // Bulk forwarding has its own parent/chunk state machine. Cancel
+            // the whole old plan atomically so the scheduler cannot create a
+            // fresh derived operation after the protocol retry window.
+            try db.execute(
+                sql: "UPDATE v2_forward_message_chunks SET state = 'cancelled' WHERE state = 'pending' AND plan_id IN (SELECT plan_id FROM v2_forward_message_plans WHERE state = 'active' AND created_at <= ?)",
+                arguments: [cutoffValue]
+            )
+            try db.execute(
+                sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', updated_at = ? WHERE state = 'active' AND created_at <= ?",
+                arguments: [now.timeIntervalSince1970, cutoffValue]
+            )
         }
     }
 

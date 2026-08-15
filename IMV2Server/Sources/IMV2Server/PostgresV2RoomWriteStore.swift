@@ -467,6 +467,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 WHERE user_id = \(bind: recipientID)
                   AND projection_kind = 'direct_room_profile'
                   AND payload->>'room_id' = \(bind: roomID.uuidString)
+                UNION ALL
+                SELECT 1 FROM im_v2.user_projection_versions
+                WHERE user_id = \(bind: recipientID)
+                  AND projection_kind = 'direct_room_profile'
+                  AND entity_key = \(bind: roomID.uuidString)
+                  AND valid_to_sequence IS NULL
             ) AS value
             """).first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
         guard !alreadyVisible else { return }

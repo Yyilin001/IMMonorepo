@@ -1,6 +1,7 @@
 import Fluent
 import Foundation
 import SQLKit
+import Synchronization
 
 /// A private, aggregate-only view of durable work waiting behind the gateway.
 /// It deliberately contains no identifiers, shard labels, provider names, or
@@ -11,7 +12,11 @@ public protocol V2DurableWorkMetricsSource: Sendable {
 }
 
 public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
-    public let isAvailable: Bool
+    public private(set) var isAvailable: Bool
+    /// A failed/timed-out refresh may safely expose the last complete global
+    /// snapshot, but it must never present that data as current.
+    public private(set) var servedFromLastKnownGood: Bool
+    public private(set) var lastSuccessfulRefreshAgeSeconds: Int
     public let readyRoomOutboxRows: Int
     public let leasedRoomOutboxRows: Int
     public let scheduledRoomOutboxRows: Int
@@ -69,9 +74,14 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     /// serving this private scrape. It intentionally has no node/device/user
     /// label, so the scrape cannot disclose topology or identity.
     public let pendingDeviceRevocationEvents: Int
+    /// Cluster-global storage cleanup backlog. This is separate from socket
+    /// closure because a remote shard outage can delay only reclamation.
+    public let pendingRevokedDeviceProjectionCleanupEvents: Int
 
     public init(
         isAvailable: Bool,
+        servedFromLastKnownGood: Bool = false,
+        lastSuccessfulRefreshAgeSeconds: Int = 0,
         readyRoomOutboxRows: Int = 0,
         leasedRoomOutboxRows: Int = 0,
         scheduledRoomOutboxRows: Int = 0,
@@ -117,9 +127,12 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         readyPushWakes: Int = 0,
         leasedPushWakes: Int = 0,
         suppressedPushWakes: Int = 0,
-        pendingDeviceRevocationEvents: Int = 0
+        pendingDeviceRevocationEvents: Int = 0,
+        pendingRevokedDeviceProjectionCleanupEvents: Int = 0
     ) {
         self.isAvailable = isAvailable
+        self.servedFromLastKnownGood = servedFromLastKnownGood
+        self.lastSuccessfulRefreshAgeSeconds = max(0, lastSuccessfulRefreshAgeSeconds)
         self.readyRoomOutboxRows = max(0, readyRoomOutboxRows)
         self.leasedRoomOutboxRows = max(0, leasedRoomOutboxRows)
         self.scheduledRoomOutboxRows = max(0, scheduledRoomOutboxRows)
@@ -166,9 +179,21 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.leasedPushWakes = max(0, leasedPushWakes)
         self.suppressedPushWakes = max(0, suppressedPushWakes)
         self.pendingDeviceRevocationEvents = max(0, pendingDeviceRevocationEvents)
+        self.pendingRevokedDeviceProjectionCleanupEvents = max(
+            0,
+            pendingRevokedDeviceProjectionCleanupEvents
+        )
     }
 
     public static let unavailable = Self(isAvailable: false)
+
+    func reportingUnavailable(lastSuccessfulRefreshAgeSeconds: Int?) -> Self {
+        var copy = self
+        copy.isAvailable = false
+        copy.servedFromLastKnownGood = lastSuccessfulRefreshAgeSeconds != nil
+        copy.lastSuccessfulRefreshAgeSeconds = max(0, lastSuccessfulRefreshAgeSeconds ?? 0)
+        return copy
+    }
 }
 
 /// Coalesces concurrent Prometheus scrapes and bounds how often the expensive
@@ -178,18 +203,27 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
 public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let source: any V2DurableWorkMetricsSource
     private let minimumRefreshInterval: TimeInterval
+    private let maximumRefreshDuration: Duration
     private let now: @Sendable () -> Date
     private var cached: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: Date)?
+    private var lastKnownGood: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: Date)?
     private var refreshTask: Task<V2DurableWorkMetricsSnapshot, Never>?
 
     public init(
         source: any V2DurableWorkMetricsSource,
         minimumRefreshInterval: TimeInterval = 5,
+        maximumRefreshDuration: TimeInterval = 4,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         precondition(minimumRefreshInterval.isFinite && minimumRefreshInterval > 0)
+        precondition(
+            maximumRefreshDuration.isFinite &&
+            maximumRefreshDuration > 0 &&
+            maximumRefreshDuration <= 86_400
+        )
         self.source = source
         self.minimumRefreshInterval = minimumRefreshInterval
+        self.maximumRefreshDuration = .milliseconds(Int64(maximumRefreshDuration * 1_000))
         self.now = now
     }
 
@@ -204,12 +238,108 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
         if let refreshTask { return await refreshTask.value }
 
         let source = source
-        let task = Task { await source.durableWorkMetricsSnapshot() }
+        let maximumRefreshDuration = maximumRefreshDuration
+        let fallback = lastKnownGood
+        let now = now
+        let task = Task {
+            let refreshed: V2DurableWorkMetricsSnapshot
+            switch await v2LoadDurableWorkMetrics(
+                source: source,
+                timeout: maximumRefreshDuration
+            ) {
+            case .snapshot(let snapshot): refreshed = snapshot
+            case .timedOut: refreshed = .unavailable
+            }
+            guard !refreshed.isAvailable else { return refreshed }
+            guard let fallback else {
+                return refreshed.reportingUnavailable(lastSuccessfulRefreshAgeSeconds: nil)
+            }
+            return fallback.snapshot.reportingUnavailable(
+                lastSuccessfulRefreshAgeSeconds: Int(max(
+                    0,
+                    now().timeIntervalSince(fallback.loadedAt)
+                ))
+            )
+        }
         refreshTask = task
         let snapshot = await task.value
-        cached = (snapshot, now())
+        let loadedAt = now()
+        if snapshot.isAvailable { lastKnownGood = (snapshot, loadedAt) }
+        cached = (snapshot, loadedAt)
         refreshTask = nil
         return snapshot
+    }
+}
+
+private enum V2DurableWorkMetricsRefreshResult: Sendable {
+    case snapshot(V2DurableWorkMetricsSnapshot)
+    case timedOut
+}
+
+/// This is intentionally an unstructured race. A structured task group waits
+/// for a non-cooperative database child while leaving scope and would recreate
+/// the `/metrics` hang this boundary exists to prevent. The losing task is
+/// cancelled; PostgreSQL's connection-level statement timeout provides the
+/// independent hard stop if a driver does not promptly observe cancellation.
+private func v2LoadDurableWorkMetrics(
+    source: any V2DurableWorkMetricsSource,
+    timeout: Duration
+) async -> V2DurableWorkMetricsRefreshResult {
+    await withCheckedContinuation { continuation in
+        let race = V2DurableWorkMetricsRefreshRace(continuation: continuation)
+        let sourceTask = Task {
+            let snapshot = await source.durableWorkMetricsSnapshot()
+            race.resolve(.snapshot(snapshot))
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+                race.resolve(.timedOut)
+            } catch {
+                // The source won and cancelled this timer.
+            }
+        }
+        race.install(tasks: [sourceTask, timeoutTask])
+    }
+}
+
+private final class V2DurableWorkMetricsRefreshRace: Sendable {
+    private struct State: Sendable {
+        var continuation: CheckedContinuation<V2DurableWorkMetricsRefreshResult, Never>?
+        var tasks: [Task<Void, Never>] = []
+        var resolved = false
+    }
+
+    private let state: Mutex<State>
+
+    init(continuation: CheckedContinuation<V2DurableWorkMetricsRefreshResult, Never>) {
+        state = Mutex(.init(continuation: continuation))
+    }
+
+    func install(tasks: [Task<Void, Never>]) {
+        let cancel = state.withLock { state -> Bool in
+            guard !state.resolved else { return true }
+            state.tasks = tasks
+            return false
+        }
+        if cancel { tasks.forEach { $0.cancel() } }
+    }
+
+    func resolve(_ result: V2DurableWorkMetricsRefreshResult) {
+        let completion = state.withLock { state -> (
+            CheckedContinuation<V2DurableWorkMetricsRefreshResult, Never>?,
+            [Task<Void, Never>]
+        ) in
+            guard !state.resolved else { return (nil, []) }
+            state.resolved = true
+            let continuation = state.continuation
+            state.continuation = nil
+            let tasks = state.tasks
+            state.tasks = []
+            return (continuation, tasks)
+        }
+        completion.1.forEach { $0.cancel() }
+        completion.0?.resume(returning: result)
     }
 }
 
@@ -504,15 +634,24 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                     FROM im_v2.push_wake_outbox, snapshot_now
                 ),
                 revocation_metrics AS (
-                    SELECT CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) ELSE 0 END
-                        AS pending_device_revocation_events
+                    SELECT
+                        CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) FILTER (
+                            WHERE event.event_id > COALESCE((
+                                SELECT cursor.last_event_id
+                                FROM im_v2.gateway_worker_cursors AS cursor
+                                WHERE cursor.worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
+                                  AND cursor.node_id = \(bind: scopedGatewayNodeID)
+                            ), 0)
+                        ) ELSE 0 END AS pending_device_revocation_events,
+                        CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) FILTER (
+                            WHERE event.event_id > COALESCE((
+                                SELECT cursor.last_event_id
+                                FROM im_v2.gateway_worker_cursors AS cursor
+                                WHERE cursor.worker_name = \(bind: V2RevokedDeviceProjectionCleanupCursorNamespace.workerName)
+                                  AND cursor.node_id = \(bind: V2RevokedDeviceProjectionCleanupCursorNamespace.nodeID)
+                            ), 0)
+                        ) ELSE 0 END AS pending_revoked_device_projection_cleanup_events
                     FROM im_v2.device_revocation_events AS event
-                    WHERE event.event_id > COALESCE((
-                        SELECT cursor.last_event_id
-                        FROM im_v2.gateway_worker_cursors AS cursor
-                        WHERE cursor.worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
-                          AND cursor.node_id = \(bind: scopedGatewayNodeID)
-                    ), 0)
                 )
                 SELECT *
                 FROM room_outbox_metrics, profile_metrics, read_receipt_preference_metrics, fanout_plan_metrics,
@@ -573,7 +712,10 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             readyPushWakes: v2MetricCount(row.readyPushWakes),
             leasedPushWakes: v2MetricCount(row.leasedPushWakes),
             suppressedPushWakes: v2MetricCount(row.suppressedPushWakes),
-            pendingDeviceRevocationEvents: v2MetricCount(row.pendingDeviceRevocationEvents)
+            pendingDeviceRevocationEvents: v2MetricCount(row.pendingDeviceRevocationEvents),
+            pendingRevokedDeviceProjectionCleanupEvents: v2MetricCount(
+                row.pendingRevokedDeviceProjectionCleanupEvents
+            )
         )
     }
 
@@ -787,7 +929,10 @@ private func v2AggregateDurableWorkMetrics(
         readyPushWakes: sum(\.readyPushWakes),
         leasedPushWakes: sum(\.leasedPushWakes),
         suppressedPushWakes: sum(\.suppressedPushWakes),
-        pendingDeviceRevocationEvents: sum(\.pendingDeviceRevocationEvents)
+        pendingDeviceRevocationEvents: sum(\.pendingDeviceRevocationEvents),
+        pendingRevokedDeviceProjectionCleanupEvents: sum(
+            \.pendingRevokedDeviceProjectionCleanupEvents
+        )
     )
 }
 
@@ -801,6 +946,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_durable_work_metrics_available Whether the durable-work scrape completed against PostgreSQL.",
         "# TYPE im_v2_durable_work_metrics_available gauge",
         "im_v2_durable_work_metrics_available \(snapshot.isAvailable ? 1 : 0)",
+        "# HELP im_v2_durable_work_metrics_last_known_good Whether a failed refresh is serving the last complete snapshot.",
+        "# TYPE im_v2_durable_work_metrics_last_known_good gauge",
+        "im_v2_durable_work_metrics_last_known_good \(snapshot.servedFromLastKnownGood ? 1 : 0)",
+        "# HELP im_v2_durable_work_metrics_last_success_age_seconds Age of the last complete durable-work refresh when serving stale data.",
+        "# TYPE im_v2_durable_work_metrics_last_success_age_seconds gauge",
+        "im_v2_durable_work_metrics_last_success_age_seconds \(snapshot.lastSuccessfulRefreshAgeSeconds)",
         "# HELP im_v2_room_outbox_backlog Durable room outbox rows owned by this deployment.",
         "# TYPE im_v2_room_outbox_backlog gauge",
         "im_v2_room_outbox_backlog{state=\"ready\"} \(snapshot.readyRoomOutboxRows)",
@@ -891,6 +1042,9 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_device_revocation_events_pending Durable device-revocation events not yet consumed by this gateway node.",
         "# TYPE im_v2_device_revocation_events_pending gauge",
         "im_v2_device_revocation_events_pending \(snapshot.pendingDeviceRevocationEvents)",
+        "# HELP im_v2_revoked_device_projection_cleanup_events_pending Durable revocations awaiting user-shard capability cleanup.",
+        "# TYPE im_v2_revoked_device_projection_cleanup_events_pending gauge",
+        "im_v2_revoked_device_projection_cleanup_events_pending \(snapshot.pendingRevokedDeviceProjectionCleanupEvents)",
     ].joined(separator: "\n") + "\n"
 }
 
@@ -941,6 +1095,7 @@ private struct DurableWorkMetricsRow: Decodable {
     let leasedPushWakes: Int64
     let suppressedPushWakes: Int64
     let pendingDeviceRevocationEvents: Int64
+    let pendingRevokedDeviceProjectionCleanupEvents: Int64
 
     enum CodingKeys: String, CodingKey {
         case readyRoomOutboxRows = "ready_room_outbox_rows"
@@ -989,6 +1144,7 @@ private struct DurableWorkMetricsRow: Decodable {
         case leasedPushWakes = "leased_push_wakes"
         case suppressedPushWakes = "suppressed_push_wakes"
         case pendingDeviceRevocationEvents = "pending_device_revocation_events"
+        case pendingRevokedDeviceProjectionCleanupEvents = "pending_revoked_device_projection_cleanup_events"
     }
 }
 

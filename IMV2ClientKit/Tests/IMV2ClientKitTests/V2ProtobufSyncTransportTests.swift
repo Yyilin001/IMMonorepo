@@ -190,27 +190,28 @@ struct V2ProtobufSyncTransportTests {
         #expect(await wire.requestedPageSize() == 100)
     }
 
-    @Test("read-receipt total is first-page-only and later cursor pages omit it")
-    func readReceiptReaderCountPresenceRoundTrips() async throws {
+    @Test("read-receipt details bind pagination to the exact message")
+    func readReceiptReaderPaginationRoundTrips() async throws {
         let wire = ReadReceiptReadersWire()
         let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
         let roomID = try RoomID("00000000-0000-0000-0000-000000000343")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000346")
 
         let first = try await transport.listReadReceiptReaders(
-            roomID: roomID, messageRoomSequence: 7, cursor: nil, pageSize: 1
+            roomID: roomID, messageID: messageID, cursor: nil, pageSize: 1
         )
         guard let cursor = first.nextCursor else {
             Issue.record("expected a first-page cursor")
             return
         }
         let second = try await transport.listReadReceiptReaders(
-            roomID: roomID, messageRoomSequence: 7,
+            roomID: roomID, messageID: messageID,
             cursor: cursor, pageSize: 1
         )
 
-        #expect(first.readerCount == 2)
+        #expect(first.messageID == messageID)
         #expect(first.readers.count == 1)
-        #expect(second.readerCount == nil)
+        #expect(first.readers[0].publicIdentity.displayName == "成员一")
         #expect(second.readers.count == 1)
         #expect(second.nextCursor == nil)
     }
@@ -305,14 +306,13 @@ private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
         response.protocolVersion = request.protocolVersion
         response.readReceiptReadersPage = .init()
         response.readReceiptReadersPage.roomID = command.roomID
-        response.readReceiptReadersPage.messageRoomSequence = command.messageRoomSequence
-        if isFirstPage { response.readReceiptReadersPage.readerCount = 2 }
+        response.readReceiptReadersPage.messageID = command.messageID
         response.readReceiptReadersPage.readers = [.with {
             $0.userID = isFirstPage
                 ? "00000000-0000-0000-0000-000000000344"
                 : "00000000-0000-0000-0000-000000000345"
-            $0.readThroughRoomSequence = 7
-            $0.recordedAtMs = 1_750_000_000_000
+            $0.publicHandle = isFirstPage ? "member_1" : "member_2"
+            $0.displayName = isFirstPage ? "成员一" : "成员二"
         }]
         response.readReceiptReadersPage.nextCursor = isFirstPage ? "opaque-cursor" : ""
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)

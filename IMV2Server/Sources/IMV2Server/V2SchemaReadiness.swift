@@ -13,7 +13,7 @@ public enum V2SchemaReadiness {
         "shard_admission_pools", "messages", "room_events", "room_outbox", "group_event_wake_outbox", "durable_work_replay_audit",
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_permission_operations", "group_role_operations", "message_forward_operations",
         "fanout_plans", "fanout_plan_targets", "fanout_completion_units", "fanout_deliveries", "consumer_inbox",
-        "user_sync_sequences", "user_sync_log", "fanout_sync_payloads", "user_projection_effects", "device_sync_cursors",
+        "user_sync_sequences", "user_sync_log", "fanout_sync_payloads", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
         "user_projection_versions", "user_projection_checkpoints", "user_sync_retention", "sync_snapshot_artifacts",
         "sync_snapshot_pages", "device_snapshot_resets", "sync_tokens", "sync_receipts", "push_campaigns",
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints",

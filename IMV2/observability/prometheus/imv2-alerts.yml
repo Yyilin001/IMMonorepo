@@ -182,6 +182,17 @@ groups:
           summary: IM V2 gateway has unconsumed device-revocation events
           runbook: IMV2/docs/10-operations/account-disable-runbook.md
 
+      - alert: IMV2RevokedDeviceProjectionCleanupBacklog
+        expr: max(im_v2_revoked_device_projection_cleanup_events_pending) > 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 revoked-device shard cleanup is not converging
+          runbook: IMV2/docs/10-operations/account-disable-runbook.md
+
       - alert: IMV2FanoutFailureRate
         expr: sum(rate(im_v2_fanout_failures_total[5m])) > 0
         for: 10m

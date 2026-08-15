@@ -51,34 +51,30 @@ public struct V2DirectReadReceiptProjection: Equatable, Sendable {
 
 public struct V2ReadReceiptReader: Equatable, Sendable {
     public let userID: UserID
-    /// Bounded profile presentation for a current group member. The opaque
-    /// user ID is retained for pagination correctness, never for display.
-    public let publicIdentity: V2PublicIdentity?
-    public let readThroughRoomSequence: UInt64
-    public let recordedAt: Date
+    /// Bounded profile presentation for an active account that belonged to the
+    /// message audience and remains in the group at the page's bound revision.
+    /// The opaque user ID is retained for pagination correctness, never display.
+    public let publicIdentity: V2PublicIdentity
 
-    public init(userID: UserID, publicIdentity: V2PublicIdentity? = nil, readThroughRoomSequence: UInt64, recordedAt: Date) {
+    public init(userID: UserID, publicIdentity: V2PublicIdentity) {
+        precondition(publicIdentity.userID == userID)
         self.userID = userID
         self.publicIdentity = publicIdentity
-        self.readThroughRoomSequence = readThroughRoomSequence
-        self.recordedAt = recordedAt
     }
 }
 
 public struct V2ReadReceiptReadersPage: Equatable, Sendable {
     public let roomID: RoomID
-    public let messageRoomSequence: UInt64
-    /// Present on the first page only. Consumers retain that value while
-    /// appending later cursor pages.
-    public let readerCount: Int?
+    public let messageID: MessageID
     public let readers: [V2ReadReceiptReader]
     public let nextCursor: String?
 
-    public init(roomID: RoomID, messageRoomSequence: UInt64, readerCount: Int?, readers: [V2ReadReceiptReader], nextCursor: String?) throws {
-        guard messageRoomSequence > 0,
-              readerCount.map({ $0 >= readers.count }) != false
-        else { throw V2ReadReceiptValidationError.invalidReaderPage }
-        self.roomID = roomID; self.messageRoomSequence = messageRoomSequence; self.readerCount = readerCount
+    public init(roomID: RoomID, messageID: MessageID, readers: [V2ReadReceiptReader], nextCursor: String?) throws {
+        guard Set(readers.map(\.userID)).count == readers.count else {
+            throw V2ReadReceiptValidationError.invalidReaderPage
+        }
+        self.roomID = roomID
+        self.messageID = messageID
         self.readers = readers; self.nextCursor = nextCursor
     }
 }

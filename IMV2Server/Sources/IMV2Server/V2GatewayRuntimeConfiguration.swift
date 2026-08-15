@@ -118,11 +118,14 @@ public struct V2APNSRuntimeConfiguration: Sendable {
 /// policy: an incomplete deployment must fail before opening a public port.
 public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databaseURL: String
+    public let databasePolicy: V2PostgresRuntimePolicy
     /// Fluent defaults to a single PostgreSQL connection per event loop. The
     /// gateway runs foreground commands and durable fan-out in the same
     /// process, so deployment must size this explicitly rather than allowing a
     /// fan-out transaction to starve sync or command work on one event loop.
-    public let databaseMaxConnectionsPerEventLoop: Int
+    public var databaseMaxConnectionsPerEventLoop: Int {
+        databasePolicy.maximumConnectionsPerEventLoop
+    }
     public let tls: V2TLSListenerConfiguration
     public let accessTokenKey: V2AccessTokenHMACKey
     public let capacityProfile: V2CapacityProfile
@@ -133,6 +136,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// Hard process-local admission ceiling, including unauthenticated TLS
     /// sockets. This bounds per-connection queues, actors and TLS state.
     public let maximumConnections: Int
+    public let authenticatedConnectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
+    public let commandRateLimitPolicy: V2GatewayCommandRateLimitPolicy
     public let maximumQueuedInboundBytes: Int
     /// Complements the byte bound so a stream of one-byte TCP fragments cannot
     /// create an unbounded number of queued `Data` allocations.
@@ -173,7 +178,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
     public let maintenancePollIntervalMilliseconds: Int
     public let mediaWithdrawnRetentionSeconds: Int
+    /// Server replay results outlive the first-party client retry window.
+    /// Deployment may retain them longer, but never shorten this protocol
+    /// fence or a delayed client could execute an already-completed command.
+    public let idempotencyRetentionSeconds: Int
     public let metrics: V2MetricsListenerConfiguration
+    public let metricsRefreshTimeoutMilliseconds: Int
     public let gatewayNodeID: String
     /// The explicit deployment topology fence for process-local wake routing.
     /// All replicas of one logical deployment must receive the same value.
@@ -193,7 +203,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
-        databaseMaxConnectionsPerEventLoop = try Self.positive("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP", environment: environment)
+        databasePolicy = try .init(environment: environment)
         tls = try .init(
             host: try Self.required("IM_V2_TLS_HOST", environment: environment),
             port: try Self.integer("IM_V2_TLS_PORT", environment: environment),
@@ -207,6 +217,53 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         maximumProtobufMessageDepth = try Self.positive("IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH", environment: environment)
         connectionLimits = try .init(maximumInFlightRequests: try Self.integer("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
         maximumConnections = try Self.boundedPositive("IM_V2_MAX_CONNECTIONS", maximum: 1_000_000, environment: environment)
+        let maximumConnectionsPerDevice = try Self.boundedPositive(
+            "IM_V2_MAX_CONNECTIONS_PER_DEVICE", maximum: 64, environment: environment
+        )
+        let maximumConnectionsPerUser = try Self.boundedPositive(
+            "IM_V2_MAX_CONNECTIONS_PER_USER", maximum: 1_024, environment: environment
+        )
+        guard maximumConnectionsPerUser >= maximumConnectionsPerDevice else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_MAX_CONNECTIONS_PER_DEVICE/IM_V2_MAX_CONNECTIONS_PER_USER"
+            )
+        }
+        authenticatedConnectionAdmissionPolicy = .init(
+            maximumConnectionsPerDevice: maximumConnectionsPerDevice,
+            maximumConnectionsPerUser: maximumConnectionsPerUser
+        )
+        let deviceCommandsPerSecond = try Self.boundedPositive(
+            "IM_V2_DEVICE_COMMANDS_PER_SECOND", maximum: 100_000, environment: environment
+        )
+        let deviceCommandBurst = try Self.boundedPositive(
+            "IM_V2_DEVICE_COMMAND_BURST", maximum: 100_000, environment: environment
+        )
+        let userCommandsPerSecond = try Self.boundedPositive(
+            "IM_V2_USER_COMMANDS_PER_SECOND", maximum: 1_000_000, environment: environment
+        )
+        let userCommandBurst = try Self.boundedPositive(
+            "IM_V2_USER_COMMAND_BURST", maximum: 1_000_000, environment: environment
+        )
+        let maximumTrackedRateLimitIdentities = try Self.boundedPositive(
+            "IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES", maximum: 2_000_000, environment: environment
+        )
+        let (minimumTrackedIdentities, trackedOverflow) = maximumConnections.multipliedReportingOverflow(by: 2)
+        guard !trackedOverflow,
+              userCommandsPerSecond >= deviceCommandsPerSecond,
+              userCommandBurst >= deviceCommandBurst,
+              maximumTrackedRateLimitIdentities >= minimumTrackedIdentities
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DEVICE_COMMANDS_PER_SECOND/IM_V2_DEVICE_COMMAND_BURST/IM_V2_USER_COMMANDS_PER_SECOND/IM_V2_USER_COMMAND_BURST/IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES"
+            )
+        }
+        commandRateLimitPolicy = .init(
+            deviceCommandsPerSecond: deviceCommandsPerSecond,
+            deviceBurst: deviceCommandBurst,
+            userCommandsPerSecond: userCommandsPerSecond,
+            userBurst: userCommandBurst,
+            maximumTrackedIdentities: maximumTrackedRateLimitIdentities
+        )
         maximumQueuedInboundBytes = try Self.positive("IM_V2_MAX_QUEUED_INBOUND_BYTES", environment: environment)
         maximumQueuedInboundChunks = try Self.boundedPositive("IM_V2_MAX_QUEUED_INBOUND_CHUNKS", maximum: 4_096, environment: environment)
         authenticationTimeoutMilliseconds = try Self.boundedPositive("IM_V2_AUTHENTICATION_TIMEOUT_MS", maximum: 300_000, environment: environment)
@@ -237,10 +294,26 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         )
         maintenancePollIntervalMilliseconds = try Self.positive("IM_V2_MAINTENANCE_POLL_INTERVAL_MS", environment: environment)
         mediaWithdrawnRetentionSeconds = try Self.positive("IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS", environment: environment)
+        idempotencyRetentionSeconds = try Self.boundedPositive(
+            "IM_V2_IDEMPOTENCY_RETENTION_SECONDS",
+            maximum: 10 * 365 * 86_400,
+            environment: environment
+        )
+        guard TimeInterval(idempotencyRetentionSeconds) >= V2IdempotencyPolicy.minimumServerRetention else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_IDEMPOTENCY_RETENTION_SECONDS")
+        }
         metrics = try .init(
             host: Self.required("IM_V2_METRICS_HOST", environment: environment),
             port: Self.integer("IM_V2_METRICS_PORT", environment: environment)
         )
+        metricsRefreshTimeoutMilliseconds = try Self.boundedPositive(
+            "IM_V2_METRICS_REFRESH_TIMEOUT_MS", maximum: 60_000, environment: environment
+        )
+        guard metricsRefreshTimeoutMilliseconds <= databasePolicy.statementTimeoutMilliseconds else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_METRICS_REFRESH_TIMEOUT_MS/IM_V2_DATABASE_STATEMENT_TIMEOUT_MS"
+            )
+        }
         gatewayNodeID = try Self.gatewayNodeID(environment: environment)
         userShardRoute = try .init(
             bucket: Self.required("IM_V2_USER_SHARD_BUCKET", environment: environment),
@@ -250,6 +323,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             rawValue: Self.optional("IM_V2_USER_SHARD_STORES_JSON", environment: environment),
             localBucket: userShardRoute.bucket,
             localDatabaseURL: databaseURL
+        )
+        try databasePolicy.validate(
+            primaryDatabaseURL: databaseURL,
+            userShardStorage: userShardStorage
         )
         directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
         groupRoomShardID = try Self.required("IM_V2_GROUP_ROOM_SHARD_ID", environment: environment)

@@ -80,31 +80,83 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
     }
 
-    public func refreshPresence(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date) async throws -> Date {
-        guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        let user = try liveActivityUUID(identity.userID), device = try liveActivityUUID(identity.deviceID)
-        let expiry = now.addingTimeInterval(onlineLease)
-        try await sql.raw("INSERT INTO im_v2.user_live_presence_leases (user_id, device_id, connection_id, expires_at, updated_at) VALUES (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now)) ON CONFLICT (connection_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, updated_at = EXCLUDED.updated_at").run()
-        return expiry
+    public func acquireConnection(
+        identity: V2AuthenticatedConnection,
+        connectionID: UUID,
+        policy: V2AuthenticatedConnectionAdmissionPolicy,
+        now: Date
+    ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2LiveActivityStoreError.corruptPersistenceState
+            }
+            let user = try liveActivityUUID(identity.userID)
+            let device = try liveActivityUUID(identity.deviceID)
+            // All contenders for one user take the same first lock; the
+            // device lock then serializes the narrower limit without a
+            // user/device lock-order cycle.
+            try await lockConnectionIdentity(user: user, device: device, sql: sql)
+            try await sql.raw("""
+                DELETE FROM im_v2.user_live_presence_leases
+                WHERE expires_at <= \(bind: now)
+                  AND (user_id = \(bind: user) OR device_id = \(bind: device))
+                """).run()
+            guard let counts = try await sql.raw("""
+                SELECT COUNT(*) FILTER (WHERE device_id = \(bind: device))::integer AS device_count,
+                       COUNT(*) FILTER (WHERE user_id = \(bind: user))::integer AS user_count
+                FROM im_v2.user_live_presence_leases
+                WHERE (user_id = \(bind: user) OR device_id = \(bind: device))
+                  AND expires_at > \(bind: now)
+                  AND connection_id <> \(bind: connectionID)
+                """).first(decoding: LiveActivityConnectionCountRow.self)
+            else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            guard counts.deviceCount < policy.maximumConnectionsPerDevice,
+                  counts.userCount < policy.maximumConnectionsPerUser
+            else { return .rejected }
+            let expiry = now.addingTimeInterval(onlineLease)
+            guard try await sql.raw("""
+                INSERT INTO im_v2.user_live_presence_leases
+                    (user_id, device_id, connection_id, expires_at, updated_at)
+                VALUES
+                    (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now))
+                ON CONFLICT (connection_id) DO UPDATE
+                SET expires_at = EXCLUDED.expires_at,
+                    updated_at = EXCLUDED.updated_at
+                WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
+                  AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
+                RETURNING connection_id
+                """).first(decoding: LiveActivityConnectionIDRow.self) != nil
+            else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            return .accepted(expiresAt: expiry)
+        }
     }
 
-    public func removePresence(connectionID: UUID, now: Date) async throws -> Bool {
+    public func removePresence(
+        identity: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now: Date
+    ) async throws -> Bool {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            // Preserve the owner from the deleted row, then ask only whether
-            // that same user has another live connection.  A global EXISTS
-            // would incorrectly keep Alice online whenever Bob is online.
+            let user = try liveActivityUUID(identity.userID)
+            let device = try liveActivityUUID(identity.deviceID)
+            try await lockConnectionIdentity(user: user, device: device, sql: sql)
+            // The caller's authenticated identity remains authoritative even
+            // if this lease expired and another replica already deleted it.
+            // Matching both owner fields also prevents an obsolete lifecycle
+            // from deleting a colliding connection ID owned by another user.
+            try await sql.raw("""
+                DELETE FROM im_v2.user_live_presence_leases
+                WHERE connection_id = \(bind: connectionID)
+                  AND user_id = \(bind: user)
+                  AND device_id = \(bind: device)
+                """).run()
             return try await sql.raw("""
-                WITH removed AS (
-                    DELETE FROM im_v2.user_live_presence_leases
-                    WHERE connection_id = \(bind: connectionID)
-                    RETURNING user_id
-                )
                 SELECT EXISTS (
                     SELECT 1
-                    FROM im_v2.user_live_presence_leases AS lease
-                    INNER JOIN removed ON removed.user_id = lease.user_id
-                    WHERE lease.expires_at > \(bind: now)
+                    FROM im_v2.user_live_presence_leases
+                    WHERE user_id = \(bind: user)
+                      AND expires_at > \(bind: now)
                 ) AS exists
                 """).first(decoding: LiveActivityBooleanRow.self)?.exists ?? false
         }
@@ -113,6 +165,19 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     private func activeMember(room: UUID, user: UUID, sql: any SQLDatabase) async throws -> Bool {
         guard let row = try await sql.raw("SELECT room.membership_revision FROM im_v2.rooms AS room WHERE room.room_id = \(bind: room)").first(decoding: LiveActivityMembershipRevisionRow.self) else { throw V2LiveActivityStoreError.roomNotFound }
         return try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: user) AND joined_revision <= \(bind: row.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: row.membershipRevision))").first(decoding: LiveActivityExistsRow.self) != nil
+    }
+
+    private func lockConnectionIdentity(user: UUID, device: UUID, sql: any SQLDatabase) async throws {
+        try await sql.raw("""
+            SELECT pg_advisory_xact_lock(
+                hashtextextended(\(bind: "v2-live-user:" + user.uuidString.lowercased()), 0)
+            )
+            """).run()
+        try await sql.raw("""
+            SELECT pg_advisory_xact_lock(
+                hashtextextended(\(bind: "v2-live-device:" + device.uuidString.lowercased()), 0)
+            )
+            """).run()
     }
 
     private func directPeer(room: UUID, user: UUID, sql: any SQLDatabase) async throws -> UUID? {
@@ -132,4 +197,16 @@ private struct LiveActivityExpiryRow: Decodable { let expiresAt: Date?; enum Cod
 private struct LiveActivityMembershipRevisionRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
 private struct LiveActivityExistsRow: Decodable { let exists: Int }
 private struct LiveActivityBooleanRow: Decodable { let exists: Bool }
+private struct LiveActivityConnectionCountRow: Decodable {
+    let deviceCount: Int
+    let userCount: Int
+    enum CodingKeys: String, CodingKey {
+        case deviceCount = "device_count"
+        case userCount = "user_count"
+    }
+}
+private struct LiveActivityConnectionIDRow: Decodable {
+    let connectionID: UUID
+    enum CodingKeys: String, CodingKey { case connectionID = "connection_id" }
+}
 private func liveActivityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: id.rawValue) else { throw V2LiveActivityStoreError.corruptPersistenceState }; return value }

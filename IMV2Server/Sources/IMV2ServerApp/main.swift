@@ -3,6 +3,7 @@ import FluentPostgresDriver
 import Foundation
 import IMV2Server
 import IMV2ServerHTTP
+import NIOPosix
 import Vapor
 #if canImport(Darwin)
 import Darwin
@@ -14,34 +15,63 @@ import Glibc
 enum IMV2ServerApp {
     static func main() async throws {
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
-        let app = try await Application.make(.production)
+        let applicationEventLoops = MultiThreadedEventLoopGroup(
+            numberOfThreads: configuration.databasePolicy.eventLoopThreads
+        )
+        let app: Application
+        do {
+            app = try await Application.make(.production, .shared(applicationEventLoops))
+        } catch {
+            try? await applicationEventLoops.shutdownGracefully()
+            throw error
+        }
         var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         do {
             app.databases.use(
-                try .postgres(
+                try postgresDatabaseConfiguration(
                     url: configuration.databaseURL,
-                    maxConnectionsPerEventLoop: configuration.databaseMaxConnectionsPerEventLoop
+                    policy: configuration.databasePolicy
                 ),
                 as: .psql
             )
             let database = app.db(.psql)
+            // The control plane remains authoritative even when every user
+            // bucket is routed to a different physical database. Verify its
+            // session policy and schema independently of the shard loop.
+            try await V2PostgresSessionReadiness.verify(
+                database: database,
+                policy: configuration.databasePolicy
+            )
+            try await V2SchemaReadiness.verify(database: database)
+            var shardDatabasesByURL: [String: any Database] = [
+                configuration.databaseURL: database
+            ]
             var shardLocations: [V2UserShardStorageLocation] = []
             for storage in configuration.userShardStorage {
                 let shardDatabase: any Database
-                if storage.databaseURL == configuration.databaseURL {
-                    shardDatabase = database
+                if let existing = shardDatabasesByURL[storage.databaseURL] {
+                    shardDatabase = existing
                 } else {
-                    let identifier = DatabaseID(string: "user-shard-\(storage.bucket)")
+                    // One physical URL owns one Fluent pool even when several
+                    // logical buckets use distinct schemas in that database.
+                    // This keeps actual pool multiplication identical to the
+                    // startup resource-budget calculation.
+                    let identifier = DatabaseID(string: "user-shard-pool-\(shardDatabasesByURL.count)")
                     app.databases.use(
-                        try .postgres(
+                        try postgresDatabaseConfiguration(
                             url: storage.databaseURL,
-                            maxConnectionsPerEventLoop: configuration.databaseMaxConnectionsPerEventLoop
+                            policy: configuration.databasePolicy
                         ),
                         as: identifier
                     )
                     shardDatabase = app.db(identifier)
+                    shardDatabasesByURL[storage.databaseURL] = shardDatabase
                 }
+                try await V2PostgresSessionReadiness.verify(
+                    database: shardDatabase,
+                    policy: configuration.databasePolicy
+                )
                 try await V2SchemaReadiness.verify(database: shardDatabase, schema: storage.schema)
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
@@ -74,7 +104,8 @@ enum IMV2ServerApp {
                     )
                 )
                 return V2SyncHousekeepingWorker(
-                    store: PostgresV2SyncHousekeepingStore(database: location.database, schema: location.schema)
+                    store: PostgresV2SyncHousekeepingStore(database: location.database, schema: location.schema),
+                    projectionEffectRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
                 )
             }
 
@@ -84,7 +115,12 @@ enum IMV2ServerApp {
             app.http.server.configuration.hostname = configuration.metrics.host
             app.http.server.configuration.port = configuration.metrics.port
             let authenticator = V2PostgresGatewayAuthenticator(database: database, tokenKey: configuration.accessTokenKey)
-            let connectionRegistry = V2DeviceConnectionRegistry()
+            let commandRateLimiter = V2AuthenticatedGatewayCommandRateLimiter(
+                policy: configuration.commandRateLimitPolicy
+            )
+            let connectionRegistry = V2DeviceConnectionRegistry(
+                connectionAdmissionPolicy: configuration.authenticatedConnectionAdmissionPolicy
+            )
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
@@ -94,7 +130,10 @@ enum IMV2ServerApp {
                         gatewayNodeID: configuration.gatewayNodeID,
                         includesUserShardMetrics: false
                     )
-                ] + userShardMetricsSources)
+                ] + userShardMetricsSources),
+                maximumRefreshDuration: TimeInterval(
+                    configuration.metricsRefreshTimeoutMilliseconds
+                ) / 1_000
             )
             V2VaporMetricsRoutes.register(
                 on: app,
@@ -345,6 +384,16 @@ enum IMV2ServerApp {
                 registry: connectionRegistry,
                 nodeID: configuration.gatewayNodeID
             )
+            let revokedDeviceProjectionCleanupWorker = V2RevokedDeviceProjectionCleanupWorker(
+                store: V2PostgresDeviceRevocationEventStore.projectionCleanup(
+                    database: database
+                ),
+                cleaner: V2RoutedRevokedDeviceProjectionCleaner(
+                    routeFence: V2PostgresUserShardRouter(database: database),
+                    registry: userShardStorage,
+                    coLocatedControlBuckets: coLocatedControlBuckets
+                )
+            )
             let moderationAuditRetentionWorker = V2ModerationAuditRetentionWorker(
                 store: PostgresV2ModerationAuditRetentionStore(database: database)
             )
@@ -353,7 +402,8 @@ enum IMV2ServerApp {
                 withdrawnRetention: TimeInterval(configuration.mediaWithdrawnRetentionSeconds)
             )
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
-                store: PostgresV2ControlPlaneHousekeepingStore(database: database)
+                store: PostgresV2ControlPlaneHousekeepingStore(database: database),
+                idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
             )
             let userShardMigrationRetentionWorker = V2UserShardMigrationRetentionWorker(
                 store: PostgresV2UserShardMigrationStore(database: database),
@@ -388,7 +438,8 @@ enum IMV2ServerApp {
                     limits: configuration.connectionLimits,
                     authenticator: authenticator,
                     capabilityProfile: configuration.capabilityProfile,
-                    maximumProtobufMessageDepth: configuration.maximumProtobufMessageDepth
+                    maximumProtobufMessageDepth: configuration.maximumProtobufMessageDepth,
+                    commandAdmission: commandRateLimiter
                 )
                 return .init(frameLimits: configuration.frameLimits, session: session, handler: handler, registry: connectionRegistry)
             }
@@ -407,6 +458,10 @@ enum IMV2ServerApp {
             // so it never rescans the append-only history on scale-out. An
             // existing cursor is deliberately preserved for crash recovery.
             try await deviceRevocationWorker.initializeForStartup()
+            // Storage cleanup has a separate cluster-global cursor and starts
+            // at zero on first deployment. This closes the outage window in
+            // which no gateway existed to observe a historical revocation.
+            try await revokedDeviceProjectionCleanupWorker.initializeForStartup()
             try await server.bind()
             app.logger.notice("IM V2 TLS gateway bound", metadata: ["host": "\(configuration.tls.host)", "port": "\(configuration.tls.port)"])
             do {
@@ -426,6 +481,43 @@ enum IMV2ServerApp {
             let foregroundGroupEventHintTask = Task {
                 await foregroundGroupEventHints.run()
             }
+            // Each physical user store owns an independent projection loop.
+            // A slow/unavailable shard therefore consumes only its configured
+            // pool budget and cannot delay another shard or fan-out planning.
+            let userProjectionTasks = zip(
+                userProjectionWorkers,
+                snapshotArtifactBuilders
+            ).map { worker, builder in
+                Task {
+                    var cadence = V2AdaptiveWorkerCadence(
+                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                    )
+                    while !Task.isCancelled {
+                        var didWork = false
+                        do {
+                            let report = try await worker.runOnce()
+                            didWork = report.claimed
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 user snapshot projection failed; retrying")
+                        }
+                        do {
+                            let report = try await builder.runOnce()
+                            didWork = didWork || report.claimed
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 snapshot artifact build failed; retrying")
+                        }
+                        do {
+                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        } catch {
+                            break
+                        }
+                    }
+                }
+            }
             // Planning stays on its own cadence. A delivery pass may hold a
             // large, lease-fenced batch while it commits several bounded
             // transactions; serially placing planning behind it would add the
@@ -436,26 +528,6 @@ enum IMV2ServerApp {
                 )
                 while !Task.isCancelled {
                     var didWork = false
-                    for worker in userProjectionWorkers {
-                        do {
-                            let report = try await worker.runOnce()
-                            didWork = didWork || report.claimed
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            logger.error("IM V2 user snapshot projection failed; retrying")
-                        }
-                    }
-                    for builder in snapshotArtifactBuilders {
-                        do {
-                            let report = try await builder.runOnce()
-                            didWork = didWork || report.claimed
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            logger.error("IM V2 snapshot artifact build failed; retrying")
-                        }
-                    }
                     do {
                         let report = try await fanoutPipeline.runRelayAndPlanOnce(
                             limit: configuration.workerBatchSize,
@@ -569,6 +641,33 @@ enum IMV2ServerApp {
                     } catch {
                         // Provider and endpoint detail must never reach logs.
                         logger.error("IM V2 Push wake worker failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
+            // Projection cleanup can cross a remote shard boundary. Give it
+            // an independent retry cadence so one unavailable shard cannot
+            // delay live-socket revocation or unrelated control-plane work.
+            let revokedDeviceProjectionCleanupTask = Task {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
+                while !Task.isCancelled {
+                    var didWork = false
+                    do {
+                        didWork = try await revokedDeviceProjectionCleanupWorker.runOnce(
+                            limit: configuration.workerBatchSize
+                        ) > 0
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 revoked-device projection cleanup failed; retrying")
                     }
                     do {
                         try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
@@ -719,17 +818,21 @@ enum IMV2ServerApp {
                 }
             }
             await TerminationSignal.wait()
+            userProjectionTasks.forEach { $0.cancel() }
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
             contentReviewTask.cancel()
             pushWakeTask.cancel()
+            revokedDeviceProjectionCleanupTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
             await foregroundGroupEventHints.finish()
+            for task in userProjectionTasks { await task.value }
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value
             await contentReviewTask.value
             await pushWakeTask.value
+            await revokedDeviceProjectionCleanupTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
             await connectionRegistry.detachForegroundGroupInterestManager()
@@ -738,13 +841,33 @@ enum IMV2ServerApp {
             await natsGroupWakeBroker?.shutdown()
             try await server.shutdown()
             try await app.asyncShutdown()
+            try await applicationEventLoops.shutdownGracefully()
         } catch {
             await natsLiveActivityBroker?.shutdown()
             await natsGroupWakeBroker?.shutdown()
             try? await app.asyncShutdown()
+            try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
     }
+}
+
+private func postgresDatabaseConfiguration(
+    url: String,
+    policy: V2PostgresRuntimePolicy
+) throws -> DatabaseConfigurationFactory {
+    var configuration = try SQLPostgresConfiguration(url: url)
+    configuration.coreConfiguration.options.connectTimeout = .milliseconds(
+        Int64(policy.connectTimeoutMilliseconds)
+    )
+    configuration.coreConfiguration.options.additionalStartupParameters.append(
+        contentsOf: policy.startupParameters
+    )
+    return .postgres(
+        configuration: configuration,
+        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
+    )
 }
 
 private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {

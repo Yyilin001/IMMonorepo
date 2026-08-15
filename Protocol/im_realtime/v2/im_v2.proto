@@ -676,33 +676,30 @@ message ReadReceiptPreferencesSet {
 }
 
 // Group read details are queried on demand instead of broadcasting a receipt
-// to every member. The cursor is opaque and may only be reused for this exact
-// room/sequence query.
+// to every member. A message ID, rather than an arbitrary room sequence, binds
+// authorization to the message's frozen membership revision. The cursor is
+// opaque and may only be reused for this exact room/message query.
 message ListReadReceiptReaders {
   string room_id = 1;
-  uint64 message_room_sequence = 2;
+  string message_id = 2;
   string cursor = 3;
   uint32 page_size = 4;
 }
 
 message ReadReceiptReader {
   string user_id = 1;
-  uint64 read_through_room_sequence = 2;
-  int64 recorded_at_ms = 3;
-  // Same bounded public identity policy as RoomMember. These values are
-  // returned only to a current member of the queried group.
-  string public_handle = 4;
-  string display_name = 5;
+  // Same bounded public identity policy as RoomMember. Reader rows are emitted
+  // only for active accounts that belonged to the message audience and remain
+  // members at the membership revision bound into this page.
+  string public_handle = 2;
+  string display_name = 3;
 }
 
 message ReadReceiptReadersPage {
   string room_id = 1;
-  uint64 message_room_sequence = 2;
-  // Exact total is returned only on the first page. Later pages inherit the
-  // first page's total and avoid repeating an O(group size) count scan.
-  optional uint32 reader_count = 3;
-  repeated ReadReceiptReader readers = 4;
-  string next_cursor = 5;
+  string message_id = 2;
+  repeated ReadReceiptReader readers = 3;
+  string next_cursor = 4;
 }
 
 enum RelationshipAction {

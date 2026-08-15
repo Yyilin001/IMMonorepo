@@ -1,37 +1,68 @@
 import Fluent
 import Foundation
+import IMV2Core
 import SQLKit
 
 public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
     public let deletedRows: Int
+    public let purgedIdempotencyRows: Int
+    public let purgedExpiredCredentialReplayRows: Int
+    public let purgedExpiredConnectionLeaseRows: Int
 
-    public init(deletedRows: Int) { self.deletedRows = max(0, deletedRows) }
+    public init(
+        deletedRows: Int,
+        purgedIdempotencyRows: Int = 0,
+        purgedExpiredCredentialReplayRows: Int = 0,
+        purgedExpiredConnectionLeaseRows: Int = 0
+    ) {
+        self.deletedRows = max(0, deletedRows)
+        self.purgedIdempotencyRows = max(0, purgedIdempotencyRows)
+        self.purgedExpiredCredentialReplayRows = max(0, purgedExpiredCredentialReplayRows)
+        self.purgedExpiredConnectionLeaseRows = max(0, purgedExpiredConnectionLeaseRows)
+    }
     public var didWork: Bool { deletedRows > 0 }
 }
 
 public protocol V2ControlPlaneHousekeepingStore: Sendable {
-    func purgeTerminal(now: Date, retention: TimeInterval, limit: Int) async throws -> V2ControlPlaneHousekeepingReport
+    func purgeTerminal(
+        now: Date,
+        retention: TimeInterval,
+        idempotencyRetention: TimeInterval,
+        limit: Int
+    ) async throws -> V2ControlPlaneHousekeepingReport
 }
 
 public struct V2ControlPlaneHousekeepingWorker: Sendable {
     private let store: any V2ControlPlaneHousekeepingStore
     private let retention: TimeInterval
+    private let idempotencyRetention: TimeInterval
     private let now: @Sendable () -> Date
 
     public init(
         store: any V2ControlPlaneHousekeepingStore,
         retention: TimeInterval = 7 * 86_400,
+        idempotencyRetention: TimeInterval = V2IdempotencyPolicy.minimumServerRetention,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         precondition(retention.isFinite && retention > 0)
+        precondition(
+            idempotencyRetention.isFinite &&
+                idempotencyRetention >= V2IdempotencyPolicy.minimumServerRetention
+        )
         self.store = store
         self.retention = retention
+        self.idempotencyRetention = idempotencyRetention
         self.now = now
     }
 
     public func runOnce(limit: Int) async throws -> V2ControlPlaneHousekeepingReport {
         guard limit > 0 else { throw V2ControlPlaneHousekeepingError.invalidLimit }
-        return try await store.purgeTerminal(now: now(), retention: retention, limit: limit)
+        return try await store.purgeTerminal(
+            now: now(),
+            retention: retention,
+            idempotencyRetention: idempotencyRetention,
+            limit: limit
+        )
     }
 }
 
@@ -51,9 +82,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     public func purgeTerminal(
         now: Date,
         retention: TimeInterval,
+        idempotencyRetention: TimeInterval,
         limit: Int
     ) async throws -> V2ControlPlaneHousekeepingReport {
-        guard limit > 0, retention.isFinite, retention > 0 else {
+        guard limit > 0, retention.isFinite, retention > 0,
+              idempotencyRetention.isFinite,
+              idempotencyRetention >= V2IdempotencyPolicy.minimumServerRetention
+        else {
             throw V2ControlPlaneHousekeepingError.invalidLimit
         }
         let cutoff = now.addingTimeInterval(-retention)
@@ -204,8 +239,70 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 RETURNING 1 AS value
                 """).all(decoding: ControlHousekeepingDeletedRow.self).count
 
-            return .init(deletedRows: count)
+            // Authentication replay rows contain encrypted bearer material;
+            // their own replay expiry is the deletion boundary, independent
+            // of the longer command-idempotency window.
+            let credentialReplays = try await deleteSimple(
+                sql: sql, table: "device_credential_operations", identity: "ctid",
+                where: "replay_expires_at <= ", order: "replay_expires_at, ctid",
+                cutoff: now, limit: limit
+            )
+            let connectionLeases = try await deleteSimple(
+                sql: sql, table: "user_live_presence_leases", identity: "connection_id",
+                where: "expires_at <= ", order: "expires_at, connection_id",
+                cutoff: now, limit: limit
+            )
+            let idempotencyRows = try await purgeIdempotencyResults(
+                sql: sql,
+                cutoff: now.addingTimeInterval(-idempotencyRetention),
+                rotationSeed: now,
+                limit: limit
+            )
+            count += credentialReplays + connectionLeases + idempotencyRows
+            return .init(
+                deletedRows: count,
+                purgedIdempotencyRows: idempotencyRows,
+                purgedExpiredCredentialReplayRows: credentialReplays,
+                purgedExpiredConnectionLeaseRows: connectionLeases
+            )
         }
+    }
+
+    /// Ordinary user-command ledgers are replay results, not authoritative
+    /// domain history. Select a rotating subset when the configured batch is
+    /// smaller than the table count, and divide the batch across that subset;
+    /// one maintenance pass therefore cannot amplify `limit` by table count.
+    private func purgeIdempotencyResults(
+        sql: any SQLDatabase,
+        cutoff: Date,
+        rotationSeed: Date,
+        limit: Int
+    ) async throws -> Int {
+        let tables = Self.idempotencyTables
+        let selectedCount = min(limit, tables.count)
+        guard selectedCount > 0 else { return 0 }
+        let start = abs(Int(rotationSeed.timeIntervalSince1970 / 60)) % tables.count
+        let perTableLimit = max(1, limit / selectedCount)
+        var deleted = 0
+        for offset in 0 ..< selectedCount {
+            let descriptor = tables[(start + offset) % tables.count]
+            deleted += try await sql.raw("""
+                WITH candidates AS (
+                    SELECT target.ctid
+                    FROM im_v2.\(unsafeRaw: descriptor.table) AS target
+                    WHERE target.\(unsafeRaw: descriptor.timestamp) <= \(bind: cutoff)
+                      \(unsafeRaw: descriptor.additionalPredicate)
+                    ORDER BY target.\(unsafeRaw: descriptor.timestamp), target.ctid
+                    LIMIT \(bind: perTableLimit)
+                    FOR UPDATE OF target SKIP LOCKED
+                )
+                DELETE FROM im_v2.\(unsafeRaw: descriptor.table) AS target
+                USING candidates
+                WHERE target.ctid = candidates.ctid
+                RETURNING 1 AS value
+                """).all(decoding: ControlHousekeepingDeletedRow.self).count
+        }
+        return deleted
     }
 
     private func deleteSimple(
@@ -232,6 +329,42 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             RETURNING 1 AS value
             """).all(decoding: ControlHousekeepingDeletedRow.self).count
     }
+
+    private struct IdempotencyTable: Sendable {
+        let table: String
+        let timestamp: String
+        let additionalPredicate: String
+    }
+
+    private static let idempotencyTables: [IdempotencyTable] = [
+        .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)"),
+        .init(table: "message_edit_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "read_receipt_operations", timestamp: "recorded_at", additionalPredicate: ""),
+        .init(table: "message_reaction_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "group_room_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "public_profile_update_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "user_add_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "read_receipt_preference_operations", timestamp: "updated_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.read_receipt_preference_propagation_outbox AS outbox WHERE outbox.actor_user_id = target.actor_user_id AND outbox.operation_id = target.operation_id)"),
+        .init(table: "user_live_activity_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "user_room_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "user_message_favorite_operations", timestamp: "updated_at", additionalPredicate: ""),
+        .init(table: "room_pinned_message_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "group_announcement_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "group_permission_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "group_role_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "message_forward_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "device_session_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "special_account_message_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "user_contact_alias_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "room_member_nickname_operations", timestamp: "created_at", additionalPredicate: "")
+    ]
 }
 
 private struct ControlHousekeepingDeletedRow: Decodable { let value: Int }

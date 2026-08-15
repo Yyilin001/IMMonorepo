@@ -21,6 +21,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private var pendingHead = 0
     private var queuedInboundBytes = 0
     private var processing = false
+    /// Exactly one request task belongs to the channel. EOF, timeout,
+    /// revocation, and every explicit close path cancel it before dropping
+    /// queued input, so database/pool acquisition does not continue for a
+    /// client that no longer exists.
+    private var processingTask: Task<Void, Never>?
     private struct PendingResponseWrite {
         let bytes: Data
         let promise: EventLoopPromise<Void>
@@ -145,6 +150,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         pendingHead = 0
         queuedInboundBytes = 0
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
+        processingTask?.cancel()
+        processingTask = nil
+        processing = false
         let stream = stream
         Task { await stream.finishSilently() }
         if let transportMetrics {
@@ -179,39 +187,49 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         let eventLoop = context.eventLoop
-        eventLoop.makeFutureWithTask {
-            try await stream.receive(inbound) { response in
-                try await eventLoop.flatSubmit {
-                    boundHandler.value.writeWhenWritable(
-                        response,
-                        context: boundContext.value
-                    )
-                }.get()
-            }
-        }.whenComplete { result in
-            let handler = boundHandler.value
-            let context = boundContext.value
-            guard !handler.closed else { return }
-            handler.processing = false
-            switch result {
-            case .success:
-                let stream = handler.stream
-                let nextContext = boundContext
-                context.eventLoop.makeFutureWithTask { await stream.isAuthenticated() }.whenComplete { authenticated in
-                    let handler = boundHandler.value
-                    guard !handler.closed else { return }
-                    if case .success(true) = authenticated {
-                        handler.authenticationDeadline?.cancel()
-                        handler.authenticationDeadline = nil
-                    }
-                    handler.processNext(context: nextContext.value)
+        processingTask = Task {
+            let outcome: V2GatewayProcessingOutcome
+            do {
+                try Task.checkCancellation()
+                try await stream.receive(inbound) { response in
+                    try Task.checkCancellation()
+                    try await eventLoop.flatSubmit {
+                        boundHandler.value.writeWhenWritable(
+                            response,
+                            context: boundContext.value
+                        )
+                    }.get()
                 }
-            case .failure(let error):
-                handler.close(
-                    context: context,
-                    reason: v2GatewayClosureReason(for: error)
+                try Task.checkCancellation()
+                outcome = .success(authenticated: await stream.isAuthenticated())
+            } catch {
+                outcome = .failure(reason: v2GatewayClosureReason(for: error))
+            }
+            eventLoop.execute {
+                boundHandler.value.completeProcessing(
+                    outcome,
+                    context: boundContext.value
                 )
             }
+        }
+    }
+
+    private func completeProcessing(
+        _ outcome: V2GatewayProcessingOutcome,
+        context: ChannelHandlerContext
+    ) {
+        processingTask = nil
+        guard !closed else { return }
+        processing = false
+        switch outcome {
+        case .success(let authenticated):
+            if authenticated {
+                authenticationDeadline?.cancel()
+                authenticationDeadline = nil
+            }
+            processNext(context: context)
+        case .failure(let reason):
+            close(context: context, reason: reason)
         }
     }
 
@@ -235,6 +253,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         pendingHead = 0
         queuedInboundBytes = 0
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
+        processingTask?.cancel()
+        processingTask = nil
+        processing = false
         if revokeDevice {
             let stream = stream
             Task { await stream.revokeDevice() }
@@ -324,6 +345,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 private enum V2GatewayTransportWriteError: Error {
     case channelClosed
     case responseAlreadyPending
+}
+
+private enum V2GatewayProcessingOutcome: Sendable {
+    case success(authenticated: Bool)
+    case failure(reason: V2GatewayConnectionClosure)
 }
 
 private extension V2GatewayByteStream {

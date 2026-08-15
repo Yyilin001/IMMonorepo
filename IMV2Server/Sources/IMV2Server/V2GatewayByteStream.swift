@@ -200,7 +200,12 @@ public actor V2GatewayByteStream {
     private func registerAuthenticatedDeviceIfNeeded() async throws {
         guard registeredIdentity == nil, let registry, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
-        await registry.register(self, connectionID: connectionID, identity: identity)
+        let accepted = await registry.register(self, connectionID: connectionID, identity: identity)
+        guard accepted, registeredIdentity == identity, !transportClosed else {
+            if registeredIdentity == identity { registeredIdentity = nil }
+            await registry.unregister(connectionID: connectionID)
+            throw V2GatewaySessionError.authenticatedConnectionLimit
+        }
     }
 
     private func unregisterAuthenticatedDevice() async {
@@ -216,10 +221,10 @@ public actor V2GatewayByteStream {
             let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
             guard case .liveActivityPreferencesSet(let updated)? = responseEnvelope.body
             else { return }
-            await registry.applyLiveActivityPreferences(
+            guard await registry.applyLiveActivityPreferences(
                 connectionID: connectionID,
                 allowsOnlinePresence: updated.allowsOnlinePresence
-            )
+            ) else { throw V2GatewaySessionError.authenticatedConnectionLimit }
         case .groupEventSubscribe(let request):
             let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
             guard case .groupEventSubscribed(let subscribed)? = responseEnvelope.body,
@@ -247,7 +252,8 @@ public actor V2GatewayByteStream {
             else { return }
             await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date())
         case .heartbeat:
-            await registry.refreshLivePresence(connectionID: connectionID)
+            guard await registry.refreshLivePresence(connectionID: connectionID)
+            else { throw V2GatewaySessionError.authenticatedConnectionLimit }
         default:
             return
         }

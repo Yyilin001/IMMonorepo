@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Core
 @testable import IMV2Server
 import Testing
 
@@ -25,6 +26,21 @@ struct V2GatewayRuntimeConfigurationTests {
         values.removeValue(forKey: "IM_V2_FANOUT_FRESH_BURST_PASSES")
         #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_FRESH_BURST_PASSES")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("server idempotency retention cannot undercut the client retry contract")
+    func rejectsShortIdempotencyRetention() throws {
+        var values = runtimeValues
+        values["IM_V2_IDEMPOTENCY_RETENTION_SECONDS"] = String(
+            Int(V2IdempotencyPolicy.minimumServerRetention) - 1
+        )
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_IDEMPOTENCY_RETENTION_SECONDS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
         }
     }
 
@@ -93,6 +109,58 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("PostgreSQL policy bounds every wait and the aggregate physical pool budget")
+    func validatesPostgresRuntimePolicy() throws {
+        let configuration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(configuration.databasePolicy.eventLoopThreads == 4)
+        #expect(configuration.databasePolicy.poolTimeoutMilliseconds == 3_000)
+        #expect(configuration.databasePolicy.startupParameters.count == 1)
+        #expect(configuration.databasePolicy.startupParameters.first?.0 == "options")
+        #expect(
+            configuration.databasePolicy.startupParameters.first?.1 ==
+            "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+        )
+
+        var invalidLock = runtimeValues
+        invalidLock["IM_V2_DATABASE_LOCK_TIMEOUT_MS"] = "5001"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DATABASE_LOCK_TIMEOUT_MS/IM_V2_DATABASE_STATEMENT_TIMEOUT_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidLock)
+            )
+        }
+
+        var exhausted = runtimeValues
+        exhausted["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "31"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(exhausted)
+            )
+        }
+    }
+
+    @Test("logical user-shard stores have an independent process bound")
+    func boundsLogicalUserShardStores() {
+        var values = runtimeValues
+        values["IM_V2_MAX_USER_SHARD_STORES"] = "1"
+        values["IM_V2_USER_SHARD_STORES_JSON"] = """
+        [{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"},
+         {"bucket":"users-next","database_url":"postgres://v2:password@db-next/im_v2","schema":"im_v2"}]
+        """
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_MAX_USER_SHARD_STORES"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+    }
+
     @Test("runtime parses a complete explicit deployment configuration")
     func parsesCompleteConfiguration() throws {
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(runtimeValues))
@@ -101,6 +169,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.frameLimits.maximumPayloadBytes == 65_536)
         #expect(configuration.maximumProtobufMessageDepth == 32)
         #expect(configuration.maximumConnections == 10_000)
+        #expect(configuration.authenticatedConnectionAdmissionPolicy.maximumConnectionsPerDevice == 2)
+        #expect(configuration.authenticatedConnectionAdmissionPolicy.maximumConnectionsPerUser == 8)
+        #expect(configuration.commandRateLimitPolicy.deviceBurst == 64)
         #expect(configuration.maximumQueuedInboundChunks == 512)
         #expect(configuration.authenticationTimeoutMilliseconds == 10_000)
         #expect(configuration.capacityProfile.id == "standard")
@@ -118,8 +189,10 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.durableRetryPolicy.jitterFraction == 0.2)
         #expect(configuration.maintenancePollIntervalMilliseconds == 60_000)
         #expect(configuration.mediaWithdrawnRetentionSeconds == 2_592_000)
+        #expect(configuration.idempotencyRetentionSeconds == 3_888_000)
         let expectedMetrics = try V2MetricsListenerConfiguration(host: "127.0.0.1", port: 9464)
         #expect(configuration.metrics == expectedMetrics)
+        #expect(configuration.metricsRefreshTimeoutMilliseconds == 4_000)
         #expect(configuration.idleTimeoutMilliseconds == 60_000)
         #expect(configuration.gatewayNodeID == "gateway-a")
         #expect(configuration.gatewayReplicaCount == 1)
@@ -307,7 +380,15 @@ struct V2GatewayRuntimeConfigurationTests {
     private var runtimeValues: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_DATABASE_EVENT_LOOP_THREADS": "4",
             "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "8",
+            "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS": "512",
+            "IM_V2_MAX_USER_SHARD_STORES": "16",
+            "IM_V2_DATABASE_CONNECT_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_POOL_TIMEOUT_MS": "3000",
+            "IM_V2_DATABASE_STATEMENT_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_LOCK_TIMEOUT_MS": "2000",
+            "IM_V2_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS": "10000",
             "IM_V2_TLS_HOST": "0.0.0.0",
             "IM_V2_TLS_PORT": "7443",
             "IM_V2_TLS_CERTIFICATE_CHAIN_PATH": "/run/secrets/tls-chain.pem",
@@ -319,6 +400,13 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH": "32",
             "IM_V2_MAX_IN_FLIGHT_REQUESTS": "32",
             "IM_V2_MAX_CONNECTIONS": "10000",
+            "IM_V2_MAX_CONNECTIONS_PER_DEVICE": "2",
+            "IM_V2_MAX_CONNECTIONS_PER_USER": "8",
+            "IM_V2_DEVICE_COMMANDS_PER_SECOND": "32",
+            "IM_V2_DEVICE_COMMAND_BURST": "64",
+            "IM_V2_USER_COMMANDS_PER_SECOND": "128",
+            "IM_V2_USER_COMMAND_BURST": "256",
+            "IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES": "20000",
             "IM_V2_MAX_QUEUED_INBOUND_BYTES": "262144",
             "IM_V2_MAX_QUEUED_INBOUND_CHUNKS": "512",
             "IM_V2_AUTHENTICATION_TIMEOUT_MS": "10000",
@@ -336,8 +424,10 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_DURABLE_RETRY_JITTER_PERCENT": "20",
             "IM_V2_MAINTENANCE_POLL_INTERVAL_MS": "60000",
             "IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS": "2592000",
+            "IM_V2_IDEMPOTENCY_RETENTION_SECONDS": "3888000",
             "IM_V2_METRICS_HOST": "127.0.0.1",
             "IM_V2_METRICS_PORT": "9464",
+            "IM_V2_METRICS_REFRESH_TIMEOUT_MS": "4000",
             "IM_V2_GATEWAY_NODE_ID": "gateway-a",
             "IM_V2_GATEWAY_REPLICA_COUNT": "1",
             "IM_V2_USER_SHARD_BUCKET": "users-primary",

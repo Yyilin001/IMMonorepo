@@ -3,6 +3,7 @@ import FluentPostgresDriver
 import Foundation
 import IMV2Server
 import IMV2ServerHTTP
+import NIOPosix
 import Vapor
 #if canImport(Darwin)
 import Darwin
@@ -16,21 +17,54 @@ import Glibc
 enum IMV2OperatorServerApp {
     static func main() async throws {
         let configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
-        let app = try await Application.make(.production)
+        let applicationEventLoops = MultiThreadedEventLoopGroup(
+            numberOfThreads: configuration.databasePolicy.eventLoopThreads
+        )
+        let app: Application
         do {
-            app.databases.use(try .postgres(url: configuration.databaseURL), as: .psql)
+            app = try await Application.make(.production, .shared(applicationEventLoops))
+        } catch {
+            try? await applicationEventLoops.shutdownGracefully()
+            throw error
+        }
+        do {
+            app.databases.use(
+                try postgresDatabaseConfiguration(
+                    url: configuration.databaseURL,
+                    policy: configuration.databasePolicy
+                ),
+                as: .psql
+            )
             let database = app.db(.psql)
+            try await V2PostgresSessionReadiness.verify(
+                database: database,
+                policy: configuration.databasePolicy
+            )
             try await V2SchemaReadiness.verify(database: database)
+            var shardDatabasesByURL: [String: any Database] = [
+                configuration.databaseURL: database
+            ]
             var shardLocations: [V2UserShardStorageLocation] = []
             for storage in configuration.userShardStorage {
                 let shardDatabase: any Database
-                if storage.databaseURL == configuration.databaseURL {
-                    shardDatabase = database
+                if let existing = shardDatabasesByURL[storage.databaseURL] {
+                    shardDatabase = existing
                 } else {
-                    let identifier = DatabaseID(string: "user-shard-\(storage.bucket)")
-                    app.databases.use(try .postgres(url: storage.databaseURL), as: identifier)
+                    let identifier = DatabaseID(string: "user-shard-pool-\(shardDatabasesByURL.count)")
+                    app.databases.use(
+                        try postgresDatabaseConfiguration(
+                            url: storage.databaseURL,
+                            policy: configuration.databasePolicy
+                        ),
+                        as: identifier
+                    )
                     shardDatabase = app.db(identifier)
+                    shardDatabasesByURL[storage.databaseURL] = shardDatabase
                 }
+                try await V2PostgresSessionReadiness.verify(
+                    database: shardDatabase,
+                    policy: configuration.databasePolicy
+                )
                 try await V2SchemaReadiness.verify(database: shardDatabase, schema: storage.schema)
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
@@ -80,6 +114,9 @@ enum IMV2OperatorServerApp {
                 service: try V2PostgresDeviceSnapshotResetService(
                     router: V2PostgresUserShardRouter(database: database),
                     registry: userShardStorage,
+                    deviceAvailability: V2PostgresDeviceAvailabilityChecker(
+                        database: database
+                    ),
                     routeFence: V2PostgresUserShardRouter(database: database),
                     coLocatedControlBuckets: coLocatedControlBuckets,
                     capabilityProfile: configuration.capabilityProfile
@@ -92,11 +129,31 @@ enum IMV2OperatorServerApp {
             ])
             await TerminationSignal.wait()
             try await app.asyncShutdown()
+            try await applicationEventLoops.shutdownGracefully()
         } catch {
             try? await app.asyncShutdown()
+            try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
     }
+}
+
+private func postgresDatabaseConfiguration(
+    url: String,
+    policy: V2PostgresRuntimePolicy
+) throws -> DatabaseConfigurationFactory {
+    var configuration = try SQLPostgresConfiguration(url: url)
+    configuration.coreConfiguration.options.connectTimeout = .milliseconds(
+        Int64(policy.connectTimeoutMilliseconds)
+    )
+    configuration.coreConfiguration.options.additionalStartupParameters.append(
+        contentsOf: policy.startupParameters
+    )
+    return .postgres(
+        configuration: configuration,
+        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
+    )
 }
 
 private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {

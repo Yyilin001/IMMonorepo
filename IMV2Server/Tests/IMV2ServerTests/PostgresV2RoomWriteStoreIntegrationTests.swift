@@ -2818,18 +2818,26 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      TIMESTAMPTZ '2025-06-15 15:06:41.123900+00')
                 """).run()
             let readerStore = PostgresV2ReadReceiptStore(database: app.db(.psql))
+            await #expect(throws: V2ReadReceiptStoreError.messageNotFound) {
+                _ = try await readerStore.readers(
+                    roomID: roomID,
+                    messageID: try .init("00000000-0000-0000-0000-000000000099"),
+                    actorUserID: senderID,
+                    cursor: nil,
+                    pageSize: 1
+                )
+            }
             let firstReaders = try await readerStore.readers(
-                roomID: roomID, actorUserID: senderID,
-                messageRoomSequence: 1, cursor: nil, pageSize: 1
+                roomID: roomID, messageID: message.messageID,
+                actorUserID: senderID, cursor: nil, pageSize: 1
             )
-            #expect(firstReaders.readerCount == 2)
+            #expect(firstReaders.messageID == message.messageID)
             #expect(firstReaders.readers.map(\.userID) == [try .init(memberThreeUUID.uuidString)])
             let readerCursor = try #require(firstReaders.nextCursor)
             let secondReaders = try await readerStore.readers(
-                roomID: roomID, actorUserID: senderID,
-                messageRoomSequence: 1, cursor: readerCursor, pageSize: 1
+                roomID: roomID, messageID: message.messageID,
+                actorUserID: senderID, cursor: readerCursor, pageSize: 1
             )
-            #expect(secondReaders.readerCount == nil)
             #expect(secondReaders.readers.map(\.userID) == [try .init(memberTwoUUID.uuidString)])
             #expect(secondReaders.nextCursor == nil)
             let directory = PostgresV2RoomMembershipDirectoryStore(database: app.db(.psql))
@@ -2843,6 +2851,55 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(UUID(uuidString: rosterCursor) == nil)
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = 1 WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberThreeUUID)").run()
+            await #expect(throws: V2ReadReceiptStoreError.membershipRevisionConflict(currentRevision: 1)) {
+                _ = try await readerStore.readers(
+                    roomID: roomID,
+                    messageID: message.messageID,
+                    actorUserID: senderID,
+                    cursor: readerCursor,
+                    pageSize: 1
+                )
+            }
+            let currentReaders = try await readerStore.readers(
+                roomID: roomID,
+                messageID: message.messageID,
+                actorUserID: senderID,
+                cursor: nil,
+                pageSize: 10
+            )
+            #expect(currentReaders.readers.map(\.userID) == [try .init(memberTwoUUID.uuidString)])
+
+            let lateMemberUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000017")!
+            let lateMemberID = try UserID(lateMemberUUID.uuidString)
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, created_at, updated_at)
+                VALUES
+                    (\(bind: lateMemberUUID), 'member017', '后加入成员', 1, \(bind: now), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
+                VALUES (\(bind: roomUUID), \(bind: lateMemberUUID), 1)
+                """).run()
+            await #expect(throws: V2ReadReceiptStoreError.actorNotMember) {
+                _ = try await readerStore.readers(
+                    roomID: roomID,
+                    messageID: message.messageID,
+                    actorUserID: lateMemberID,
+                    cursor: nil,
+                    pageSize: 10
+                )
+            }
+
+            try await sql.raw("UPDATE im_v2.public_user_profiles SET state = 'hidden' WHERE user_id = \(bind: memberTwoUUID)").run()
+            let visibleReaders = try await readerStore.readers(
+                roomID: roomID,
+                messageID: message.messageID,
+                actorUserID: senderID,
+                cursor: nil,
+                pageSize: 10
+            )
+            #expect(visibleReaders.readers.isEmpty)
             await #expect(throws: V2RoomMembershipDirectoryError.revisionConflict(currentRevision: 1)) {
                 _ = try await directory.list(.init(
                     roomID: roomID,
@@ -3355,11 +3412,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let secondRevokedDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000714")!
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at) VALUES (\(bind: firstRevokedUser), \(bind: firstRevokedDevice), \(bind: now), \(bind: now)), (\(bind: secondRevokedUser), \(bind: secondRevokedDevice), \(bind: now), \(bind: now))").run()
             try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) VALUES (\(bind: firstRevokedUser), \(bind: firstRevokedDevice), \(bind: now)), (\(bind: secondRevokedUser), \(bind: secondRevokedDevice), \(bind: now))").run()
-            #expect((await metrics.durableWorkMetricsSnapshot()).pendingDeviceRevocationEvents == 2)
+            let revocationBacklog = await metrics.durableWorkMetricsSnapshot()
+            #expect(revocationBacklog.pendingDeviceRevocationEvents == 2)
+            #expect(revocationBacklog.pendingRevokedDeviceProjectionCleanupEvents == 2)
             let revocationStore = V2PostgresDeviceRevocationEventStore(database: app.db(.psql))
             let firstRevocation = try #require(try await revocationStore.events(afterCursorFor: revocationNodeID, limit: 1).first)
             try await revocationStore.markProcessed(eventID: firstRevocation.eventID, nodeID: revocationNodeID, now: now)
-            #expect((await metrics.durableWorkMetricsSnapshot()).pendingDeviceRevocationEvents == 1)
+            let advancedRevocationBacklog = await metrics.durableWorkMetricsSnapshot()
+            #expect(advancedRevocationBacklog.pendingDeviceRevocationEvents == 1)
+            #expect(advancedRevocationBacklog.pendingRevokedDeviceProjectionCleanupEvents == 2)
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3)
             let send = V2SendMessageService(
@@ -3841,6 +3902,24 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // cursor, otherwise a duplicate node ID could skip live work.
             try await store.initializeCursorIfNeeded(nodeID: freshNodeID, now: occurredAt)
             #expect(try await store.events(afterCursorFor: freshNodeID, limit: 8).map(\.eventID) == laterPage.map(\.eventID))
+
+            // The cluster-global projection consumer uses an independent
+            // namespace and deliberately replays historical events.
+            let cleanupStore = V2PostgresDeviceRevocationEventStore.projectionCleanup(
+                database: app.db(.psql)
+            )
+            try await cleanupStore.initializeCursorAtBeginningIfNeeded(
+                nodeID: "cluster",
+                now: occurredAt
+            )
+            #expect(
+                try await cleanupStore.events(afterCursorFor: "cluster", limit: 8)
+                    .map(\.deviceID) == [
+                        try DeviceID(firstDevice.uuidString),
+                        try DeviceID(secondDevice.uuidString),
+                        try DeviceID(laterDevice.uuidString),
+                    ]
+            )
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -4490,6 +4569,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 registry: try V2StaticUserShardStorageRegistry(locations: [
                     try .init(bucket: "control", database: app.db(.psql), schema: "im_v2")
                 ]),
+                deviceAvailability: V2PostgresDeviceAvailabilityChecker(
+                    database: app.db(.psql)
+                ),
                 capabilityProfile: "base",
                 now: { now.addingTimeInterval(2) }
             )
@@ -4512,6 +4594,158 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("snapshot reset authorizes against control plane for an independent user shard")
+    func snapshotResetUsesControlPlaneDeviceAuthority() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        let shardSchema = "im_v2_reset_shard"
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2),
+                as: .psql, isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await installSchema(on: sql, schema: shardSchema)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000cf1")!
+            let device = UUID(uuidString: "00000000-0000-0000-0000-000000000cf2")!
+            let operation = UUID(uuidString: "00000000-0000-0000-0000-000000000cf3")!
+            try await sql.raw("""
+                INSERT INTO im_v2.auth_devices
+                    (user_id, device_id, created_at, last_active_at)
+                VALUES (\(bind: user), \(bind: device), \(bind: now), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: shardSchema).user_projection_checkpoints
+                    (user_id, projected_sequence, updated_at)
+                VALUES (\(bind: user), 0, \(bind: now))
+                """).run()
+            #expect(try await count("\(shardSchema).auth_devices", on: sql) == 0)
+
+            let route = try V2UserShardRoute(
+                bucket: "reset-shard",
+                observedRouterEpoch: 1,
+                readFallbackBucket: "control"
+            )
+            let storage = try V2StaticUserShardStorageRegistry(locations: [
+                try .init(
+                    bucket: route.bucket,
+                    database: app.db(.psql),
+                    schema: shardSchema
+                ),
+                try .init(
+                    bucket: "control",
+                    database: app.db(.psql),
+                    schema: "im_v2"
+                ),
+            ])
+            let service = try V2PostgresDeviceSnapshotResetService(
+                router: V2SingleUserShardRouter(route: route),
+                registry: storage,
+                deviceAvailability: V2PostgresDeviceAvailabilityChecker(
+                    database: app.db(.psql)
+                ),
+                capabilityProfile: "base",
+                now: { now }
+            )
+            #expect(try await service.stage(.init(
+                operationID: operation,
+                userID: .init(user.uuidString),
+                deviceID: .init(device.uuidString)
+            )) == .init(generation: 2, state: .preparing, wasIdempotent: false))
+            #expect(try await count("\(shardSchema).sync_snapshot_artifacts", on: sql) == 1)
+
+            try await sql.raw("""
+                UPDATE im_v2.auth_devices SET revoked_at = \(bind: now)
+                WHERE user_id = \(bind: user) AND device_id = \(bind: device)
+                """).run()
+            await #expect(throws: V2DeviceSnapshotResetError.deviceUnavailable) {
+                try await service.stage(.init(
+                    operationID: UUID(),
+                    userID: .init(user.uuidString),
+                    deviceID: .init(device.uuidString)
+                ))
+            }
+
+            // A retained migration source can still contain capabilities at
+            // revocation time. Route-fenced cleanup removes both owners; a
+            // later exclusive final-copy therefore cannot resurrect them.
+            try await sql.raw("""
+                INSERT INTO im_v2.device_sync_cursors
+                    (user_id, device_id, state, reset_generation)
+                VALUES (\(bind: user), \(bind: device), 'ready', 1)
+                """).run()
+            try await V2RoutedRevokedDeviceProjectionCleaner(
+                routeFence: StaticUserShardRouteFence(
+                    route: route,
+                    database: app.db(.psql)
+                ),
+                registry: storage,
+                coLocatedControlBuckets: ["control"]
+            ).clean(
+                userID: .init(user.uuidString),
+                deviceID: .init(device.uuidString),
+                revokedAt: now
+            )
+            #expect(try await count("\(shardSchema).device_sync_cursors", on: sql) == 0)
+            #expect(try await count("im_v2.device_sync_cursors", on: sql) == 0)
+            #expect(try await count(
+                "\(shardSchema).revoked_device_projection_tombstones",
+                on: sql
+            ) == 1)
+            #expect(try await count(
+                "im_v2.revoked_device_projection_tombstones",
+                on: sql
+            ) == 1)
+            #expect(try await sql.raw("""
+                SELECT COUNT(DISTINCT revoked_at) AS value
+                FROM (
+                    SELECT revoked_at
+                    FROM im_v2.revoked_device_projection_tombstones
+                    WHERE user_id = \(bind: user) AND device_id = \(bind: device)
+                    UNION ALL
+                    SELECT revoked_at
+                    FROM \(unsafeRaw: shardSchema).revoked_device_projection_tombstones
+                    WHERE user_id = \(bind: user) AND device_id = \(bind: device)
+                ) AS tombstones
+                """).first(decoding: CountRow.self)?.value == 1)
+            await #expect(throws: V2SyncStoreError.deviceRevoked) {
+                try await PostgresV2SyncStore(
+                    database: app.db(.psql),
+                    schema: shardSchema
+                ).pull(
+                    userID: .init(user.uuidString),
+                    deviceID: .init(device.uuidString),
+                    syncToken: nil,
+                    maxRecords: 10,
+                    now: now
+                )
+            }
+            #expect(try await count("\(shardSchema).device_sync_cursors", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA \(unsafeRaw: shardSchema) CASCADE").run()
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: shardSchema) CASCADE").run()
                 try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             }
             try? await app.asyncShutdown()
@@ -4777,6 +5011,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 registry: V2StaticUserShardStorageRegistry(locations: [
                     try .init(bucket: route.bucket, database: app.db(.psql), schema: "im_v2")
                 ]),
+                deviceAvailability: V2PostgresDeviceAvailabilityChecker(
+                    database: app.db(.psql)
+                ),
                 capabilityProfile: "base",
                 makeUUID: { UUID() }, now: { now }
             )
@@ -4989,6 +5226,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await scopedCount(targetSchema, "device_snapshot_resets", user: user, on: sql) == 1)
             #expect(try await scopedCount(targetSchema, "sync_tokens", user: user, on: sql) == 1)
             #expect(try await scopedCount(targetSchema, "sync_receipts", user: user, on: sql) == 1)
+            #expect(try await scopedCount(
+                targetSchema,
+                "revoked_device_projection_tombstones",
+                user: user,
+                on: sql
+            ) == 1)
             #expect(try await scopedCount(targetSchema, "user_projection_effects", user: user, on: sql) == 0)
             #expect(try await sql.raw("SELECT 1 FROM \(unsafeRaw: targetSchema).user_sync_log WHERE source_event_id IN (\(bind: staleEffect), \(bind: staleShared))").first() == nil)
             #expect(try await sql.raw("SELECT 1 FROM \(unsafeRaw: targetSchema).consumer_inbox WHERE source_event_id = \(bind: staleShared)").first() == nil)
@@ -5002,6 +5245,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             try await transfer.cleanSource(for: retained)
             #expect(try await scopedCount(sourceSchema, "user_sync_log", user: user, on: sql) == 0)
+            #expect(try await scopedCount(
+                sourceSchema,
+                "revoked_device_projection_tombstones",
+                user: user,
+                on: sql
+            ) == 0)
             #expect(try await scopedCount(targetSchema, "user_sync_log", user: user, on: sql) == 2)
             try await sql.raw("DROP SCHEMA \(unsafeRaw: sourceSchema) CASCADE").run()
             try await sql.raw("DROP SCHEMA \(unsafeRaw: targetSchema) CASCADE").run()
@@ -7134,6 +7383,99 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("an expired presence lease must reacquire the global connection budget")
+    func expiredPresenceLeaseCannotResurrectPastTheConnectionLimit() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let user = UUID(uuidString: "00000000-0000-0000-0000-0000000008c1")!
+            let device = UUID(uuidString: "00000000-0000-0000-0000-0000000008c2")!
+            try await sql.raw("""
+                INSERT INTO im_v2.auth_devices
+                    (user_id, device_id, created_at, last_active_at)
+                VALUES (\(bind: user), \(bind: device), \(bind: now), \(bind: now))
+                """).run()
+            let identity = try V2AuthenticatedConnection(
+                userID: .init(user.uuidString),
+                deviceID: .init(device.uuidString),
+                capabilityProfile: "base"
+            )
+            let firstConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008c3")!
+            let replacementConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008c4")!
+            let policy = V2AuthenticatedConnectionAdmissionPolicy(
+                maximumConnectionsPerDevice: 1,
+                maximumConnectionsPerUser: 1
+            )
+            let store = PostgresV2LiveActivityStore(database: app.db(.psql), onlineLease: 10)
+
+            #expect(try await store.acquireConnection(
+                identity: identity,
+                connectionID: firstConnection,
+                policy: policy,
+                now: now
+            ) == .accepted(expiresAt: now.addingTimeInterval(10)))
+            #expect(try await store.acquireConnection(
+                identity: identity,
+                connectionID: firstConnection,
+                policy: policy,
+                now: now.addingTimeInterval(1)
+            ) == .accepted(expiresAt: now.addingTimeInterval(11)))
+
+            let afterExpiry = now.addingTimeInterval(12)
+            #expect(try await store.acquireConnection(
+                identity: identity,
+                connectionID: replacementConnection,
+                policy: policy,
+                now: afterExpiry
+            ) == .accepted(expiresAt: afterExpiry.addingTimeInterval(10)))
+            #expect(try await store.acquireConnection(
+                identity: identity,
+                connectionID: firstConnection,
+                policy: policy,
+                now: afterExpiry
+            ) == .rejected)
+            #expect(try await store.removePresence(
+                identity: identity,
+                connectionID: firstConnection,
+                now: afterExpiry
+            ))
+            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 1)
+            #expect(try await sql.raw("""
+                SELECT EXISTS (
+                    SELECT 1 FROM im_v2.user_live_presence_leases
+                    WHERE connection_id = \(bind: replacementConnection)
+                ) AS exists
+                """).first(decoding: ExistsRow.self)?.exists == true)
+
+            #expect(try await !store.removePresence(
+                identity: identity,
+                connectionID: replacementConnection,
+                now: afterExpiry
+            ))
+            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("bounded housekeeping expires capabilities, recovers stale reset fences, and keeps ACK position")
     func boundedHousekeepingRecoversExpiredSyncReset() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -7255,11 +7597,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES ('revoked-live-receipt', \(bind: user), \(bind: revokedDevice),
                         1, 3, 3, \(bind: now.addingTimeInterval(600)), \(bind: now))
                 """).run()
-            let revokedReport = try await V2SyncHousekeepingWorker(
-                store: PostgresV2SyncHousekeepingStore(database: app.db(.psql)),
-                now: { now }
-            ).runOnce(limit: 8)
-            #expect(revokedReport.purgedRevokedDeviceCount == 1)
+            try await V2PostgresRevokedDeviceProjectionStore(
+                database: app.db(.psql)
+            ).clean(
+                userID: .init(user.uuidString),
+                deviceID: .init(revokedDevice.uuidString),
+                revokedAt: now
+            )
             #expect(try await sql.raw("""
                 SELECT COUNT(*) AS value FROM im_v2.device_sync_cursors
                 WHERE user_id = \(bind: user) AND device_id = \(bind: revokedDevice)
@@ -7272,6 +7616,60 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT COUNT(*) AS value FROM im_v2.sync_receipts
                 WHERE user_id = \(bind: user) AND device_id = \(bind: revokedDevice)
                 """).first(decoding: CountRow.self)?.value == 0)
+            #expect(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM im_v2.revoked_device_projection_tombstones
+                WHERE user_id = \(bind: user) AND device_id = \(bind: revokedDevice)
+                """).first(decoding: CountRow.self)?.value == 1)
+
+            // Stable projection effects are compacted only after their
+            // incremental log row is gone and no shard-migration fence can
+            // still copy the idempotency result.
+            let projectionEvent = UUID(uuidString: "00000000-0000-0000-0000-0000000008a5")!
+            let projectionOld = now.addingTimeInterval(-40 * 86_400)
+            try await sql.raw("""
+                INSERT INTO im_v2.user_projection_checkpoints
+                    (user_id, projected_sequence, migration_fence_token,
+                     migration_fence_expires_at, updated_at)
+                VALUES (\(bind: user), 1, \(bind: UUID()),
+                        \(bind: now.addingTimeInterval(60)), \(bind: now))
+                ON CONFLICT (user_id) DO UPDATE
+                SET projected_sequence = 1,
+                    migration_fence_token = EXCLUDED.migration_fence_token,
+                    migration_fence_expires_at = EXCLUDED.migration_fence_expires_at,
+                    updated_at = EXCLUDED.updated_at
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_projection_versions
+                    (user_id, projection_kind, entity_key, valid_from_sequence,
+                     source_event_id, payload, created_at)
+                VALUES (\(bind: user), 'conversation_state', 'housekeeping-room', 1,
+                        \(bind: projectionEvent), '{}'::jsonb, \(bind: projectionOld))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_projection_effects
+                    (user_id, source_event_id, projection_kind,
+                     user_sync_sequence, payload, created_at)
+                VALUES (\(bind: user), \(bind: projectionEvent), 'conversation_state',
+                        1, '{}'::jsonb, \(bind: projectionOld))
+                """).run()
+            let fencedEffectReport = try await V2SyncHousekeepingWorker(
+                store: PostgresV2SyncHousekeepingStore(database: app.db(.psql)),
+                now: { now }
+            ).runOnce(limit: 8)
+            #expect(fencedEffectReport.purgedProjectionEffectCount == 0)
+            try await sql.raw("""
+                UPDATE im_v2.user_projection_checkpoints
+                SET migration_fence_token = NULL, migration_fence_expires_at = NULL
+                WHERE user_id = \(bind: user)
+                """).run()
+            let effectReport = try await V2SyncHousekeepingWorker(
+                store: PostgresV2SyncHousekeepingStore(database: app.db(.psql)),
+                now: { now }
+            ).runOnce(limit: 8)
+            #expect(effectReport.purgedProjectionEffectCount == 1)
+            #expect(try await count("im_v2.user_projection_effects", on: sql) == 0)
+            #expect(try await count("im_v2.user_projection_versions", on: sql) == 1)
 
             // One old terminal fan-out is dismantled leaf-first in the same
             // bounded pass while its authoritative room event is retained.
@@ -7323,15 +7721,51 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES (\(bind: event), \(bind: plan), 'terminal', \(bind: old), \(bind: old))
                 """).run()
 
-            #expect(try await V2ControlPlaneHousekeepingWorker(
+            let veryOld = now.addingTimeInterval(-40 * 86_400)
+            let directOperation = UUID(uuidString: "00000000-0000-0000-0000-0000000008b4")!
+            try await sql.raw("""
+                INSERT INTO im_v2.direct_room_operations
+                    (actor_user_id, operation_id, target_user_id, room_id, created_at)
+                VALUES (\(bind: senderUUID), \(bind: directOperation),
+                        \(bind: memberTwoUUID), \(bind: roomUUID), \(bind: veryOld))
+                """).run()
+            let staleConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008b5")!
+            try await sql.raw("""
+                INSERT INTO im_v2.user_live_presence_leases
+                    (connection_id, user_id, device_id, expires_at, updated_at)
+                VALUES (\(bind: staleConnection), \(bind: user), \(bind: revokedDevice),
+                        \(bind: now.addingTimeInterval(-1)), \(bind: veryOld))
+                """).run()
+            let credentialOperation = UUID(uuidString: "00000000-0000-0000-0000-0000000008b6")!
+            try await sql.raw("""
+                INSERT INTO im_v2.device_credential_operations
+                    (device_id, operation_id, operation_kind, user_id,
+                     resulting_access_token_hmac, encrypted_access_token,
+                     encrypted_refresh_credential, access_token_expires_at,
+                     replay_expires_at, created_at)
+                VALUES (\(bind: revokedDevice), \(bind: credentialOperation), 'refresh',
+                        \(bind: user), \(bind: String(repeating: "a", count: 64)),
+                        'encrypted-access', 'encrypted-refresh',
+                        \(bind: now.addingTimeInterval(-2)),
+                        \(bind: now.addingTimeInterval(-1)), \(bind: veryOld))
+                """).run()
+
+            let controlReport = try await V2ControlPlaneHousekeepingWorker(
                 store: PostgresV2ControlPlaneHousekeepingStore(database: app.db(.psql)),
                 now: { now }
-            ).runOnce(limit: 8) == .init(deletedRows: 6))
+            ).runOnce(limit: 8)
+            #expect(controlReport.deletedRows == 9)
+            #expect(controlReport.purgedIdempotencyRows == 1)
+            #expect(controlReport.purgedExpiredConnectionLeaseRows == 1)
+            #expect(controlReport.purgedExpiredCredentialReplayRows == 1)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
             #expect(try await count("im_v2.room_outbox", on: sql) == 0)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 0)
             #expect(try await count("im_v2.consumer_inbox", on: sql) == 0)
             #expect(try await count("im_v2.room_events", on: sql) == 1)
+            #expect(try await count("im_v2.direct_room_operations", on: sql) == 0)
+            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
+            #expect(try await count("im_v2.device_credential_operations", on: sql) == 0)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -7401,6 +7835,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         schema: String, user: UUID, device: UUID, eventOne: UUID, eventTwo: UUID,
         snapshot: UUID, now: Date, on sql: any SQLDatabase
     ) async throws {
+        let revokedDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000cff")!
+        try await sql.raw("""
+            INSERT INTO \(unsafeRaw: schema).revoked_device_projection_tombstones
+                (user_id, device_id, revoked_at)
+            VALUES (\(bind: user), \(bind: revokedDevice), \(bind: now))
+            """).run()
         try await sql.raw("INSERT INTO \(unsafeRaw: schema).user_sync_sequences (user_id, next_sequence) VALUES (\(bind: user), 2)").run()
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: schema).user_sync_log
@@ -8765,6 +9205,17 @@ private struct ModeratedRemovalEventAssertionRow: Decodable { let eventType: Str
 private struct FrozenRoomAssertionRow: Decodable { let frozenAt: Date?; let frozenByUserID: UUID?; enum CodingKeys: String, CodingKey { case frozenAt = "frozen_at", frozenByUserID = "frozen_by_user_id" } }
 private struct FreezeProjectionRow: Decodable { let projectionKind: String; let eventType: String; enum CodingKeys: String, CodingKey { case projectionKind = "projection_kind", eventType = "event_type" } }
 private struct ModerationDeliveredEventRow: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
+private struct StaticUserShardRouteFence: V2UserShardRouteFencing {
+    let route: V2UserShardRoute
+    let database: any Database
+
+    func withCurrentRoute<Result: Sendable>(
+        for _: UserID,
+        _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result
+    ) async throws -> Result {
+        try await operation(route, database)
+    }
+}
 private enum TestConfigurationError: Error {
     case schemaAlreadyExists
     case invalidLocalCapacityLimit(String)

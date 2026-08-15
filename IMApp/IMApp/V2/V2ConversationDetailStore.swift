@@ -555,11 +555,11 @@ final class V2ConversationDetailStore {
             let cursor = reset || isNewMessage ? nil : groupReadReceiptPage?.nextCursor
             let page = try await groupReadReceiptReader.readers(
                 roomID: roomID,
-                messageRoomSequence: message.roomSequence,
+                messageID: message.id,
                 cursor: cursor
             )
             try Task.checkCancellation()
-            guard page.roomID.rawValue == roomID, page.messageRoomSequence == message.roomSequence else {
+            guard page.roomID.rawValue == roomID, page.messageID.rawValue == message.id else {
                 groupReadReceiptFeedback = "已读详情返回异常，请稍后重试。"
                 return
             }
@@ -575,8 +575,7 @@ final class V2ConversationDetailStore {
                 }
                 groupReadReceiptPage = try .init(
                     roomID: page.roomID,
-                    messageRoomSequence: page.messageRoomSequence,
-                    readerCount: existing.readerCount ?? page.readerCount,
+                    messageID: page.messageID,
                     readers: existing.readers + page.readers,
                     nextCursor: page.nextCursor
                 )

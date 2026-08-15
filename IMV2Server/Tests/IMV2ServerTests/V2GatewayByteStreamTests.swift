@@ -129,6 +129,51 @@ struct V2GatewayByteStreamTests {
         #expect(await registry.connectionMetricsSnapshot() == .init(activeDevices: 0, activeConnections: 0))
     }
 
+    @Test("a heartbeat closes a connection that cannot reacquire its expired lease")
+    func heartbeatFailsClosedWhenLeaseRenewalIsRejected() async throws {
+        let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
+            maximumConnectionsPerDevice: 1,
+            maximumConnectionsPerUser: 1
+        ))
+        let leases = RejectingByteStreamRenewalLeases()
+        await registry.configureLivePresenceLeases(leases)
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base"
+            ),
+            handler: ByteStreamCommandFake(),
+            registry: registry
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+        #expect(await registry.connectionMetricsSnapshot().activeConnections == 1)
+
+        var heartbeat = IMV2Envelope()
+        heartbeat.requestID = 3
+        heartbeat.protocolVersion = UInt32(protocolVersion)
+        heartbeat.heartbeat = .init()
+        await #expect(throws: V2GatewaySessionError.authenticatedConnectionLimit) {
+            try await stream.receive(encoded(heartbeat, version: protocolVersion))
+        }
+
+        #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
+        #expect(await leases.activeConnectionIDs().isEmpty)
+    }
+
     @Test("a local Hybrid room viewer receives a metadata-only wake on its existing TLS stream")
     func emitsGroupEventAvailableOnlyWhileLocallySubscribed() async throws {
         let registry = V2DeviceConnectionRegistry()
@@ -185,6 +230,35 @@ private actor OutboundFrameRecorder {
     }
 
     func count() -> Int { frames.count }
+}
+
+private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
+    private var active: Set<UUID> = []
+    private var acquisitions = 0
+
+    func acquireConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        policy _: V2AuthenticatedConnectionAdmissionPolicy,
+        now: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome {
+        acquisitions += 1
+        guard acquisitions == 1 else { return .rejected }
+        active.insert(connectionID)
+        return .accepted(expiresAt: now.addingTimeInterval(90))
+    }
+
+    func removePresence(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now _: Date
+    ) -> Bool {
+        active.remove(connectionID)
+        return !active.isEmpty
+    }
+
+    func allowsOnlinePresence(userID _: UserID) -> Bool { true }
+    func activeConnectionIDs() -> Set<UUID> { active }
 }
 
 private struct ByteStreamAuthFake: V2GatewayAuthenticator {

@@ -368,7 +368,7 @@ public struct V2ClientReadReceipt: Equatable, Sendable {
 public protocol V2ClientReadReceiptTransport: Sendable {
     func recordReadReceipt(roomID: RoomID, operationID: ReadReceiptOperationID, readThroughRoomSequence: UInt64) async throws -> V2ClientReadReceipt
     func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences
-    func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
+    func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
 }
 
 public enum V2ClientReadReceiptLimits {
@@ -383,8 +383,8 @@ public extension V2ClientReadReceiptTransport {
         throw V2RealtimeTransportError.unexpectedResponse
     }
 
-    func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        _ = roomID; _ = messageRoomSequence; _ = cursor; _ = pageSize
+    func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        _ = roomID; _ = messageID; _ = cursor; _ = pageSize
         throw V2RealtimeTransportError.unexpectedResponse
     }
 }
@@ -1051,36 +1051,33 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         return .init(allowsDirectReadReceipts: result.allowsDirectReadReceipts, allowsGroupReadReceipts: result.allowsGroupReadReceipts, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
     }
 
-    public func listReadReceiptReaders(roomID: RoomID, messageRoomSequence: UInt64, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        guard messageRoomSequence > 0, (1 ... V2ClientReadReceiptLimits.maximumPageSize).contains(pageSize) else { throw V2RealtimeTransportError.unexpectedResponse }
+    public func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+        guard (1 ... V2ClientReadReceiptLimits.maximumPageSize).contains(pageSize) else { throw V2RealtimeTransportError.unexpectedResponse }
         var request = IMV2Envelope(); request.listReadReceiptReaders = .init()
         request.listReadReceiptReaders.roomID = roomID.rawValue
-        request.listReadReceiptReaders.messageRoomSequence = messageRoomSequence
+        request.listReadReceiptReaders.messageID = messageID.rawValue
         request.listReadReceiptReaders.cursor = cursor ?? ""
         request.listReadReceiptReaders.pageSize = UInt32(pageSize)
         let response = try await requestEnvelope(request)
         guard case .readReceiptReadersPage(let page)? = response.body,
               page.roomID == roomID.rawValue,
-              page.messageRoomSequence == messageRoomSequence,
-              page.hasReaderCount == (cursor == nil),
-              !page.hasReaderCount || page.readerCount >= page.readers.count
+              page.messageID == messageID.rawValue
         else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let readers = try page.readers.map { reader -> V2ReadReceiptReader in
-            guard reader.readThroughRoomSequence >= messageRoomSequence, reader.recordedAtMs >= 0 else { throw V2RealtimeTransportError.unexpectedResponse }
             let userID = try UserID(reader.userID)
-            let identity: V2PublicIdentity?
-            if reader.publicHandle.isEmpty && reader.displayName.isEmpty {
-                identity = nil
-            } else {
-                guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty else { throw V2RealtimeTransportError.unexpectedResponse }
-                identity = try .init(userID: userID, handle: .init(reader.publicHandle), displayName: reader.displayName)
+            guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty else {
+                throw V2RealtimeTransportError.unexpectedResponse
             }
-            return .init(userID: userID, publicIdentity: identity, readThroughRoomSequence: reader.readThroughRoomSequence, recordedAt: Date(timeIntervalSince1970: TimeInterval(reader.recordedAtMs) / 1_000))
+            let identity = try V2PublicIdentity(
+                userID: userID,
+                handle: .init(reader.publicHandle),
+                displayName: reader.displayName
+            )
+            return .init(userID: userID, publicIdentity: identity)
         }
         return try .init(
             roomID: roomID,
-            messageRoomSequence: messageRoomSequence,
-            readerCount: page.hasReaderCount ? Int(page.readerCount) : nil,
+            messageID: messageID,
             readers: readers,
             nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor
         )

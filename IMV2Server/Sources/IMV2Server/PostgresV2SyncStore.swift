@@ -32,9 +32,9 @@ public struct PostgresV2SyncStore: V2SyncStore {
         guard maxRecords > 0 else { throw V2SyncStoreError.invalidRecordLimit }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
-        try await ensureCursor(userID: userUUID, deviceID: deviceUUID)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await prepareActiveCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
             guard let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -139,11 +139,14 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let deviceUUID = try uuid(deviceID)
         let generation = try signed(generation)
         let sequence = try signed(highestContiguousSequence)
-        try await ensureCursor(userID: userUUID, deviceID: deviceUUID)
         try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase,
-                  let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true)
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            try await prepareActiveCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            guard let cursor = try await fetchCursor(
+                sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true
+            ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             guard let issued = try await sql.raw("""
                 SELECT first_sequence, last_sequence FROM \(unsafeRaw: table("sync_receipts"))
                 WHERE receipt = \(bind: receipt.rawValue) AND user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
@@ -177,8 +180,11 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let snapshotUUID = try uuid(snapshotID)
         let generation = try signed(generation)
         return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase,
-                  let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true),
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            try await lockActiveDevice(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            guard let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true),
                   cursor.state == "reset_pending", cursor.resetGeneration == generation, cursor.pendingSnapshotID == snapshotUUID,
                   let manifest = try await sql.raw("""
                     SELECT artifact.base_user_sync_sequence, artifact.root_digest, artifact.schema_version,
@@ -219,8 +225,11 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let generation = try signed(generation)
         guard let index = Int(exactly: index) else { throw V2SyncStoreError.snapshotExpiredOrInvalid }
         return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase,
-                  let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true),
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            try await lockActiveDevice(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            guard let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true),
                   cursor.state == "reset_pending", cursor.resetGeneration == generation, cursor.pendingSnapshotID == snapshotUUID,
                   let page = try await sql.raw("""
                     SELECT page.first_projection_kind, page.first_entity_key,
@@ -256,9 +265,13 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let generation = try signed(generation)
         let base = try signed(baseSequence)
         try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase,
-                  let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true)
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            try await lockActiveDevice(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            guard let cursor = try await fetchCursor(
+                sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true
+            ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             if cursor.completedSnapshotID == snapshotUUID,
                cursor.completedSnapshotAckReceipt == receipt.rawValue,
                cursor.completedSnapshotGeneration == generation,
@@ -308,13 +321,39 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
-    private func ensureCursor(userID: UUID, deviceID: UUID) async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    private func prepareActiveCursor(
+        sql: any SQLDatabase,
+        userID: UUID,
+        deviceID: UUID
+    ) async throws {
+        try await lockActiveDevice(sql: sql, userID: userID, deviceID: deviceID)
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: table("device_sync_cursors")) (user_id, device_id, state, reset_generation)
             VALUES (\(bind: userID), \(bind: deviceID), 'ready', 1)
             ON CONFLICT (user_id, device_id) DO NOTHING
             """).run()
+    }
+
+    /// Serializes cursor creation/mutation with the asynchronous revocation
+    /// cleaner. Once the monotonic tombstone commits, no in-flight or retried
+    /// sync request can recreate device-owned state.
+    private func lockActiveDevice(
+        sql: any SQLDatabase,
+        userID: UUID,
+        deviceID: UUID
+    ) async throws {
+        try await sql.raw("""
+            SELECT pg_advisory_xact_lock(hashtextextended(
+                CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
+            ))
+            """).run()
+        guard try await sql.raw("""
+            SELECT 1
+            FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
+            WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
+            """).first() == nil else {
+            throw V2SyncStoreError.deviceRevoked
+        }
     }
 
     private func fetchCursor(sql: any SQLDatabase, userID: UUID, deviceID: UUID, lock: Bool) async throws -> DeviceCursorRow? {
@@ -347,6 +386,7 @@ public enum V2SyncStoreError: Error, Equatable, Sendable {
     case snapshotExpiredOrInvalid
     case snapshotCheckpointUnavailable
     case syncLogSequenceGap
+    case deviceRevoked
 }
 
 private struct DeviceCursorRow: Decodable {

@@ -207,6 +207,12 @@ migration_marker() {
     0053_shared_snapshot_and_revoked_device_cleanup.sql)
       printf "%s" "SELECT to_regclass('im_v2.sync_snapshot_artifacts_reusable_idx') IS NOT NULL AND to_regclass('im_v2.auth_devices_revoked_cleanup_idx') IS NOT NULL"
       ;;
+    0054_bounded_idempotency_retention.sql)
+      printf "%s" "SELECT to_regclass('im_v2.user_projection_effects_cleanup_idx') IS NOT NULL AND to_regclass('im_v2.user_live_presence_leases_expiry_idx') IS NOT NULL AND to_regclass('im_v2.direct_room_operations_cleanup_idx') IS NOT NULL"
+      ;;
+    0055_revoked_device_projection_tombstones.sql)
+      printf "%s" "SELECT to_regclass('im_v2.revoked_device_projection_tombstones') IS NOT NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

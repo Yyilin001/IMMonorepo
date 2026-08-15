@@ -40,6 +40,15 @@ struct V2OperatorReplayRuntimeConfigurationTests {
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_DATABASE_EVENT_LOOP_THREADS": "2",
+            "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "4",
+            "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS": "32",
+            "IM_V2_MAX_USER_SHARD_STORES": "16",
+            "IM_V2_DATABASE_CONNECT_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_POOL_TIMEOUT_MS": "3000",
+            "IM_V2_DATABASE_STATEMENT_TIMEOUT_MS": "30000",
+            "IM_V2_DATABASE_LOCK_TIMEOUT_MS": "5000",
+            "IM_V2_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS": "60000",
             "IM_V2_OPERATOR_REPLAY_LISTEN_HOST": "127.0.0.1",
             "IM_V2_OPERATOR_REPLAY_LISTEN_PORT": "9445",
             "IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64": Data(repeating: 12, count: 32).base64EncodedString(),

@@ -12,8 +12,8 @@ struct V2DeviceRevocationWorkerTests {
         let secondUser = try UserID("00000000-0000-0000-0000-000000000703")
         let secondDevice = try DeviceID("00000000-0000-0000-0000-000000000704")
         let store = InMemoryDeviceRevocationEventStore(events: [
-            .init(eventID: 8, userID: firstUser, deviceID: device),
-            .init(eventID: 9, userID: secondUser, deviceID: secondDevice),
+            .init(eventID: 8, userID: firstUser, deviceID: device, revokedAt: revocationFixtureDate),
+            .init(eventID: 9, userID: secondUser, deviceID: secondDevice, revokedAt: revocationFixtureDate),
         ])
         let worker = V2DeviceRevocationWorker(
             store: store,
@@ -35,8 +35,8 @@ struct V2DeviceRevocationWorkerTests {
         let secondUser = try UserID("00000000-0000-0000-0000-000000000723")
         let secondDevice = try DeviceID("00000000-0000-0000-0000-000000000724")
         let store = InMemoryDeviceRevocationEventStore(events: [
-            .init(eventID: 12, userID: firstUser, deviceID: firstDevice),
-            .init(eventID: 13, userID: secondUser, deviceID: secondDevice),
+            .init(eventID: 12, userID: firstUser, deviceID: firstDevice, revokedAt: revocationFixtureDate),
+            .init(eventID: 13, userID: secondUser, deviceID: secondDevice, revokedAt: revocationFixtureDate),
         ])
         let worker = V2DeviceRevocationWorker(
             store: store,
@@ -48,7 +48,12 @@ struct V2DeviceRevocationWorkerTests {
         try await worker.initializeForStartup()
         #expect(try await worker.runOnce(limit: 8) == 0)
 
-        await store.append(.init(eventID: 14, userID: firstUser, deviceID: firstDevice))
+        await store.append(.init(
+            eventID: 14,
+            userID: firstUser,
+            deviceID: firstDevice,
+            revokedAt: revocationFixtureDate
+        ))
         #expect(try await worker.runOnce(limit: 8) == 1)
         #expect(await store.processedEventIDs(for: "new-gateway-test") == [14])
         try await worker.initializeForStartup()
@@ -82,7 +87,12 @@ struct V2DeviceRevocationWorkerTests {
         #expect(await registry.connectionCount(for: device) == 1)
 
         let store = InMemoryDeviceRevocationEventStore(
-            events: [.init(eventID: 10, userID: user, deviceID: device)],
+            events: [.init(
+                eventID: 10,
+                userID: user,
+                deviceID: device,
+                revokedAt: revocationFixtureDate
+            )],
             didCloseBeforeMarking: { await closeRecorder.didRecordClose() }
         )
         let worker = V2DeviceRevocationWorker(
@@ -97,6 +107,32 @@ struct V2DeviceRevocationWorkerTests {
         #expect(await registry.connectionCount(for: device) == 0)
         #expect(await store.closeObservationsWhenMarked(for: "gateway-live-close-test") == [true])
         #expect(await store.processedEventIDs(for: "gateway-live-close-test") == [10])
+    }
+
+    @Test("cluster projection cleanup replays history and acknowledges only after success")
+    func projectionCleanupIsDurableAndReplayable() async throws {
+        let user = try UserID("00000000-0000-0000-0000-000000000731")
+        let device = try DeviceID("00000000-0000-0000-0000-000000000732")
+        let store = InMemoryDeviceRevocationEventStore(events: [
+            .init(eventID: 21, userID: user, deviceID: device, revokedAt: revocationFixtureDate)
+        ])
+        let cleaner = FailOnceProjectionCleaner()
+        let worker = V2RevokedDeviceProjectionCleanupWorker(
+            store: store,
+            cleaner: cleaner,
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+
+        try await worker.initializeForStartup()
+        await #expect(throws: ProjectionCleanupTestError.unavailable) {
+            try await worker.runOnce(limit: 8)
+        }
+        #expect(await store.processedEventIDs(for: "cluster").isEmpty)
+
+        #expect(try await worker.runOnce(limit: 8) == 1)
+        #expect(await cleaner.cleanedDevices() == [device, device])
+        #expect(await cleaner.revocationTimes() == [revocationFixtureDate, revocationFixtureDate])
+        #expect(await store.processedEventIDs(for: "cluster") == [21])
     }
 }
 
@@ -120,6 +156,11 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
         cursors[nodeID] = events.map(\.eventID).max() ?? 0
     }
 
+    func initializeCursorAtBeginningIfNeeded(nodeID: String, now _: Date) {
+        guard cursors[nodeID] == nil else { return }
+        cursors[nodeID] = 0
+    }
+
     func events(afterCursorFor nodeID: String, limit: Int) -> [V2DeviceRevocationEvent] {
         let cursor = cursors[nodeID] ?? 0
         return Array(events.filter { $0.eventID > cursor }.prefix(limit))
@@ -138,6 +179,30 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
     func processedEventIDs(for nodeID: String) -> [Int64] { processed[nodeID] ?? [] }
     func closeObservationsWhenMarked(for nodeID: String) -> [Bool] { closeObservations[nodeID] ?? [] }
 }
+
+private enum ProjectionCleanupTestError: Error, Equatable {
+    case unavailable
+}
+
+private actor FailOnceProjectionCleaner: V2RevokedDeviceProjectionCleaning {
+    private var devices: [DeviceID] = []
+    private var revokedAtValues: [Date] = []
+    private var shouldFail = true
+
+    func clean(userID _: UserID, deviceID: DeviceID, revokedAt: Date) throws {
+        devices.append(deviceID)
+        revokedAtValues.append(revokedAt)
+        if shouldFail {
+            shouldFail = false
+            throw ProjectionCleanupTestError.unavailable
+        }
+    }
+
+    func cleanedDevices() -> [DeviceID] { devices }
+    func revocationTimes() -> [Date] { revokedAtValues }
+}
+
+private let revocationFixtureDate = Date(timeIntervalSince1970: 1_749_999_900)
 
 private actor RevocationCloseRecorder {
     private var closeCount = 0

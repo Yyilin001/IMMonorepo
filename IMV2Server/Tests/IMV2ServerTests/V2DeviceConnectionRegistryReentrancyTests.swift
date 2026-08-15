@@ -20,8 +20,33 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         await leases.waitUntilRefreshStarts()
         await registry.unregister(connectionID: connectionID)
         await leases.resumeRefresh()
-        await registration.value
+        _ = await registration.value
 
+        #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
+        #expect(await leases.activeConnectionIDs().isEmpty)
+    }
+
+    @Test("unregister during the privacy lookup cannot complete a stale registration")
+    func rejectsRegistrationAfterSuspendedPrivacyLookup() async throws {
+        let registry = V2DeviceConnectionRegistry()
+        let leases = SuspendedPreferencePresenceLeases()
+        await registry.configureLivePresenceLeases(leases)
+        let identity = try identityFixture()
+        let connectionID = UUID(uuidString: "00000000-0000-0000-0000-000000000d07")!
+        let stream = try streamFixture()
+
+        let registration = Task {
+            await registry.register(
+                stream,
+                connectionID: connectionID,
+                identity: identity
+            )
+        }
+        await leases.waitUntilPreferenceLookupStarts()
+        await registry.unregister(connectionID: connectionID)
+        await leases.resumePreferenceLookup()
+
+        #expect(await !registration.value)
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
         #expect(await leases.activeConnectionIDs().isEmpty)
     }
@@ -101,16 +126,25 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
     private var refreshResume: CheckedContinuation<Void, Never>?
     private var didStartRefresh = false
 
-    func refreshPresence(identity _: V2AuthenticatedConnection, connectionID: UUID, now: Date) async throws -> Date {
+    func acquireConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        policy _: V2AuthenticatedConnectionAdmissionPolicy,
+        now: Date
+    ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
         active.insert(connectionID)
         didStartRefresh = true
         refreshStarted?.resume()
         refreshStarted = nil
         await withCheckedContinuation { refreshResume = $0 }
-        return now.addingTimeInterval(30)
+        return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
-    func removePresence(connectionID: UUID, now _: Date) -> Bool {
+    func removePresence(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now _: Date
+    ) -> Bool {
         active.remove(connectionID)
         return !active.isEmpty
     }
@@ -122,6 +156,52 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
         await withCheckedContinuation { refreshStarted = $0 }
     }
     func resumeRefresh() { refreshResume?.resume(); refreshResume = nil }
+    func activeConnectionIDs() -> Set<UUID> { active }
+}
+
+private actor SuspendedPreferencePresenceLeases: V2LivePresenceLeaseManaging {
+    private var active: Set<UUID> = []
+    private var lookupStarted: CheckedContinuation<Void, Never>?
+    private var lookupResume: CheckedContinuation<Void, Never>?
+    private var didStartLookup = false
+
+    func acquireConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        policy _: V2AuthenticatedConnectionAdmissionPolicy,
+        now: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome {
+        active.insert(connectionID)
+        return .accepted(expiresAt: now.addingTimeInterval(30))
+    }
+
+    func removePresence(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now _: Date
+    ) -> Bool {
+        active.remove(connectionID)
+        return !active.isEmpty
+    }
+
+    func allowsOnlinePresence(userID _: UserID) async -> Bool {
+        didStartLookup = true
+        lookupStarted?.resume()
+        lookupStarted = nil
+        await withCheckedContinuation { lookupResume = $0 }
+        return false
+    }
+
+    func waitUntilPreferenceLookupStarts() async {
+        if didStartLookup { return }
+        await withCheckedContinuation { lookupStarted = $0 }
+    }
+
+    func resumePreferenceLookup() {
+        lookupResume?.resume()
+        lookupResume = nil
+    }
+
     func activeConnectionIDs() -> Set<UUID> { active }
 }
 

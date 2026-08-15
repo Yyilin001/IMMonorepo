@@ -316,7 +316,7 @@ public struct V2BestEffortFanoutPlanHintPublisher: V2FanoutPlanPublisher {
 /// PostgreSQL publication is the correctness boundary. Optional broker PING /
 /// PONG latency belongs to one bounded background lane and never extends an
 /// outbox relay transaction or delays the next durable trigger.
-private final class V2AsynchronousFanoutHintDispatcher: @unchecked Sendable {
+private final class V2AsynchronousFanoutHintDispatcher: Sendable {
     private let continuation: AsyncStream<V2FanoutPlanTrigger>.Continuation
     private let worker: Task<Void, Never>
 

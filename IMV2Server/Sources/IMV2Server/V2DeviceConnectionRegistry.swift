@@ -6,6 +6,7 @@ import SQLKit
 /// Process-local index of authenticated live connections. A durable revocation
 /// consumer invokes this registry on every gateway replica.
 public actor V2DeviceConnectionRegistry {
+    private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
@@ -30,35 +31,71 @@ public actor V2DeviceConnectionRegistry {
     private var typingMutationByConnection: [UUID: UUID] = [:]
     private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
-    public init() {}
+    public init(
+        connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy = .init(
+            maximumConnectionsPerDevice: 2,
+            maximumConnectionsPerUser: 8
+        )
+    ) {
+        self.connectionAdmissionPolicy = connectionAdmissionPolicy
+    }
 
-    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async {
-        guard identityByConnection[connectionID] == nil else { return }
+    @discardableResult
+    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async -> Bool {
+        // A connection ID is one lifecycle token, not an idempotency key.
+        // Accepting a duplicate while the first registration is suspended
+        // would let a different stream inherit its identity and lease.
+        if identityByConnection[connectionID] != nil { return false }
+        guard (streamsByDevice[identity.deviceID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerDevice,
+              (streamsByUser[identity.userID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerUser
+        else { return false }
         let lifecycle = UUID()
         lifecycleByConnection[connectionID] = lifecycle
         identityByConnection[connectionID] = identity
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
         streamsByUser[identity.userID, default: [:]][connectionID] = stream
-        guard let livePresenceLeases else { return }
-        guard let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date()) else { return }
-        guard lifecycleByConnection[connectionID] == lifecycle else {
-            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
-            return
+        guard let livePresenceLeases else { return true }
+        let lease: V2AuthenticatedConnectionLeaseOutcome
+        do {
+            lease = try await livePresenceLeases.acquireConnection(
+                identity: identity,
+                connectionID: connectionID,
+                policy: connectionAdmissionPolicy,
+                now: Date()
+            )
+        } catch {
+            rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
+            return false
         }
-        guard (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true else {
-            if lifecycleByConnection[connectionID] == lifecycle {
-                _ = try? await livePresenceLeases.removePresence(connectionID: connectionID, now: Date())
-            }
-            return
-        }
         guard lifecycleByConnection[connectionID] == lifecycle else {
-            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
-            return
+            await compensateStalePresence(connectionID: connectionID, identity: identity)
+            return false
+        }
+        guard case .accepted(let expiresAt) = lease else {
+            rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
+            return false
+        }
+        let allowsOnlinePresence = (
+            try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)
+        ) == true
+        guard lifecycleByConnection[connectionID] == lifecycle else {
+            await compensateStalePresence(connectionID: connectionID, identity: identity)
+            return false
+        }
+        guard allowsOnlinePresence else {
+            // The durable row is also the cross-replica authenticated
+            // connection-admission lease.  Presence privacy controls whether
+            // that lease is observable, not whether it exists.  Dropping it
+            // here would let users who hide presence bypass global per-user
+            // and per-device connection limits.
+            return true
         }
         await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
         if lifecycleByConnection[connectionID] != lifecycle {
-            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+            await compensateStalePresence(connectionID: connectionID, identity: identity)
+            return false
         }
+        return true
     }
 
     public func unregister(connectionID: UUID) async {
@@ -104,7 +141,15 @@ public actor V2DeviceConnectionRegistry {
         // teardown awaited. Its new lease must not be deleted by this older
         // continuation.
         guard lifecycleByConnection[connectionID] == nil else { return }
-        let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? (streamsByUser[identity.userID] != nil)
+        guard let remainsOnline = await removePresenceLease(
+            identity: identity,
+            connectionID: connectionID
+        ) else {
+            // A failed cross-replica query cannot prove the user offline.
+            // The short database lease will converge without emitting a
+            // misleading global transition during the outage.
+            return
+        }
         if !remainsOnline, lifecycleByConnection[connectionID] == nil {
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
         }
@@ -224,23 +269,41 @@ public actor V2DeviceConnectionRegistry {
         liveActivityBroker = nil
     }
 
-    public func refreshLivePresence(connectionID: UUID) async {
+    @discardableResult
+    public func refreshLivePresence(connectionID: UUID) async -> Bool {
         guard let identity = identityByConnection[connectionID],
-              let lifecycle = lifecycleByConnection[connectionID],
-              let livePresenceLeases,
-              let expiresAt = try? await livePresenceLeases.refreshPresence(identity: identity, connectionID: connectionID, now: Date())
-        else { return }
+              let lifecycle = lifecycleByConnection[connectionID]
+        else { return false }
+        guard let livePresenceLeases else { return true }
+        let lease: V2AuthenticatedConnectionLeaseOutcome
+        do {
+            lease = try await livePresenceLeases.acquireConnection(
+                identity: identity,
+                connectionID: connectionID,
+                policy: connectionAdmissionPolicy,
+                now: Date()
+            )
+        } catch {
+            await unregister(connectionID: connectionID)
+            return false
+        }
         guard lifecycleByConnection[connectionID] == lifecycle else {
-            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
-            return
+            await compensateStalePresence(connectionID: connectionID, identity: identity)
+            return false
         }
-        guard (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true,
-              lifecycleByConnection[connectionID] == lifecycle
-        else { return }
-        await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
+        guard case .accepted(let expiresAt) = lease else {
+            await unregister(connectionID: connectionID)
+            return false
+        }
+        if (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true,
+           lifecycleByConnection[connectionID] == lifecycle {
+            await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
+        }
         if lifecycleByConnection[connectionID] != lifecycle {
-            await compensateStalePresence(connectionID: connectionID, userID: identity.userID)
+            await compensateStalePresence(connectionID: connectionID, identity: identity)
+            return false
         }
+        return true
     }
 
     public func subscribePresence(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, targetUserID: UserID) async {
@@ -331,20 +394,21 @@ public actor V2DeviceConnectionRegistry {
         await notifyTypingWatchers(state)
     }
 
-    public func applyLiveActivityPreferences(connectionID: UUID, allowsOnlinePresence: Bool) async {
+    @discardableResult
+    public func applyLiveActivityPreferences(connectionID: UUID, allowsOnlinePresence: Bool) async -> Bool {
         guard let identity = identityByConnection[connectionID],
               let lifecycle = lifecycleByConnection[connectionID]
-        else { return }
+        else { return false }
         if allowsOnlinePresence {
-            await refreshLivePresence(connectionID: connectionID)
+            return await refreshLivePresence(connectionID: connectionID)
         } else {
-            let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? false
-            guard lifecycleByConnection[connectionID] == lifecycle else {
-                await refreshLivePresence(connectionID: connectionID)
-                return
-            }
-            guard !remainsOnline else { return }
+            // Keep every connection-admission lease alive.  Database reads
+            // and refresh broadcasts both apply the privacy preference, so
+            // the lease remains invisible while still enforcing caps across
+            // gateway replicas.
+            guard lifecycleByConnection[connectionID] == lifecycle else { return false }
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
+            return lifecycleByConnection[connectionID] == lifecycle
         }
     }
 
@@ -366,12 +430,32 @@ public actor V2DeviceConnectionRegistry {
         await liveActivityBroker?.publishPresence(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
     }
 
-    private func compensateStalePresence(connectionID: UUID, userID: UserID) async {
-        let remainsOnline = (try? await livePresenceLeases?.removePresence(connectionID: connectionID, now: Date())) ?? (streamsByUser[userID] != nil)
+    private func compensateStalePresence(connectionID: UUID, identity: V2AuthenticatedConnection) async {
+        // A newer lifecycle may have deliberately reused this UUID and now
+        // owns the database row. The stale continuation must not delete it.
+        guard lifecycleByConnection[connectionID] == nil else { return }
+        guard let remainsOnline = await removePresenceLease(
+            identity: identity,
+            connectionID: connectionID
+        ) else { return }
         guard !remainsOnline,
-              identityByConnection[connectionID]?.userID != userID
+              identityByConnection[connectionID] == nil
         else { return }
-        await routePresence(targetUserID: userID, isOnline: false, expiresAt: Date())
+        await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
+    }
+
+    private func removePresenceLease(
+        identity: V2AuthenticatedConnection,
+        connectionID: UUID
+    ) async -> Bool? {
+        guard let livePresenceLeases else {
+            return streamsByUser[identity.userID] != nil
+        }
+        return try? await livePresenceLeases.removePresence(
+            identity: identity,
+            connectionID: connectionID,
+            now: Date()
+        )
     }
 
     private func notifyPresenceWatchers(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
@@ -476,6 +560,26 @@ public actor V2DeviceConnectionRegistry {
                     try? await foregroundGroupInterestManager.activate(roomID: roomID)
                 }
             }
+        }
+    }
+
+    private func rollbackRegistration(
+        connectionID: UUID,
+        identity: V2AuthenticatedConnection,
+        lifecycle: UUID
+    ) {
+        guard lifecycleByConnection[connectionID] == lifecycle,
+              identityByConnection[connectionID] == identity
+        else { return }
+        lifecycleByConnection.removeValue(forKey: connectionID)
+        identityByConnection.removeValue(forKey: connectionID)
+        streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)
+        if streamsByDevice[identity.deviceID]?.isEmpty == true {
+            streamsByDevice.removeValue(forKey: identity.deviceID)
+        }
+        streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
+        if streamsByUser[identity.userID]?.isEmpty == true {
+            streamsByUser.removeValue(forKey: identity.userID)
         }
     }
 
