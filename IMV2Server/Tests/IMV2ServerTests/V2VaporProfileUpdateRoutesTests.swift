@@ -68,9 +68,9 @@ struct V2VaporProfileUpdateRoutesTests {
 
 private struct ProfileUpdateRouteAuthenticator: V2GatewayAuthenticator {
     let userID: UserID
-    func authenticate(accessToken: String, deviceID _: DeviceID) async throws -> UserID {
+    func authenticateSession(accessToken: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
         guard accessToken == "access-token" else { throw ProfileUpdateRouteTestError.denied }
-        return userID
+        return .init(userID: userID, expiresAt: nil)
     }
 }
 
@@ -90,7 +90,7 @@ private actor ProfileUpdateRouteStore: V2ProfileUpdateStore {
 private func updateFixtureProfile(userID: UserID, revision: UInt64) throws -> V2ProfileView {
     try .init(
         userID: userID,
-        publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "资料名称"),
+        publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "资料名称", accountKind: .regular),
         avatar: nil,
         state: .active,
         revision: try #require(V2ProfileRevision(rawValue: revision)),

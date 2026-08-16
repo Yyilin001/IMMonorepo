@@ -12,22 +12,6 @@ public protocol V2ClientProfileProjectionStore: Sendable {
     func applyProfileViewResults(_ results: [V2ProfileViewLookupResult]) async throws
 }
 
-public extension V2ClientProfileProjectionStore {
-    /// Compatibility implementation for small fakes. Persistent stores should
-    /// override this and commit the complete authorized response atomically.
-    func applyProfileViewResults(_ results: [V2ProfileViewLookupResult]) async throws {
-        let batch = V2ProfileViewResultBatch(results)
-        for profile in batch.profiles.values {
-            try Task.checkCancellation()
-            try await saveProfileView(profile)
-        }
-        for userID in batch.unavailableUserIDs.subtracting(batch.profiles.keys) {
-            try Task.checkCancellation()
-            try await markProfileUnavailable(userID: userID)
-        }
-    }
-}
-
 /// Coordinates remote hydration with the durable projection. The actor owns
 /// no UI state and never leaks transport DTOs above this boundary.
 public actor V2ProfileRepository {

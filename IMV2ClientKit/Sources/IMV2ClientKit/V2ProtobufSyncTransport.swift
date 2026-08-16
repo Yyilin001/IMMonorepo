@@ -375,20 +375,6 @@ public enum V2ClientReadReceiptLimits {
     public static let maximumPageSize = 100
 }
 
-/// Receipt transports that do not support the detail surface fail closed
-/// instead of fabricating a receipt result.
-public extension V2ClientReadReceiptTransport {
-    func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences {
-        _ = operationID; _ = allowsDirectReadReceipts; _ = allowsGroupReadReceipts
-        throw V2RealtimeTransportError.unexpectedResponse
-    }
-
-    func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        _ = roomID; _ = messageID; _ = cursor; _ = pageSize
-        throw V2RealtimeTransportError.unexpectedResponse
-    }
-}
-
 public protocol V2ClientLiveActivityTransport: Sendable {
     func liveActivityPreferences() async throws -> V2LiveActivityPreferences
     func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences
@@ -720,9 +706,13 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         let members: [V2ClientRoomMember] = try page.members.map { member in
             let userID: UserID = try .init(member.userID)
             let publicIdentity: V2PublicIdentity?
-            switch (member.publicHandle.isEmpty, member.displayName.isEmpty) {
-            case (true, true): publicIdentity = nil
-            case (false, false): publicIdentity = try .init(userID: userID, handle: .init(member.publicHandle), displayName: member.displayName)
+            switch (member.publicHandle.isEmpty, member.displayName.isEmpty, member.accountKind.isEmpty) {
+            case (true, true, true): publicIdentity = nil
+            case (false, false, false):
+                guard let accountKind = V2AccountKind(rawValue: member.accountKind) else {
+                    throw V2RealtimeTransportError.unexpectedResponse
+                }
+                publicIdentity = try .init(userID: userID, handle: .init(member.publicHandle), displayName: member.displayName, accountKind: accountKind)
             default: throw V2RealtimeTransportError.unexpectedResponse
             }
             return .init(userID: userID, role: try Self.membershipRole(from: member.role), publicIdentity: publicIdentity)
@@ -1065,13 +1055,16 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let readers = try page.readers.map { reader -> V2ReadReceiptReader in
             let userID = try UserID(reader.userID)
-            guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty else {
+            guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty,
+                  let accountKind = V2AccountKind(rawValue: reader.accountKind)
+            else {
                 throw V2RealtimeTransportError.unexpectedResponse
             }
             let identity = try V2PublicIdentity(
                 userID: userID,
                 handle: .init(reader.publicHandle),
-                displayName: reader.displayName
+                displayName: reader.displayName,
+                accountKind: accountKind
             )
             return .init(userID: userID, publicIdentity: identity)
         }

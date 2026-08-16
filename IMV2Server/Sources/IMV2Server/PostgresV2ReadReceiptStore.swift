@@ -186,10 +186,14 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
             let pageRows = Array(rows.prefix(pageSize))
             let readers = try pageRows.map { row in
                 let userID = try UserID(row.userID.uuidString)
+                guard let accountKind = V2AccountKind(rawValue: row.accountKind) else {
+                    throw V2ReadReceiptStoreError.corruptPersistenceState
+                }
                 let identity = try V2PublicIdentity(
                     userID: userID,
                     handle: .init(row.publicHandle),
-                    displayName: row.displayName
+                    displayName: row.displayName,
+                    accountKind: accountKind
                 )
                 return V2ReadReceiptReader(userID: userID, publicIdentity: identity)
             }
@@ -223,7 +227,8 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
                 SELECT receipt.user_id,
                        receipt.read_through_room_sequence,
                        profile.public_handle,
-                       profile.display_name
+                       profile.display_name,
+                       profile.account_kind
                 FROM im_v2.room_read_receipts AS receipt
                 LEFT JOIN im_v2.user_read_receipt_preferences AS preference
                   ON preference.user_id = receipt.user_id
@@ -263,7 +268,8 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
             SELECT receipt.user_id,
                    receipt.read_through_room_sequence,
                    profile.public_handle,
-                   profile.display_name
+                   profile.display_name,
+                   profile.account_kind
             FROM im_v2.room_read_receipts AS receipt
             LEFT JOIN im_v2.user_read_receipt_preferences AS preference
               ON preference.user_id = receipt.user_id
@@ -343,11 +349,13 @@ private struct ReceiptReaderRow: Decodable {
     let readThroughRoomSequence: Int64
     let publicHandle: String
     let displayName: String
+    let accountKind: String
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case readThroughRoomSequence = "read_through_room_sequence"
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
     }
 }
 private struct ReceiptCursor: Codable {

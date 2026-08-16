@@ -499,7 +499,7 @@ private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
                 .init(
                     userID: request.actorUserID,
                     role: .owner,
-                    publicIdentity: try! .init(userID: request.actorUserID, handle: .init("owner_1"), displayName: "群主")
+                    publicIdentity: try! .init(userID: request.actorUserID, handle: .init("owner_1"), displayName: "群主", accountKind: .regular)
                 )
             ],
             nextCursor: nil

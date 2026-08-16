@@ -87,6 +87,19 @@ public protocol V2RoomWriteStore: Sendable {
     ) async throws -> V2SendMessageOutcome
 }
 
+public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
+    case roomNotFound
+    case actorNotEligible
+    case actorMuted
+    case roomFrozen
+    case capacityProfileMismatch
+    case corruptPersistenceState
+    case directMessageBlocked
+    case strangerMessagePermissionDenied
+    case strangerMessageLimitReached
+    case replyTargetNotFound
+}
+
 public struct V2AcceptanceIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
 

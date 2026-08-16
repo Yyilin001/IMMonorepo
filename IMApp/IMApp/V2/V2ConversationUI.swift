@@ -227,8 +227,6 @@ protocol V2ConversationDataSource: Sendable {
         before cursor: V2ClientConversationListCursor?,
         limit: Int
     ) async throws -> V2ConversationListPage
-    func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem]
-    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem]
     func timelinePage(
         in roomID: String,
         for userID: String,
@@ -241,40 +239,6 @@ protocol V2ConversationSendingCapabilityReading: Sendable {
     /// `nil` means no server decision has been projected yet, so the composer
     /// remains usable and the authoritative send command is still the gate.
     func directSendingCapability(in roomID: String) async throws -> Bool?
-}
-
-extension V2ConversationDataSource {
-    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
-        try await messages(in: roomID, for: userID).map { .message($0, timelineSequence: $0.roomSequence) }
-    }
-
-    /// Compatibility path for small deterministic fakes. Production data
-    /// sources override this with a bounded SQLite keyset query.
-    func timelinePage(
-        in roomID: String,
-        for userID: String,
-        before cursor: V2ConversationTimelineCursor?,
-        limit: Int
-    ) async throws -> V2ConversationTimelinePage {
-        precondition(limit > 0)
-        let candidates = try await timeline(in: roomID, for: userID)
-            .filter { item in
-                guard let cursor else { return true }
-                return item.timelineSequence < cursor.timelineSequence
-                    || (item.timelineSequence == cursor.timelineSequence && item.storageItemID < cursor.itemID)
-            }
-            .sorted { lhs, rhs in
-                lhs.timelineSequence == rhs.timelineSequence
-                    ? lhs.storageItemID > rhs.storageItemID
-                    : lhs.timelineSequence > rhs.timelineSequence
-            }
-        let selected = Array(candidates.prefix(limit)).reversed()
-        let items = Array(selected)
-        let olderCursor: V2ConversationTimelineCursor? = candidates.count > limit ? items.first.map {
-            V2ConversationTimelineCursor(timelineSequence: $0.timelineSequence, itemID: $0.storageItemID)
-        } : nil
-        return .init(items: items, olderCursor: olderCursor)
-    }
 }
 
 protocol V2ConversationFavoritesReading: Sendable {

@@ -106,7 +106,7 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
 
     public func register(accountHandle: String, password: String, publicHandle: String, displayName: String, deviceID: DeviceID) async throws -> V2AccountAssertion {
         guard (try? V2PublicHandle(publicHandle)) != nil else { throw V2AccountAuthenticationError.invalidPublicHandle }
-        guard (try? V2PublicIdentity(userID: try .init(deviceID.rawValue), handle: .init(publicHandle), displayName: displayName)) != nil else { throw V2AccountAuthenticationError.invalidDisplayName }
+        guard (try? V2PublicIdentity(userID: try .init(deviceID.rawValue), handle: .init(publicHandle), displayName: displayName, accountKind: .regular)) != nil else { throw V2AccountAuthenticationError.invalidDisplayName }
         return try await send(accountHandle: accountHandle, password: password, deviceID: deviceID, publicHandle: publicHandle, displayName: displayName, to: registrationEndpoint)
     }
 

@@ -221,8 +221,8 @@ private actor RevocationCloseRecorder {
 }
 
 private struct RevocationAuthFake: V2GatewayAuthenticator {
-    func authenticate(accessToken _: String, deviceID _: DeviceID) async throws -> UserID {
-        try .init("00000000-0000-0000-0000-000000000711")
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
+        try .init(userID: .init("00000000-0000-0000-0000-000000000711"), expiresAt: nil)
     }
 }
 

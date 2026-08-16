@@ -54,12 +54,6 @@ public protocol V2UserShardCutoverFinalizing: Sendable {
     ) async throws
 }
 
-public extension V2UserShardMigrationExecuting {
-    func verifyForwarding(migrationID _: UUID) async throws -> V2UserShardMigrationRecord {
-        throw V2UserShardMigrationError.invalidTransition
-    }
-}
-
 public struct V2StaticUserShardStorageRegistry: V2UserShardStorageResolving, Sendable {
     private let locations: [String: V2UserShardStorageLocation]
 

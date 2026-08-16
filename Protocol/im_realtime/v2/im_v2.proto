@@ -564,6 +564,7 @@ message RoomMember {
   // directory response instead of the per-user sync stream.
   string public_handle = 3;
   string display_name = 4;
+  string account_kind = 5;
 }
 
 message RoomMembersPage {
@@ -693,6 +694,7 @@ message ReadReceiptReader {
   // members at the membership revision bound into this page.
   string public_handle = 2;
   string display_name = 3;
+  string account_kind = 4;
 }
 
 message ReadReceiptReadersPage {

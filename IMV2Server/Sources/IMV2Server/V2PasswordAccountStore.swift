@@ -58,7 +58,8 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
             identity = try .init(
                 userID: .init(userUUID.uuidString),
                 handle: .init(publicHandle),
-                displayName: displayName
+                displayName: displayName,
+                accountKind: .regular
             )
         } catch {
             throw V2PasswordAccountStoreError.invalidPublicIdentity
@@ -78,7 +79,7 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
                 throw V2PasswordAccountStoreError.publicHandleAlreadyExists
             }
             try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES (\(bind: handle), \(bind: userUUID), \(bind: passwordHash), \(bind: current))").run()
-            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), 1, \(bind: current), \(bind: current))").run()
+            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, account_kind, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 1, \(bind: current), \(bind: current))").run()
             try await recordPasswordAuthenticationAudit(
                 outcome: .registrationSucceeded,
                 userID: identity.userID,

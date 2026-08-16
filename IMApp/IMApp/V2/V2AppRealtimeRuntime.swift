@@ -40,10 +40,6 @@ extension V2ConversationSending {
         try await send(text: text, media: [], in: roomID)
     }
 
-    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
-        guard entities.isEmpty, replyTo == nil else { throw V2RichMessageContentError.invalidEntity }
-        return try await send(text: text, media: media, mentions: mentions, in: roomID)
-    }
 }
 
 enum V2MessageWithdrawalOutcome: Equatable, Sendable {
@@ -177,10 +173,6 @@ protocol V2GroupConversationCreating: Sendable {
     func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome
     func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome
     func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus?
-}
-
-extension V2GroupConversationCreating {
-    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { nil }
 }
 
 struct V2GroupMemberItem: Equatable, Identifiable, Sendable {

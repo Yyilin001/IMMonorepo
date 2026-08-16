@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Core
 @testable import IMV2Server
 import Testing
 
@@ -73,6 +74,7 @@ private actor MigrationStoreFake: V2UserShardMigrationStoring {
     init(value: V2UserShardMigrationRecord) { self.value = value }
     func prepare(_: V2UserShardMigrationPreparation, now _: Date) throws -> V2UserShardMigrationRecord { prepareCount += 1; return value }
     func load(migrationID _: UUID) throws -> V2UserShardMigrationRecord? { value }
+    func load(userID: UserID) throws -> V2UserShardMigrationRecord? { value.userID == userID ? value : nil }
     func advance(migrationID _: UUID, expectedPhase _: V2UserShardMigrationPhase, action _: V2UserShardMigrationAction, fingerprints _: (source: String, target: String)?, now _: Date) throws -> V2UserShardMigrationRecord { value }
     func fail(migrationID _: UUID, expectedPhase _: V2UserShardMigrationPhase, code _: V2UserShardMigrationFailureCode, now _: Date) throws -> V2UserShardMigrationRecord { value }
 }

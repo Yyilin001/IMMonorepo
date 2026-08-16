@@ -130,6 +130,7 @@ private struct ResponseItem: Decodable {
     let unavailable: Bool
     let handle: String?
     let displayName: String?
+    let accountKind: V2AccountKind?
     let avatarMediaID: String?
     let state: String?
     let revision: UInt64?
@@ -142,6 +143,7 @@ private struct ResponseItem: Decodable {
         case unavailable
         case handle
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case avatarMediaID = "avatar_media_id"
         case state
         case revision
@@ -166,7 +168,7 @@ private struct ResponseItem: Decodable {
         }
         let key = V2ProfileViewLookupKey(userID: userID, context: context)
         if unavailable {
-            guard handle == nil, displayName == nil, avatarMediaID == nil,
+            guard handle == nil, displayName == nil, accountKind == nil, avatarMediaID == nil,
                   state == nil, revision == nil, visibilityRevision == nil
             else { throw V2ProfileViewClientError.invalidResponse }
             return .unavailable(key: key)
@@ -177,10 +179,10 @@ private struct ResponseItem: Decodable {
               let visibilityRevision, let accessRevision = V2ProfileRevision(rawValue: visibilityRevision)
         else { throw V2ProfileViewClientError.invalidResponse }
         let identity: V2PublicIdentity?
-        switch (handle, displayName) {
-        case (.none, .none): identity = nil
-        case let (.some(handle), .some(displayName)):
-            identity = try .init(userID: userID, handle: .init(handle), displayName: displayName)
+        switch (handle, displayName, accountKind) {
+        case (.none, .none, .none): identity = nil
+        case let (.some(handle), .some(displayName), .some(accountKind)):
+            identity = try .init(userID: userID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
         default: throw V2ProfileViewClientError.invalidResponse
         }
         let avatar = try avatarMediaID.map { try V2AvatarReference(mediaID: .init($0)) }

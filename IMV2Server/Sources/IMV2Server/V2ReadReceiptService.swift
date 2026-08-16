@@ -20,21 +20,6 @@ public protocol V2ReadReceiptStore: Sendable {
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
 }
 
-/// The original receipt-store seam remains useful for focused watermark
-/// tests. Production storage implements these v10 operations; old in-memory
-/// fakes fail closed if a caller attempts the richer surface.
-public extension V2ReadReceiptStore {
-    func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome {
-        _ = command; _ = now
-        throw V2ReadReceiptStoreError.corruptPersistenceState
-    }
-
-    func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        _ = roomID; _ = messageID; _ = actorUserID; _ = cursor; _ = pageSize
-        throw V2ReadReceiptStoreError.corruptPersistenceState
-    }
-}
-
 public struct V2ReadReceiptService: Sendable {
     private let store: any V2ReadReceiptStore; private let now: @Sendable () -> Date
     public init(store: any V2ReadReceiptStore, now: @escaping @Sendable () -> Date = Date.init) { self.store = store; self.now = now }

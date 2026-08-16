@@ -132,12 +132,12 @@ private struct ResponseBody: Decodable {
         case visibilityRevision = "visibility_revision", currentRevision = "current_revision"
     }
     func profileView() throws -> V2ProfileView {
-        guard let userID, let handle, let displayName, let state, let revision,
+        guard let userID, let handle, let displayName, let accountKind, let state, let revision,
               let revision = V2ProfileRevision(rawValue: revision),
               let visibilityRevision, let visibilityRevision = V2ProfileRevision(rawValue: visibilityRevision)
         else { throw V2OwnProfileClientError.invalidResponse }
         let parsedUserID = try UserID(userID)
-        let identity = try V2PublicIdentity(userID: parsedUserID, handle: .init(handle), displayName: displayName, accountKind: accountKind ?? .regular)
+        let identity = try V2PublicIdentity(userID: parsedUserID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
         return try .init(
             userID: parsedUserID,
             publicIdentity: identity,

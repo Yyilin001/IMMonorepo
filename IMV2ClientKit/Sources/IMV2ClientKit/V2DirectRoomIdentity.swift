@@ -49,7 +49,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
             userID: .init(payload.targetUserID),
             handle: .init(payload.publicHandle),
             displayName: payload.displayName,
-            accountKind: payload.accountKind ?? .regular
+            accountKind: payload.accountKind
         )
         revision = payload.revision
         updatedAt = Date(timeIntervalSince1970: TimeInterval(payload.updatedAtMilliseconds) / 1_000)
@@ -60,7 +60,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
         let targetUserID: String
         let publicHandle: String
         let displayName: String
-        let accountKind: V2AccountKind?
+        let accountKind: V2AccountKind
         let revision: UInt64
         let updatedAtMilliseconds: Int64
 

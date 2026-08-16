@@ -36,8 +36,7 @@ struct V2GatewaySessionTests {
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
 
-        #expect(await auth.combinedReadCount == 1)
-        #expect(await auth.legacyReadCount == 0)
+        #expect(await auth.readCount == 1)
     }
 
     @Test("gateway session enforces its configured protobuf nesting limit")
@@ -83,26 +82,16 @@ private actor GatewayAuthFake: V2GatewayAuthenticator {
     let userID: UserID
     let expiresAt: Date?
     init(userID: UserID, expiresAt: Date? = nil) { self.userID = userID; self.expiresAt = expiresAt }
-    func authenticate(accessToken _: String, deviceID _: DeviceID) -> UserID { userID }
-    func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) -> Date? { expiresAt }
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) -> V2GatewayAuthentication {
+        .init(userID: userID, expiresAt: expiresAt)
+    }
 }
 
 private actor CombinedGatewayAuthFake: V2GatewayAuthenticator {
-    private(set) var combinedReadCount = 0
-    private(set) var legacyReadCount = 0
-
-    func authenticate(accessToken _: String, deviceID _: DeviceID) throws -> UserID {
-        legacyReadCount += 1
-        return try .init("legacy")
-    }
-
-    func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) -> Date? {
-        legacyReadCount += 1
-        return nil
-    }
+    private(set) var readCount = 0
 
     func authenticateSession(accessToken _: String, deviceID _: DeviceID) throws -> V2GatewayAuthentication {
-        combinedReadCount += 1
+        readCount += 1
         return try .init(
             userID: .init("combined-user"),
             expiresAt: Date(timeIntervalSince1970: 20)

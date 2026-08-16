@@ -11,12 +11,6 @@ public protocol V2ClientRuntimeActivity: Sendable {
     func runHeartbeatLoop() async throws
 }
 
-public extension V2ClientRuntimeActivity {
-    /// Activities without a command outbox (for example read-only clients)
-    /// retain the safe no-op behavior without needing test-only adapters.
-    func flushDurableCommands() async throws {}
-}
-
 /// Default V2 activity composition. A reset is completely materialized and
 /// acknowledged before the runtime starts live availability or heartbeat
 /// loops.  Priority user commands are flushed before optional post-sync

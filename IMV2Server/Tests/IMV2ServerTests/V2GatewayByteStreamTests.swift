@@ -265,7 +265,9 @@ private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
 }
 
 private struct ByteStreamAuthFake: V2GatewayAuthenticator {
-    func authenticate(accessToken _: String, deviceID _: DeviceID) async throws -> UserID { try .init("user-a") }
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
+        try .init(userID: .init("user-a"), expiresAt: nil)
+    }
 }
 
 private struct ByteStreamCommandFake: V2GatewayCommandHandler {

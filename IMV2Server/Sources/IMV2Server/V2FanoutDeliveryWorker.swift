@@ -80,18 +80,6 @@ public protocol V2FanoutDeliveryBucketConcurrencyControlling: Sendable {
 }
 
 public extension V2FanoutDeliveryStore {
-    /// Conservative fallback for fake and cross-store implementations. The
-    /// concrete PostgreSQL control-store implementation overrides this with a
-    /// bounded all-or-nothing transaction.
-    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
-        var commits: [V2FanoutDeliveryCommit] = []
-        commits.reserveCapacity(leases.count)
-        for lease in leases {
-            commits.append(try await commit(lease, now: now))
-        }
-        return commits
-    }
-
     /// Convenience helper for one-off administrative and integration-test
     /// callers. The runtime uses `V2FanoutDeliveryClaimScheduler` instead so
     /// a busy fresh lane cannot indefinitely postpone recovery work.
@@ -105,18 +93,6 @@ public extension V2FanoutDeliveryStore {
         return []
     }
 
-    /// Test/fake stores keep their immediate release semantics unless they
-    /// opt in to durable PostgreSQL backoff and pause state.
-    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) async throws {
-        try await release(lease)
-    }
-
-    /// Legacy in-memory fakes may retain release-only behavior. The
-    /// PostgreSQL implementation persists the new route before releasing the
-    /// claim, which is required for an actual bucket cutover.
-    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) async throws {
-        try await release(lease)
-    }
 }
 
 /// Allocates claim turns for one logical target bucket. Seven (by default)

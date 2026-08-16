@@ -14,7 +14,7 @@ struct V2VaporPublicIdentityRoutesTests {
         defer { Task { try? await app.asyncShutdown() } }
         V2VaporPublicIdentityRoutes(
             authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
-            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("target-user"), handle: .init("target_user"), displayName: "Target"))
+            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("target-user"), handle: .init("target_user"), displayName: "Target", accountKind: .regular))
         ).register(on: app)
 
         try await app.testing().test(.GET, "v2/public-identities/resolve?handle=%40TARGET_USER", beforeRequest: { request in
@@ -54,7 +54,7 @@ struct V2VaporPublicIdentityRoutesTests {
         defer { Task { try? await app.asyncShutdown() } }
         V2VaporPublicIdentityRoutes(
             authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
-            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("actor-user"), handle: .init("actor_user"), displayName: "Old"))
+            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("actor-user"), handle: .init("actor_user"), displayName: "Old", accountKind: .regular))
         ).register(on: app)
 
         try await app.testing().test(.PUT, "v2/public-identities/me", beforeRequest: { request in
@@ -69,9 +69,9 @@ struct V2VaporPublicIdentityRoutesTests {
 
 private struct PublicIdentityRouteAuthenticator: V2GatewayAuthenticator {
     let userID: UserID
-    func authenticate(accessToken: String, deviceID _: DeviceID) throws -> UserID {
+    func authenticateSession(accessToken: String, deviceID _: DeviceID) throws -> V2GatewayAuthentication {
         guard accessToken == "access-token" else { throw PublicIdentityRouteAuthenticationFailure.denied }
-        return userID
+        return .init(userID: userID, expiresAt: nil)
     }
 }
 
@@ -81,7 +81,7 @@ private struct PublicIdentityDirectoryFake: V2PublicIdentityAccountManaging {
     func profile(for _: UserID) async throws -> V2PublicIdentity? { identity }
     func updateDisplayName(for _: UserID, displayName: String) async throws -> V2PublicIdentity {
         guard let identity else { throw PublicIdentityRouteAuthenticationFailure.denied }
-        return try .init(userID: identity.userID, handle: identity.handle, displayName: displayName)
+        return try .init(userID: identity.userID, handle: identity.handle, displayName: displayName, accountKind: identity.accountKind)
     }
 }
 

@@ -1,7 +1,8 @@
 import Foundation
 import IMV2Core
+@testable import IMV2Server
 
-public actor InMemoryV2OutboxStore: V2RoomOutboxStore {
+actor InMemoryV2OutboxStore: V2RoomOutboxStore {
     private struct Entry: Sendable {
         let trigger: V2FanoutPlanTrigger
         var published = false
@@ -10,11 +11,11 @@ public actor InMemoryV2OutboxStore: V2RoomOutboxStore {
 
     private var entries: [EventID: Entry]
 
-    public init(triggers: [V2FanoutPlanTrigger]) {
+    init(triggers: [V2FanoutPlanTrigger]) {
         self.entries = Dictionary(uniqueKeysWithValues: triggers.map { ($0.sourceEventID, Entry(trigger: $0)) })
     }
 
-    public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2OutboxLease] {
+    func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2OutboxLease] {
         guard limit > 0 else { return [] }
         let available = entries.values
             .filter { !$0.published && ($0.lease == nil) }
@@ -28,20 +29,24 @@ public actor InMemoryV2OutboxStore: V2RoomOutboxStore {
         return claimed
     }
 
-    public func markPublished(_ lease: V2OutboxLease) {
+    func markPublished(_ lease: V2OutboxLease) {
         guard var entry = entries[lease.trigger.sourceEventID], entry.lease == lease else { return }
         entry.published = true
         entry.lease = nil
         entries[lease.trigger.sourceEventID] = entry
     }
 
-    public func release(_ lease: V2OutboxLease) {
+    func release(_ lease: V2OutboxLease) {
         guard var entry = entries[lease.trigger.sourceEventID], entry.lease == lease else { return }
         entry.lease = nil
         entries[lease.trigger.sourceEventID] = entry
     }
 
-    public func publishedTriggers() -> [V2FanoutPlanTrigger] {
+    func scheduleRetry(_ lease: V2OutboxLease, disposition _: V2DurableRetryDisposition, now _: Date) {
+        release(lease)
+    }
+
+    func publishedTriggers() -> [V2FanoutPlanTrigger] {
         entries.values.filter(\.published).map(\.trigger).sorted { $0.sourceEventID < $1.sourceEventID }
     }
 }

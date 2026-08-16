@@ -108,6 +108,9 @@ private actor MigrationStoreFake: V2UserShardMigrationStoring {
     func load(migrationID: UUID) async throws -> V2UserShardMigrationRecord? {
         value.migrationID == migrationID ? value : nil
     }
+    func load(userID: UserID) async throws -> V2UserShardMigrationRecord? {
+        value.userID == userID ? value : nil
+    }
 
     func advance(
         migrationID: UUID, expectedPhase: V2UserShardMigrationPhase, action: V2UserShardMigrationAction,

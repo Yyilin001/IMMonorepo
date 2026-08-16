@@ -94,7 +94,7 @@ private struct Fixture {
     let avatar = V2AvatarReference(mediaID: try! MediaID("00000000-0000-0000-0000-000000000004"))
 
     var identity: V2PublicIdentity {
-        try! .init(userID: target, handle: .init("target_user"), displayName: "全局名称")
+        try! .init(userID: target, handle: .init("target_user"), displayName: "全局名称", accountKind: .regular)
     }
 
     var activeProfile: V2ProfileView {

@@ -239,6 +239,7 @@ private actor PipelineOutboxStore: V2RoomOutboxStore {
 
     func markPublished(_: V2OutboxLease) { published = true }
     func release(_: V2OutboxLease) { claimed = false }
+    func scheduleRetry(_ lease: V2OutboxLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func didPublish() -> Bool { published }
     func claimLimits() -> [Int] { limits }
 }
@@ -275,6 +276,9 @@ private actor PipelineDeliveryStore: V2FanoutDeliveryStore {
     }
 
     func release(_: V2FanoutDeliveryLease) { claimed = false }
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func didCommit() -> Bool { committed }
     func claimLimits() -> [Int] { limits }
 }
@@ -305,6 +309,9 @@ private actor DelayingPipelineDeliveryStore: V2FanoutDeliveryStore {
     }
 
     func release(_: V2FanoutDeliveryLease) { claimed = false }
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
 
     func waitUntilClaimStarted() async {
         guard !claimStarted else { return }
@@ -329,6 +336,7 @@ private actor ConcurrentPipelineOutboxStore: V2RoomOutboxStore {
 
     func markPublished(_: V2OutboxLease) {}
     func release(_ lease: V2OutboxLease) { pending.append(lease.trigger) }
+    func scheduleRetry(_ lease: V2OutboxLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
 }
 
 private actor ConcurrentPipelinePlanStore: V2FanoutPlanStore {
@@ -360,6 +368,9 @@ private actor ConcurrentPipelineDeliveryStore: V2FanoutDeliveryStore {
     }
 
     func release(_ lease: V2FanoutDeliveryLease) { pending.append(lease) }
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func committedCount() -> Int { committed }
 }
 
@@ -384,6 +395,9 @@ private actor CappedPipelineDeliveryStore: V2FanoutDeliveryStore, V2FanoutDelive
     }
 
     func release(_ lease: V2FanoutDeliveryLease) { pending.append(lease) }
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func claimCallCount() -> Int { claimCalls }
 }
 
@@ -410,6 +424,9 @@ private actor BucketedPipelineDeliveryStore: V2FanoutDeliveryStore {
     }
 
     func release(_: V2FanoutDeliveryLease) {}
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func claimedBuckets() -> [String] { claimed }
     func committedCount() -> Int { committed }
 }

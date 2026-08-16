@@ -185,6 +185,7 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.members.map(\.role) == [.owner, .member])
         #expect(page.members.first?.publicIdentity?.handle.rawValue == "owner_1")
         #expect(page.members.first?.publicIdentity?.displayName == "群主")
+        #expect(page.members.first?.publicIdentity?.accountKind == .regular)
         #expect(page.members.last?.publicIdentity?.handle.rawValue == "member_2")
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
@@ -212,6 +213,7 @@ struct V2ProtobufSyncTransportTests {
         #expect(first.messageID == messageID)
         #expect(first.readers.count == 1)
         #expect(first.readers[0].publicIdentity.displayName == "成员一")
+        #expect(first.readers[0].publicIdentity.accountKind == .regular)
         #expect(second.readers.count == 1)
         #expect(second.nextCursor == nil)
     }
@@ -279,12 +281,14 @@ private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
                 $0.role = .owner
                 $0.publicHandle = "owner_1"
                 $0.displayName = "群主"
+                $0.accountKind = "regular"
             },
             .with {
                 $0.userID = "00000000-0000-0000-0000-000000000342"
                 $0.role = .member
                 $0.publicHandle = "member_2"
                 $0.displayName = "成员二"
+                $0.accountKind = "regular"
             }
         ]
         response.roomMembersPage.nextCursor = "00000000-0000-0000-0000-000000000342"
@@ -313,6 +317,7 @@ private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
                 : "00000000-0000-0000-0000-000000000345"
             $0.publicHandle = isFirstPage ? "member_1" : "member_2"
             $0.displayName = isFirstPage ? "成员一" : "成员二"
+            $0.accountKind = "regular"
         }]
         response.readReceiptReadersPage.nextCursor = isFirstPage ? "opaque-cursor" : ""
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)

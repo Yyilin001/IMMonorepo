@@ -91,9 +91,9 @@ private struct RoutePushAuthenticator: V2GatewayAuthenticator {
     let userID: UserID
     var accepts = true
 
-    func authenticate(accessToken: String, deviceID _: DeviceID) throws -> UserID {
+    func authenticateSession(accessToken: String, deviceID _: DeviceID) throws -> V2GatewayAuthentication {
         guard accepts, accessToken == "access-token" else { throw RoutePushAuthenticationFailure.denied }
-        return userID
+        return .init(userID: userID, expiresAt: nil)
     }
 }
 

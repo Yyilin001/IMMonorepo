@@ -51,14 +51,6 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         self.now = now
     }
 
-    public func authenticate(accessToken: String, deviceID: DeviceID) async throws -> UserID {
-        try await authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
-    }
-
-    public func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date? {
-        try await authenticateSession(accessToken: accessToken, deviceID: deviceID).expiresAt
-    }
-
     public func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
         guard !accessToken.isEmpty, let database = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.unauthenticated

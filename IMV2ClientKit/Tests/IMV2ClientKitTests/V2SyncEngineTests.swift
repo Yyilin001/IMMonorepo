@@ -735,12 +735,14 @@ struct V2SyncEngineTests {
         let firstIdentity = try V2PublicIdentity(
             userID: .init(acceptedFirst),
             handle: .init("alice_one"),
-            displayName: "Alice 张三"
+            displayName: "Alice 张三",
+            accountKind: .regular
         )
         let secondIdentity = try V2PublicIdentity(
             userID: .init(acceptedSecond),
             handle: .init("malice_two"),
-            displayName: "Malice"
+            displayName: "Malice",
+            accountKind: .regular
         )
         let revisionOne = try #require(V2ProfileRevision(rawValue: 1))
         try await store.saveProfileView(.init(
@@ -789,7 +791,8 @@ struct V2SyncEngineTests {
         let renamedIdentity = try V2PublicIdentity(
             userID: firstIdentity.userID,
             handle: .init("carol_one"),
-            displayName: "Carol"
+            displayName: "Carol",
+            accountKind: firstIdentity.accountKind
         )
         try await store.saveProfileView(.init(
             userID: renamedIdentity.userID,
@@ -1587,7 +1590,8 @@ struct V2SyncEngineTests {
                 publicIdentity: .init(
                     userID: .init("00000000-0000-0000-0000-0000000002e6"),
                     handle: .init("prepared_fence"),
-                    displayName: "准备阶段 fence"
+                    displayName: "准备阶段 fence",
+                    accountKind: .regular
                 )
             )
         }
@@ -1597,7 +1601,8 @@ struct V2SyncEngineTests {
             publicIdentity: .init(
                 userID: .init("00000000-0000-0000-0000-0000000002e6"),
                 handle: .init("prepared_fence"),
-                displayName: "准备阶段 fence"
+                displayName: "准备阶段 fence",
+                accountKind: .regular
             )
         )
     }

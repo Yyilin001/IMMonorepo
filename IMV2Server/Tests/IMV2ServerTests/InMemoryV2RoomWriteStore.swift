@@ -1,17 +1,18 @@
 import Foundation
 import IMV2Core
+@testable import IMV2Server
 
 /// Test fixture only. Production acceptance uses the PostgreSQL store below;
 /// keeping this implementation actor-isolated makes service tests deterministic
 /// without pretending that in-memory state is a durable backend.
-public actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
+actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
     private var rooms: [RoomID: V2RoomCommandState]
     private var shardStates: [RoomID: ShardAdmissionState]
     private var capacityProfileIDs: [RoomID: String]
     private let authorizedActors: Set<UserID>
     private let mediaPresentationResolver: @Sendable ([V2MediaReference]) throws -> [V2MediaPresentation]
 
-    public init(
+    init(
         seed: [(V2RoomCommandState, ShardAdmissionState)],
         authorizedActors: Set<UserID>,
         capacityProfileID: String = "standard",
@@ -27,7 +28,7 @@ public actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
         self.mediaPresentationResolver = mediaPresentationResolver
     }
 
-    public func accept(
+    func accept(
         command: V2SendMessageCommand,
         capacityProfile: V2CapacityProfile,
         identifiers: V2AcceptanceIdentifiers,
@@ -86,21 +87,8 @@ public actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
         }
     }
 
-    public func state(for roomID: RoomID) -> (V2RoomCommandState, ShardAdmissionState)? {
+    func state(for roomID: RoomID) -> (V2RoomCommandState, ShardAdmissionState)? {
         guard let room = rooms[roomID], let shard = shardStates[roomID] else { return nil }
         return (room, shard)
     }
-}
-
-public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
-    case roomNotFound
-    case actorNotEligible
-    case actorMuted
-    case roomFrozen
-    case capacityProfileMismatch
-    case corruptPersistenceState
-    case directMessageBlocked
-    case strangerMessagePermissionDenied
-    case strangerMessageLimitReached
-    case replyTargetNotFound
 }

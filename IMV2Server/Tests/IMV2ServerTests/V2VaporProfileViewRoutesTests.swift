@@ -33,6 +33,7 @@ struct V2VaporProfileViewRoutesTests {
             #expect(body.results[0].unavailable == false)
             #expect(body.results[0].context == "direct")
             #expect(body.results[0].displayName == "资料名称")
+            #expect(body.results[0].accountKind == .regular)
             #expect(body.results[0].revision == 4)
             #expect(body.results[1].unavailable == true)
             #expect(body.results[1].context == "room")
@@ -67,9 +68,9 @@ struct V2VaporProfileViewRoutesTests {
 
 private struct ProfileRouteAuthenticator: V2GatewayAuthenticator {
     let userID: UserID
-    func authenticate(accessToken: String, deviceID _: DeviceID) async throws -> UserID {
+    func authenticateSession(accessToken: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
         guard accessToken == "access-token" else { throw ProfileRouteError.denied }
-        return userID
+        return .init(userID: userID, expiresAt: nil)
     }
 }
 
@@ -88,7 +89,7 @@ private func fixtureProfile() throws -> V2ProfileView {
     let userID = try UserID("00000000-0000-0000-0000-000000000802")
     return try .init(
         userID: userID,
-        publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "资料名称"),
+        publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "资料名称", accountKind: .regular),
         avatar: nil,
         state: .active,
         revision: try #require(V2ProfileRevision(rawValue: 4)),

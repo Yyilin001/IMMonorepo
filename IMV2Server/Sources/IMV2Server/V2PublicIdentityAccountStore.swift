@@ -100,7 +100,8 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
                 validated = try .init(
                     userID: userID,
                     handle: current.handle,
-                    displayName: displayName
+                    displayName: displayName,
+                    accountKind: current.accountKind
                 )
             } catch {
                 throw V2PublicIdentityDirectoryError.unavailable

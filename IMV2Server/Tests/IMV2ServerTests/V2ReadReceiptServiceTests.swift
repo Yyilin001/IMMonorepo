@@ -24,5 +24,11 @@ private actor ReceiptStoreSpy: V2ReadReceiptStore {
         captured = command
         return .recorded(.init(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: command.readThroughRoomSequence, recordedAt: now))
     }
+    func setPreferences(command _: V2SetReadReceiptPreferencesCommand, now _: Date) throws -> V2SetReadReceiptPreferencesOutcome {
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+    func readers(roomID _: RoomID, messageID _: MessageID, actorUserID _: UserID, cursor _: String?, pageSize _: Int) throws -> V2ReadReceiptReadersPage {
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
     func command() -> V2RecordReadReceiptCommand? { captured }
 }

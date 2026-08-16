@@ -3758,7 +3758,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await issuer.register(registration) == .idempotent(initial))
 
             let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now })
-            #expect(try await gateway.authenticate(accessToken: initial.accessToken, deviceID: deviceID) == userID)
+            #expect(try await gateway.authenticateSession(accessToken: initial.accessToken, deviceID: deviceID).userID == userID)
 
             let refresh = try V2DeviceCredentialRefresh(
                 userID: userID,
@@ -3770,7 +3770,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(successor.accessToken != initial.accessToken)
             #expect(successor.refreshCredential != initial.refreshCredential)
             #expect(try await issuer.refresh(refresh) == .idempotent(successor))
-            #expect(try await gateway.authenticate(accessToken: successor.accessToken, deviceID: deviceID) == userID)
+            #expect(try await gateway.authenticateSession(accessToken: successor.accessToken, deviceID: deviceID).userID == userID)
 
             let reuse = try V2DeviceCredentialRefresh(
                 userID: userID,
@@ -3780,7 +3780,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             #expect(try await issuer.refresh(reuse) == .terminalRejection)
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
-                try await gateway.authenticate(accessToken: successor.accessToken, deviceID: deviceID)
+                try await gateway.authenticateSession(accessToken: successor.accessToken, deviceID: deviceID)
             }
             #expect(try await count("im_v2.auth_devices", on: sql) == 1)
             #expect(try await count("im_v2.device_refresh_sessions", on: sql) == 1)
@@ -3839,12 +3839,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await service.revokeOtherDevices(actorUserID: userID, currentDeviceID: currentDeviceID, operationID: revokeOthersOperationID) == .idempotent)
 
             let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now.addingTimeInterval(2) })
-            #expect(try await gateway.authenticate(accessToken: currentCredentials.accessToken, deviceID: currentDeviceID) == userID)
+            #expect(try await gateway.authenticateSession(accessToken: currentCredentials.accessToken, deviceID: currentDeviceID).userID == userID)
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
-                try await gateway.authenticate(accessToken: remoteCredentials.accessToken, deviceID: remoteDeviceID)
+                try await gateway.authenticateSession(accessToken: remoteCredentials.accessToken, deviceID: remoteDeviceID)
             }
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
-                try await gateway.authenticate(accessToken: otherRemoteCredentials.accessToken, deviceID: otherRemoteDeviceID)
+                try await gateway.authenticateSession(accessToken: otherRemoteCredentials.accessToken, deviceID: otherRemoteDeviceID)
             }
             #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 1)
             #expect(try await count("im_v2.device_session_operations", on: sql) == 2)
@@ -3907,10 +3907,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now.addingTimeInterval(2) })
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
-                try await gateway.authenticate(accessToken: firstCredentials.accessToken, deviceID: firstDeviceID)
+                try await gateway.authenticateSession(accessToken: firstCredentials.accessToken, deviceID: firstDeviceID)
             }
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
-                try await gateway.authenticate(accessToken: secondCredentials.accessToken, deviceID: secondDeviceID)
+                try await gateway.authenticateSession(accessToken: secondCredentials.accessToken, deviceID: secondDeviceID)
             }
             #expect(try await issuer.register(firstRegistration) == .deviceUnavailable)
             let refresh = try V2DeviceCredentialRefresh(
@@ -4116,7 +4116,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(replayedSuccessor.refreshCredential == successor.refreshCredential)
 
             let gateway = V2PostgresGatewayAuthenticator(database: app.db(.psql), tokenKey: tokenKey, now: { now })
-            #expect(try await gateway.authenticate(accessToken: successor.accessToken, deviceID: deviceID) == userID)
+            #expect(try await gateway.authenticateSession(accessToken: successor.accessToken, deviceID: deviceID).userID == userID)
             #expect(try await count("im_v2.auth_devices", on: sql) == 1)
             #expect(try await count("im_v2.device_refresh_sessions", on: sql) == 1)
             #expect(try await count("im_v2.device_credential_operations", on: sql) == 2)

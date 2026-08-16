@@ -67,7 +67,7 @@ private actor V2LateProfileManager: V2OwnProfileManaging {
         let userID = try UserID("00000000-0000-0000-0000-000000000515")
         return try .init(
             userID: userID,
-            publicIdentity: .init(userID: userID, handle: .init("profile_test"), displayName: displayName),
+            publicIdentity: .init(userID: userID, handle: .init("profile_test"), displayName: displayName, accountKind: .regular),
             avatar: nil,
             state: .active,
             revision: .init(rawValue: 1)!,

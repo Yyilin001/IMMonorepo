@@ -11,7 +11,8 @@ struct V2ConversationStoreTests {
         let identity = try V2PublicIdentity(
             userID: .init("00000000-0000-0000-0000-000000000e03"),
             handle: .init("empty_direct"),
-            displayName: "尚未聊天的用户"
+            displayName: "尚未聊天的用户",
+            accountKind: .regular
         )
         let updatedAt = Date(timeIntervalSince1970: 1_750_000_000)
         let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
@@ -30,7 +31,8 @@ struct V2ConversationStoreTests {
         let identity = try V2PublicIdentity(
             userID: .init("00000000-0000-0000-0000-000000000e13"),
             handle: .init("empty_state"),
-            displayName: "空会话"
+            displayName: "空会话",
+            accountKind: .regular
         )
         let updatedAt = Date(timeIntervalSince1970: 1_750_000_000)
         let muteUntil = updatedAt.addingTimeInterval(3_600)
@@ -2265,9 +2267,14 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
         return .init(items: items, nextCursor: nextCursor)
     }
 
-    func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem] {
+    func timelinePage(
+        in roomID: String,
+        for userID: String,
+        before cursor: V2ConversationTimelineCursor?,
+        limit: Int
+    ) async throws -> V2ConversationTimelinePage {
         requestedMessageCount += 1
-        return messages
+        return makeTimelinePage(messages: messages, before: cursor, limit: limit)
     }
 
     func messageRequestCount() -> Int { requestedMessageCount }
@@ -2312,14 +2319,20 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
         }
     }
 
-    func messages(in _: String, for _: String) async throws -> [V2ConversationMessageItem] {
+    func timelinePage(
+        in _: String,
+        for _: String,
+        before cursor: V2ConversationTimelineCursor?,
+        limit: Int
+    ) async throws -> V2ConversationTimelinePage {
         messageRequestCount += 1
         let waiters = messageRequestWaiters
         messageRequestWaiters = []
         waiters.forEach { $0.resume() }
-        return try await withCheckedContinuation { continuation in
+        let messages = try await withCheckedContinuation { continuation in
             messageContinuations.append(continuation)
         }.get()
+        return makeTimelinePage(messages: messages, before: cursor, limit: limit)
     }
 
     func waitUntilSummaryRequestCount(_ expectedCount: Int) async {
@@ -2363,6 +2376,37 @@ private enum V2SequencedConversationDataSourceFailure: Error, Sendable {
     case failed
 }
 
+private func makeTimelinePage(
+    messages: [V2ConversationMessageItem],
+    before cursor: V2ConversationTimelineCursor?,
+    limit: Int
+) -> V2ConversationTimelinePage {
+    precondition(limit > 0)
+    var candidates: [V2ConversationTimelineItem] = []
+    candidates.reserveCapacity(messages.count)
+    for message in messages {
+        let item = V2ConversationTimelineItem.message(message, timelineSequence: message.roomSequence)
+        if let cursor {
+            let precedesSequence = item.timelineSequence < cursor.timelineSequence
+            let precedesItem = item.timelineSequence == cursor.timelineSequence
+                && item.storageItemID < cursor.itemID
+            guard precedesSequence || precedesItem else { continue }
+        }
+        candidates.append(item)
+    }
+    candidates.sort { lhs, rhs in
+        if lhs.timelineSequence != rhs.timelineSequence {
+            return lhs.timelineSequence > rhs.timelineSequence
+        }
+        return lhs.storageItemID > rhs.storageItemID
+    }
+    let items = Array(candidates.prefix(limit).reversed())
+    let olderCursor = candidates.count > limit ? items.first.map {
+        V2ConversationTimelineCursor(timelineSequence: $0.timelineSequence, itemID: $0.storageItemID)
+    } : nil
+    return .init(items: items, olderCursor: olderCursor)
+}
+
 private actor V2ConversationSenderFake: V2ConversationSending {
     private let result: V2ConversationSendOutcome
     private var messages: [V2SentMessage] = []
@@ -2378,6 +2422,11 @@ private actor V2ConversationSenderFake: V2ConversationSending {
 
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
         messages.append(.init(text: text, media: media, roomID: roomID, mentions: mentions))
+        return result
+    }
+
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+        messages.append(.init(text: text, media: media, roomID: roomID, mentions: mentions, entities: entities, replyTo: replyTo))
         return result
     }
 
@@ -2405,6 +2454,15 @@ private actor V2SuspendingConversationSender: V2ConversationSending {
         return .accepted
     }
 
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+        messages.append(.init(text: text, media: media, roomID: roomID, mentions: mentions, entities: entities, replyTo: replyTo))
+        beganSending = true
+        startWaiter?.resume()
+        startWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return .accepted
+    }
+
     func waitUntilSending() async {
         guard !beganSending else { return }
         await withCheckedContinuation { startWaiter = $0 }
@@ -2423,12 +2481,16 @@ private struct V2SentMessage: Equatable, Sendable {
     let media: [V2MediaReference]
     let roomID: String
     let mentions: [V2MentionTarget]
+    let entities: [V2MessageEntity]
+    let replyTo: V2MessageReplyReference?
 
-    init(text: String, media: [V2MediaReference] = [], roomID: String, mentions: [V2MentionTarget] = []) {
+    init(text: String, media: [V2MediaReference] = [], roomID: String, mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) {
         self.text = text
         self.media = media
         self.roomID = roomID
         self.mentions = mentions
+        self.entities = entities
+        self.replyTo = replyTo
     }
 }
 
@@ -2716,7 +2778,7 @@ private actor V2ConversationPublicIdentityResolverFake: V2ConversationPublicIden
     func resolve(handle: String) async throws -> V2PublicIdentity {
         let normalized = try V2PublicHandle(handle).rawValue
         guard let userID = values[normalized] else { throw V2PublicIdentityDirectoryClientError.notFound }
-        return try .init(userID: .init(userID), handle: .init(normalized), displayName: normalized)
+        return try .init(userID: .init(userID), handle: .init(normalized), displayName: normalized, accountKind: .regular)
     }
 }
 
@@ -2729,7 +2791,7 @@ private actor V2SuspendingConversationPublicIdentityResolver: V2ConversationPubl
         startWaiter?.resume()
         startWaiter = nil
         try await Task.sleep(for: .seconds(60))
-        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other")
+        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other", accountKind: .regular)
     }
 
     func waitUntilResolving() async {
@@ -2748,7 +2810,7 @@ private actor V2CancellationIgnoringConversationPublicIdentityResolver: V2Conver
         startWaiter?.resume()
         startWaiter = nil
         await withCheckedContinuation { resolutionContinuation = $0 }
-        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other")
+        return try .init(userID: .init("other-user"), handle: .init("other_user"), displayName: "Other", accountKind: .regular)
     }
 
     func waitUntilResolving() async {
@@ -2807,6 +2869,7 @@ private actor V2SuspendingGroupConversationCreator: V2GroupConversationCreating 
     }
 
     func cancelConversationCreation(operationID _: String) async throws -> V2GroupConversationCancellationOutcome { .queuedForRetry }
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { nil }
 
     func waitUntilCreating() async {
         guard count == 0 else { return }
@@ -3208,7 +3271,7 @@ private actor V2UserBlockPublicIdentityResolverFake: V2PublicIdentityResolving {
         handles.append(handle)
         let canonical = try V2PublicHandle(handle).rawValue
         guard let userID = values[canonical] else { throw V2PublicIdentityDirectoryClientError.notFound }
-        return try .init(userID: .init(userID), handle: .init(canonical), displayName: canonical)
+        return try .init(userID: .init(userID), handle: .init(canonical), displayName: canonical, accountKind: .regular)
     }
 
     func requestedHandles() -> [String] {

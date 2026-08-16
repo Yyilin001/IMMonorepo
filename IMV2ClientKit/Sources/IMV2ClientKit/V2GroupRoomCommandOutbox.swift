@@ -77,10 +77,6 @@ public protocol V2LocalGroupRoomCommandStore: Sendable {
     func groupRoomCreations() async throws -> [V2PendingGroupRoomCreation]
 }
 
-public extension V2LocalGroupRoomCommandStore {
-    func groupRoomCreations() async throws -> [V2PendingGroupRoomCreation] { [] }
-}
-
 public enum V2GroupRoomCreationFlushResult: Equatable, Sendable {
     case idle
     case acknowledged(GroupRoomOperationID, roomID: RoomID)

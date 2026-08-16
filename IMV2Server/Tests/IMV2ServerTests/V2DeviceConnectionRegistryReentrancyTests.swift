@@ -251,8 +251,8 @@ private actor SuspendedLiveActivityBroker: V2LiveActivityInterestManaging, V2Liv
 }
 
 private struct RegistryReentrancyAuthenticator: V2GatewayAuthenticator {
-    func authenticate(accessToken _: String, deviceID _: DeviceID) async throws -> UserID {
-        try .init("00000000-0000-0000-0000-000000000d01")
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
+        try .init(userID: .init("00000000-0000-0000-0000-000000000d01"), expiresAt: nil)
     }
 }
 

@@ -164,8 +164,8 @@ private actor HiddenPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
 }
 
 private struct Authenticator: V2GatewayAuthenticator {
-    func authenticate(accessToken _: String, deviceID _: DeviceID) async throws -> UserID {
-        try .init("00000000-0000-0000-0000-000000000001")
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
+        try .init(userID: .init("00000000-0000-0000-0000-000000000001"), expiresAt: nil)
     }
 }
 

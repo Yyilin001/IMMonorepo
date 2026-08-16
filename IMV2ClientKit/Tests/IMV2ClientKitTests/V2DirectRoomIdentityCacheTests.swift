@@ -13,7 +13,8 @@ struct V2DirectRoomIdentityCacheTests {
         let identity = try V2PublicIdentity(
             userID: .init("00000000-0000-0000-0000-000000000d03"),
             handle: .init("direct_user"),
-            displayName: "初始名称"
+            displayName: "初始名称",
+            accountKind: .regular
         )
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         try await first.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
@@ -21,7 +22,7 @@ struct V2DirectRoomIdentityCacheTests {
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         #expect(try await restarted.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))])
 
-        let refreshed = try V2PublicIdentity(userID: identity.userID, handle: identity.handle, displayName: "更新名称")
+        let refreshed = try V2PublicIdentity(userID: identity.userID, handle: identity.handle, displayName: "更新名称", accountKind: identity.accountKind)
         try await restarted.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: refreshed, updatedAt: Date(timeIntervalSince1970: 1_750_000_100))
         #expect(try await restarted.directRoomIdentities().first?.publicIdentity.displayName == "更新名称")
     }
@@ -32,7 +33,7 @@ struct V2DirectRoomIdentityCacheTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d11")!)
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000d12")
         let userID: UserID = try .init("00000000-0000-0000-0000-000000000d13")
-        let cached = try V2PublicIdentity(userID: userID, handle: .init("direct_user"), displayName: "旧名称")
+        let cached = try V2PublicIdentity(userID: userID, handle: .init("direct_user"), displayName: "旧名称", accountKind: .regular)
         let synced = try V2PublicIdentity(
             userID: userID,
             handle: .init("direct_user"),
@@ -124,7 +125,8 @@ struct V2DirectRoomIdentityCacheTests {
         let identity = try V2PublicIdentity(
             userID: .init("00000000-0000-0000-0000-000000000d53"),
             handle: .init("cached_user"),
-            displayName: "本地授权缓存"
+            displayName: "本地授权缓存",
+            accountKind: .regular
         )
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         try await store.cacheDirectRoomIdentity(
@@ -170,7 +172,7 @@ struct V2DirectRoomIdentityCacheTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d61")!)
         let roomID = try RoomID("00000000-0000-0000-0000-000000000d62")
         let userID = try UserID("00000000-0000-0000-0000-000000000d63")
-        let identity = try V2PublicIdentity(userID: userID, handle: .init("snapshot_disabled"), displayName: "停用前")
+        let identity = try V2PublicIdentity(userID: userID, handle: .init("snapshot_disabled"), displayName: "停用前", accountKind: .regular)
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
 
@@ -248,7 +250,7 @@ struct V2DirectRoomIdentityCacheTests {
             .init(userID: userID, minimumRevision: try #require(V2ProfileRevision(rawValue: 3)))
         ])
 
-        let identity = try V2PublicIdentity(userID: userID, handle: .init("hydrated_user"), displayName: "重新读取")
+        let identity = try V2PublicIdentity(userID: userID, handle: .init("hydrated_user"), displayName: "重新读取", accountKind: .regular)
         try await store.saveProfileView(.init(
             userID: userID,
             publicIdentity: identity,
@@ -269,7 +271,7 @@ struct V2DirectRoomIdentityCacheTests {
         let userID = "00000000-0000-0000-0000-000000000d22"
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let directProfile = Data("""
-            {"room_id":"\(lowerRoomID)","target_user_id":"\(userID)","public_handle":"direct_user","display_name":"对方","revision":1,"updated_at_ms":1750000000000}
+            {"room_id":"\(lowerRoomID)","target_user_id":"\(userID)","public_handle":"direct_user","display_name":"对方","account_kind":"regular","revision":1,"updated_at_ms":1750000000000}
             """.utf8)
         let acceptedMessage = Data("""
             {"event_type":"message.accepted","message_id":"00000000-0000-0000-0000-000000000d23","room_id":"\(upperRoomID)","room_sequence":1,"message_revision":1,"sender_user_id":"\(userID)","text":"离线重放","media_ids":[],"mention_user_ids":[],"mentions_everyone":false,"server_created_at_ms":1750000000000}
@@ -291,13 +293,13 @@ struct V2DirectRoomIdentityCacheTests {
         #expect(try await store.messages(in: roomID).map(\.text) == ["离线重放"])
     }
 
-    @Test("a suspended profile invalidation removes the legacy direct identity atomically")
+    @Test("a suspended profile invalidation removes the compact direct identity atomically")
     func suspendedInvalidationRemovesCompactIdentity() async throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-profile-suspended-\(UUID().uuidString).sqlite")
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d41")!)
         let roomID = try RoomID("00000000-0000-0000-0000-000000000d42")
         let userID = try UserID("00000000-0000-0000-0000-000000000d43")
-        let identity = try V2PublicIdentity(userID: userID, handle: .init("disabled_user"), displayName: "停用前")
+        let identity = try V2PublicIdentity(userID: userID, handle: .init("disabled_user"), displayName: "停用前", accountKind: .regular)
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         let invalidation = Data("{\"user_id\":\"\(userID.rawValue)\",\"minimum_profile_revision\":2,\"profile_state\":\"suspended\"}".utf8)

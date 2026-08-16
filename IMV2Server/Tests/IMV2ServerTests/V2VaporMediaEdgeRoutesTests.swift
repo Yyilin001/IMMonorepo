@@ -171,7 +171,9 @@ private struct InsecureRouteProvider: V2MediaObjectProvider {
 
 private struct RouteAuthenticator: V2GatewayAuthenticator {
     let result: Result<UserID, Error>
-    func authenticate(accessToken _: String, deviceID _: DeviceID) throws -> UserID { try result.get() }
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) throws -> V2GatewayAuthentication {
+        .init(userID: try result.get(), expiresAt: nil)
+    }
 }
 
 private enum RouteAuthenticationFailure: Error { case denied }

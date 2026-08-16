@@ -40,7 +40,7 @@ public struct V2VaporProfileViewRoutes: Sendable {
               let deviceID = try? DeviceID(rawDeviceID)
         else { throw Abort(.unauthorized) }
         do {
-            let userID = try await authenticator.authenticate(accessToken: accessToken, deviceID: deviceID)
+            let userID = try await authenticator.authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
             return .init(userID: userID, deviceID: deviceID, capabilityProfile: "account-edge")
         } catch {
             throw Abort(.unauthorized)
@@ -111,6 +111,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
     public let unavailable: Bool
     public let handle: String?
     public let displayName: String?
+    public let accountKind: V2AccountKind?
     public let avatarMediaID: String?
     public let state: String?
     public let revision: UInt64?
@@ -123,6 +124,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
         case unavailable
         case handle
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case avatarMediaID = "avatar_media_id"
         case state
         case revision
@@ -138,6 +140,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
             unavailable = true
             handle = nil
             displayName = nil
+            accountKind = nil
             avatarMediaID = nil
             state = nil
             revision = nil
@@ -149,6 +152,7 @@ public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
             unavailable = false
             handle = view.publicIdentity?.handle.rawValue
             displayName = view.publicIdentity?.displayName
+            accountKind = view.publicIdentity?.accountKind
             avatarMediaID = view.avatar?.mediaID.rawValue
             state = view.state.rawValue
             revision = view.revision.rawValue

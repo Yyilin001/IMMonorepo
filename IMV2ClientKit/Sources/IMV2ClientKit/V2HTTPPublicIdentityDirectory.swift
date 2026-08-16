@@ -87,20 +87,6 @@ private struct IdentityResponse: Decodable {
     let displayName: String
     let accountKind: V2AccountKind
 
-    private enum CodingKeys: String, CodingKey {
-        case userID
-        case handle
-        case displayName
-        case accountKind
-    }
-
-    init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        userID = try container.decode(String.self, forKey: .userID)
-        handle = try container.decode(String.self, forKey: .handle)
-        displayName = try container.decode(String.self, forKey: .displayName)
-        accountKind = try container.decodeIfPresent(V2AccountKind.self, forKey: .accountKind) ?? .regular
-    }
 }
 
 /// Authenticated owner-only profile access. The public handle remains stable
@@ -123,7 +109,7 @@ public struct V2HTTPPublicIdentityProfileClient: V2PublicIdentityProfileManaging
     }
 
     public func updateDisplayName(_ displayName: String) async throws -> V2PublicIdentity {
-        guard (try? V2PublicIdentity(userID: try .init("profile-validation"), handle: .init("profile_validation"), displayName: displayName)) != nil else {
+        guard (try? V2PublicIdentity(userID: try .init("profile-validation"), handle: .init("profile_validation"), displayName: displayName, accountKind: .regular)) != nil else {
             throw V2PublicIdentityDirectoryClientError.invalidResponse
         }
         return try await send(method: "PUT", displayName: displayName)

@@ -15,8 +15,8 @@ struct V2HTTPProfileViewClientTests {
         let roomID = "00000000-0000-0000-0000-000000000902"
         let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
         let body = try JSONEncoder().encode(ProfileViewResponseBody(results: [
-            .init(userID: userID, context: "direct", roomID: nil, unavailable: false, handle: "profile_user", displayName: "资料名称", state: "active", revision: 4, visibilityRevision: 2),
-            .init(userID: userID, context: "room", roomID: roomID, unavailable: true, handle: nil, displayName: nil, state: nil, revision: nil, visibilityRevision: nil),
+            .init(userID: userID, context: "direct", roomID: nil, unavailable: false, handle: "profile_user", displayName: "资料名称", accountKind: .regular, state: "active", revision: 4, visibilityRevision: 2),
+            .init(userID: userID, context: "room", roomID: roomID, unavailable: true, handle: nil, displayName: nil, accountKind: nil, state: nil, revision: nil, visibilityRevision: nil),
         ]))
         let transport = ProfileViewHTTPTransport(result: .success((body, response)))
         let client = try V2HTTPProfileViewClient(endpoint: endpoint, credentials: ProfileViewCredentials(), transport: transport)
@@ -33,6 +33,7 @@ struct V2HTTPProfileViewClientTests {
             return
         }
         #expect(view.publicIdentity?.displayName == "资料名称")
+        #expect(view.publicIdentity?.accountKind == .regular)
         #expect(view.revision.rawValue == 4)
         guard case .unavailable = results[1] else {
             Issue.record("Expected unavailable result")
@@ -74,6 +75,7 @@ private struct ProfileViewResponseItem: Encodable {
     let unavailable: Bool
     let handle: String?
     let displayName: String?
+    let accountKind: V2AccountKind?
     let state: String?
     let revision: UInt64?
     let visibilityRevision: UInt64?
@@ -86,6 +88,7 @@ private struct ProfileViewResponseItem: Encodable {
         case unavailable
         case handle
         case displayName = "display_name"
+        case accountKind = "account_kind"
         case state
         case revision
         case visibilityRevision = "visibility_revision"

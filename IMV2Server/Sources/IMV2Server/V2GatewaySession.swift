@@ -14,23 +14,9 @@ public struct V2GatewayAuthentication: Equatable, Sendable {
 }
 
 public protocol V2GatewayAuthenticator: Sendable {
-    func authenticate(accessToken: String, deviceID: DeviceID) async throws -> UserID
-    /// Production authenticators return the verified access-token expiry. A
-    /// nil value is reserved for non-expiring test/auth adapters.
-    func authenticatedSessionExpiresAt(accessToken: String, deviceID: DeviceID) async throws -> Date?
-    /// Production implementations override this combined read so identity and
-    /// expiry come from one revocation-consistent database snapshot.
+    /// Identity and expiry must come from one revocation-consistent read.
+    /// A nil expiry is reserved for deliberately non-expiring adapters.
     func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication
-}
-
-public extension V2GatewayAuthenticator {
-    func authenticatedSessionExpiresAt(accessToken _: String, deviceID _: DeviceID) async throws -> Date? { nil }
-    func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
-        .init(
-            userID: try await authenticate(accessToken: accessToken, deviceID: deviceID),
-            expiresAt: try await authenticatedSessionExpiresAt(accessToken: accessToken, deviceID: deviceID)
-        )
-    }
 }
 
 public enum V2GatewaySessionError: Error, Equatable, Sendable {

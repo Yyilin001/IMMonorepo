@@ -729,6 +729,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             if let publicIdentity = entry.publicIdentity {
                 member.publicHandle = publicIdentity.handle.rawValue
                 member.displayName = publicIdentity.displayName
+                member.accountKind = publicIdentity.accountKind.rawValue
             }
             return member
         }
@@ -838,6 +839,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             var wire = IMV2ReadReceiptReader(); wire.userID = reader.userID.rawValue
             wire.publicHandle = reader.publicIdentity.handle.rawValue
             wire.displayName = reader.publicIdentity.displayName
+            wire.accountKind = reader.publicIdentity.accountKind.rawValue
             return wire
         }
         return response

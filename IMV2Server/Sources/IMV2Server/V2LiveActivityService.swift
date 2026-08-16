@@ -103,8 +103,3 @@ public struct V2LiveActivityService: Sendable, V2LiveActivityObservationAuthoriz
 }
 
 extension PostgresV2LiveActivityStore: V2LivePresenceLeaseManaging {}
-
-extension V2LiveActivityStore {
-    public func allowsOnlinePresence(userID _: UserID) async throws -> Bool { true }
-    public func authorizeObservation(roomID _: RoomID, viewerUserID _: UserID, subjectUserID _: UserID, now _: Date) async throws {}
-}

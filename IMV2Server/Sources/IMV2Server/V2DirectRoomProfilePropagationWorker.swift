@@ -358,7 +358,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
     let targetUserID: String
     let publicHandle: String
     let displayName: String
-    let accountKind: String?
+    let accountKind: String
     let revision: Int64
     let updatedAtMilliseconds: Int64
 
@@ -382,7 +382,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
             return false
         }
         return publicHandle == lease.publicHandle && displayName == lease.displayName &&
-            (accountKind ?? V2AccountKind.regular.rawValue) == lease.accountKind &&
+            accountKind == lease.accountKind &&
             revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds
     }
 }

@@ -1,16 +1,17 @@
 import Foundation
 import IMV2Core
+@testable import IMV2Server
 
 /// Actor-isolated control-plane fixture. It models the same fencing rules as
 /// PostgreSQL while keeping unit tests independent of an external database.
-public actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
+actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
     private var pools: [V2ShardAdmissionPoolKey: ShardAdmissionState]
 
-    public init(seed: [(V2ShardAdmissionPoolKey, ShardAdmissionState)] = []) {
+    init(seed: [(V2ShardAdmissionPoolKey, ShardAdmissionState)] = []) {
         self.pools = Dictionary(uniqueKeysWithValues: seed)
     }
 
-    public func issue(
+    func issue(
         key: V2ShardAdmissionPoolKey,
         capacityProfile: V2CapacityProfile,
         leaseID: ShardAdmissionLeaseID,
@@ -33,7 +34,7 @@ public actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         return lease
     }
 
-    public func renew(
+    func renew(
         key: V2ShardAdmissionPoolKey,
         expectedFence: V2ShardAdmissionLeaseFence,
         validUntil: Date,
@@ -66,7 +67,7 @@ public actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         return renewed
     }
 
-    public func replaceExpired(
+    func replaceExpired(
         key: V2ShardAdmissionPoolKey,
         capacityProfile: V2CapacityProfile,
         replacementLeaseID: ShardAdmissionLeaseID,
@@ -104,7 +105,7 @@ public actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         return replacement
     }
 
-    public func state(for key: V2ShardAdmissionPoolKey) -> ShardAdmissionState? {
+    func state(for key: V2ShardAdmissionPoolKey) -> ShardAdmissionState? {
         pools[key]
     }
 

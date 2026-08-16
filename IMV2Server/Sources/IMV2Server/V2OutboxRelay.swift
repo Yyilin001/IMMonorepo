@@ -33,14 +33,6 @@ public protocol V2RoomOutboxStore: Sendable {
     func scheduleRetry(_ lease: V2OutboxLease, disposition: V2DurableRetryDisposition, now: Date) async throws
 }
 
-public extension V2RoomOutboxStore {
-    /// In-memory/fake stores may retain their previous immediate-release
-    /// behavior. PostgreSQL overrides this with durable backoff or pause.
-    func scheduleRetry(_ lease: V2OutboxLease, disposition _: V2DurableRetryDisposition, now _: Date) async throws {
-        try await release(lease)
-    }
-}
-
 /// NATS is one possible implementation. Keeping it as a protocol makes the
 /// at-least-once contract testable and permits a local deterministic adapter.
 public protocol V2FanoutPlanPublisher: Sendable {

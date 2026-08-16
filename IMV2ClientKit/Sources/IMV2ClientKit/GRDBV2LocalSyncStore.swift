@@ -2378,12 +2378,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         else { throw V2ClientProjectionError.invalidMessagePayload }
         let handle: String? = row["public_handle"]
         let displayName: String? = row["display_name"]
-        let accountKind = (row["account_kind"] as String?).flatMap(V2AccountKind.init) ?? .regular
+        let accountKindRaw: String? = row["account_kind"]
+        let accountKind = accountKindRaw.flatMap(V2AccountKind.init)
+        guard accountKindRaw == nil || accountKind != nil else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
         let avatarMediaID: String? = row["avatar_media_id"]
         let identity: V2PublicIdentity?
-        switch (handle, displayName) {
-        case (.none, .none): identity = nil
-        case let (.some(handle), .some(displayName)):
+        switch (handle, displayName, accountKind) {
+        case (.none, .none, .none): identity = nil
+        case let (.some(handle), .some(displayName), .some(accountKind)):
             identity = try .init(userID: userID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
         default: throw V2ClientProjectionError.invalidMessagePayload
         }
@@ -3279,11 +3283,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     static func decodeDirectRoomIdentity(_ row: Row) throws -> V2ClientDirectRoomIdentity {
+        guard let accountKind = V2AccountKind(rawValue: row["account_kind"] as String) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
         let identity = try V2PublicIdentity(
             userID: .init(row["target_user_id"] as String),
             handle: .init(row["public_handle"] as String),
             displayName: row["display_name"] as String,
-            accountKind: (row["account_kind"] as String?).flatMap(V2AccountKind.init) ?? .regular
+            accountKind: accountKind
         )
         return try .init(
             roomID: .init(row["room_id"] as String),

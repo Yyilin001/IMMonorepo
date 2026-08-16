@@ -135,12 +135,6 @@ public protocol V2UserShardMigrationStoring: Sendable {
     ) async throws -> V2UserShardMigrationRecord
 }
 
-public extension V2UserShardMigrationStoring {
-    /// Stores that do not own a user-indexed durable control table (notably
-    /// deterministic fakes) do not participate in runtime shadow forwarding.
-    func load(userID _: UserID) async throws -> V2UserShardMigrationRecord? { nil }
-}
-
 public struct V2UserShardMigrationRetentionLease: Equatable, Sendable {
     public let record: V2UserShardMigrationRecord
     public let claimToken: UUID

@@ -102,7 +102,7 @@ public struct V2ProfileUpdateCommand: Sendable {
         avatar: V2AvatarReference?
     ) throws {
         // Reuse the established public-name validation and normalization.
-        _ = try V2PublicIdentity(userID: actorUserID, handle: .init("profile_update"), displayName: displayName)
+        _ = try V2PublicIdentity(userID: actorUserID, handle: .init("profile_update"), displayName: displayName, accountKind: .regular)
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.expectedRevision = expectedRevision

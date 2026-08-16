@@ -46,7 +46,7 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
               let deviceID = try? DeviceID(rawDeviceID)
         else { throw Abort(.unauthorized) }
         do {
-            let userID = try await authenticator.authenticate(accessToken: accessToken, deviceID: deviceID)
+            let userID = try await authenticator.authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
             return .init(userID: userID, deviceID: deviceID, capabilityProfile: "account-edge")
         } catch { throw Abort(.unauthorized) }
     }

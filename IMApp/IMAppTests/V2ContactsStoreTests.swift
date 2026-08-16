@@ -124,7 +124,7 @@ struct V2ContactsStoreTests {
     }
 
     private func makeIdentity(userID: String, handle: String, displayName: String) throws -> V2PublicIdentity {
-        try .init(userID: .init(userID), handle: .init(handle), displayName: displayName)
+        try .init(userID: .init(userID), handle: .init(handle), displayName: displayName, accountKind: .regular)
     }
 }
 

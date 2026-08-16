@@ -44,7 +44,7 @@ public struct V2PublicIdentity: Codable, Equatable, Sendable {
         userID: UserID,
         handle: V2PublicHandle,
         displayName: String,
-        accountKind: V2AccountKind = .regular
+        accountKind: V2AccountKind
     ) throws {
         let normalizedName = displayName.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -67,16 +67,13 @@ public struct V2PublicIdentity: Codable, Equatable, Sendable {
         case accountKind
     }
 
-    /// Old snapshots and direct-room cache records did not contain an account
-    /// kind. They are ordinary accounts by definition, so decoding keeps that
-    /// history valid while all new server projections carry the explicit fact.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             userID: container.decode(UserID.self, forKey: .userID),
             handle: container.decode(V2PublicHandle.self, forKey: .handle),
             displayName: container.decode(String.self, forKey: .displayName),
-            accountKind: try container.decodeIfPresent(V2AccountKind.self, forKey: .accountKind) ?? .regular
+            accountKind: try container.decode(V2AccountKind.self, forKey: .accountKind)
         )
     }
 

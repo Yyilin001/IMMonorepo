@@ -45,7 +45,7 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
             if let cursor {
                 rows = try await sql.raw("""
                     SELECT membership.user_id, membership.role,
-                           profile.public_handle, profile.display_name
+                           profile.public_handle, profile.display_name, profile.account_kind
                     FROM im_v2.room_memberships AS membership
                     LEFT JOIN im_v2.public_user_profiles AS profile
                       ON profile.user_id = membership.user_id AND profile.state = 'active'
@@ -59,7 +59,7 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
             } else {
                 rows = try await sql.raw("""
                     SELECT membership.user_id, membership.role,
-                           profile.public_handle, profile.display_name
+                           profile.public_handle, profile.display_name, profile.account_kind
                     FROM im_v2.room_memberships AS membership
                     LEFT JOIN im_v2.public_user_profiles AS profile
                       ON profile.user_id = membership.user_id AND profile.state = 'active'
@@ -76,10 +76,13 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
                 guard let role = V2RoomMembershipRole(rawValue: row.role) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
                 let userID: UserID = try .init(row.userID.uuidString)
                 let publicIdentity: V2PublicIdentity?
-                switch (row.publicHandle, row.displayName) {
-                case (.none, .none): publicIdentity = nil
-                case let (.some(handle), .some(displayName)):
-                    publicIdentity = try .init(userID: userID, handle: .init(handle), displayName: displayName)
+                switch (row.publicHandle, row.displayName, row.accountKind) {
+                case (.none, .none, .none): publicIdentity = nil
+                case let (.some(handle), .some(displayName), .some(rawAccountKind)):
+                    guard let accountKind = V2AccountKind(rawValue: rawAccountKind) else {
+                        throw V2RoomMembershipDirectoryError.corruptPersistenceState
+                    }
+                    publicIdentity = try .init(userID: userID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
                 default: throw V2RoomMembershipDirectoryError.corruptPersistenceState
                 }
                 return .init(userID: userID, role: role, publicIdentity: publicIdentity)
@@ -110,11 +113,13 @@ private struct DirectoryMemberRow: Decodable {
     let role: String
     let publicHandle: String?
     let displayName: String?
+    let accountKind: String?
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case role
         case publicHandle = "public_handle"
         case displayName = "display_name"
+        case accountKind = "account_kind"
     }
 }
 

@@ -248,6 +248,8 @@ private actor BatchDeliveryStore: V2FanoutDeliveryStore {
 
     func release(_: V2FanoutDeliveryLease) {}
 
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+
     func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) {
         scheduled.append(lease.targetUserID)
     }
@@ -298,6 +300,10 @@ private actor DeliveryStore: V2FanoutDeliveryStore {
         return outcome ?? .staleLease
     }
 
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) throws -> [V2FanoutDeliveryCommit] {
+        try leases.map { try commit($0, now: now) }
+    }
+
     func release(_: V2FanoutDeliveryLease) {
         releases += 1
         claimed = false
@@ -343,6 +349,9 @@ private actor LaneDeliveryStore: V2FanoutDeliveryStore {
     }
 
     func release(_: V2FanoutDeliveryLease) {}
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) -> [V2FanoutDeliveryCommit] { leases.map { commit($0, now: now) } }
+    func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
+    func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func claimedLanes() -> [V2FanoutDeliveryClaimLane] { lanes }
 }
 

@@ -66,9 +66,9 @@ struct V2VaporDeviceSessionRoutesTests {
 
 private struct DeviceSessionRouteAuthenticator: V2GatewayAuthenticator {
     let userID: UserID
-    func authenticate(accessToken: String, deviceID: DeviceID) throws -> UserID {
+    func authenticateSession(accessToken: String, deviceID: DeviceID) throws -> V2GatewayAuthentication {
         guard accessToken == "opaque-token" else { throw V2GatewayAuthenticationError.unauthenticated }
-        return userID
+        return .init(userID: userID, expiresAt: nil)
     }
 }
 

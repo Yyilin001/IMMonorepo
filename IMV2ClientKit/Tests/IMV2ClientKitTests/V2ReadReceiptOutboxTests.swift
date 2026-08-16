@@ -96,6 +96,12 @@ private actor ReceiptTransport: V2ClientReadReceiptTransport {
         case .accepted: return .init(roomID: roomID, userID: try! .init("00000000-0000-0000-0000-000000000983"), readThroughRoomSequence: readThroughRoomSequence, recordedAt: .distantPast)
         }
     }
+    func setReadReceiptPreferences(operationID _: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts _: Bool, allowsGroupReadReceipts _: Bool) throws -> V2ReadReceiptPreferences {
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
+    func listReadReceiptReaders(roomID _: RoomID, messageID _: MessageID, cursor _: String?, pageSize _: Int) throws -> V2ReadReceiptReadersPage {
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
     func operationIDs() -> [ReadReceiptOperationID] { received }
 }
 

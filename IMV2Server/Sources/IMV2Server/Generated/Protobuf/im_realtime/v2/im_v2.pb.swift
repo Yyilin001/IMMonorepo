@@ -2606,6 +2606,8 @@ public nonisolated struct IMV2RoomMember: Sendable {
 
   public var displayName: String = String()
 
+  public var accountKind: String = String()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2878,6 +2880,8 @@ public nonisolated struct IMV2ReadReceiptReader: Sendable {
   public var publicHandle: String = String()
 
   public var displayName: String = String()
+
+  public var accountKind: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -7745,7 +7749,7 @@ nonisolated extension IMV2ListRoomMembers: SwiftProtobuf.Message, SwiftProtobuf.
 
 nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RoomMember"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}role\0\u{3}public_handle\0\u{3}display_name\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}role\0\u{3}public_handle\0\u{3}display_name\0\u{3}account_kind\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7757,6 +7761,7 @@ nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._Mess
       case 2: try { try decoder.decodeSingularEnumField(value: &self.role) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.publicHandle) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.accountKind) }()
       default: break
       }
     }
@@ -7775,6 +7780,9 @@ nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if !self.displayName.isEmpty {
       try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 4)
     }
+    if !self.accountKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountKind, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -7783,6 +7791,7 @@ nonisolated extension IMV2RoomMember: SwiftProtobuf.Message, SwiftProtobuf._Mess
     if lhs.role != rhs.role {return false}
     if lhs.publicHandle != rhs.publicHandle {return false}
     if lhs.displayName != rhs.displayName {return false}
+    if lhs.accountKind != rhs.accountKind {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8370,7 +8379,7 @@ nonisolated extension IMV2ListReadReceiptReaders: SwiftProtobuf.Message, SwiftPr
 
 nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ReadReceiptReader"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}public_handle\0\u{3}display_name\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}public_handle\0\u{3}display_name\0\u{3}account_kind\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8381,6 +8390,7 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
       case 1: try { try decoder.decodeSingularStringField(value: &self.userID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.publicHandle) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.displayName) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.accountKind) }()
       default: break
       }
     }
@@ -8396,6 +8406,9 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
     if !self.displayName.isEmpty {
       try visitor.visitSingularStringField(value: self.displayName, fieldNumber: 3)
     }
+    if !self.accountKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountKind, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8403,6 +8416,7 @@ nonisolated extension IMV2ReadReceiptReader: SwiftProtobuf.Message, SwiftProtobu
     if lhs.userID != rhs.userID {return false}
     if lhs.publicHandle != rhs.publicHandle {return false}
     if lhs.displayName != rhs.displayName {return false}
+    if lhs.accountKind != rhs.accountKind {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

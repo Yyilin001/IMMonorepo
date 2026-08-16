@@ -104,33 +104,6 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         }
     }
 
-    func messages(in roomID: String, for userID: String) async throws -> [V2ConversationMessageItem] {
-        let parsedRoomID = try RoomID(roomID)
-        let messages = try await localStore.messages(in: parsedRoomID)
-        let reactions = try await localStore.reactions(in: parsedRoomID)
-        let pinnedMessageIDs = try await localStore.pinnedMessageIDs(roomID: parsedRoomID)
-        let favoritedMessageIDs = try await localStore.favoritedMessageIDs(in: parsedRoomID)
-        let directReceipt = try await localStore.directReadReceipt(roomID: parsedRoomID)
-        let reactionsByMessageID = Dictionary(grouping: reactions, by: \.messageID)
-        var items: [V2ConversationMessageItem] = []
-        items.reserveCapacity(messages.count)
-        for message in messages {
-            items.append(Self.messageItem(
-                message,
-                userID: userID,
-                reactions: reactionsByMessageID[message.messageID] ?? [],
-                pinnedMessageIDs: pinnedMessageIDs,
-                favoritedMessageIDs: favoritedMessageIDs,
-                directReceipt: directReceipt
-            ))
-        }
-        return items
-    }
-
-    func timeline(in roomID: String, for userID: String) async throws -> [V2ConversationTimelineItem] {
-        try await timelinePage(in: roomID, for: userID, before: nil, limit: 10_000).items
-    }
-
     func timelinePage(
         in roomID: String,
         for userID: String,

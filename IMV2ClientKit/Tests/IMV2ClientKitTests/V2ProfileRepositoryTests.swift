@@ -64,7 +64,7 @@ struct V2ProfileRepositoryTests {
     private func profile(userID: UserID, revision: UInt64) throws -> V2ProfileView {
         try .init(
             userID: userID,
-            publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "已读取"),
+            publicIdentity: .init(userID: userID, handle: .init("profile_user"), displayName: "已读取", accountKind: .regular),
             avatar: nil,
             state: .active,
             revision: try #require(V2ProfileRevision(rawValue: revision)),
