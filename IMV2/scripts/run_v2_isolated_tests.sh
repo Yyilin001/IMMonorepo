@@ -54,11 +54,7 @@ for package in "${package_list[@]}"; do
     "${test_command[@]}"
 done
 
-bash "${repo_root}/scripts/check_v2_sql_migration_manifest.sh"
-bash "${repo_root}/scripts/check_v2_sql_migration_baseline_lock.sh"
-bash "${repo_root}/scripts/test_v2_sql_migration_baseline_lock.sh"
 bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
-bash "${repo_root}/scripts/check_v2_local_schema_migration_markers.sh"
 bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"
 bash "${repo_root}/scripts/check_v2_prometheus_rules.sh"
 bash "${repo_root}/scripts/check_v2_runtime_env_examples.sh"

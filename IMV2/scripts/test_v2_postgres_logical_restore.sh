@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Disposable logical-backup drill for the V2 authoritative schema. This proves
-# that a generated dump can recreate the migration-owned im_v2 schema and a
+# that a generated dump can recreate the canonical im_v2 schema and a
 # durable replay-audit record. It is intentionally not a claim of WAL/PITR,
 # cross-region, RPO, or RTO readiness.
 
@@ -31,9 +31,7 @@ scalar() {
   psql -tAc "$1" | tr -d '[:space:]'
 }
 
-for migration_path in "${v2_dir}"/sql/[0-9][0-9][0-9][0-9]_*.sql; do
-  psql < "${migration_path}" >/dev/null
-done
+psql < "${v2_dir}/sql/schema.sql" >/dev/null
 
 psql -c "INSERT INTO im_v2.durable_work_replay_audit (operation_id, operator_principal, target_kind, source_event_id, target_user_id, projection_kind, reason_code, requested_at, outcome) VALUES ('00000000-0000-0000-0000-00000000d701', 'logical-restore-drill', 'room_outbox', '00000000-0000-0000-0000-00000000d702', NULL, NULL, 'dependency_recovered', now(), 'requeued')" >/dev/null
 

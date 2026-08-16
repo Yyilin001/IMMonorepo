@@ -291,12 +291,10 @@ struct V2GroupMembersSheet: View {
                 ForEach(store.groupMembers) { member in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(member.displayName ?? member.handle.map { "@\($0)" } ?? "资料暂不可用")
-                            if let handle = member.handle {
-                                Text("@\(handle)")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text(member.displayName)
+                            Text("@\(member.handle)")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
@@ -314,7 +312,7 @@ struct V2GroupMembersSheet: View {
                                     .contentShape(.rect)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityLabel("修改 \(member.displayName ?? member.handle ?? "成员") 的角色")
+                            .accessibilityLabel("修改 \(member.displayName) 的角色")
                             .accessibilityHint("可设为管理员或普通成员")
                             .accessibilityIdentifier("v2.group.member.role.\(member.id)")
                         }
@@ -334,7 +332,7 @@ struct V2GroupMembersSheet: View {
                                     .contentShape(.rect)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityLabel("群管理 \(member.displayName ?? member.handle ?? "成员")")
+                            .accessibilityLabel("群管理 \(member.displayName)")
                             .accessibilityHint("可禁言一小时或执行带审计记录的管理员移除")
                             .accessibilityIdentifier("v2.group.member.moderation.\(member.id)")
                             Button("移除", role: .destructive) {
@@ -398,7 +396,7 @@ struct V2GroupMembersSheet: View {
                     runModeratedRemoval(member)
                 }
             } message: { member in
-                Text("将移除 \(member.displayName ?? member.handle ?? "该成员")，并写入管理员审计记录。")
+                Text("将移除 \(member.displayName)，并写入管理员审计记录。")
             }
         }
     }

@@ -73,6 +73,19 @@ public struct V2ClientGroupEventSubscription: Equatable, Sendable {
     }
 }
 
+/// Durable local access state for a projected group room. Delivery mode is a
+/// required room invariant; authorization is mutable device state that the
+/// server can revoke independently with `FORBIDDEN`.
+public struct V2ClientGroupEventAccess: Equatable, Sendable {
+    public let deliveryMode: V2GroupDeliveryMode
+    public let isAuthorized: Bool
+
+    public init(deliveryMode: V2GroupDeliveryMode, isAuthorized: Bool) {
+        self.deliveryMode = deliveryMode
+        self.isAuthorized = isAuthorized
+    }
+}
+
 /// Foreground subscription control is intentionally distinct from durable
 /// event reads so callers cannot mistake a wake for a delivered message.
 public protocol V2ClientGroupEventSubscriptionTransport: Sendable {
@@ -92,9 +105,9 @@ public protocol V2LocalGroupEventStore: Sendable {
     func setHybridGroupBackgroundCursor(_ roomID: RoomID?) async throws
     func isKnownHybridGroupRoom(roomID: RoomID) async throws -> Bool
     /// Stops room-log pulls after the authoritative server says this device's
-    /// user is no longer a member. Historical local projections remain
-    /// readable; only the eligibility marker is cleared.
-    func deactivateHybridGroupRoom(roomID: RoomID) async throws
+    /// user is no longer a member. Historical local projections and the
+    /// immutable delivery mode remain readable.
+    func markGroupEventUnauthorized(roomID: RoomID) async throws
     func groupEventCursor(roomID: RoomID) async throws -> UInt64
     func applyGroupEventPage(_ page: V2ClientGroupEventPage) async throws -> UInt64
 }
@@ -104,9 +117,9 @@ public protocol V2LocalGroupEventStore: Sendable {
 /// durable acknowledgement: `user_sync_log` remains the recovery and ACK
 /// authority for standard groups.
 public protocol V2LocalForegroundGroupEventPreviewStore: Sendable {
-    /// Returns the immutable delivery mode from the locally projected room
-    /// profile. `nil` means this device does not currently know a group room.
-    func groupDeliveryMode(roomID: RoomID) async throws -> V2GroupDeliveryMode?
+    /// Returns the immutable delivery mode and current local authorization.
+    /// `nil` means this device does not know the group room.
+    func groupEventAccess(roomID: RoomID) async throws -> V2ClientGroupEventAccess?
     /// A safe lower bound for an in-memory preview cursor. It may cause a
     /// duplicate pull after restart, but may never skip a room event.
     func foregroundGroupEventPreviewStartSequence(roomID: RoomID) async throws -> UInt64
@@ -174,7 +187,7 @@ public actor V2GroupEventSyncEngine {
             try Task.checkCancellation()
             // A forbidden response is still one bounded background attempt;
             // otherwise a batch containing only revoked rooms could loop
-            // forever while repeatedly deactivating the same stale entry.
+            // forever while repeatedly revoking the same stale entry.
             processedPages += 1
             do {
                 let progress = try await synchronizeOnePage(roomID: roomID)
@@ -182,7 +195,7 @@ public actor V2GroupEventSyncEngine {
                 roomHasMoreEvents = roomHasMoreEvents || progress.hasMore
             } catch let error as V2RealtimeTransportError {
                 guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-                try await store.deactivateHybridGroupRoom(roomID: roomID)
+                try await store.markGroupEventUnauthorized(roomID: roomID)
             }
             // Persist after each bounded attempt. A crash can repeat the last
             // room but cannot reset every restart to the lexicographically

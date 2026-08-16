@@ -135,12 +135,12 @@ public protocol V2ClientMembershipTransport: Sendable {
 public struct V2ClientRoomMember: Equatable, Sendable {
     public let userID: UserID
     public let role: V2RoomMembershipRole
-    /// Public profile authorized by the active-room roster read.  It is not a
-    /// replacement for a durable contact graph and may be absent when the
-    /// member has no public profile.
-    public let publicIdentity: V2PublicIdentity?
+    /// Public profile authorized by the active-room roster read. It is not a
+    /// replacement for a durable contact graph; non-visible profiles are not
+    /// returned as roster rows.
+    public let publicIdentity: V2PublicIdentity
 
-    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity? = nil) {
+    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity) {
         self.userID = userID
         self.role = role
         self.publicIdentity = publicIdentity
@@ -705,16 +705,17 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         let actorRole = try Self.membershipRole(from: page.actorRole)
         let members: [V2ClientRoomMember] = try page.members.map { member in
             let userID: UserID = try .init(member.userID)
-            let publicIdentity: V2PublicIdentity?
-            switch (member.publicHandle.isEmpty, member.displayName.isEmpty, member.accountKind.isEmpty) {
-            case (true, true, true): publicIdentity = nil
-            case (false, false, false):
-                guard let accountKind = V2AccountKind(rawValue: member.accountKind) else {
-                    throw V2RealtimeTransportError.unexpectedResponse
-                }
-                publicIdentity = try .init(userID: userID, handle: .init(member.publicHandle), displayName: member.displayName, accountKind: accountKind)
-            default: throw V2RealtimeTransportError.unexpectedResponse
+            guard !member.publicHandle.isEmpty, !member.displayName.isEmpty,
+                  let accountKind = V2AccountKind(rawValue: member.accountKind)
+            else {
+                throw V2RealtimeTransportError.unexpectedResponse
             }
+            let publicIdentity = try V2PublicIdentity(
+                userID: userID,
+                handle: .init(member.publicHandle),
+                displayName: member.displayName,
+                accountKind: accountKind
+            )
             return .init(userID: userID, role: try Self.membershipRole(from: member.role), publicIdentity: publicIdentity)
         }
         guard Set(members.map(\.userID)).count == members.count else { throw V2RealtimeTransportError.unexpectedResponse }

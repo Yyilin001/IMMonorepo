@@ -1202,7 +1202,7 @@ struct V2ConversationStoreTests {
             "member-a": .init(
                 membershipRevision: 3,
                 actorRole: "成员",
-                members: [.init(id: "member-b", role: "成员")],
+                members: [.init(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")],
                 nextCursor: nil
             )
         ])
@@ -1231,7 +1231,7 @@ struct V2ConversationStoreTests {
         let reader = V2SuspendingGroupMemberDirectory(page: .init(
             membershipRevision: 3,
             actorRole: "成员",
-            members: [.init(id: "owner", role: "群主")],
+            members: [.init(id: "owner", role: "群主", handle: "owner_1", displayName: "群主")],
             nextCursor: nil
         ))
         let store = makeConversationDetailStore(
@@ -1263,7 +1263,7 @@ struct V2ConversationStoreTests {
             .success(.init(
                 membershipRevision: 3,
                 actorRole: "群主",
-                members: [.init(id: "old-owner", role: "群主")],
+                members: [.init(id: "old-owner", role: "群主", handle: "old_owner", displayName: "旧群主")],
                 nextCursor: "opaque-revision-3"
             )),
             .failure(.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 4)),
@@ -1271,8 +1271,8 @@ struct V2ConversationStoreTests {
                 membershipRevision: 4,
                 actorRole: "群主",
                 members: [
-                    .init(id: "current-owner", role: "群主"),
-                    .init(id: "current-member", role: "成员")
+                    .init(id: "current-owner", role: "群主", handle: "current_owner", displayName: "当前群主"),
+                    .init(id: "current-member", role: "成员", handle: "current_member", displayName: "当前成员")
                 ],
                 nextCursor: nil
             ))
@@ -1301,7 +1301,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1331,7 +1331,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1367,7 +1367,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1399,7 +1399,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1433,7 +1433,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "管理员",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1465,7 +1465,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1494,7 +1494,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1531,7 +1531,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "管理员",
-            members: [.init(id: "member-a", role: "成员")],
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1959,6 +1959,66 @@ struct V2ConversationStoreTests {
         await store.search()
 
         #expect(await searcher.requests().map(\.scope) == [.room(roomID)])
+    }
+
+    @Test func forbiddenGroupSubscriptionPersistsRevokedAccessWithoutErasingDeliveryMode() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000f21")
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appending(path: "im-v2-group-access-\(UUID().uuidString).sqlite")
+        let localStore = try await V2LocalStoreBootstrapper(
+            bindingStore: V2RuntimeInstallationBindingStoreFake(),
+            makeBinding: {
+                .init(value: UUID(uuidString: "00000000-0000-0000-0000-000000000f22")!)
+            }
+        ).open(
+            databaseURL: databaseURL
+        )
+        let profile = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000f23"),
+            projectionKind: "membership",
+            payload: JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed",
+                "room_id": roomID.rawValue,
+                "title": "已撤销事件权限的普通群",
+                "owner_user_id": "00000000-0000-0000-0000-000000000f24",
+                "target_user_id": "00000000-0000-0000-0000-000000000f25",
+                "action": "remove",
+                "membership_revision": 2,
+                "delivery_mode": "standard_fanout",
+                "created_at_ms": 1_750_000_000_000,
+                "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+        _ = try await localStore.apply(.init(
+            generation: 1,
+            records: [profile],
+            nextSyncToken: .init("runtime-access-token"),
+            receipt: .init("runtime-access-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let eventTransport = V2UnusedGroupEventTransportFake()
+        let subscriptionTransport = V2ForbiddenGroupEventSubscriptionTransportFake()
+        let synchronizer = V2RealtimeActiveHybridGroupSynchronizer(
+            groupEventSync: .init(transport: eventTransport, store: localStore),
+            foregroundGroupPreview: .init(transport: eventTransport, store: localStore),
+            localStore: localStore,
+            subscriptionTransport: subscriptionTransport,
+            wakeSource: V2UnusedGroupEventWakeSourceFake()
+        )
+
+        #expect(try await synchronizer.subscribe(roomID: roomID.rawValue) == .notHybridRoom)
+        #expect(try await localStore.groupEventAccess(roomID: roomID) == .init(
+            deliveryMode: .standardFanout,
+            isAuthorized: false
+        ))
+
+        // A second foreground attempt observes durable local revocation and
+        // never enters a FORBIDDEN network loop.
+        #expect(try await synchronizer.subscribe(roomID: roomID.rawValue) == .notHybridRoom)
+        #expect(await subscriptionTransport.requestCount() == 1)
     }
 }
 
@@ -3299,6 +3359,51 @@ private actor V2UserBlockChangerFake: V2UserBlockChanging {
 
     func requests() -> [Request] {
         requestsValue
+    }
+}
+
+private struct V2UnusedGroupEventTransportFake: V2ClientGroupEventTransport {
+    func pullGroupEvents(
+        roomID _: RoomID,
+        afterRoomSequence _: UInt64,
+        pageSize _: Int
+    ) async throws -> V2ClientGroupEventPage {
+        throw V2RealtimeTransportError.unexpectedResponse
+    }
+}
+
+private actor V2RuntimeInstallationBindingStoreFake: V2InstallationBindingStore {
+    private var binding: V2LocalInstallationBinding?
+
+    func load() -> V2LocalInstallationBinding? { binding }
+    func save(_ binding: V2LocalInstallationBinding) { self.binding = binding }
+    func delete() { binding = nil }
+}
+
+private actor V2ForbiddenGroupEventSubscriptionTransportFake: V2ClientGroupEventSubscriptionTransport {
+    private var requests = 0
+
+    func subscribeToGroupEvents(
+        roomID _: RoomID,
+        afterRoomSequence _: UInt64
+    ) throws -> V2ClientGroupEventSubscription {
+        requests += 1
+        throw V2RealtimeTransportError.server(
+            code: "FORBIDDEN",
+            retryable: false,
+            retryAfterSeconds: 0,
+            currentRevision: nil
+        )
+    }
+
+    func unsubscribeFromGroupEvents(roomID _: RoomID) {}
+
+    func requestCount() -> Int { requests }
+}
+
+private struct V2UnusedGroupEventWakeSourceFake: V2GroupEventAvailabilityHintSource {
+    func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
+        throw CancellationError()
     }
 }
 

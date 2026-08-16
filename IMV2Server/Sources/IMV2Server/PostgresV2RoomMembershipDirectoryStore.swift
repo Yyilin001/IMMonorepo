@@ -3,9 +3,10 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Reads the current active-membership interval at one room revision. The
-/// opaque cursor binds its UUID seek boundary to both room and revision,
-/// keeping every page bounded without mixing two versions of a 100k roster.
+/// Reads visible current members at one room revision. Every returned row has
+/// an active public profile and active account; hidden or disabled identities
+/// are omitted rather than exposed as an internal user ID. The opaque cursor
+/// keeps every page bounded without mixing two membership revisions.
 public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
     private let database: any Database
 
@@ -47,12 +48,16 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
                     SELECT membership.user_id, membership.role,
                            profile.public_handle, profile.display_name, profile.account_kind
                     FROM im_v2.room_memberships AS membership
-                    LEFT JOIN im_v2.public_user_profiles AS profile
+                    JOIN im_v2.public_user_profiles AS profile
                       ON profile.user_id = membership.user_id AND profile.state = 'active'
                     WHERE membership.room_id = \(bind: roomID)
                       AND membership.joined_revision <= \(bind: room.membershipRevision)
                       AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: room.membershipRevision))
                       AND membership.user_id > \(bind: cursor.afterUserID)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM im_v2.account_disables AS disabled
+                          WHERE disabled.user_id = membership.user_id
+                      )
                     ORDER BY membership.user_id
                     LIMIT \(bind: request.pageSize + 1)
                     """).all(decoding: DirectoryMemberRow.self)
@@ -61,11 +66,15 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
                     SELECT membership.user_id, membership.role,
                            profile.public_handle, profile.display_name, profile.account_kind
                     FROM im_v2.room_memberships AS membership
-                    LEFT JOIN im_v2.public_user_profiles AS profile
+                    JOIN im_v2.public_user_profiles AS profile
                       ON profile.user_id = membership.user_id AND profile.state = 'active'
                     WHERE membership.room_id = \(bind: roomID)
                       AND membership.joined_revision <= \(bind: room.membershipRevision)
                       AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: room.membershipRevision))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM im_v2.account_disables AS disabled
+                          WHERE disabled.user_id = membership.user_id
+                      )
                     ORDER BY membership.user_id
                     LIMIT \(bind: request.pageSize + 1)
                     """).all(decoding: DirectoryMemberRow.self)
@@ -75,16 +84,15 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
             let entries = try pageRows.map { row -> V2RoomMembershipDirectoryEntry in
                 guard let role = V2RoomMembershipRole(rawValue: row.role) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
                 let userID: UserID = try .init(row.userID.uuidString)
-                let publicIdentity: V2PublicIdentity?
-                switch (row.publicHandle, row.displayName, row.accountKind) {
-                case (.none, .none, .none): publicIdentity = nil
-                case let (.some(handle), .some(displayName), .some(rawAccountKind)):
-                    guard let accountKind = V2AccountKind(rawValue: rawAccountKind) else {
-                        throw V2RoomMembershipDirectoryError.corruptPersistenceState
-                    }
-                    publicIdentity = try .init(userID: userID, handle: .init(handle), displayName: displayName, accountKind: accountKind)
-                default: throw V2RoomMembershipDirectoryError.corruptPersistenceState
+                guard let accountKind = V2AccountKind(rawValue: row.accountKind) else {
+                    throw V2RoomMembershipDirectoryError.corruptPersistenceState
                 }
+                let publicIdentity = try V2PublicIdentity(
+                    userID: userID,
+                    handle: .init(row.publicHandle),
+                    displayName: row.displayName,
+                    accountKind: accountKind
+                )
                 return .init(userID: userID, role: role, publicIdentity: publicIdentity)
             }
             let nextCursor: String? = if hasMore, let last = pageRows.last {
@@ -111,9 +119,9 @@ private struct DirectoryRoomRow: Decodable {
 private struct DirectoryMemberRow: Decodable {
     let userID: UUID
     let role: String
-    let publicHandle: String?
-    let displayName: String?
-    let accountKind: String?
+    let publicHandle: String
+    let displayName: String
+    let accountKind: String
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case role

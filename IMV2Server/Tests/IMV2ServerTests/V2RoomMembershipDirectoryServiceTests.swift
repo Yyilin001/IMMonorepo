@@ -16,6 +16,7 @@ struct V2RoomMembershipDirectoryServiceTests {
         #expect(page.membershipRevision == 4)
         #expect(page.actorRole == .owner)
         #expect(page.entries.map(\.role) == [.owner, .member])
+        #expect(page.entries.map(\.publicIdentity.displayName) == ["群主", "成员"])
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000804")
         #expect(await store.request()?.pageSize == 2)
     }
@@ -41,13 +42,23 @@ private actor DirectoryStoreSpy: V2RoomMembershipDirectoryStore {
 
     func list(_ request: V2RoomMembershipDirectoryRequest) throws -> V2RoomMembershipDirectoryPage {
         captured = request
+        let ownerID = try! UserID("00000000-0000-0000-0000-000000000802")
+        let memberID = try! UserID("00000000-0000-0000-0000-000000000804")
         return .init(
             roomID: request.roomID,
             membershipRevision: 4,
             actorRole: .owner,
             entries: [
-                .init(userID: try! .init("00000000-0000-0000-0000-000000000802"), role: .owner),
-                .init(userID: try! .init("00000000-0000-0000-0000-000000000804"), role: .member),
+                .init(
+                    userID: ownerID,
+                    role: .owner,
+                    publicIdentity: try! .init(userID: ownerID, handle: .init("owner_1"), displayName: "群主", accountKind: .regular)
+                ),
+                .init(
+                    userID: memberID,
+                    role: .member,
+                    publicIdentity: try! .init(userID: memberID, handle: .init("member_1"), displayName: "成员", accountKind: .regular)
+                ),
             ],
             nextCursor: "00000000-0000-0000-0000-000000000804"
         )

@@ -55,8 +55,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: ExistsRow.self))
             #expect(fullSyncIdentityConstraintIsAbsent.exists)
             // Non-fan-out writers do not acquire `consumer_inbox`, so they
-            // retain the source-event semantic uniqueness that existed before
-            // migration 0028.
+            // retain source-event semantic uniqueness.
             let nonFanoutUserID = UUID(uuidString: "00000000-0000-0000-0000-000000000e01")!
             let nonFanoutSourceEventID = UUID(uuidString: "00000000-0000-0000-0000-000000000e02")!
             try await sql.raw("""
@@ -2900,6 +2899,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 pageSize: 10
             )
             #expect(visibleReaders.readers.isEmpty)
+            let hiddenMemberID = try UserID(memberTwoUUID.uuidString)
+            let visibleMembers = try await directory.list(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                cursor: nil,
+                pageSize: 10
+            ))
+            #expect(!visibleMembers.entries.contains { $0.userID == hiddenMemberID })
+            #expect(visibleMembers.entries.allSatisfy { $0.publicIdentity.userID == $0.userID })
             await #expect(throws: V2RoomMembershipDirectoryError.revisionConflict(currentRevision: 1)) {
                 _ = try await directory.list(.init(
                     roomID: roomID,
@@ -7954,24 +7962,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let schemaDirectory = repositoryRoot.appending(path: "IMV2/sql", directoryHint: .isDirectory)
-        let migrations = try FileManager.default.contentsOfDirectory(
-            at: schemaDirectory,
-            includingPropertiesForKeys: nil
-        )
-        .filter { $0.lastPathComponent.range(of: "^[0-9]{4}_.+\\.sql$", options: .regularExpression) != nil }
-        .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        for schemaURL in migrations {
-            let source = try String(contentsOf: schemaURL, encoding: .utf8)
-                .replacingOccurrences(of: "im_v2", with: schema)
-            let executableSQL = source
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
-                .joined(separator: "\n")
-            for statement in postgresStatements(in: executableSQL) {
-                guard !statement.isEmpty else { continue }
-                try await sql.raw("\(unsafeRaw: statement)").run()
-            }
+        let schemaURL = repositoryRoot.appending(path: "IMV2/sql/schema.sql")
+        let source = try String(contentsOf: schemaURL, encoding: .utf8)
+            .replacingOccurrences(of: "im_v2", with: schema)
+        let executableSQL = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
+            .joined(separator: "\n")
+        for statement in postgresStatements(in: executableSQL) {
+            guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
+            try await sql.raw("\(unsafeRaw: statement)").run()
         }
     }
 
@@ -8175,7 +8175,7 @@ private actor BoundedForwardRoomWriteStore: V2RoomWriteStore {
 
 /// Test schema installation must handle PostgreSQL function bodies as a
 /// single statement. A plain `split(separator: ";")` breaks `$$` blocks and
-/// can mask migration failures before a database-backed regression starts.
+/// can mask bootstrap failures before a database-backed regression starts.
 private func postgresStatements(in source: String) -> [String] {
     var statements: [String] = []
     var buffer = ""

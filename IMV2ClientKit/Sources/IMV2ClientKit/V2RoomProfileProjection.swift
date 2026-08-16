@@ -9,13 +9,13 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     public let roomID: RoomID
     public let title: String
     public let ownerUserID: UserID
-    public let deliveryMode: V2GroupDeliveryMode?
+    public let deliveryMode: V2GroupDeliveryMode
     public let membershipRevision: UInt64
     public let createdAt: Date
 
     init(
         sourceEventID: EventID, roomID: RoomID, title: String,
-        ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode?,
+        ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode,
         membershipRevision: UInt64, createdAt: Date
     ) {
         self.sourceEventID = sourceEventID
@@ -34,7 +34,7 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             let title: String
             let ownerUserID: String
             let membershipRevision: UInt64
-            let deliveryMode: String?
+            let deliveryMode: String
             let createdAtMilliseconds: Int64
             enum CodingKeys: String, CodingKey {
                 case eventType = "event_type"; case roomID = "room_id"; case title
@@ -58,10 +58,10 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             roomID = try .init(payload.roomID)
             title = normalizedTitle
             ownerUserID = try .init(payload.ownerUserID)
-            deliveryMode = try payload.deliveryMode.map {
-                guard let mode = V2GroupDeliveryMode(rawValue: $0) else { throw V2ClientProjectionError.invalidMessagePayload }
-                return mode
+            guard let mode = V2GroupDeliveryMode(rawValue: payload.deliveryMode) else {
+                throw V2ClientProjectionError.invalidMessagePayload
             }
+            deliveryMode = mode
             membershipRevision = payload.membershipRevision
             createdAt = Date(timeIntervalSince1970: TimeInterval(payload.createdAtMilliseconds) / 1_000)
         } catch { throw V2ClientProjectionError.invalidMessagePayload }

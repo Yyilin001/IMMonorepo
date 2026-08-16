@@ -331,6 +331,7 @@ struct V2SyncEngineTests {
                 "event_type": "room.created", "room_id": roomID, "title": "项目群",
                 "owner_user_id": "00000000-0000-0000-0000-000000000269",
                 "membership_revision": 1,
+                "delivery_mode": "standard_fanout",
                 "created_at_ms": 1_750_000_000_000,
             ])
         )
@@ -355,6 +356,7 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000272",
                 "target_user_id": "00000000-0000-0000-0000-000000000273",
                 "action": "add", "membership_revision": 2,
+                "delivery_mode": "standard_fanout",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -363,11 +365,45 @@ struct V2SyncEngineTests {
         let profile = try #require(await store.roomProfile(roomID: .init(roomID)))
         #expect(profile.title == "后加入的群")
         #expect(profile.membershipRevision == 2)
+        #expect(profile.deliveryMode == .standardFanout)
+    }
+
+    @Test("a room profile without its required delivery mode is rejected")
+    func roomProfileRejectsMissingDeliveryMode() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let record = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-00000000026f"),
+            projectionKind: "membership",
+            payload: try JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed",
+                "room_id": "00000000-0000-0000-0000-00000000026e",
+                "title": "缺少投递模式",
+                "owner_user_id": "00000000-0000-0000-0000-00000000026d",
+                "target_user_id": "00000000-0000-0000-0000-00000000026c",
+                "action": "add",
+                "membership_revision": 1,
+                "created_at_ms": 1_750_000_000_000,
+                "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await store.apply(.init(
+                generation: 1,
+                records: [record],
+                nextSyncToken: .init("missing-mode-token"),
+                receipt: .init("missing-mode-receipt"),
+                hasMore: false,
+                capabilityProfile: "base"
+            ))
+        }
     }
 
     @Test("a hybrid membership projection enrolls the room in cursor synchronization")
     func hybridMembershipProjectionRegistersRoomLog() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
         let roomID = "00000000-0000-0000-0000-000000000274"
         let record = try V2ClientSyncRecord(
             sequence: 1,
@@ -385,9 +421,47 @@ struct V2SyncEngineTests {
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("hybrid-member-token"), receipt: .init("hybrid-member-receipt"), hasMore: false, capabilityProfile: "base"))
 
         #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
-        try await store.deactivateHybridGroupRoom(roomID: .init(roomID))
+        try await store.markGroupEventUnauthorized(roomID: .init(roomID))
         #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
-        #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == nil)
+        #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == .largeGroupHybrid)
+        #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
+            deliveryMode: .largeGroupHybrid,
+            isAuthorized: false
+        ))
+
+        let reopenedStore = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
+            deliveryMode: .largeGroupHybrid,
+            isAuthorized: false
+        ))
+        #expect(try await reopenedStore.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
+
+        let reauthorizedRecord = try V2ClientSyncRecord(
+            sequence: 2,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000273"),
+            projectionKind: "membership",
+            payload: JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": roomID, "title": "大群",
+                "owner_user_id": "00000000-0000-0000-0000-000000000276",
+                "target_user_id": "00000000-0000-0000-0000-000000000277",
+                "action": "add", "membership_revision": 3,
+                "delivery_mode": "large_group_hybrid",
+                "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_002_000,
+            ])
+        )
+        _ = try await reopenedStore.apply(.init(
+            generation: 1,
+            records: [reauthorizedRecord],
+            nextSyncToken: .init("hybrid-reauthorized-token"),
+            receipt: .init("hybrid-reauthorized-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
+            deliveryMode: .largeGroupHybrid,
+            isAuthorized: true
+        ))
+        #expect(try await reopenedStore.knownHybridGroupRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
     }
 
     @Test("a room-log page and its cursor commit atomically and accept an exact retry")
@@ -543,7 +617,10 @@ struct V2SyncEngineTests {
         let transport = GroupEventTransportFake(page: .init(roomID: roomID, events: [preview], nextRoomSequence: 3, hasMore: false))
         let engine = V2ForegroundGroupEventPreviewEngine(transport: transport, store: store)
 
-        #expect(try await store.groupDeliveryMode(roomID: roomID) == .standardFanout)
+        #expect(try await store.groupEventAccess(roomID: roomID) == .init(
+            deliveryMode: .standardFanout,
+            isAuthorized: true
+        ))
         #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 1, hasMore: false))
         #expect(await transport.requestedCursors() == [2])
         #expect(try await store.messages(in: roomID).map(\.text) == ["可靠投递", "前台预览"])
@@ -555,7 +632,7 @@ struct V2SyncEngineTests {
         #expect(try await store.groupEventCursor(roomID: roomID) == 0)
     }
 
-    @Test("a forbidden hybrid room is deactivated without blocking normal synchronization")
+    @Test("a forbidden hybrid room revokes event access without blocking normal synchronization")
     func forbiddenHybridRoomStopsFutureCursorPulls() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let roomID = "00000000-0000-0000-0000-00000000027e"
@@ -578,6 +655,10 @@ struct V2SyncEngineTests {
         _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
 
         #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
+            deliveryMode: .largeGroupHybrid,
+            isAuthorized: false
+        ))
     }
 
     @Test("background hybrid maintenance is page-bounded and round-robin fair")
@@ -667,6 +748,7 @@ struct V2SyncEngineTests {
                     "title": "Empty Group",
                     "owner_user_id": "00000000-0000-0000-0000-000000000406",
                     "membership_revision": 1,
+                    "delivery_mode": "standard_fanout",
                     "created_at_ms": 1_750_000_001_500,
                 ])
             ),
@@ -1667,7 +1749,7 @@ private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
     func hybridGroupBackgroundCursor() -> RoomID? { backgroundCursor }
     func setHybridGroupBackgroundCursor(_ roomID: RoomID?) { backgroundCursor = roomID }
     func isKnownHybridGroupRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
-    func deactivateHybridGroupRoom(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
+    func markGroupEventUnauthorized(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
     func groupEventCursor(roomID: RoomID) -> UInt64 { cursors[roomID, default: 0] }
     func applyGroupEventPage(_ page: V2ClientGroupEventPage) -> UInt64 {
         cursors[page.roomID] = page.nextRoomSequence

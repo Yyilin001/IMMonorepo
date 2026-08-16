@@ -180,10 +180,10 @@ struct V2GroupMemberItem: Equatable, Identifiable, Sendable {
     /// commands.  UI must render the public fields below instead.
     let id: String
     let role: String
-    let handle: String?
-    let displayName: String?
+    let handle: String
+    let displayName: String
 
-    init(id: String, role: String, handle: String? = nil, displayName: String? = nil) {
+    init(id: String, role: String, handle: String, displayName: String) {
         self.id = id
         self.role = role
         self.handle = handle
@@ -641,8 +641,8 @@ actor V2RealtimeGroupMemberDirectory: V2GroupMemberDirectoryReading {
                 .init(
                     id: $0.userID.rawValue,
                     role: Self.displayRole($0.role),
-                    handle: $0.publicIdentity?.handle.rawValue,
-                    displayName: $0.publicIdentity?.displayName
+                    handle: $0.publicIdentity.handle.rawValue,
+                    displayName: $0.publicIdentity.displayName
                 )
             },
             nextCursor: page.nextCursor
@@ -913,12 +913,14 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
     func synchronizeOnePage(roomID: String) async throws -> V2ActiveHybridGroupSyncOutcome {
         let parsedRoomID = try RoomID(roomID)
-        guard let deliveryMode = try await localStore.groupDeliveryMode(roomID: parsedRoomID) else {
+        guard let access = try await localStore.groupEventAccess(roomID: parsedRoomID),
+              access.isAuthorized
+        else {
             return .notHybridRoom
         }
         let progress: V2GroupEventSyncProgress
         do {
-            switch deliveryMode {
+            switch access.deliveryMode {
             case .largeGroupHybrid:
                 progress = try await groupEventSync.synchronizeOnePage(roomID: parsedRoomID)
             case .standardFanout:
@@ -926,9 +928,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
             }
         } catch let error as V2RealtimeTransportError {
             guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-            if deliveryMode == .largeGroupHybrid {
-                try await localStore.deactivateHybridGroupRoom(roomID: parsedRoomID)
-            }
+            try await localStore.markGroupEventUnauthorized(roomID: parsedRoomID)
             return .notHybridRoom
         }
         return .synchronized(appliedEventCount: progress.appliedEventCount, hasMore: progress.hasMore)
@@ -936,12 +936,14 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
     func subscribe(roomID: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome {
         let parsedRoomID = try RoomID(roomID)
-        guard let deliveryMode = try await localStore.groupDeliveryMode(roomID: parsedRoomID) else {
+        guard let access = try await localStore.groupEventAccess(roomID: parsedRoomID),
+              access.isAuthorized
+        else {
             return .notHybridRoom
         }
         do {
             let cursor: UInt64
-            switch deliveryMode {
+            switch access.deliveryMode {
             case .largeGroupHybrid:
                 cursor = try await localStore.groupEventCursor(roomID: parsedRoomID)
             case .standardFanout:
@@ -955,9 +957,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
             return .subscribed(highWatermark: subscription.highWatermark)
         } catch let error as V2RealtimeTransportError {
             guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-            if deliveryMode == .largeGroupHybrid {
-                try await localStore.deactivateHybridGroupRoom(roomID: parsedRoomID)
-            }
+            try await localStore.markGroupEventUnauthorized(roomID: parsedRoomID)
             return .notHybridRoom
         }
     }

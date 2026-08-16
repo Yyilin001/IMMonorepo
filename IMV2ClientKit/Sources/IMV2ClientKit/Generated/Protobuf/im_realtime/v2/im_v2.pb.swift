@@ -2599,9 +2599,9 @@ public nonisolated struct IMV2RoomMember: Sendable {
   public var role: IMV2RoomMembershipRole = .unspecified
 
   /// A roster page is returned only to an active room member.  These fields
-  /// contain the member's public chat identity, never an account identifier
-  /// or authentication factor.  They are intentionally part of the bounded
-  /// directory response instead of the per-user sync stream.
+  /// contain the member's required public chat identity, never an account
+  /// identifier or authentication factor. Members without a currently visible
+  /// public identity are omitted from the bounded directory response.
   public var publicHandle: String = String()
 
   public var displayName: String = String()

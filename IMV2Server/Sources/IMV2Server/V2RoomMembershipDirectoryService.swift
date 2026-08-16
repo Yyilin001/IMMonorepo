@@ -8,13 +8,12 @@ import IMV2Core
 public struct V2RoomMembershipDirectoryEntry: Equatable, Sendable {
     public let userID: UserID
     public let role: V2RoomMembershipRole
-    /// Present when the member has a public profile.  The nullable shape lets
-    /// a rolling deployment safely serve historical rows created before that
-    /// profile migration completed, without exposing an internal user ID in
-    /// the UI.
-    public let publicIdentity: V2PublicIdentity?
+    /// Current public chat identity authorized by this roster read. Members
+    /// whose profile is not active are omitted rather than represented by an
+    /// internal user ID without displayable identity.
+    public let publicIdentity: V2PublicIdentity
 
-    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity? = nil) {
+    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity) {
         self.userID = userID
         self.role = role
         self.publicIdentity = publicIdentity

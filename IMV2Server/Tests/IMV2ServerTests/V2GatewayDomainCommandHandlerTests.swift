@@ -319,6 +319,7 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.roomMembersPage.members.count == 1)
         #expect(response.roomMembersPage.members.first?.publicHandle == "owner_1")
         #expect(response.roomMembersPage.members.first?.displayName == "群主")
+        #expect(response.roomMembersPage.members.first?.accountKind == "regular")
         #expect(await store.actor() == fixture.userID)
     }
 

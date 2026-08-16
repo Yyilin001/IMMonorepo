@@ -183,12 +183,28 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.membershipRevision == 6)
         #expect(page.actorRole == .owner)
         #expect(page.members.map(\.role) == [.owner, .member])
-        #expect(page.members.first?.publicIdentity?.handle.rawValue == "owner_1")
-        #expect(page.members.first?.publicIdentity?.displayName == "群主")
-        #expect(page.members.first?.publicIdentity?.accountKind == .regular)
-        #expect(page.members.last?.publicIdentity?.handle.rawValue == "member_2")
+        #expect(page.members.first?.publicIdentity.handle.rawValue == "owner_1")
+        #expect(page.members.first?.publicIdentity.displayName == "群主")
+        #expect(page.members.first?.publicIdentity.accountKind == .regular)
+        #expect(page.members.last?.publicIdentity.handle.rawValue == "member_2")
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
+    }
+
+    @Test("member directory rejects a row without its current public identity")
+    func membershipDirectoryRejectsMissingIdentity() async throws {
+        let transport = V2ProtobufSyncTransport(
+            wire: MembershipDirectoryWire(includesIdentity: false),
+            protocolVersion: 1
+        )
+
+        await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+            try await transport.listRoomMembers(
+                roomID: .init("00000000-0000-0000-0000-000000000340"),
+                cursor: nil,
+                pageSize: 100
+            )
+        }
     }
 
     @Test("read-receipt details bind pagination to the exact message")
@@ -263,6 +279,11 @@ private actor GroupEventSubscriptionWire: V2AuthenticatedFrameTransport {
 
 private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
     private var pageSize: UInt32 = 0
+    private let includesIdentity: Bool
+
+    init(includesIdentity: Bool = true) {
+        self.includesIdentity = includesIdentity
+    }
 
     func request(_ frame: V2Frame) throws -> V2Frame {
         let request = try V2ProtobufFrameCodec.decode(frame)
@@ -279,16 +300,20 @@ private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
             .with {
                 $0.userID = "00000000-0000-0000-0000-000000000341"
                 $0.role = .owner
-                $0.publicHandle = "owner_1"
-                $0.displayName = "群主"
-                $0.accountKind = "regular"
+                if includesIdentity {
+                    $0.publicHandle = "owner_1"
+                    $0.displayName = "群主"
+                    $0.accountKind = "regular"
+                }
             },
             .with {
                 $0.userID = "00000000-0000-0000-0000-000000000342"
                 $0.role = .member
-                $0.publicHandle = "member_2"
-                $0.displayName = "成员二"
-                $0.accountKind = "regular"
+                if includesIdentity {
+                    $0.publicHandle = "member_2"
+                    $0.displayName = "成员二"
+                    $0.accountKind = "regular"
+                }
             }
         ]
         response.roomMembersPage.nextCursor = "00000000-0000-0000-0000-000000000342"
