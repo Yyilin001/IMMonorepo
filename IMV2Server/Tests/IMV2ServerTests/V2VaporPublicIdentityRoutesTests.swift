@@ -48,23 +48,6 @@ struct V2VaporPublicIdentityRoutesTests {
         }
     }
 
-    @Test("the legacy non-idempotent display-name mutation route is not registered")
-    func legacyDisplayNameMutationIsUnavailable() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
-        V2VaporPublicIdentityRoutes(
-            authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
-            directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("actor-user"), handle: .init("actor_user"), displayName: "Old", accountKind: .regular))
-        ).register(on: app)
-
-        try await app.testing().test(.PUT, "v2/public-identities/me", beforeRequest: { request in
-            request.headers.bearerAuthorization = .init(token: "access-token")
-            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000901")
-            try request.content.encode(V2PublicIdentityProfileHTTPRequest(displayName: "New"))
-        }) { response async in
-            #expect(response.status == .notFound)
-        }
-    }
 }
 
 private struct PublicIdentityRouteAuthenticator: V2GatewayAuthenticator {

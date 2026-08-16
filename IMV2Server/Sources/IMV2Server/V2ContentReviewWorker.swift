@@ -253,6 +253,7 @@ public enum V2ContentReviewWorkerError: Error, Equatable, Sendable {
 /// only code/severity/confidence; no text or provider response is retained in
 /// this operational path.
 public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
+    private static let configuredPolicyVersion = "configured-terms-1"
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
@@ -389,7 +390,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
             guard updated != nil else { return false }
             try await tx.raw("""
                 INSERT INTO im_v2.content_review_decisions (message_id, decision, policy_version, decided_at)
-                VALUES (\(bind: messageID), \(bind: data.decision), 'v1', \(bind: now))
+                VALUES (\(bind: messageID), \(bind: data.decision), \(bind: Self.configuredPolicyVersion), \(bind: now))
                 ON CONFLICT (message_id) DO UPDATE SET decision = EXCLUDED.decision, policy_version = EXCLUDED.policy_version, decided_at = EXCLUDED.decided_at
                 """).run()
             if let category = data.category {

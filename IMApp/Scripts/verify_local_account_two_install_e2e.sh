@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app_dir="$(cd "${script_dir}/.." && pwd)"
 repo_root="$(cd "${app_dir}/.." && pwd)"
 local_stack_script="${repo_root}/IMV2/scripts/run_v2_local_account_stack.sh"
-local_ca="${repo_root}/IMV2/local-ca/root.crt"
+local_ca="${IMAPP_LOCAL_TWO_INSTALL_CA_PATH:-${repo_root}/IMV2/local-ca/root.crt}"
 local_compose_file="${repo_root}/IMV2/docker-compose.local-account.yml"
 local_env_file="${repo_root}/IMV2/.env.local"
 local_compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
@@ -17,6 +17,7 @@ sender_simulator_id="${IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID:-}"
 test_class="IMAppLocalTwoInstallE2ETests/IMAppLocalTwoInstallE2ETests"
 keep_result_bundle="${IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS:-false}"
 accessibility_profile="${IMAPP_LOCAL_TWO_INSTALL_ACCESSIBILITY_PROFILE:-default}"
+external_stack="${IMAPP_LOCAL_TWO_INSTALL_EXTERNAL_STACK:-false}"
 
 source "${repo_root}/IMV2/scripts/local_compose.sh"
 # shellcheck source=../../IMV2/scripts/local_admission_pool.sh
@@ -35,9 +36,18 @@ require_command() {
   }
 }
 
-for command in xcrun xcodebuild curl docker jq uuidgen; do
+for command in xcrun xcodebuild curl jq uuidgen; do
   require_command "${command}"
 done
+
+case "${external_stack}" in
+  true) ;;
+  false) require_command docker ;;
+  *)
+    printf 'unsupported IMAPP_LOCAL_TWO_INSTALL_EXTERNAL_STACK: %s\n' "${external_stack}" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -z "${receiver_simulator_id}" || -z "${sender_simulator_id}" ]]; then
   printf '%s\n' 'missing IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID or IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID; choose two explicitly booted simulators.' >&2
@@ -68,17 +78,19 @@ done
 
 printf '%s\n' 'preflight: manually unlock both selected simulators at least once since boot, and keep the Mac unlocked. This script never boots, restarts, erases, or shuts down a simulator.' >&2
 
-running_services="$(local_compose ps --status running --services 2>/dev/null || true)"
-if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
-  "${local_stack_script}"
+if [[ "${external_stack}" == false ]]; then
+  running_services="$(local_compose ps --status running --services 2>/dev/null || true)"
+  if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
+    "${local_stack_script}"
+  fi
+  v2_seed_local_admission_pool
+  v2_ensure_local_gateway_tls "${local_ca}"
 fi
-v2_seed_local_admission_pool
 
 if [[ ! -f "${local_ca}" ]]; then
   printf 'missing local CA after starting stack: %s\n' "${local_ca}" >&2
   exit 1
 fi
-v2_ensure_local_gateway_tls "${local_ca}"
 
 status="$(curl --silent --output /dev/null --write-out '%{http_code}' --cacert "${local_ca}" \
   --request POST \

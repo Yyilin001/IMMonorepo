@@ -2,7 +2,7 @@ import Foundation
 
 /// The app-owned account factor (password, passkey, SSO, or another approved
 /// mechanism) implements this boundary. ClientKit deliberately receives only
-/// the already-issued device credentials and never imports a V1 session.
+/// already-issued device credentials and does not own account-factor state.
 public protocol V2AccountDeviceCredentialProvider: Sendable {
     func issueDeviceCredentials() async throws -> V2AuthCredentials
 }

@@ -142,11 +142,10 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             """).all(decoding: DirectProfileTarget.self)
     }
 
-    /// During the protocol transition, old clients retain their compact
-    /// direct-room projection while new clients receive only a revision fence
-    /// and rehydrate a normalized view on demand. Both records share the same
-    /// source event and are appended atomically so a retry cannot expose a
-    /// half-updated cache.
+    /// Current clients use the compact direct-room projection for conversation
+    /// presentation and the revision fence for normalized profile hydration.
+    /// Both records share one source event and are appended atomically so a
+    /// retry cannot expose a half-updated projection.
     private func appendControlProjections(target: DirectProfileTarget, lease: ProfileUpdateLease) async throws -> UInt64 {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }

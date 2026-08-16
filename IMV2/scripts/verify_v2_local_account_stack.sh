@@ -116,7 +116,7 @@ assertion="$(curl --silent --show-error --fail \
   --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${device_id}\",\"publicHandle\":\"${public_handle}\",\"displayName\":\"Local Smoke\"}" \
   https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
 
-# Exercise the real HTTPS route, PostgreSQL migration and configured policy as
+# Exercise the real HTTPS route, PostgreSQL persistence and configured policy as
 # one path. The rate-limited account is separate from the credential smoke
 # account so the subsequent trusted-device flow remains independent.
 rate_limit_handle="rate-${suffix:0:20}"

@@ -41,8 +41,8 @@ public enum V2GroupPermissionDefaults {
     }
 
     public static func allows(role: V2RoomMembershipRole, permission: V2GroupPermission, configured: Set<V2GroupPermission>?) -> Bool {
-        // Direct rooms do not consult this model. For groups, an absent row is
-        // a safe migration default, never an accidental grant.
+        // Direct rooms do not consult this model. For groups, an absent
+        // override selects the explicit built-in role policy.
         guard role != .owner else { return true }
         return (configured ?? permissions(for: role)).contains(permission)
     }

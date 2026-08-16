@@ -3,7 +3,7 @@
 # The production control plane owns admission leases.  The disposable local
 # stack has no such control-plane service, but real room creation deliberately
 # refuses to proceed without a live fenced pool.  This helper renews only the
-# single local profile after migrations: a live fence is preserved; an expired
+# single local profile after schema bootstrap: a live fence is preserved; an expired
 # one receives a fresh lease ID and generation with the same semantics as the
 # tested replacement operation.  It is local test functionality, not a
 # capacity approval or a production lease-management mechanism.

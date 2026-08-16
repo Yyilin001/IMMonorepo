@@ -7,8 +7,8 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | 目标 | 文档 |
 | --- | --- |
 | 了解当前组件、数据流、群聊和 NATS 边界 | [当前架构](../../docs/current-system-map.md) |
-| 获取当前问题清单、优先级和实施路线 | [实现审计与路线图](implementation-review-and-roadmap.md) |
-| 判断某项能力是否已实现及其验证等级 | [implementation status](implementation-status.md) |
+| 判断能力、证据等级与当前实施路线 | [implementation status](implementation-status.md) |
+| 查看仍需部署、设备、容量或审批闭环的风险 | [residual risk register](10-operations/residual-risk-register.md) |
 | 查找已接受或待批准的设计决定 | [ADR register](ADR-REGISTER.md) |
 | 使用 100k 成员配置或准备压测 | [standard 100k contract](09-capacity/standard-100k.md) |
 | 处理 paused durable work | [operator replay runbook](10-operations/durable-work-operator-replay.md) |
@@ -24,3 +24,4 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 - **本地验证**：只证明明确记录的本机自动化环境；不能外推为真实 WebAuthn、APNs、Alertmanager、PITR、容量或生产发布结论。
 
 所有 V2 配置、运行入口和本机隔离栈以 [IMV2Server README](../../IMV2Server/README.md) 与 `IMV2/` 下脚本为准。
+已完成的演进记录只保留在 Git 历史中，不在当前运行文档内维护重复时间线。

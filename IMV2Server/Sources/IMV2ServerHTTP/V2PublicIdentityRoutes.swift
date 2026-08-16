@@ -75,9 +75,3 @@ public struct V2PublicIdentityHTTPResponse: Content, Sendable {
     public let displayName: String
     public let accountKind: V2AccountKind
 }
-
-public struct V2PublicIdentityProfileHTTPRequest: Content, Sendable {
-    public let displayName: String
-
-    public init(displayName: String) { self.displayName = displayName }
-}

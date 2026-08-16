@@ -14,6 +14,12 @@ done
 # coverage and strict deployment examples in the same required gate as the
 # code they describe. A green unit suite must not permit deployment drift.
 bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
+bash "${repo_root}/IMV2/scripts/test_v2_local_environment_contract.sh"
 bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"
-bash "${repo_root}/scripts/test_v2_postgres_schema_bootstrap.sh"
+if [[ "${V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION:-0}" == "1" ]]; then
+  printf '%s\n' 'Standalone Docker bootstrap/drift drill skipped; the provisioned integration gate installs the canonical schema.'
+else
+  bash "${repo_root}/scripts/test_v2_postgres_schema_bootstrap.sh"
+fi
 bash "${repo_root}/scripts/check_v2_runtime_env_examples.sh"
+bash "${repo_root}/scripts/check_v2_document_links.sh"

@@ -9,9 +9,10 @@ and the [V2 document entry](../IMV2/docs/README.md).
 
 ## Provisioning
 
-1. Create an empty PostgreSQL database and apply every numbered migration in
-   [`IMV2/sql`](../IMV2/sql), in lexical order. Verify the committed migration
-   set with `scripts/check_v2_sql_migration_manifest.sh` before deployment.
+1. Create an empty PostgreSQL database and install the single current schema:
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`. Before
+   deployment, run `bash scripts/test_v2_postgres_schema_bootstrap.sh` against
+   a disposable PostgreSQL instance to verify clean bootstrap and schema drift.
 2. Provision PEM certificate-chain and private-key files through the deployment
    secret store.
 3. Provision a random 32-byte-or-longer access-token HMAC key as base64. The
@@ -77,7 +78,7 @@ expensive route cannot be reached by a direct loopback caller. The iOS app
 accepts only an HTTPS account base URL; it must never be pointed directly at
 the internal HTTP listener.
 
-The password fallback uses bcrypt cost 12. Generate
+The password factor uses bcrypt cost 12. Generate
 `IM_V2_PASSWORD_DUMMY_BCRYPT_HASH` once with the same cost so an unknown
 account executes the same expensive comparison as a wrong password. Keep the
 account assertion HMAC key and the device-credential replay-envelope key in
@@ -93,7 +94,8 @@ address. PostgreSQL stores only a HMAC digest derived using the distinct
 `IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64`, never a clear-text address;
 expired windows are removed in bounded batches. The production ingress must
 still supply an approved trusted-proxy chain and outer DDoS/abuse controls,
-and the product still needs audit, recovery and account-disable operations.
+and production still requires approval plus drills for audit, recovery and the
+implemented account-disable operator path.
 
 The client-side passkey flow has a complete challenge/assertion transport
 boundary, but this executable does not yet mount public WebAuthn endpoints:
@@ -190,11 +192,11 @@ evidence remains local-stack coverage, not a production deployment approval.
   `IM_V2_NATS_URL` and `IM_V2_NATS_SUBJECT` are both configured, the gateway
   publishes a best-effort Core NATS wake hint only after durable publication.
   Loss, duplication or publishing failure cannot release work or change user
-  state; polling recovers it. The current adapter opens a fresh connection for
-  each hint, bounds both connection and broker confirmation to two seconds,
-  then requires a Core NATS `PONG` after `PUB`. It has no NATS TLS/NKey,
-  persistent consumer, connection reuse/reconnection, circuit breaker or
-  broker-health implementation. The isolated suite does prove a real Core
+  state; polling recovers it. The current adapter retains one serial Core NATS
+  connection per process publisher, discards it on failure, bounds connection
+  and broker confirmation to two seconds, and requires `PONG` after each
+  `PUB`. It has no NATS TLS/NKey, autonomous reconnect loop, circuit breaker or
+  broker-health metrics. The isolated suite does prove a real Core
   NATS subscriber receives the privacy-safe trigger envelope, but the adapter
   is still not a delivery dependency.
 - Groups use the existing authenticated TLS/protobuf connection rather than
@@ -228,7 +230,8 @@ evidence remains local-stack coverage, not a production deployment approval.
   routed fan-out projections are committed in the selected target store before
   the control delivery is completed. See
   [`user-shard migration runbook`](../IMV2/docs/10-operations/user-shard-migration-runbook.md);
-  read fallback and independent-database deployment evidence remain pending.
+  two-database integration is covered locally, while production permissions,
+  partition behavior and long-running forwarding evidence remain pending.
 - `IM_V2_DIRECT_ROOM_SHARD_ID` selects the admission pool used for new
   two-user rooms. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
   `IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS` are enforced in the durable message

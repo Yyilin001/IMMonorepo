@@ -1,6 +1,6 @@
 # V2 ADR 登记册
 
-最后审阅：2026-07-25
+最后审阅：2026-08-16
 维护者：V2 架构负责人
 
 本登记册对应架构规范第 11 节要求的初始 ADR 集合。`已接受`仅表示设计
@@ -12,7 +12,7 @@
 | Native TLS TCP 与客户端平台 | [ADR-003](00-foundation/ADR-003-native-tls-and-platforms.md) | 待批准 | TLS gateway 已实现；发布平台与证书策略未批准 |
 | PostgreSQL 权威状态与事件模型 | [ADR-004](00-foundation/ADR-004-postgresql-authoritative-state.md) | 已接受 | V2 schema、PostgreSQL stores 与集成测试目标 |
 | 命令幂等、outbox/inbox、至少一次 | [ADR-005](00-foundation/ADR-005-idempotency-outbox-inbox.md) | 已接受 | Core contracts、唯一约束、fan-out/sync stores |
-| Room/user shard 路由与迁移 | [ADR-006](00-foundation/ADR-006-routing-and-migration.md) | 待批准 | capacity lease、持久化 logical router、epoch-CAS cutover、迁移阶段/retention lease 与 stale-route fenced handoff 已实现；跨存储迁移证据待定 |
+| Room/user shard 路由与迁移 | [ADR-006](00-foundation/ADR-006-routing-and-migration.md) | 待批准 | capacity lease、持久化 logical router、epoch-CAS cutover、迁移阶段/retention lease 与 stale-route fenced handoff 已实现；双 PostgreSQL 集成已验证，生产分区/长周期 forwarding 与操作员演练待定 |
 | sync cursor、snapshot reset、多设备 | [ADR-007](00-foundation/ADR-007-sync-cursor-and-snapshot.md) | 已接受 | Server sync、Client SQLite 与 snapshot tests |
 | sync projection checkpoint、日志保留与 compaction | [ADR-013](00-foundation/ADR-013-sync-checkpoint-and-log-retention.md) | 已接受并实施 | Snapshot V3、连续 MVCC checkpoint、有界 artifact builder、ACK-before-activate、retained floor、低游标 reset、inbox/effect 稳定结果、shared-payload GC、有界 compactor 及分片 copy/fingerprint 已实施；R-006 已关闭，生产 replay window/阈值仍需容量校准 |
 | 移动前后台与 Push wake | [ADR-008](00-foundation/ADR-008-mobile-lifecycle-and-push.md) | 待批准 | durable wake/预算、APNs provider、加密端点与 iOS 明确开关已实现；资格/活动策略与真实 APNs 发布证据待定 |

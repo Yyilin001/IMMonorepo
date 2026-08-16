@@ -55,6 +55,8 @@ for package in "${package_list[@]}"; do
 done
 
 bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
+bash "${repo_root}/IMV2/scripts/test_v2_local_environment_contract.sh"
 bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"
 bash "${repo_root}/scripts/check_v2_prometheus_rules.sh"
 bash "${repo_root}/scripts/check_v2_runtime_env_examples.sh"
+bash "${repo_root}/scripts/check_v2_document_links.sh"

@@ -18,7 +18,8 @@ body 中携带数据库 URL、SQL、批量 user 范围或事件内容。
 3. 选定**一个** user、source bucket、target bucket、当前 router epoch 和新的
    migration UUID。先取得变更审批与 rollback 决策人；不得以批量脚本替代。
 4. 目标 store 必须已通过 schema readiness，且复制窗口内没有未处置的 target
-   数据库故障。容量、备份恢复和独立数据库连通性是上线前另行验证项。
+   数据库故障。仓库已覆盖双 PostgreSQL 连通与崩溃恢复；目标部署的权限、分区、
+   容量和备份恢复仍需单独验收。
 
 示例中的 bearer 仅由 secret manager 注入，不应回显、写 shell history 或贴到
 incident 公共字段。网络重试一律重用相同 operation/migration UUID。
@@ -109,9 +110,9 @@ schema readiness、告警与演练结果。不得记录 token、连接串或用�
 
 ## 当前限制
 
-- sync read 使用当前 write owner；`readFallbackBucket` 是控制面元数据，尚未作为
-  任意读取错误的自动 fallback，避免返回旧序列破坏单调性；
-- 集成测试验证了两个独立 PostgreSQL 容器之间的投影/完成崩溃恢复，尚未证明网络
-  分区、跨 region 延迟或 100k 容量；
+- sync read 始终使用当前 write owner；`readFallbackBucket` 只支持受控 rollback，
+  不作为任意读取错误的自动降级，避免返回旧序列破坏单调性；
+- 集成测试验证了两个独立 PostgreSQL 实例之间的投影/完成崩溃恢复，尚未证明目标
+  部署的网络分区、跨 region 延迟、长时间 forwarding 或 100k 容量；
 - operator access 的 bastion/mTLS、审批、实际告警 receiver 与灾备恢复演练必须在
   目标部署中单独验收。

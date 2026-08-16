@@ -85,8 +85,8 @@ public struct V2ClientConversationListPage: Equatable, Sendable {
     }
 }
 
-/// V2's local database is intentionally separate from the V1 conversation
-/// cache. It applies sync records incrementally in one SQLite transaction.
+/// The local database is the authoritative device projection. It applies sync
+/// records incrementally in one SQLite transaction.
 public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
     /// All local command repositories share this actor-owned pool. Extensions
     /// preserve the actor boundary while keeping each durable queue in its
@@ -2869,7 +2869,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let directProfiles = target.table("v2_direct_room_profile_projections")
         if invalidation.state != .active {
             // A suspended/hidden/deleted identity must disappear from the
-            // legacy compact direct-room cache in the same sync transaction;
+            // direct-room identity projection in the same sync transaction;
             // waiting for a later profile fetch would briefly re-expose it.
             try db.execute(
                 sql: "DELETE FROM \(directProfiles) WHERE target_user_id = ?",

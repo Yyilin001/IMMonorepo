@@ -12,7 +12,7 @@ cache participates in this path.
 | `IMV2Core/` | Domain types, frame/command rules, admission, fan-out and sync invariants. |
 | `IMV2ClientKit/` | Device Keychain session, SQLite sync projection, durable client outboxes and TLS/HTTPS transports. |
 | `IMV2Server/` | TLS gateway, PostgreSQL stores, account/device service and loopback-only operator service. |
-| `IMV2/` | Numbered SQL migrations, isolated test/local-stack Compose files, scripts, alert rules and design/operations docs. |
+| `IMV2/` | Canonical PostgreSQL schema, isolated test/local-stack Compose files, scripts, alert rules and design/operations docs. |
 
 ## Documentation
 
@@ -51,12 +51,13 @@ xcrun --toolchain XcodeDefault swift build --build-tests \
 docker compose -f IMV2/docker-compose.isolated-tests.yml \
   run --rm --build swift-tests
 
-# Disposable local-schema ledger and logical-restore drills
-bash IMV2/scripts/test_v2_local_schema_migrations.sh
+# Disposable canonical-schema drift and logical-restore drills
+bash scripts/test_v2_postgres_schema_bootstrap.sh
 bash IMV2/scripts/test_v2_postgres_logical_restore.sh
 ```
 
-The isolated regression also validates protobuf generated sources, the SQL
-migration manifest, schema-readiness coverage, Prometheus rules and runtime
-environment examples. Current local evidence and capacity limits are maintained
-in [implementation status](IMV2/docs/implementation-status.md).
+The isolated regression also validates protobuf generated sources, the current
+local-environment contract, schema-readiness coverage, documentation links,
+Prometheus rules and runtime environment examples. Current local evidence and
+capacity limits are maintained in
+[implementation status](IMV2/docs/implementation-status.md).

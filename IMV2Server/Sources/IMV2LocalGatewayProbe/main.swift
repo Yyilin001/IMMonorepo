@@ -119,7 +119,7 @@ private enum ProbeResult: Sendable {
     var standardOutput: String {
         switch self {
         case .authenticated:
-            return "local V2 gateway authentication: protocol v1 verified"
+            return "local V2 gateway authentication: current protocol verified"
         case .messageAccepted(let roomID, let messageID):
             // The shell verifier captures this line rather than logging it.
             // IDs are only passed to the recipient-side probe as short-lived

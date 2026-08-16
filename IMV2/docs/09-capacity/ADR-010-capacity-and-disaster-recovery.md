@@ -27,9 +27,9 @@ NATS hint 的故障实验。Redis 不属于当前 V2 correctness path。报告�
 
 ## 当前可重复的恢复证据
 
-`IMV2/scripts/test_v2_postgres_logical_restore.sh` 在独立 PostgreSQL 卷中执行
-所有编号 migration，写入 durable replay audit record，生成 `im_v2` custom-format
-logical dump，删除 schema 后恢复该 dump，并验证 retry-pause column 与审计行。
+`IMV2/scripts/test_v2_postgres_logical_restore.sh` 在独立 PostgreSQL 卷中安装
+`IMV2/sql/schema.sql`，写入 durable replay audit record，生成 `im_v2` custom-format
+logical dump，删除 schema 后恢复该 dump，并验证当前结构与审计行。
 该回归也在本机 V2 隔离验证入口中执行。
 
 这是开发环境的**本机逻辑恢复**证据，不是 PITR 证明：它不覆盖 WAL archive、时间点

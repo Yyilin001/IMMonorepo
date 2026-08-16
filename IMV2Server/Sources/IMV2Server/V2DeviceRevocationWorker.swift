@@ -17,9 +17,7 @@ public struct V2DeviceRevocationEvent: Equatable, Sendable {
     }
 }
 
-/// Stable durable-cursor namespace for the current device-revocation worker.
-/// Any retired namespace is migrated by the numbered PostgreSQL schema before
-/// the gateway process passes its readiness check.
+/// Stable durable-cursor identity for the per-gateway device-revocation worker.
 enum V2DeviceRevocationCursorNamespace {
     static let workerName = "device-revocation"
 }
@@ -94,8 +92,8 @@ public struct V2RevokedDeviceProjectionCleanupWorker: Sendable {
 }
 
 /// One physical projection store. Snapshot artifacts are intentionally kept:
-/// protocol V17 permits several devices to share an immutable artifact, while
-/// the reset assignment, tokens, receipts and cursor are device-owned.
+/// several devices may share an immutable artifact, while the reset assignment,
+/// tokens, receipts and cursor are device-owned.
 public struct V2PostgresRevokedDeviceProjectionStore: V2RevokedDeviceProjectionCleaning {
     private let database: any Database
     private let schema: String

@@ -7,6 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 compose_file="${repo_root}/IMV2/docker-compose.isolated-tests.yml"
 schema_file="${repo_root}/IMV2/sql/schema.sql"
+schema_contract_query="${repo_root}/IMV2/scripts/current_v2_schema_contract.sql"
 project_name="imv2-schema-bootstrap-regression"
 
 command -v docker >/dev/null 2>&1 || {
@@ -29,8 +30,14 @@ psql() {
 scalar() {
   psql -tAc "$1" | tr -d '[:space:]'
 }
+current_schema_contract() {
+  psql -tA < "${schema_contract_query}" | tr -d '[:space:]'
+}
+
+test "$(current_schema_contract)" = 'f'
 
 psql < "${schema_file}" >/dev/null
+test "$(current_schema_contract)" = 't'
 
 test "$(scalar "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'")" = '119'
 test "$(scalar "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'")" = '283'
@@ -55,6 +62,11 @@ diff --unified \
   <("${compose[@]}" exec -T postgres \
       pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments \
       -U im_v2_test -d im_v2_test | normalize_schema)
+
+psql -c 'CREATE TABLE im_v2.local_schema_migrations (migration_id TEXT PRIMARY KEY)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP TABLE im_v2.local_schema_migrations' >/dev/null
+test "$(current_schema_contract)" = 't'
 
 if psql < "${schema_file}" >/dev/null 2>&1; then
   printf 'canonical schema unexpectedly accepted a stale non-empty database\n' >&2

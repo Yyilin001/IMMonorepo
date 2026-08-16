@@ -75,40 +75,11 @@ if [[ ! -f "${env_file}" ]]; then
   printf 'created local-only secret configuration: %s\n' "${env_file}"
 fi
 
-required_env_keys=(
-  IM_V2_LOCAL_POSTGRES_PASSWORD
-  IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64
-  IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64
-  IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64
-  IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64
-  IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64
-  IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64
-  IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64
-  IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64
-  IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64
-  IM_V2_PASSWORD_DUMMY_BCRYPT_HASH
-)
-
-validate_current_env_contract() {
-  local invalid_lines duplicate_keys actual_keys expected_keys
-  invalid_lines="$(awk '!/^[[:space:]]*($|#)/ && !/^[A-Z0-9_]+=[^[:space:]].*$/ { print NR }' "${env_file}")"
-  duplicate_keys="$(sed -nE 's/^([A-Z0-9_]+)=.*$/\1/p' "${env_file}" | sort | uniq -d)"
-  actual_keys="$(sed -nE 's/^([A-Z0-9_]+)=.*$/\1/p' "${env_file}" | sort)"
-  expected_keys="$(printf '%s\n' "${required_env_keys[@]}" | sort)"
-  if [[ -n "${invalid_lines}" || -n "${duplicate_keys}" || "${actual_keys}" != "${expected_keys}" ]]; then
-    printf 'local V2 environment does not match the current contract: %s\n' "${env_file}" >&2
-    [[ -z "${invalid_lines}" ]] || printf 'invalid or empty-value lines: %s\n' "${invalid_lines//$'\n'/, }" >&2
-    [[ -z "${duplicate_keys}" ]] || printf 'duplicate keys: %s\n' "${duplicate_keys//$'\n'/, }" >&2
-    printf 'Move or remove this file, then rerun to generate a complete current configuration.\n' >&2
-    exit 1
-  fi
-}
-
-validate_current_env_contract
+"${script_dir}/validate_v2_local_environment.sh" "${env_file}"
 
 # Older local Docker installations can lack Buildx and therefore ignore a
 # Dockerfile-specific .dockerignore. Build from a temporary, allow-listed
-# context so V1 sources and host compiler artifacts never enter the image.
+# context so unrelated sources and host compiler artifacts never enter the image.
 build_context="$(mktemp -d)"
 # A failed Docker build can leave the same dangling compiler stage as a
 # successful one.  The exit trap makes that failure recoverable immediately,
@@ -134,18 +105,11 @@ prune_unreferenced_local_build_stages
 # current. A retained database must already match the current contract; this
 # greenfield stack never upgrades it in place.
 compose up -d --wait --force-recreate postgres
-schema_is_current="$(compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -tAc "
-  SELECT to_regnamespace('im_v2') IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-       FROM information_schema.columns
-       WHERE table_schema = 'im_v2'
-         AND table_name = 'schema_contract'
-         AND column_name = 'schema_id'
-         AND column_default = '''im-v2-current-1''::text'
-     )
-     AND to_regclass('im_v2.local_schema_migrations') IS NULL
-  " | tr -d '[:space:]')"
+schema_is_current="$(
+  compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -tA \
+    < "${script_dir}/current_v2_schema_contract.sql" |
+    tr -d '[:space:]'
+)"
 test "${schema_is_current}" = 't' || {
   printf 'local PostgreSQL volume does not match the current canonical schema.\n' >&2
   printf 'Reset it explicitly with: docker compose --project-name %s --env-file %s --file %s down --volumes\n' \

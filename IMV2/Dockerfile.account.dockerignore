@@ -1,5 +1,5 @@
-# The account image needs only these two packages. Keep V1, Xcode products,
-# Docker test artifacts, and V2 client sources out of the build context.
+# The account image needs only the Core and Server packages. Keep Xcode
+# products, Docker test artifacts, and client sources out of the build context.
 .git
 .github
 IMApp

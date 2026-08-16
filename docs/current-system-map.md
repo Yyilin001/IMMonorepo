@@ -11,7 +11,7 @@
 | `IMV2Server` | V2 TLS gateway、PostgreSQL store、持久化 outbox/fan-out、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
 | `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久化命令 outbox、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
 | `IMApp` | SwiftUI 状态与用户交互、依赖注入、iOS Push/文件导入边界 | 直接持有 bearer token、直接操作协议或数据库 |
-| `IMV2` | 编号 SQL migration、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
+| `IMV2` | PostgreSQL 当前 canonical schema、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
 
 ## 消息与同步事实链
 

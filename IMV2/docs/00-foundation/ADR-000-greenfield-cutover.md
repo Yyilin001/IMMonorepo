@@ -1,56 +1,47 @@
-# ADR-000：V2 绿地重构与兼容性边界
+# ADR-000：V2 绿地单一当前合同
 
 状态：已接受  
 日期：2026-07-23  
+最后审阅：2026-08-16
 所有者：V2 架构负责人
 
 ## 背景
 
-项目尚未上线。产品已确认不需要承载任何历史用户、设备、本地缓存、数据库记录
-或已发布客户端。因此，V2 可以直接按目标架构重构，不保留协议降级、双写、数据
-回填、影子读或灰度迁移路径。
+项目尚未上线，没有需要承载的真实用户、设备、本地缓存、数据库记录或已发布客户端。
+因此当前代码只维护一个目标合同，不实现旧协议、旧凭据、旧配置或旧 schema 的升级路径。
 
 ## 决策
 
-- V2 使用独立的 Core、Server、ClientKit、PostgreSQL schema 和 TLS protocol；
-  现有表、API、事件格式、本地缓存和网络帧不是兼容对象。
-- 首次部署只创建 V2 schema；不实现数据迁移、同步令牌转换、outbox 重放或本地缓存导入。
-- 首次分发前不存在服务端对旧帧或旧 token 的兼容承诺。
-- 在 V2 上线前，尚未发布的 V2 协议、SQL 和本地投影可以破坏性调整；每次
-  调整必须同时更新 Core、protobuf 生成物、Server、ClientKit、测试和文档，
-  不能留下静默解析或自由 JSON 回退路径。
-- 绿地决策不放宽 V2 自身的一致性要求：同一命令仍须幂等、授权、持久化、
-  可重试并能在进程/网络故障后恢复；已接受的 V2 数据也不得通过“未上线”
-  作为丢失或绕过授权的理由。
+- V2 使用独立 Core、Server、ClientKit、PostgreSQL schema、SQLite schema 和 TLS/protobuf contract。
+- PostgreSQL 首次启动只允许在空数据库执行 `IMV2/sql/schema.sql`；仓库不定义其他建库入口。
+- ClientKit 只创建当前主 SQLite 与派生搜索 schema；已有布局不升级，由认证同步重建。
+- `.env.local` 必须完整匹配当前生成格式；脚本不会追加缺失 secret 或修改旧文件。
+- protobuf、数据库字段、DTO 与协议要求缺失时必须失败，禁止以默认值、自由 JSON、双读或降级
+  消息猜测当前领域事实。
+- 破坏性调整必须在同一提交中更新 schema、Core/protobuf、Server、ClientKit、App、测试和文档。
+- 绿地政策不放宽当前合同本身：授权、幂等、事务、持久化、重试、容量 fence 和隐私仍是硬要求。
+
+## 验证与回滚
+
+当前验证以全新状态为边界：
+
+```sh
+bash scripts/test_v2_postgres_schema_bootstrap.sh
+bash IMV2/scripts/test_v2_local_environment_contract.sh
+bash scripts/verify_v2.sh
+```
+
+PostgreSQL gate 在一次性空库执行 canonical schema、与规范化 `pg_dump` 精确对比，并确认再次对
+非空库执行会失败。SQLite contract test 只验证全新当前 schema。开发环境不匹配时的回滚方式是
+显式删除一次性/本地 volume 和本地数据库后重建，不尝试保留未发布数据。
 
 ## 后果
 
-### 正向
-
-- 可直接采用目标身份、房间、事件、fan-out、sync 和 SQLite 模型。
-- 不需要为历史数据模型或行为妥协 V2 的安全、容量和可测试性边界。
-- 每项未实现能力可围绕唯一的 V2 合同设计，测试矩阵更小且更确定。
-
-### 约束
-
-- SQL migration baseline 已在首个外部测试/分发前冻结为
-  `IMV2/sql/migration-baseline.lock.sha256`。门禁会校验每一条已锁定 migration 的 SHA-256，
-  只允许追加编号大于当前最高号的新 migration；不得回写 `0001_core.sql` 或其他锁定历史。
-- 首个可分发构建前仍必须冻结 wire/schema 版本，并由本机自动化验证 protobuf
-  生成物、PostgreSQL 集成测试、migration baseline lock 和客户端投影测试。
-- 若在未来 V2 已有真实用户后进行破坏性演进，必须先新增独立 ADR；本 ADR
-  不能被用作规避已上线数据迁移、回滚或兼容责任的依据。
-- 外部规范中关于“支持已发布客户端窗口”“滚动升级”和“兼容性测试”的条款，
-  在首个 V2 发布前仅适用于 V2 组件的一致发布与回滚演练。
-
-## 发布与回滚
-
-首次部署使用空数据库/新 schema。发布失败时只允许回滚到同一 V2 构建链中已
-验证的前一候选版本；后续 schema 变更必须新增 migration，并进行 upgrade/rollback
-演练。一旦有任何真实数据或已发布客户端，后续变更还必须先定义数据、协议与客户端的
-兼容/迁移策略。
+- 代码与文档不需要承载已经删除的演进时间线，测试矩阵只覆盖当前合同和故障恢复。
+- 任何 retained local volume 都不是升级输入；脚本必须输出明确 reset 命令而非自动修补。
+- 首次真实外部测试版或生产用户出现后，本 ADR 的绿地权限终止。届时所有 schema/wire 破坏性
+  变更必须由新的 ADR 定义数据迁移、客户端窗口、滚动发布、回滚和兼容验证。
 
 ## 复审条件
 
-首次生产用户、任何外部测试版分发、需要导入旧数据，或提出多版本并存时，
-本 ADR 必须重新评审。
+首次外部测试分发、首次真实数据、需要导入外部数据，或提出多版本并存时立即复审。

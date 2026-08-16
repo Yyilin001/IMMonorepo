@@ -498,8 +498,8 @@ public nonisolated enum IMV2UserBlockAction: SwiftProtobuf.Enum, Swift.CaseItera
 
 }
 
-/// V2 is an independent protocol. It intentionally has no V1 compatibility
-/// fields or fallback messages.
+/// Every field below belongs to the current protocol contract. Required domain
+/// facts are validated after protobuf decoding rather than inferred from gaps.
 public nonisolated struct IMV2Envelope: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for

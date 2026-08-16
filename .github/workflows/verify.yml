@@ -37,6 +37,11 @@ jobs:
       - name: Install native verification dependencies
         run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep
       - name: Run package tests
+        env:
+          # This job runs inside a Swift container and cannot launch sibling
+          # Docker containers. The following service-backed integration step
+          # installs the canonical schema into a clean PostgreSQL database.
+          V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION: "1"
         run: bash ./scripts/run_v2_swift_tests.sh
       - name: Run PostgreSQL integration tests
         env:

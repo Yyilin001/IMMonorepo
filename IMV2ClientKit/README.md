@@ -44,7 +44,8 @@ a stale refresh cannot recreate it afterward.
 `V2ClientSessionBootstrapper` is the app-facing startup boundary: it requires
 an authenticated V2 session before opening the installation-bound local store,
 and accepts first credentials only from an injected trusted account/device
-provider. It deliberately has no legacy session or default login fallback.
+provider. It accepts credentials only through that explicit current provider;
+there is no implicit login source.
 
 `V2HTTPDeviceCredentialAuthTransport` is the native HTTPS refresh adapter for
 `POST /v2/device-credentials/refresh`. It sends the durable refresh operation
