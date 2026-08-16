@@ -22,7 +22,7 @@ struct V2ConversationStoreTests {
         )
 
         #expect(items == [
-            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct)
+            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular))
         ])
     }
 
@@ -52,7 +52,7 @@ struct V2ConversationStoreTests {
         )
 
         #expect(items == [
-            .init(id: roomID.rawValue, title: "空会话", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct, isPinned: true, isArchived: true, muteUntil: muteUntil)
+            .init(id: roomID.rawValue, title: "空会话", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular), isPinned: true, isArchived: true, muteUntil: muteUntil)
         ])
     }
 
@@ -60,7 +60,7 @@ struct V2ConversationStoreTests {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         let source = V2ConversationDataSourceFake(
             summaries: [
-                .init(id: "room-direct", title: "私聊", preview: "你好", lastActivity: date, isOutgoing: false, kind: .direct),
+                .init(id: "room-direct", title: "私聊", preview: "你好", lastActivity: date, isOutgoing: false, kind: .direct(accountKind: .regular)),
                 .init(id: "room-group", title: "项目群", preview: "大家好", lastActivity: date, isOutgoing: false, kind: .group)
             ],
             messages: []
@@ -76,7 +76,7 @@ struct V2ConversationStoreTests {
         let date = Date(timeIntervalSince1970: 1_700_000_000)
         let source = V2ConversationDataSourceFake(
             summaries: [
-                .init(id: "room-a", title: "会话 room-a", preview: "你好", lastActivity: date, isOutgoing: false)
+                .init(id: "room-a", title: "会话 room-a", preview: "你好", lastActivity: date, isOutgoing: false, kind: .unknown)
             ],
             messages: []
         )
@@ -92,8 +92,8 @@ struct V2ConversationStoreTests {
     @Test func listRefreshIgnoresAResponseSupersededByANewerRefresh() async {
         let source = V2SequencedConversationDataSource()
         let store = makeConversationListStore(dataSource: source, userID: "current-user")
-        let staleItem = V2ConversationListItem(id: "room-stale", title: "旧会话", preview: "旧消息", lastActivity: .now, isOutgoing: false)
-        let currentItem = V2ConversationListItem(id: "room-current", title: "新会话", preview: "新消息", lastActivity: .now, isOutgoing: false)
+        let staleItem = V2ConversationListItem(id: "room-stale", title: "旧会话", preview: "旧消息", lastActivity: .now, isOutgoing: false, kind: .unknown)
+        let currentItem = V2ConversationListItem(id: "room-current", title: "新会话", preview: "新消息", lastActivity: .now, isOutgoing: false, kind: .unknown)
 
         let firstRefresh = Task { await store.refresh() }
         await source.waitUntilSummaryRequestCount(1)
@@ -545,7 +545,7 @@ struct V2ConversationStoreTests {
             sender: sender,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             attachmentStager: stager,
             attachmentUploader: uploader
         )
@@ -573,7 +573,7 @@ struct V2ConversationStoreTests {
             sender: sender,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             publicIdentityResolver: resolver
         )
         store.draft = "请关注"
@@ -597,7 +597,7 @@ struct V2ConversationStoreTests {
             sender: sender,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true
+            kind: .group
         )
         store.draft = "全体注意"
         store.mentionHandlesText = "@all"
@@ -620,7 +620,7 @@ struct V2ConversationStoreTests {
             sender: sender,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             publicIdentityResolver: resolver
         )
         store.draft = "请关注"
@@ -1239,7 +1239,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader
         )
 
@@ -1282,7 +1282,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader
         )
 
@@ -1342,7 +1342,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMembershipChanger: changer,
             publicIdentityResolver: resolver
@@ -1377,7 +1377,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMembershipChanger: changer
         )
@@ -1410,7 +1410,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMembershipChanger: changer,
             publicIdentityResolver: resolver
@@ -1443,7 +1443,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMemberMuter: muter
         )
@@ -1475,7 +1475,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             moderatedGroupMemberRemover: remover
         )
@@ -1505,7 +1505,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMembershipChanger: changer,
             moderatedGroupMemberRemover: remover
@@ -1541,7 +1541,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
-            isGroupConversation: true,
+            kind: .group,
             groupMemberDirectory: reader,
             groupMemberMuter: muter
         )
@@ -1799,7 +1799,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-standard",
-            isGroupConversation: true,
+            kind: .group,
             activeHybridGroupSynchronizer: synchronizer
         )
 
@@ -1816,7 +1816,7 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-hybrid",
-            isGroupConversation: true,
+            kind: .group,
             activeHybridGroupSynchronizer: synchronizer
         )
 
@@ -1897,8 +1897,8 @@ struct V2ConversationStoreTests {
         let date = Date(timeIntervalSince1970: 1_750_000_000)
         let source = V2ConversationDataSourceFake(
             summaries: [
-                .init(id: "inbox", title: "收件箱", preview: "消息", lastActivity: date, isOutgoing: false),
-                .init(id: "archive", title: "归档", preview: "消息", lastActivity: date, isOutgoing: false, isArchived: true)
+                .init(id: "inbox", title: "收件箱", preview: "消息", lastActivity: date, isOutgoing: false, kind: .unknown),
+                .init(id: "archive", title: "归档", preview: "消息", lastActivity: date, isOutgoing: false, kind: .unknown, isArchived: true)
             ],
             messages: []
         )
@@ -1917,7 +1917,8 @@ struct V2ConversationStoreTests {
                 title: "Room \(index)",
                 preview: "Message",
                 lastActivity: Date(timeIntervalSince1970: TimeInterval(1_750_000_000 + index)),
-                isOutgoing: false
+                isOutgoing: false,
+                kind: .unknown
             )
         }
         let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
@@ -2048,8 +2049,7 @@ private func makeConversationDetailStore(
     userID: String,
     roomID: String,
     title: String = "会话",
-    isGroupConversation: Bool = false,
-    directAccountKind: V2AccountKind = .regular,
+    kind: V2ConversationKind = .direct(accountKind: .regular),
     groupMemberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
     groupMembershipChanger: (any V2GroupMembershipChanging)? = nil,
     groupMemberMuter: (any V2GroupMemberMuting)? = nil,
@@ -2108,8 +2108,7 @@ private func makeConversationDetailStore(
         context: .init(
             roomID: roomID,
             title: title,
-            isGroupConversation: isGroupConversation,
-            directAccountKind: directAccountKind,
+            kind: kind,
             forwardTargets: forwardTargets,
             initialDraft: initialDraft,
             initialMentionHandles: initialMentionHandles

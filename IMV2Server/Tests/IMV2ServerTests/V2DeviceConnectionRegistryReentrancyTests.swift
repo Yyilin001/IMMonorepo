@@ -113,9 +113,11 @@ struct V2DeviceConnectionRegistryReentrancyTests {
             session: .init(
                 limits: try .init(maximumInFlightRequests: 1),
                 authenticator: RegistryReentrancyAuthenticator(),
-                capabilityProfile: "base"
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
-            handler: RegistryReentrancyCommandHandler()
+            handler: RegistryReentrancyCommandHandler(),
+            registry: V2DeviceConnectionRegistry()
         )
     }
 }

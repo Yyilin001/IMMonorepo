@@ -13,17 +13,17 @@ public protocol V2ProfileUpdateStore: Sendable {
     func update(_ command: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome
 }
 
-/// Kept separate from mutation so tests and deployments may expose profile
-/// editing only when the authenticated own-profile reader is configured.
+/// Kept separate from mutation so each capability remains independently
+/// testable while the profile API composes both at startup.
 public protocol V2OwnProfileReading: Sendable {
     func currentProfile(for actorUserID: UserID) async throws -> V2ProfileView
 }
 
 public struct V2ProfileUpdateService: Sendable {
     private let store: any V2ProfileUpdateStore
-    private let reader: (any V2OwnProfileReading)?
+    private let reader: any V2OwnProfileReading
 
-    public init(store: any V2ProfileUpdateStore, reader: (any V2OwnProfileReading)? = nil) {
+    public init(store: any V2ProfileUpdateStore, reader: any V2OwnProfileReading) {
         self.store = store
         self.reader = reader
     }
@@ -33,7 +33,6 @@ public struct V2ProfileUpdateService: Sendable {
     }
 
     public func currentProfile(for actorUserID: UserID) async throws -> V2ProfileView {
-        guard let reader else { throw V2ProfileUpdateError.unavailable }
         return try await reader.currentProfile(for: actorUserID)
     }
 }

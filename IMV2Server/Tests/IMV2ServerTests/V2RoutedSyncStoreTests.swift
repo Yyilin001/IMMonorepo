@@ -14,15 +14,18 @@ struct V2RoutedSyncStoreTests {
         app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql)
         let user = try UserID("00000000-0000-0000-0000-000000000fa1")
         let device = try DeviceID("00000000-0000-0000-0000-000000000fa2")
-        let router = V2SingleUserShardRouter(route: try .init(
+        let route = try V2UserShardRoute(
             bucket: "users-target", observedRouterEpoch: 9, readFallbackBucket: "users-source"
-        ))
+        )
         let registry = try V2StaticUserShardStorageRegistry(locations: [
             try .init(bucket: "users-source", database: app.db(.psql), schema: "im_v2"),
             try .init(bucket: "users-target", database: app.db(.psql), schema: "im_v2"),
         ])
         let recorder = RoutedSyncRecorder()
-        let store = V2RoutedSyncStore(router: router, registry: registry) { location in
+        let store = V2RoutedSyncStore(
+            registry: registry,
+            routeFence: V2FixedUserShardRouteFence(route: route, database: app.db(.psql))
+        ) { location in
             RoutedSyncStoreFake(bucket: location.bucket, recorder: recorder)
         }
 

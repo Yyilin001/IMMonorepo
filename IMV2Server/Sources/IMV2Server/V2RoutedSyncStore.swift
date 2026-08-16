@@ -7,21 +7,18 @@ import IMV2Core
 /// sequence. Migration copy/forwarding establishes the target state before
 /// route control makes it the owner.
 public struct V2RoutedSyncStore: V2SyncStore, Sendable {
-    private let router: any V2UserShardRouter
     private let registry: any V2UserShardStorageResolving
-    private let routeFence: (any V2UserShardRouteFencing)?
+    private let routeFence: any V2UserShardRouteFencing
     private let coLocatedControlBuckets: Set<String>
     private let makeStore: @Sendable (V2UserShardStorageLocation) -> any V2SyncStore
 
     public init(
-        router: any V2UserShardRouter,
         registry: any V2UserShardStorageResolving,
-        routeFence: (any V2UserShardRouteFencing)? = nil,
+        routeFence: any V2UserShardRouteFencing,
         coLocatedControlBuckets: Set<String> = [],
         capabilityProfile: String = "base",
         makeStore: (@Sendable (V2UserShardStorageLocation) -> any V2SyncStore)? = nil
     ) {
-        self.router = router
         self.registry = registry
         self.routeFence = routeFence
         self.coLocatedControlBuckets = coLocatedControlBuckets
@@ -67,24 +64,19 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
         for userID: UserID,
         _ operation: @escaping @Sendable (any V2SyncStore) async throws -> Result
     ) async throws -> Result {
-        if let routeFence {
-            return try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
-                var location = try registry.location(for: route.bucket)
-                // A co-located shard must use the fence transaction's database
-                // handle. Opening a second pooled connection while the first
-                // holds the route lock can self-deadlock in one-connection
-                // deployments and would not share the transaction boundary.
-                if coLocatedControlBuckets.contains(route.bucket) {
-                    location = try .init(
-                        bucket: location.bucket, database: fencedDatabase,
-                        schema: location.schema
-                    )
-                }
-                return try await operation(makeStore(location))
+        try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
+            var location = try registry.location(for: route.bucket)
+            // A co-located shard must use the fence transaction's database
+            // handle. Opening a second pooled connection while the first
+            // holds the route lock can self-deadlock in one-connection
+            // deployments and would not share the transaction boundary.
+            if coLocatedControlBuckets.contains(route.bucket) {
+                location = try .init(
+                    bucket: location.bucket, database: fencedDatabase,
+                    schema: location.schema
+                )
             }
+            return try await operation(makeStore(location))
         }
-        let routes = try await router.routes(for: [userID])
-        guard routes.count == 1 else { throw V2UserShardRouterError.resultCountMismatch }
-        return try await operation(makeStore(try registry.location(for: routes[0].bucket)))
     }
 }

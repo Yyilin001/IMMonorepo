@@ -9,9 +9,9 @@ import SQLKit
 /// ordering rather than a best-effort collection of reads.
 public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     private let database: any Database
-    private let shadowForwarder: (any V2UserShardProjectionShadowing)?
+    private let shadowForwarder: any V2UserShardProjectionShadowing
 
-    public init(database: any Database, shadowForwarder: (any V2UserShardProjectionShadowing)? = nil) {
+    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
         self.database = database
         self.shadowForwarder = shadowForwarder
     }
@@ -141,7 +141,6 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     }
 
     private func shadow(users: [UserID], operationID: String, kinds: Set<String>) async throws {
-        guard let shadowForwarder else { return }
         let eventID = try EventID(operationID)
         for userID in Set(users) {
             _ = try await shadowForwarder.shadowIfForwarding(userID: userID, sourceEventID: eventID, projectionKinds: kinds)

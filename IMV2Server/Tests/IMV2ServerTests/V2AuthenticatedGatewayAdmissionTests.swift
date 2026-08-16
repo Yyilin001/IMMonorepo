@@ -121,9 +121,11 @@ struct V2AuthenticatedGatewayAdmissionTests {
             session: .init(
                 limits: try .init(maximumInFlightRequests: 1),
                 authenticator: Authenticator(),
-                capabilityProfile: "base"
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
-            handler: Handler()
+            handler: Handler(),
+            registry: V2DeviceConnectionRegistry()
         )
     }
 }

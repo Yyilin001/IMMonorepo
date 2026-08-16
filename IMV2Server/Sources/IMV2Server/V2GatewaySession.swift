@@ -42,7 +42,7 @@ public actor V2GatewaySession {
     private let supportedVersions: Set<UInt8>
     private let capabilityProfile: String
     private let maximumProtobufMessageDepth: Int
-    private let commandAdmission: (any V2AuthenticatedGatewayCommandAdmitting)?
+    private let commandAdmission: any V2AuthenticatedGatewayCommandAdmitting
     private let now: @Sendable () -> Date
     private var authenticatedSessionExpiresAt: Date?
 
@@ -52,7 +52,7 @@ public actor V2GatewaySession {
         supportedVersions: Set<UInt8> = [UInt8(IMV2ProtocolVersion.current)],
         capabilityProfile: String,
         maximumProtobufMessageDepth: Int = V2ServerProtobufFrameCodec.defaultMaximumMessageDepth,
-        commandAdmission: (any V2AuthenticatedGatewayCommandAdmitting)? = nil,
+        commandAdmission: any V2AuthenticatedGatewayCommandAdmitting,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.state = .init(limits: limits)
@@ -135,8 +135,7 @@ public actor V2GatewaySession {
         try state.receiveAuthenticatedRequest(frame)
         do {
             var response: IMV2Envelope
-            if let commandAdmission,
-               !(await commandAdmission.admit(identity: identity, now: now())) {
+            if !(await commandAdmission.admit(identity: identity, now: now())) {
                 response = IMV2Envelope()
                 response.error = .init()
                 response.error.code = "RATE_LIMITED"

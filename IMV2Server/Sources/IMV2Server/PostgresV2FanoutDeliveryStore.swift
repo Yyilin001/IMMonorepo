@@ -586,9 +586,12 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         // advisory locks let unrelated users continue while serializing this
         // batch with route finalization/cutover for exactly these identities.
         let lockUsers = Array(Set(users.map(\.rawValue))).sorted()
-        for user in lockUsers {
-            try await sql.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: user), 0))").run()
-        }
+        let lockUsersJSON = try batchJSON(lockUsers)
+        try await sql.raw("""
+            SELECT pg_advisory_xact_lock_shared(hashtextextended(lock_user, 0))
+            FROM jsonb_array_elements_text(\(bind: lockUsersJSON)::jsonb) AS value(lock_user)
+            ORDER BY lock_user
+            """).run()
         guard try await sql.raw("""
             SELECT router_epoch
             FROM im_v2.user_shard_router_configuration

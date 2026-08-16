@@ -70,7 +70,8 @@ struct V2DeviceRevocationWorkerTests {
             session: .init(
                 limits: try .init(maximumInFlightRequests: 1),
                 authenticator: RevocationAuthFake(),
-                capabilityProfile: "base"
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: RevocationCommandFake(),
             registry: registry

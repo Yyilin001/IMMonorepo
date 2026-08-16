@@ -19,56 +19,36 @@ public protocol V2UserShardProjectionShadowing: Sendable {
 }
 
 public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
-    private let control: any Database
-    private let router: any V2UserShardRouter
-    private let migrations: any V2UserShardMigrationStoring
     private let registry: any V2UserShardStorageResolving
-    private let routeFence: (any V2UserShardRouteFencing)?
+    private let routeFence: any V2UserShardRouteFencing
     private let coLocatedControlBuckets: Set<String>
 
     public init(
-        control: any Database, router: any V2UserShardRouter,
-        migrations: any V2UserShardMigrationStoring,
         registry: any V2UserShardStorageResolving,
-        routeFence: (any V2UserShardRouteFencing)? = nil,
+        routeFence: any V2UserShardRouteFencing,
         coLocatedControlBuckets: Set<String> = []
     ) {
-        self.control = control
-        self.router = router
-        self.migrations = migrations
         self.registry = registry
         self.routeFence = routeFence
         self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
     public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
-        if let routeFence {
-            return try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
-                guard let sql = fencedDatabase as? any SQLDatabase,
-                      let userUUID = UUID(uuidString: userID.rawValue)
-                else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let migration = try await sql.raw("""
-                    SELECT phase, source_bucket, target_bucket
-                    FROM im_v2.user_shard_migrations
-                    WHERE user_id = \(bind: userUUID)
-                    """).first(decoding: ShadowMigrationRow.self)?.record
-                return try await shadow(
-                    userID: userID, sourceEventID: sourceEventID,
-                    projectionKinds: projectionKinds, route: route,
-                    controlDatabase: fencedDatabase, migration: migration
-                )
-            }
+        try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
+            guard let sql = fencedDatabase as? any SQLDatabase,
+                  let userUUID = UUID(uuidString: userID.rawValue)
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let migration = try await sql.raw("""
+                SELECT phase, source_bucket, target_bucket
+                FROM im_v2.user_shard_migrations
+                WHERE user_id = \(bind: userUUID)
+                """).first(decoding: ShadowMigrationRow.self)?.record
+            return try await shadow(
+                userID: userID, sourceEventID: sourceEventID,
+                projectionKinds: projectionKinds, route: route,
+                controlDatabase: fencedDatabase, migration: migration
+            )
         }
-        let routes = try await router.routes(for: [userID])
-        guard routes.count == 1 else { throw V2UserShardRouterError.resultCountMismatch }
-        return try await shadow(
-            userID: userID, sourceEventID: sourceEventID,
-            projectionKinds: projectionKinds, route: routes[0],
-            controlDatabase: control,
-            migration: try await migrations.load(userID: userID).map {
-                .init(phase: $0.phase, sourceBucket: $0.sourceBucket, targetBucket: $0.targetBucket)
-            }
-        )
     }
 
     private func shadow(

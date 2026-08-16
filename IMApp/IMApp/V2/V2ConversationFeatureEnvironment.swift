@@ -171,8 +171,7 @@ struct V2ConversationFeatureEnvironment {
 struct V2ConversationDetailContext {
     let roomID: String
     let title: String
-    let isGroupConversation: Bool
-    let directAccountKind: V2AccountKind
+    let kind: V2ConversationKind
     let forwardTargets: [V2ConversationForwardTarget]
     let initialDraft: String?
     let initialMentionHandles: String?
@@ -180,16 +179,14 @@ struct V2ConversationDetailContext {
     init(
         roomID: String,
         title: String = "会话",
-        isGroupConversation: Bool = false,
-        directAccountKind: V2AccountKind = .regular,
+        kind: V2ConversationKind,
         forwardTargets: [V2ConversationForwardTarget] = [],
         initialDraft: String? = nil,
         initialMentionHandles: String? = nil
     ) {
         self.roomID = roomID
         self.title = title
-        self.isGroupConversation = isGroupConversation
-        self.directAccountKind = directAccountKind
+        self.kind = kind
         self.forwardTargets = forwardTargets
         self.initialDraft = initialDraft
         self.initialMentionHandles = initialMentionHandles

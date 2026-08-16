@@ -103,6 +103,7 @@ struct V2FanoutPipelineTests {
                 now: { now }
             ),
             deliveryWorker: .init(store: store, now: { now }),
+            telemetry: V2DiscardingTelemetrySink(),
             now: { now }
         )
 
@@ -127,6 +128,7 @@ struct V2FanoutPipelineTests {
                 now: { now }
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
+            telemetry: V2DiscardingTelemetrySink(),
             now: { now }
         )
 
@@ -159,6 +161,7 @@ struct V2FanoutPipelineTests {
                 now: { now }
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
+            telemetry: V2DiscardingTelemetrySink(),
             now: { now }
         )
 
@@ -212,6 +215,7 @@ struct V2FanoutPipelineTests {
                 .init(store: store, bucket: "users-a", now: { now }),
                 .init(store: store, bucket: "users-b", now: { now }),
             ],
+            telemetry: V2DiscardingTelemetrySink(),
             now: { now }
         )
 

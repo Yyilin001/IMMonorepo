@@ -216,26 +216,6 @@ public protocol V2UserShardMigrationVerifying: Sendable {
 
 public enum V2UserShardMigrationVerificationError: Error, Equatable, Sendable { case fingerprintMismatch }
 
-/// The coordinator is intentionally storage-neutral: a PostgreSQL-backed
-/// store can fence phase writes, while this unit keeps copy/verify ordering
-/// deterministic under injected success and failure providers.
-public struct V2UserShardMigrationCoordinator: Sendable {
-    private let copier: any V2UserShardMigrationCopying
-    private let verifier: any V2UserShardMigrationVerifying
-
-    public init(copier: any V2UserShardMigrationCopying, verifier: any V2UserShardMigrationVerifying) {
-        self.copier = copier; self.verifier = verifier
-    }
-
-    public func copyThenVerify(_ record: V2UserShardMigrationRecord) async throws -> (sourceFingerprint: String, targetFingerprint: String) {
-        guard record.phase == .prepared || record.phase == .failed else { throw V2UserShardMigrationError.invalidTransition }
-        try await copier.copy(record)
-        let fingerprints = try await verifier.fingerprints(for: record)
-        guard fingerprints.source == fingerprints.target else { throw V2UserShardMigrationVerificationError.fingerprintMismatch }
-        return (fingerprints.source, fingerprints.target)
-    }
-}
-
 /// Durable orchestration for a single migration attempt. It never holds a
 /// PostgreSQL transaction while a cross-store adapter is doing network I/O;
 /// every continuation is fenced by the persisted phase instead.

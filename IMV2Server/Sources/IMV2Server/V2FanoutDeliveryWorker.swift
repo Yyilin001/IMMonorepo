@@ -79,22 +79,6 @@ public protocol V2FanoutDeliveryBucketConcurrencyControlling: Sendable {
     var maximumConcurrentClaimsPerBucket: Int { get }
 }
 
-public extension V2FanoutDeliveryStore {
-    /// Convenience helper for one-off administrative and integration-test
-    /// callers. The runtime uses `V2FanoutDeliveryClaimScheduler` instead so
-    /// a busy fresh lane cannot indefinitely postpone recovery work.
-    func claimPending(bucket: String?, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease] {
-        for lane in [.fresh, .retryDue, .expiredLease] as [V2FanoutDeliveryClaimLane] {
-            let leases = try await claimPending(
-                bucket: bucket, lane: lane, now: now, leaseDuration: leaseDuration, limit: limit
-            )
-            if !leases.isEmpty { return leases }
-        }
-        return []
-    }
-
-}
-
 /// Allocates claim turns for one logical target bucket. Seven (by default)
 /// fast-path turns are followed by one recovery-first turn. If the preferred
 /// lane is empty, a worker falls through to the other lanes immediately; if
@@ -153,13 +137,25 @@ public struct V2FanoutDeliveryReport: Equatable, Sendable {
 /// A bounded caller-scheduled worker. It purposely processes sequentially:
 /// database lease contention is the backpressure boundary, while deployment
 /// controls parallelism through bucket ownership and worker replicas.
+protocol V2FanoutDeliveryRouteResolving: Sendable {
+    func routes(for leases: [V2FanoutDeliveryLease]) async throws -> [V2UserShardRoute]
+}
+
+private struct V2UserShardFanoutDeliveryRouteResolver: V2FanoutDeliveryRouteResolving {
+    let router: any V2UserShardRouter
+
+    func routes(for leases: [V2FanoutDeliveryLease]) async throws -> [V2UserShardRoute] {
+        try await router.routes(for: leases.map(\.targetUserID))
+    }
+}
+
 public struct V2FanoutDeliveryWorker: Sendable {
     private let store: any V2FanoutDeliveryStore
     private let bucket: String?
     private let leaseDuration: TimeInterval
     private let now: @Sendable () -> Date
     private let liveNotifier: (any V2LiveSyncNotifier)?
-    private let router: (any V2UserShardRouter)?
+    private let routeResolver: any V2FanoutDeliveryRouteResolving
     private let retryPolicy: V2DurableRetryPolicy
     private let claimScheduler: V2FanoutDeliveryClaimScheduler
     private let commitBatchSize: Int
@@ -181,7 +177,33 @@ public struct V2FanoutDeliveryWorker: Sendable {
         bucket: String? = nil,
         leaseDuration: TimeInterval = 30,
         liveNotifier: (any V2LiveSyncNotifier)? = nil,
-        router: (any V2UserShardRouter)? = nil,
+        router: any V2UserShardRouter,
+        retryPolicy: V2DurableRetryPolicy = .standard,
+        claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
+        commitBatchSize: Int = 128,
+        maximumConcurrentCommitBatches: Int = 1,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.init(
+            store: store,
+            bucket: bucket,
+            leaseDuration: leaseDuration,
+            liveNotifier: liveNotifier,
+            routeResolver: V2UserShardFanoutDeliveryRouteResolver(router: router),
+            retryPolicy: retryPolicy,
+            claimScheduler: claimScheduler,
+            commitBatchSize: commitBatchSize,
+            maximumConcurrentCommitBatches: maximumConcurrentCommitBatches,
+            now: now
+        )
+    }
+
+    init(
+        store: any V2FanoutDeliveryStore,
+        bucket: String? = nil,
+        leaseDuration: TimeInterval = 30,
+        liveNotifier: (any V2LiveSyncNotifier)? = nil,
+        routeResolver: any V2FanoutDeliveryRouteResolving,
         retryPolicy: V2DurableRetryPolicy = .standard,
         claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
         commitBatchSize: Int = 128,
@@ -196,7 +218,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
         self.bucket = bucket
         self.leaseDuration = leaseDuration
         self.liveNotifier = liveNotifier
-        self.router = router
+        self.routeResolver = routeResolver
         self.retryPolicy = retryPolicy
         self.claimScheduler = claimScheduler
         self.commitBatchSize = commitBatchSize
@@ -220,12 +242,12 @@ public struct V2FanoutDeliveryWorker: Sendable {
         var released = 0
         var paused = 0
         var committableLeases: [V2FanoutDeliveryLease] = []
-        if let router, !leases.isEmpty {
+        if !leases.isEmpty {
             do {
                 // Route the complete bounded claim together. This preserves
                 // the exact epoch check per lease while replacing an N+1
                 // control-plane read with one ordered batch lookup.
-                let routes = try await router.routes(for: leases.map(\.targetUserID))
+                let routes = try await routeResolver.routes(for: leases)
                 guard routes.count == leases.count else { throw V2UserShardRouterError.resultCountMismatch }
                 for (lease, route) in zip(leases, routes) {
                     guard route.writeIdentity != lease.observedRoute.writeIdentity else {
@@ -257,8 +279,6 @@ public struct V2FanoutDeliveryWorker: Sendable {
                 released += outcome.released
                 paused += outcome.paused
             }
-        } else {
-            committableLeases = leases
         }
         let batches = committableLeases.chunked(into: commitBatchSize)
         for windowStart in stride(from: 0, to: batches.count, by: maximumConcurrentCommitBatches) {

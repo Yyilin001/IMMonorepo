@@ -11,12 +11,10 @@ import SQLKit
 /// or roll back together.
 public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
     private let database: any Database
-    private let router: any V2UserShardRouter
     private let makeUUID: @Sendable () -> UUID
 
-    public init(database: any Database, router: any V2UserShardRouter, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
+    public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
-        self.router = router
         self.makeUUID = makeUUID
     }
 
@@ -88,21 +86,7 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
 
-            // The production router stores its configuration in this same
-            // control database. Keep a generic-router fallback for tests and
-            // deliberately non-co-located control planes: only the explicit
-            // PostgreSQL router is allowed to use the SQL routing relation.
-            if router is V2PostgresUserShardRouter {
-                return try await planPostgresRoutedPage(
-                    sql: sql,
-                    plan: plan,
-                    planID: planID,
-                    pageSize: pageSize,
-                    expectedTargetCount: expectedTargetCount
-                )
-            }
-
-            return try await planExternalRouterPage(
+            return try await planPostgresRoutedPage(
                 sql: sql,
                 plan: plan,
                 planID: planID,
@@ -112,62 +96,7 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
         }
     }
 
-    private func planExternalRouterPage(
-        sql: any SQLDatabase,
-        plan: FanoutPlanRow,
-        planID: UUID,
-        pageSize: Int,
-        expectedTargetCount: Int
-    ) async throws -> PlanningStep {
-        let members = try await fetchPage(
-            sql: sql,
-            plan: plan,
-            afterUserID: plan.afterUserID,
-            pageSize: pageSize
-        )
-        guard !members.isEmpty else {
-            return try await completeEmptyPage(
-                sql: sql,
-                planID: planID,
-                expectedTargetCount: expectedTargetCount,
-                enumeratedTargetCount: plan.enumeratedTargetCount
-            )
-        }
-
-        let users = try members.map { try UserID($0.userID.uuidString) }
-        let routes = try await router.routes(for: users)
-        guard routes.count == members.count else { throw V2UserShardRouterError.resultCountMismatch }
-        let first = members[0].userID
-        let last = members[members.count - 1].userID
-        let completionUnitID = makeUUID()
-        try await sql.raw("""
-            INSERT INTO im_v2.fanout_completion_units
-                (source_event_id, completion_unit_id, target_boundary, target_count, state)
-            VALUES
-                (\(bind: plan.sourceEventID), \(bind: completionUnitID),
-                 jsonb_build_object('first_user_id', \(bind: first.uuidString),
-                                    'last_user_id', \(bind: last.uuidString),
-                                    'membership_revision', \(bind: plan.committedMembershipRevision),
-                                    'audience_kind', \(bind: plan.targetRuleKind)),
-                 \(bind: members.count), 'pending')
-        """).run()
-        try await insertDeliveries(sql: sql, plan: plan, members: members, routes: routes, completionUnitID: completionUnitID)
-        let progress = try await advancePageCheckpoint(
-            sql: sql,
-            planID: planID,
-            lastUserID: last,
-            enumeratedCount: members.count
-        )
-        guard progress.enumeratedTargetCount <= Int64(expectedTargetCount) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        if progress.state == "planned" {
-            return .completed(units: 1, deliveries: members.count)
-        }
-        return .page(units: 1, deliveries: members.count)
-    }
-
-    /// This is the production fast path. `candidateMembers` is intentionally
+    /// `candidateMembers` is intentionally
     /// MATERIALIZED because its exact bounded membership snapshot feeds the
     /// completion boundary, route join, delivery write and checkpoint in one
     /// statement. No application-side UUID JSON round trip is involved.
@@ -322,28 +251,6 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
             """
     }
 
-    private func advancePageCheckpoint(
-        sql: any SQLDatabase,
-        planID: UUID,
-        lastUserID: UUID,
-        enumeratedCount: Int
-    ) async throws -> FanoutPlanProgressRow {
-        guard let progress = try await sql.raw("""
-            UPDATE im_v2.fanout_plans
-            SET enumeration_checkpoint = jsonb_build_object('after_user_id', \(bind: lastUserID.uuidString)),
-                enumerated_target_count = enumerated_target_count + \(bind: enumeratedCount),
-                state = CASE
-                    WHEN enumerated_target_count + \(bind: enumeratedCount) = target_count THEN 'planned'
-                    ELSE state
-                END
-            WHERE plan_id = \(bind: planID) AND state = 'planning'
-            RETURNING state, enumerated_target_count
-            """).first(decoding: FanoutPlanProgressRow.self) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return progress
-    }
-
     private func completeEmptyPage(
         sql: any SQLDatabase,
         planID: UUID,
@@ -369,70 +276,6 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
         return .completed(units: 0, deliveries: 0)
     }
 
-    private func fetchPage(
-        sql: any SQLDatabase,
-        plan: FanoutPlanRow,
-        afterUserID: UUID?,
-        pageSize: Int
-    ) async throws -> [FanoutMemberRow] {
-        if plan.targetRuleKind == "frozen_targets" {
-            if let afterUserID {
-                return try await sql.raw("""
-                    SELECT target_user_id AS user_id FROM im_v2.fanout_plan_targets
-                    WHERE source_event_id = \(bind: plan.sourceEventID) AND target_user_id > \(bind: afterUserID)
-                    ORDER BY target_user_id LIMIT \(bind: pageSize)
-                    """).all(decoding: FanoutMemberRow.self)
-            }
-            return try await sql.raw("""
-                SELECT target_user_id AS user_id FROM im_v2.fanout_plan_targets
-                WHERE source_event_id = \(bind: plan.sourceEventID)
-                ORDER BY target_user_id LIMIT \(bind: pageSize)
-                """).all(decoding: FanoutMemberRow.self)
-        }
-        if let afterUserID {
-            return try await sql.raw("""
-                SELECT user_id FROM im_v2.room_memberships
-                WHERE room_id = \(bind: plan.roomID)
-                  AND joined_revision <= \(bind: plan.committedMembershipRevision)
-                  AND (left_revision IS NULL OR left_revision > \(bind: plan.committedMembershipRevision))
-                  AND user_id > \(bind: afterUserID)
-                ORDER BY user_id LIMIT \(bind: pageSize)
-                """).all(decoding: FanoutMemberRow.self)
-        }
-        return try await sql.raw("""
-            SELECT user_id FROM im_v2.room_memberships
-            WHERE room_id = \(bind: plan.roomID)
-              AND joined_revision <= \(bind: plan.committedMembershipRevision)
-              AND (left_revision IS NULL OR left_revision > \(bind: plan.committedMembershipRevision))
-            ORDER BY user_id LIMIT \(bind: pageSize)
-            """).all(decoding: FanoutMemberRow.self)
-    }
-
-    private func insertDeliveries(
-        sql: any SQLDatabase,
-        plan: FanoutPlanRow,
-        members: [FanoutMemberRow],
-        routes: [V2UserShardRoute],
-        completionUnitID: UUID
-    ) async throws {
-        let projectionKind = projectionKind(for: plan.eventType)
-        guard members.count == routes.count else { throw V2UserShardRouterError.resultCountMismatch }
-        let routeJSON = try String(data: JSONEncoder().encode(zip(members, routes).map {
-            DeliveryRouteInsertRow(userID: $0.0.userID, bucket: $0.1.bucket, observedRouterEpoch: $0.1.observedRouterEpoch)
-        }), encoding: .utf8)
-        guard let routeJSON else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        try await sql.raw("""
-            INSERT INTO im_v2.fanout_deliveries
-                (source_event_id, target_user_id, projection_kind, completion_unit_id,
-                 target_shard_bucket, observed_router_epoch)
-            SELECT \(bind: plan.sourceEventID), route.target_user_id, \(bind: projectionKind), \(bind: completionUnitID),
-                   route.target_shard_bucket, route.observed_router_epoch
-            FROM jsonb_to_recordset(\(bind: routeJSON)::jsonb) AS route(
-                target_user_id UUID, target_shard_bucket TEXT, observed_router_epoch BIGINT
-            )
-            ON CONFLICT (source_event_id, target_user_id, projection_kind) DO NOTHING
-            """).run()
-    }
 }
 
 private extension PostgresV2FanoutPlanStore {
@@ -471,22 +314,6 @@ private struct FanoutPlanRow: Decodable {
     }
 }
 
-private struct FanoutMemberRow: Decodable {
-    let userID: UUID
-    enum CodingKeys: String, CodingKey { case userID = "user_id" }
-}
-
-private struct DeliveryRouteInsertRow: Encodable {
-    let userID: UUID
-    let bucket: String
-    let observedRouterEpoch: Int64
-    enum CodingKeys: String, CodingKey {
-        case userID = "target_user_id"
-        case bucket = "target_shard_bucket"
-        case observedRouterEpoch = "observed_router_epoch"
-    }
-}
-
 private struct SetBasedPlanningPageRow: Decodable {
     let candidateCount: Int64
     let routedCount: Int64
@@ -497,15 +324,6 @@ private struct SetBasedPlanningPageRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case candidateCount = "candidate_count", routedCount = "routed_count", insertedCount = "inserted_count"
         case firstUserID = "first_user_id", lastUserID = "last_user_id", resultingState = "resulting_state"
-    }
-}
-
-private struct FanoutPlanProgressRow: Decodable {
-    let state: String
-    let enumeratedTargetCount: Int64
-    enum CodingKeys: String, CodingKey {
-        case state
-        case enumeratedTargetCount = "enumerated_target_count"
     }
 }
 

@@ -5,12 +5,6 @@ public protocol V2RuntimeEnvironment: Sendable {
     func value(for key: String) -> String?
 }
 
-public struct V2DictionaryRuntimeEnvironment: V2RuntimeEnvironment, Sendable {
-    private let values: [String: String]
-    public init(_ values: [String: String]) { self.values = values }
-    public func value(for key: String) -> String? { values[key] }
-}
-
 public enum V2GatewayRuntimeConfigurationError: Error, Equatable, Sendable {
     case missing(String)
     case invalid(String)

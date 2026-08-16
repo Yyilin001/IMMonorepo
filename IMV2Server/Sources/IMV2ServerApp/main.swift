@@ -154,8 +154,7 @@ enum IMV2ServerApp {
             try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
             let userShardMigrations = PostgresV2UserShardMigrationStore(database: database)
             let userShardShadowForwarder = V2PostgresUserShardProjectionShadowForwarder(
-                control: database, router: userShardRouter,
-                migrations: userShardMigrations, registry: userShardStorage,
+                registry: userShardStorage,
                 routeFence: userShardRouter,
                 coLocatedControlBuckets: coLocatedControlBuckets
             )
@@ -311,8 +310,7 @@ enum IMV2ServerApp {
                 groupCapabilities: groupCapabilities,
                 forwardMessages: forwardMessages,
                 sync: .init(store: V2RoutedSyncStore(
-                    router: userShardRouter, registry: userShardStorage,
-                    routeFence: userShardRouter,
+                    registry: userShardStorage, routeFence: userShardRouter,
                     coLocatedControlBuckets: coLocatedControlBuckets,
                     capabilityProfile: configuration.capabilityProfile
                 )),
@@ -321,7 +319,7 @@ enum IMV2ServerApp {
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(database: database)
             let durableFanoutPublisher = V2LocalFanoutPlanPublisher(
                 planner: .init(
-                    store: PostgresV2FanoutPlanStore(database: database, router: userShardRouter),
+                    store: PostgresV2FanoutPlanStore(database: database),
                     pageSize: configuration.capacityProfile.limits.maxEnumerationPageSize
                 )
             )

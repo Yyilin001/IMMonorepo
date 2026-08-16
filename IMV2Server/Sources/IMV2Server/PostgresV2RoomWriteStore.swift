@@ -11,13 +11,13 @@ import SQLKit
 /// database transaction.
 public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let database: any Database
-    private let strangerMessagePolicy: V2StrangerMessagePolicy?
-    private let shadowForwarder: (any V2UserShardProjectionShadowing)?
+    private let strangerMessagePolicy: V2StrangerMessagePolicy
+    private let shadowForwarder: any V2UserShardProjectionShadowing
 
     public init(
         database: any Database,
-        strangerMessagePolicy: V2StrangerMessagePolicy? = nil,
-        shadowForwarder: (any V2UserShardProjectionShadowing)? = nil
+        strangerMessagePolicy: V2StrangerMessagePolicy,
+        shadowForwarder: any V2UserShardProjectionShadowing
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
@@ -232,7 +232,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // consuming the stranger window earlier would be a silent quota
             // loss despite no accepted message.
             if room.kind == "direct" {
-                guard let strangerMessagePolicy else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 try await consumeDirectMessageQuota(roomID: roomID, senderID: senderID, policy: strangerMessagePolicy, now: now, sql: sql)
             }
 
@@ -273,7 +272,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         command: V2SendMessageCommand,
         outcome: V2SendMessageOutcome
     ) async throws {
-        guard let shadowForwarder else { return }
         let message: V2AcceptedMessage
         switch outcome {
         case .accepted(let value), .idempotent(let value):
@@ -594,16 +592,45 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 (message_id, room_id, expected_content_revision, state, created_at)
             VALUES (\(bind: messageID), \(bind: roomID), 1, 'pending', \(bind: message.createdAt))
             """).run()
-        for (ordinal, reference) in message.media.enumerated() {
-            try await sql.raw("INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at) VALUES (\(bind: messageID), \(bind: try uuid(reference.mediaID)), \(bind: ordinal), \(bind: message.createdAt))").run()
-        }
-        for (ordinal, target) in message.mentions.enumerated() {
-            switch target {
-            case .user(let userID):
-                try await sql.raw("INSERT INTO im_v2.message_mentions (message_id, ordinal, mention_kind, mentioned_user_id, created_at) VALUES (\(bind: messageID), \(bind: ordinal), 'user', \(bind: try uuid(userID)), \(bind: message.createdAt))").run()
-            case .everyone:
-                try await sql.raw("INSERT INTO im_v2.message_mentions (message_id, ordinal, mention_kind, mentioned_user_id, created_at) VALUES (\(bind: messageID), \(bind: ordinal), 'everyone', NULL, \(bind: message.createdAt))").run()
+        if !message.media.isEmpty {
+            let references = try message.media.enumerated().map { ordinal, reference in
+                OrderedMediaReferenceInput(ordinal: ordinal, mediaID: try uuid(reference.mediaID))
             }
+            let referencesJSON = try roomWriteJSON(references)
+            try await sql.raw("""
+                INSERT INTO im_v2.message_media_references
+                    (message_id, media_id, ordinal, referenced_at)
+                SELECT \(bind: messageID), reference.media_id, reference.ordinal, \(bind: message.createdAt)
+                FROM jsonb_to_recordset(\(bind: referencesJSON)::jsonb)
+                     AS reference(ordinal integer, media_id uuid)
+                """).run()
+        }
+        if !message.mentions.isEmpty {
+            let mentions = try message.mentions.enumerated().map { ordinal, target in
+                switch target {
+                case .user(let userID):
+                    return OrderedMentionInput(
+                        ordinal: ordinal,
+                        mentionKind: "user",
+                        mentionedUserID: try uuid(userID)
+                    )
+                case .everyone:
+                    return OrderedMentionInput(
+                        ordinal: ordinal,
+                        mentionKind: "everyone",
+                        mentionedUserID: nil
+                    )
+                }
+            }
+            let mentionsJSON = try roomWriteJSON(mentions)
+            try await sql.raw("""
+                INSERT INTO im_v2.message_mentions
+                    (message_id, ordinal, mention_kind, mentioned_user_id, created_at)
+                SELECT \(bind: messageID), mention.ordinal, mention.mention_kind,
+                       mention.mentioned_user_id, \(bind: message.createdAt)
+                FROM jsonb_to_recordset(\(bind: mentionsJSON)::jsonb)
+                     AS mention(ordinal integer, mention_kind text, mentioned_user_id uuid)
+                """).run()
         }
         try await sql.raw("""
             INSERT INTO im_v2.room_events
@@ -686,14 +713,35 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     }
 
     private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
+        guard !media.isEmpty else { return [] }
         guard Set(media).count == media.count else { throw V2MediaStoreError.invalidReferenceSet }
-        var presentations: [V2MediaPresentation] = []
-        for reference in media {
-            let mediaID = try uuid(reference.mediaID)
-            guard let row = try await sql.raw("SELECT media_id, content_type, byte_count FROM im_v2.media_objects WHERE media_id = \(bind: mediaID) AND owner_user_id = \(bind: ownerID) AND state = 'available' AND expires_at > \(bind: now) FOR UPDATE").first(decoding: MessageMediaPresentationRow.self) else { throw V2MediaStoreError.mediaUnavailable }
-            presentations.append(try row.presentation)
+        let requested = try media.enumerated().map { ordinal, reference in
+            OrderedMediaReferenceInput(ordinal: ordinal, mediaID: try uuid(reference.mediaID))
         }
-        return presentations
+        let requestedJSON = try roomWriteJSON(requested)
+        let rows = try await sql.raw("""
+            WITH requested AS (
+                SELECT ordinal, media_id
+                FROM jsonb_to_recordset(\(bind: requestedJSON)::jsonb)
+                     AS input(ordinal integer, media_id uuid)
+            )
+            SELECT requested.ordinal, media.media_id, media.content_type, media.byte_count
+            FROM requested
+            JOIN im_v2.media_objects AS media
+              ON media.media_id = requested.media_id
+             AND media.owner_user_id = \(bind: ownerID)
+             AND media.state = 'available'
+             AND media.expires_at > \(bind: now)
+            -- Lock shared media in a canonical order so two concurrent sends
+            -- cannot deadlock merely because their attachment order differs.
+            ORDER BY media.media_id
+            FOR UPDATE OF media
+            """).all(decoding: OrderedMessageMediaPresentationRow.self)
+        let orderedRows = rows.sorted { $0.ordinal < $1.ordinal }
+        guard orderedRows.count == requested.count,
+              orderedRows.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
+        else { throw V2MediaStoreError.mediaUnavailable }
+        return try orderedRows.map { try $0.presentation }
     }
 
     private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
@@ -868,6 +916,36 @@ private func mentionTargetJSON(_ userIDs: [UUID]) throws -> String {
     return json
 }
 
+private func roomWriteJSON<Value: Encodable>(_ value: Value) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    guard let json = String(data: data, encoding: .utf8) else {
+        throw V2RoomWriteStoreError.corruptPersistenceState
+    }
+    return json
+}
+
+private struct OrderedMediaReferenceInput: Encodable {
+    let ordinal: Int
+    let mediaID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case mediaID = "media_id"
+    }
+}
+
+private struct OrderedMentionInput: Encodable {
+    let ordinal: Int
+    let mentionKind: String
+    let mentionedUserID: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case mentionKind = "mention_kind"
+        case mentionedUserID = "mentioned_user_id"
+    }
+}
+
 private struct AdmissionRow: Decodable {
     let eligibleMemberCount: Int
     let commandWindowLimit: Int
@@ -1000,6 +1078,30 @@ private struct MessageMediaPresentationRow: Decodable {
     let byteCount: Int64
 
     enum CodingKeys: String, CodingKey {
+        case mediaID = "media_id"
+        case contentType = "content_type"
+        case byteCount = "byte_count"
+    }
+
+    var presentation: V2MediaPresentation {
+        get throws {
+            try .init(
+                mediaID: .init(mediaID.uuidString),
+                kind: V2MediaPresentation.kind(forContentType: contentType),
+                contentType: contentType,
+                byteCount: byteCount
+            )
+        }
+    }
+}
+private struct OrderedMessageMediaPresentationRow: Decodable {
+    let ordinal: Int
+    let mediaID: UUID
+    let contentType: String
+    let byteCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
         case mediaID = "media_id"
         case contentType = "content_type"
         case byteCount = "byte_count"

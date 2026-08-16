@@ -19,18 +19,6 @@ struct V2UserShardMigrationTests {
         }
     }
 
-    @Test("copy verification accepts only matching fingerprints")
-    func verifiesMatchingFingerprints() async throws {
-        let user = try UserID("00000000-0000-0000-0000-000000000991")
-        let record = V2UserShardMigrationRecord(migrationID: UUID(), userID: user, sourceBucket: "users-a", targetBucket: "users-b", sourceRouterEpoch: 1, phase: .prepared, sourceFingerprint: nil, targetFingerprint: nil)
-        let coordinator = V2UserShardMigrationCoordinator(copier: CopyFake(), verifier: VerifyFake(values: ("same", "same")))
-        let result = try await coordinator.copyThenVerify(record)
-        #expect(result.sourceFingerprint == "same")
-        await #expect(throws: V2UserShardMigrationVerificationError.fingerprintMismatch) {
-            try await V2UserShardMigrationCoordinator(copier: CopyFake(), verifier: VerifyFake(values: ("left", "right"))).copyThenVerify(record)
-        }
-    }
-
     @Test("durable coordinator fences each phase and retains only a bounded failure code")
     func durableCoordinatorPersistsVerifiedOrFailedState() async throws {
         let user = try UserID("00000000-0000-0000-0000-000000000992")

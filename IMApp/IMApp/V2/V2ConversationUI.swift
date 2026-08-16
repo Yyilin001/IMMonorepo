@@ -9,47 +9,51 @@ import UniformTypeIdentifiers
 
 /// App-facing, value-only view data. The UI never reads SQLite rows or sync
 /// event payloads directly, which keeps navigation and rendering testable.
-struct V2ConversationListItem: Hashable, Identifiable, Sendable {
-    enum Kind: Hashable, Sendable {
-        /// A direct room with an authorized, bounded public-identity projection.
-        case direct
-        /// A group room with a compact room-profile projection.
-        case group
-        /// A message arrived before its corresponding room projection. Keep
-        /// it readable, but do not expose group-only controls speculatively.
-        case unknown
+enum V2ConversationKind: Hashable, Sendable {
+    /// A direct room with an authorized, bounded public-identity projection.
+    case direct(accountKind: V2AccountKind)
+    /// A group room with a compact room-profile projection.
+    case group
+    /// A message arrived before its corresponding room projection. Keep it
+    /// readable, but do not invent a direct-account classification for it.
+    case unknown
 
-        /// Test-only consumers can distinguish a locally projected direct
-        /// room from a group without depending on a mutable display name.
-        /// The opaque room ID remains the final identifier component.
-        var accessibilityIdentifierComponent: String {
-            switch self {
-            case .direct: "direct"
-            case .group: "group"
-            case .unknown: "unknown"
-            }
+    var accessibilityIdentifierComponent: String {
+        switch self {
+        case .direct: "direct"
+        case .group: "group"
+        case .unknown: "unknown"
         }
     }
+
+    var isGroup: Bool {
+        if case .group = self { true } else { false }
+    }
+
+    var directAccountKind: V2AccountKind? {
+        if case .direct(let accountKind) = self { accountKind } else { nil }
+    }
+}
+
+struct V2ConversationListItem: Hashable, Identifiable, Sendable {
 
     let id: String
     let title: String
     let preview: String
     let lastActivity: Date
     let isOutgoing: Bool
-    let kind: Kind
-    let accountKind: V2AccountKind
+    let kind: V2ConversationKind
     let isPinned: Bool
     let isArchived: Bool
     let muteUntil: Date?
 
-    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: Kind = .unknown, accountKind: V2AccountKind = .regular, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil) {
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil) {
         self.id = id
         self.title = title
         self.preview = preview
         self.lastActivity = lastActivity
         self.isOutgoing = isOutgoing
         self.kind = kind
-        self.accountKind = accountKind
         self.isPinned = isPinned
         self.isArchived = isArchived
         self.muteUntil = muteUntil
@@ -370,7 +374,7 @@ final class V2ConversationListStore {
     private(set) var isCreatingGroupConversation = false
     private(set) var pendingGroupConversationOperationID: String?
     private var explicitRoomTitles: [String: String] = [:]
-    private var explicitRoomKinds: [String: V2ConversationListItem.Kind] = [:]
+    private var explicitRoomKinds: [String: V2ConversationKind] = [:]
     private var refreshGeneration = 0
 
     init(environment: V2ConversationFeatureEnvironment) {
@@ -665,7 +669,6 @@ final class V2ConversationListStore {
         let item = items.first(where: { $0.id == roomID })
         let title = explicitRoomTitles[roomID] ?? item?.title ?? "会话"
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
-        let accountKind = item?.accountKind ?? .regular
         let forwardTargets = items
             .filter { $0.id != roomID }
             .map { V2ConversationForwardTarget(roomID: $0.id, title: $0.title) }
@@ -674,8 +677,7 @@ final class V2ConversationListStore {
             context: .init(
                 roomID: roomID,
                 title: title,
-                isGroupConversation: kind == .group,
-                directAccountKind: accountKind,
+                kind: kind,
                 forwardTargets: forwardTargets,
                 initialDraft: initialDraft,
                 initialMentionHandles: initialMentionHandles
@@ -725,7 +727,7 @@ final class V2ConversationListStore {
             let roomID = try await directConversationOpener.openConversation(with: identity)
             try Task.checkCancellation()
             explicitRoomTitles[roomID] = identity.displayName
-            explicitRoomKinds[roomID] = .direct
+            explicitRoomKinds[roomID] = .direct(accountKind: identity.accountKind)
             directConversationFeedback = nil
             return roomID
         } catch is CancellationError {
@@ -813,12 +815,13 @@ struct V2ConversationListView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text(item.title).font(.headline)
-                                    if let accountBadge = item.accountKind.badgeTitle {
+                                    if let accountKind = item.kind.directAccountKind,
+                                       let accountBadge = accountKind.badgeTitle {
                                         Text(accountBadge)
                                             .font(.caption2.weight(.semibold))
                                             .foregroundStyle(.tint)
                                             .accessibilityLabel(accountBadge)
-                                            .accessibilityIdentifier("v2.conversation.account-kind.\(item.accountKind.rawValue)")
+                                            .accessibilityIdentifier("v2.conversation.account-kind.\(accountKind.rawValue)")
                                     }
                                     if item.isPinned { Image(systemName: "pin.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     if item.muteUntil.map({ $0 > Date() }) == true { Image(systemName: "bell.slash.fill").foregroundStyle(.secondary).accessibilityHidden(true) }

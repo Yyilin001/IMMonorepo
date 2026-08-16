@@ -13,9 +13,10 @@ struct V2VaporProfileUpdateRoutesTests {
         defer { Task { try? await app.asyncShutdown() } }
         let actor = try UserID("00000000-0000-0000-0000-000000000811")
         let view = try updateFixtureProfile(userID: actor, revision: 2)
+        let profiles = ProfileUpdateRouteStore(result: .updated(view))
         V2VaporProfileUpdateRoutes(
             authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
-            profiles: .init(store: ProfileUpdateRouteStore(result: .updated(view)))
+            profiles: .init(store: profiles, reader: profiles)
         ).register(on: app)
 
         try await app.testing().test(.PUT, "v2/profile/me", beforeRequest: { request in
@@ -43,9 +44,10 @@ struct V2VaporProfileUpdateRoutesTests {
         defer { Task { try? await app.asyncShutdown() } }
         let actor = try UserID("00000000-0000-0000-0000-000000000821")
         let currentRevision = try #require(V2ProfileRevision(rawValue: 9))
+        let profiles = ProfileUpdateRouteStore(result: nil, error: .revisionConflict(current: currentRevision))
         V2VaporProfileUpdateRoutes(
             authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
-            profiles: .init(store: ProfileUpdateRouteStore(result: nil, error: .revisionConflict(current: currentRevision)))
+            profiles: .init(store: profiles, reader: profiles)
         ).register(on: app)
 
         try await app.testing().test(.PUT, "v2/profile/me", beforeRequest: { request in
@@ -74,7 +76,7 @@ private struct ProfileUpdateRouteAuthenticator: V2GatewayAuthenticator {
     }
 }
 
-private actor ProfileUpdateRouteStore: V2ProfileUpdateStore {
+private actor ProfileUpdateRouteStore: V2ProfileUpdateStore, V2OwnProfileReading {
     let result: V2ProfileUpdateOutcome?
     let error: V2ProfileUpdateError?
     init(result: V2ProfileUpdateOutcome?, error: V2ProfileUpdateError? = nil) {
@@ -84,6 +86,13 @@ private actor ProfileUpdateRouteStore: V2ProfileUpdateStore {
     func update(_: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome {
         if let error { throw error }
         return try #require(result)
+    }
+
+    func currentProfile(for _: UserID) async throws -> V2ProfileView {
+        switch try #require(result) {
+        case .updated(let profile), .idempotent(let profile):
+            return profile
+        }
     }
 }
 

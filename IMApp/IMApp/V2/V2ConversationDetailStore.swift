@@ -50,8 +50,9 @@ final class V2ConversationDetailStore {
     private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     let roomID: String
     let title: String
-    let isGroupConversation: Bool
-    let directAccountKind: V2AccountKind
+    let kind: V2ConversationKind
+    var isGroupConversation: Bool { kind.isGroup }
+    var directAccountKind: V2AccountKind? { kind.directAccountKind }
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var timeline: [V2ConversationTimelineItem] = []
     private(set) var timelineRevision: UInt64 = 0
@@ -128,8 +129,7 @@ final class V2ConversationDetailStore {
         userID = environment.userID
         roomID = context.roomID
         title = context.title
-        isGroupConversation = context.isGroupConversation
-        directAccountKind = context.directAccountKind
+        kind = context.kind
         groupMemberDirectory = environment.groups.memberDirectory
         groupMembershipChanger = environment.groups.membershipChanger
         groupMemberMuter = environment.groups.memberMuter

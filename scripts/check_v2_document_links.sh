@@ -37,10 +37,10 @@ retired_references=(
   check_v2_sql_migration_manifest.sh
   migration-manifest.sha256
   migration-baseline.lock.sha256
+  legacy-cleanup-plan.md
 )
 for retired_reference in "${retired_references[@]}"; do
-  if rg -l -F --glob '*.md' --glob '!IMV2/docs/legacy-cleanup-plan.md' \
-      -- "${retired_reference}" "${repo_root}" >/dev/null; then
+  if rg -l -F --glob '*.md' -- "${retired_reference}" "${repo_root}" >/dev/null; then
     printf 'retired documentation reference remains: %s\n' "${retired_reference}" >&2
     status=1
   fi

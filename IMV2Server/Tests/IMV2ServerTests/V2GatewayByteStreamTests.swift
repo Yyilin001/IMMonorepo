@@ -11,9 +11,11 @@ struct V2GatewayByteStreamTests {
             session: .init(
                 limits: try .init(maximumInFlightRequests: 1),
                 authenticator: ByteStreamAuthFake(),
-                capabilityProfile: "base"
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
-            handler: ByteStreamCommandFake()
+            handler: ByteStreamCommandFake(),
+            registry: V2DeviceConnectionRegistry()
         )
         #expect(await stream.attachTransport(
             deviceRevocationHandler: {}, outboundWriter: { _ in }
@@ -32,8 +34,9 @@ struct V2GatewayByteStreamTests {
     func fragmentedFrames() async throws {
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
-            session: .init(limits: try .init(maximumInFlightRequests: 2), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", now: { Date(timeIntervalSince1970: 0) }),
-            handler: ByteStreamCommandFake()
+            session: .init(limits: try .init(maximumInFlightRequests: 2), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(), now: { Date(timeIntervalSince1970: 0) }),
+            handler: ByteStreamCommandFake(),
+            registry: V2DeviceConnectionRegistry()
         )
 
         var hello = IMV2Envelope()
@@ -80,8 +83,9 @@ struct V2GatewayByteStreamTests {
     func malformedFrameClosesSession() async throws {
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 128, acceptedVersions: [0, protocolVersion]),
-            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
-            handler: ByteStreamCommandFake()
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ByteStreamCommandFake(),
+            registry: V2DeviceConnectionRegistry()
         )
         await #expect(throws: V2FrameCodecError.invalidMagic) {
             try await stream.receive(Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
@@ -104,7 +108,7 @@ struct V2GatewayByteStreamTests {
         let registry = V2DeviceConnectionRegistry()
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
-            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: ByteStreamCommandFake(),
             registry: registry
         )
@@ -142,7 +146,8 @@ struct V2GatewayByteStreamTests {
             session: .init(
                 limits: try .init(maximumInFlightRequests: 1),
                 authenticator: ByteStreamAuthFake(),
-                capabilityProfile: "base"
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: ByteStreamCommandFake(),
             registry: registry
@@ -180,7 +185,7 @@ struct V2GatewayByteStreamTests {
         let connectionID = UUID()
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
-            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base"),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: ByteStreamCommandFake(),
             connectionID: connectionID,
             registry: registry

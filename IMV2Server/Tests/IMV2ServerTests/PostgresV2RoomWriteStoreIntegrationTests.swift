@@ -192,7 +192,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let pushLease = try #require(try await pushStore.claimAdmitted(now: pushWindow, leaseDuration: 30, limit: 1).first)
             try await pushStore.markSent(pushLease, now: pushWindow.addingTimeInterval(1))
             let planning = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 2,
                 now: { Date(timeIntervalSince1970: 1_750_000_001) }
             ).plan(.init(sourceEventID: try .init(triggerRow.sourceEventID.uuidString), planID: try .init(triggerRow.planID.uuidString)))
@@ -773,7 +773,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let trigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox").first(decoding: TriggerRow.self))
             let plannerTrigger = try V2FanoutPlanTrigger(sourceEventID: .init(trigger.sourceEventID.uuidString), planID: .init(trigger.planID.uuidString))
             let plannerRouter = V2PostgresUserShardRouter(database: app.db(.psql))
-            try await plannerRouter.bootstrap(defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9), now: now)
             try await sql.raw("""
                 INSERT INTO im_v2.user_shard_route_overrides
                     (user_id, write_bucket, read_fallback_bucket, router_epoch, updated_at)
@@ -804,8 +803,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: (any Error).self) {
                 try await V2FanoutPlanner(
                     store: PostgresV2FanoutPlanStore(
-                        database: app.db(.psql),
-                        router: plannerRouter
+                        database: app.db(.psql)
                     ),
                     pageSize: 1,
                     now: { now.addingTimeInterval(1) }
@@ -826,7 +824,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("DROP FUNCTION im_v2.fail_second_set_based_planner_page()").run()
 
             let resumed = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: plannerRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 1,
                 now: { now.addingTimeInterval(3) }
             ).plan(plannerTrigger)
@@ -1119,7 +1117,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             let trigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox").first(decoding: TriggerRow.self))
             let planning = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 1,
                 now: { now.addingTimeInterval(1) }
             ).plan(.init(sourceEventID: try .init(trigger.sourceEventID.uuidString), planID: try .init(trigger.planID.uuidString)))
@@ -1209,7 +1207,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
 
             let result = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 1_000,
                 now: { now }
             ).plan(.init(sourceEventID: try .init(event.uuidString), planID: try .init(plan.uuidString)))
@@ -1360,13 +1358,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // comes from the same PostgreSQL control-plane relation instead
             // of the test-only in-memory single-bucket router.
             let plannerRouter = V2PostgresUserShardRouter(database: app.db(.psql))
-            try await plannerRouter.bootstrap(
-                defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9),
-                now: now
-            )
             let planningStartedAt = Date()
             #expect(try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: plannerRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: plannerPageSize,
                 now: { now }
             ).plan(trigger) == .init(
@@ -1631,10 +1625,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // atomic set-based page path. The previous in-memory test router
             // exercised a deliberately slower cross-store fallback instead.
             let userShardRouter = V2PostgresUserShardRouter(database: app.db(.psql))
-            try await userShardRouter.bootstrap(
-                defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9),
-                now: now
-            )
 
             let capacityProfile = try V2CapacityProfile(
                 id: "standard",
@@ -1704,7 +1694,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
                 publisher: V2LocalFanoutPlanPublisher(
                     planner: .init(
-                        store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: userShardRouter),
+                        store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                         // Keep this capacity regression on the production
                         // standard-profile boundary (1,000 by default), not
                         // a single 5,000-member planner page. The latter
@@ -1981,6 +1971,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM generate_series(1, 100000) AS member
                 """).run()
             try await sql.raw("""
+                INSERT INTO im_v2.user_shard_route_overrides
+                    (user_id, write_bucket, read_fallback_bucket, router_epoch, updated_at)
+                SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(member), 12, '0'))::uuid,
+                       'recovery-' || ((member - 1) / 1000)::text,
+                       NULL,
+                       1,
+                       \(bind: now)
+                FROM generate_series(1, 100000) AS member
+                """).run()
+            try await sql.raw("""
                 INSERT INTO im_v2.room_events
                     (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
                 VALUES
@@ -1995,10 +1995,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      '{"kind":"membership_at_revision"}'::jsonb, '{}'::jsonb, 100000, 100000, 'planning', \(bind: now))
                 """).run()
 
-            let recoveryRouter = CompletionUnitRecoveryTestRouter()
             let trigger = try V2FanoutPlanTrigger(sourceEventID: .init(event.uuidString), planID: .init(plan.uuidString))
             #expect(try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: recoveryRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 1_000,
                 now: { now }
             ).plan(trigger) == .init(createdCompletionUnits: 100, createdDeliveries: 100_000, wasAlreadyPlanned: false))
@@ -2058,7 +2057,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 let recoveryWorker = V2FanoutDeliveryWorker(
                     store: deliveryStore,
                     bucket: "recovery-\(unitIndex)",
-                    router: recoveryRouter,
+                    router: V2PostgresUserShardRouter(database: app.db(.psql)),
                     now: { claimTime.addingTimeInterval(93) }
                 )
                 let recovery = try await recoveryWorker.runOnce(limit: 1_000)
@@ -2253,7 +2252,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let replay = try await service.change(request)
 
             let planning = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 2,
                 now: { now.addingTimeInterval(1) }
             ).plan(.init(sourceEventID: change.eventID, planID: change.fanoutPlanID))
@@ -2396,7 +2395,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "react to me")) else { Issue.record("expected accepted message"); return }
             let acceptedTrigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox ORDER BY created_at LIMIT 1").first(decoding: TriggerRow.self))
             let acceptedPlanning = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 2,
                 now: { now.addingTimeInterval(0.5) }
             ).plan(.init(sourceEventID: try .init(acceptedTrigger.sourceEventID.uuidString), planID: try .init(acceptedTrigger.planID.uuidString)))
@@ -2424,7 +2423,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let replay = try await reaction.change(request)
 
             let planning = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 2,
                 now: { now.addingTimeInterval(2) }
             ).plan(.init(sourceEventID: change.eventID, planID: change.fanoutPlanID))
@@ -2487,7 +2486,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let first = try await edit.edit(request)
             guard case .edited(let result) = first else { Issue.record("expected edit result"); return }
             let replay = try await edit.edit(request)
-            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(2) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
+            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(2) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(3) }).runOnce(limit: 8)
             let persisted = try #require(try await sql.raw("SELECT text_body, content_revision FROM im_v2.messages WHERE message_id = \(bind: UUID(uuidString: message.messageID.rawValue)!)").first(decoding: EditMessageStateRow.self))
             let event = try #require(try await sql.raw("SELECT event_type, payload->>'text' AS text, payload->>'message_revision' AS revision FROM im_v2.room_events WHERE event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!)").first(decoding: EditEventRow.self))
@@ -2999,7 +2998,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             let acceptedTrigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox WHERE source_event_id = \(bind: UUID(uuidString: "00000000-0000-0000-0000-000000000095")!)").first(decoding: TriggerRow.self))
             _ = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 2,
                 now: { now.addingTimeInterval(4) }
             ).plan(.init(sourceEventID: try .init(acceptedTrigger.sourceEventID.uuidString), planID: try .init(acceptedTrigger.planID.uuidString)))
@@ -3124,7 +3123,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES (\(bind: messageUUID), \(bind: mediaUUID), 0, \(bind: now))
                 """).run()
             let acceptedTrigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox ORDER BY created_at LIMIT 1").first(decoding: TriggerRow.self))
-            _ = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(0.25) }).plan(.init(sourceEventID: try .init(acceptedTrigger.sourceEventID.uuidString), planID: try .init(acceptedTrigger.planID.uuidString)))
+            _ = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(0.25) }).plan(.init(sourceEventID: try .init(acceptedTrigger.sourceEventID.uuidString), planID: try .init(acceptedTrigger.planID.uuidString)))
             _ = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(0.5) }).runOnce(limit: 8)
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID) AND joined_revision = 0").run()
             let command = try V2ModerationCommand(roomID: roomID, actorUserID: senderID, operationID: .init("00000000-0000-0000-0000-000000000097"), action: .redactMessage, messageID: message.messageID, reasonCode: .init("abuse_spam"))
@@ -3140,7 +3139,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.message_media_references
                 WHERE message_id = \(bind: messageUUID) AND media_id = \(bind: mediaUUID)
                 """).first(decoding: ExistsRow.self))
-            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(3) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
+            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(3) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(4) }).runOnce(limit: 8)
             let delivered = try #require(try await sql.raw("""
                 SELECT (CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END)->>'event_type' AS event_type
@@ -3250,7 +3249,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2RoomWriteStoreError.roomFrozen) {
                 _ = try await messages.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "frozen"))
             }
-            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: frozen.eventID, planID: frozen.fanoutPlanID))
+            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: frozen.eventID, planID: frozen.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(2) }).runOnce(limit: 8)
             let projection = try #require(try await sql.raw("""
                 SELECT log.projection_kind,
@@ -3314,7 +3313,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2RoomWriteStoreError.actorMuted) {
                 _ = try await messages.send(.init(roomID: roomID, actorUserID: try .init(memberTwoUUID.uuidString), clientMessageID: try .init("00000000-0000-0000-0000-000000000075"), text: "must-not-send"))
             }
-            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
+            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(2) }).runOnce(limit: 8)
             try await drainV3Projection(database: app.db(.psql))
             let snapshotMutes = try await currentV3ProjectionItems(sql: sql, userID: senderID, kind: "moderation")
@@ -3360,7 +3359,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let membership = try #require(try await sql.raw("SELECT left_revision FROM im_v2.room_memberships WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberTwoUUID)").first(decoding: RemovedMembershipAssertionRow.self))
             let audit = try #require(try await sql.raw("SELECT action, reason_code FROM im_v2.moderation_audit_entries WHERE actor_user_id = \(bind: senderUUID)").first(decoding: ModerationAuditAssertionRow.self))
             let event = try #require(try await sql.raw("SELECT event_type, payload->>'action' AS action, payload->>'target_user_id' AS target_user_id FROM im_v2.room_events WHERE event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!)").first(decoding: ModeratedRemovalEventAssertionRow.self))
-            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
+            let planning = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(1) }).plan(.init(sourceEventID: result.eventID, planID: result.fanoutPlanID))
             let delivery = try await V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(2) }).runOnce(limit: 8)
             let targetDelivery = try #require(try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: UUID(uuidString: result.eventID.rawValue)!) AND user_id = \(bind: memberTwoUUID)").first(decoding: CountRow.self))
             #expect(replay == .idempotent(result))
@@ -3445,7 +3444,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
                 publisher: V2LocalFanoutPlanPublisher(
                     planner: .init(
-                        store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter),
+                        store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                         pageSize: 2,
                         now: { now }
                     )
@@ -3521,7 +3520,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(abandonedOutbox.count == 1)
             let recoveredRelay = V2OutboxRelay(
                 store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
-                publisher: V2LocalFanoutPlanPublisher(planner: .init(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(32) })),
+                publisher: V2LocalFanoutPlanPublisher(planner: .init(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(32) })),
                 now: { now.addingTimeInterval(32) }
             )
             #expect(try await recoveredRelay.runOnce(limit: 8) == .init(claimedCount: 1, publishedCount: 1, releasedCount: 0))
@@ -3591,7 +3590,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await operatorReplay.replay(outboxReplayCommand) == .init(operationID: outboxReplayCommand.operationID, outcome: .requeued, wasIdempotent: true))
             let replayedOutbox = try #require(try await outbox.claimPending(now: now.addingTimeInterval(12), leaseDuration: 30, limit: 1).first)
             #expect(replayedOutbox.attempt == 1)
-            _ = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: testUserShardRouter), pageSize: 2, now: { now.addingTimeInterval(12) }).plan(.init(sourceEventID: sourceEventID, planID: planID))
+            _ = try await V2FanoutPlanner(store: PostgresV2FanoutPlanStore(database: app.db(.psql)), pageSize: 2, now: { now.addingTimeInterval(12) }).plan(.init(sourceEventID: sourceEventID, planID: planID))
             try await outbox.markPublished(replayedOutbox)
 
             let firstDeliveries = try await delivery.claimPending(bucket: nil, now: now.addingTimeInterval(13), leaseDuration: 30, limit: 8)
@@ -4158,7 +4157,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let userID = try UserID(user.uuidString)
             let router = V2PostgresUserShardRouter(database: app.db(.psql))
             let initialRoute = try V2UserShardRoute(bucket: "users-old", observedRouterEpoch: 4)
-            try await router.bootstrap(defaultRoute: initialRoute, now: now)
+            try await configureDefaultUserShardRoute(initialRoute, now: now, on: sql)
             #expect(try await router.routes(for: [userID]) == [initialRoute])
             let migrationStore = PostgresV2UserShardMigrationStore(database: app.db(.psql))
             let migration = try await migrationStore.prepare(.init(
@@ -4666,13 +4665,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // MAX(log), which is now empty after successful compaction.
             let resetRoute = try V2UserShardRoute(bucket: "control", observedRouterEpoch: 1)
             let resetService = try V2PostgresDeviceSnapshotResetService(
-                router: V2SingleUserShardRouter(route: resetRoute),
                 registry: try V2StaticUserShardStorageRegistry(locations: [
                     try .init(bucket: "control", database: app.db(.psql), schema: "im_v2")
                 ]),
                 deviceAvailability: V2PostgresDeviceAvailabilityChecker(
                     database: app.db(.psql)
                 ),
+                routeFence: V2FixedUserShardRouteFence(route: resetRoute, database: app.db(.psql)),
                 capabilityProfile: "base",
                 now: { now.addingTimeInterval(2) }
             )
@@ -4758,11 +4757,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ),
             ])
             let service = try V2PostgresDeviceSnapshotResetService(
-                router: V2SingleUserShardRouter(route: route),
                 registry: storage,
                 deviceAvailability: V2PostgresDeviceAvailabilityChecker(
                     database: app.db(.psql)
                 ),
+                routeFence: V2FixedUserShardRouteFence(route: route, database: app.db(.psql)),
                 capabilityProfile: "base",
                 now: { now }
             )
@@ -5108,13 +5107,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             let route = try V2UserShardRoute(bucket: "snapshot-v3-test", observedRouterEpoch: 1)
             let reset = try V2PostgresDeviceSnapshotResetService(
-                router: V2SingleUserShardRouter(route: route),
                 registry: V2StaticUserShardStorageRegistry(locations: [
                     try .init(bucket: route.bucket, database: app.db(.psql), schema: "im_v2")
                 ]),
                 deviceAvailability: V2PostgresDeviceAvailabilityChecker(
                     database: app.db(.psql)
                 ),
+                routeFence: V2FixedUserShardRouteFence(route: route, database: app.db(.psql)),
                 capabilityProfile: "base",
                 makeUUID: { UUID() }, now: { now }
             )
@@ -5390,9 +5389,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: secondarySQL)
             try await seedRoom(on: sql)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            try await V2PostgresUserShardRouter(database: app.db(.psql)).bootstrap(
-                defaultRoute: .init(bucket: "users-source", observedRouterEpoch: 1),
-                now: now
+            try await configureDefaultUserShardRoute(
+                .init(bucket: "users-source", observedRouterEpoch: 1),
+                now: now,
+                on: sql
             )
             let profile = try RoomCapacityProfile(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
@@ -5410,10 +5410,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let trigger = try #require(try await sql.raw("""
                 SELECT source_event_id, plan_id FROM im_v2.room_outbox
                 """).first(decoding: TriggerRow.self))
-            let sourceRoute = try V2UserShardRoute(bucket: "users-source", observedRouterEpoch: 1)
             _ = try await V2FanoutPlanner(
                 store: PostgresV2FanoutPlanStore(
-                    database: app.db(.psql), router: V2SingleUserShardRouter(route: sourceRoute)
+                    database: app.db(.psql)
                 ), pageSize: 10, now: { now.addingTimeInterval(1) }
             ).plan(.init(sourceEventID: try .init(trigger.sourceEventID.uuidString), planID: try .init(trigger.planID.uuidString)))
 
@@ -5550,11 +5549,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             let trigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox").first(decoding: TriggerRow.self))
             let remoteRoute = try V2UserShardRoute(bucket: "users-remote", observedRouterEpoch: 1)
-            try await V2PostgresUserShardRouter(database: app.db(.psql)).bootstrap(
-                defaultRoute: remoteRoute, now: now
-            )
+            try await configureDefaultUserShardRoute(remoteRoute, now: now, on: sql)
             _ = try await V2FanoutPlanner(
-                store: PostgresV2FanoutPlanStore(database: app.db(.psql), router: V2SingleUserShardRouter(route: remoteRoute)),
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
                 pageSize: 10,
                 now: { now.addingTimeInterval(1) }
             ).plan(.init(sourceEventID: try .init(trigger.sourceEventID.uuidString), planID: try .init(trigger.planID.uuidString)))
@@ -5854,11 +5851,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
 
             let remoteRoute = try V2UserShardRoute(bucket: "users-remote", observedRouterEpoch: 1)
+            try await configureDefaultUserShardRoute(remoteRoute, now: now, on: controlSQL)
             let trigger = try V2FanoutPlanTrigger(sourceEventID: .init(event.uuidString), planID: .init(plan.uuidString))
             let planningStartedAt = Date()
             #expect(try await V2FanoutPlanner(
                 store: PostgresV2FanoutPlanStore(
-                    database: app.db(.psql), router: V2SingleUserShardRouter(route: remoteRoute)
+                    database: app.db(.psql)
                 ),
                 pageSize: plannerPageSize, now: { now }
             ).plan(trigger) == .init(
@@ -5898,7 +5896,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
                     publisher: V2LocalFanoutPlanPublisher(planner: .init(
                         store: PostgresV2FanoutPlanStore(
-                            database: app.db(.psql), router: V2SingleUserShardRouter(route: remoteRoute)
+                            database: app.db(.psql)
                         ),
                         pageSize: plannerPageSize,
                         now: Date.init
@@ -5906,7 +5904,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     retryPolicy: .init(initialDelay: 0.01, maximumDelay: 0.1, maximumAttempts: 10, jitterFraction: 0),
                     now: Date.init
                 ),
-                deliveryWorker: worker
+                deliveryWorker: worker,
+                telemetry: V2DiscardingTelemetrySink()
             )
             let deliveryStartedAt = Date()
             var aggregate = V2FanoutDeliveryReport(
@@ -6033,10 +6032,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try .init(bucket: "users-target", database: app.db(secondaryID), schema: "im_v2"),
             ])
             let router = V2PostgresUserShardRouter(database: app.db(.psql))
-            try await router.bootstrap(defaultRoute: .init(bucket: "users-source", observedRouterEpoch: 1), now: now)
+            try await configureDefaultUserShardRoute(
+                .init(bucket: "users-source", observedRouterEpoch: 1),
+                now: now,
+                on: sql
+            )
             let shadow = V2PostgresUserShardProjectionShadowForwarder(
-                control: app.db(.psql), router: router,
-                migrations: migrations, registry: registry,
+                registry: registry,
                 routeFence: router,
                 coLocatedControlBuckets: ["users-source"]
             )
@@ -6512,14 +6514,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(updated.displayName == "新名称")
 
             let router = V2PostgresUserShardRouter(database: app.db(.psql))
-            try await router.bootstrap(defaultRoute: .init(bucket: "users-primary", observedRouterEpoch: 1), now: now)
-            let migrations = PostgresV2UserShardMigrationStore(database: app.db(.psql))
+            try await configureDefaultUserShardRoute(
+                .init(bucket: "users-primary", observedRouterEpoch: 1),
+                now: now,
+                on: sql
+            )
             let registry = try V2StaticUserShardStorageRegistry(locations: [
                 try .init(bucket: "users-primary", database: app.db(.psql), schema: "im_v2"),
             ])
             let shadow = V2PostgresUserShardProjectionShadowForwarder(
-                control: app.db(.psql), router: router,
-                migrations: migrations, registry: registry,
+                registry: registry,
                 routeFence: router,
                 coLocatedControlBuckets: ["users-primary"]
             )
@@ -7973,6 +7977,33 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
             try await sql.raw("\(unsafeRaw: statement)").run()
         }
+        try await configureDefaultUserShardRoute(
+            .init(bucket: "test-users", observedRouterEpoch: 9),
+            now: Date(timeIntervalSince1970: 0),
+            on: sql,
+            schema: schema
+        )
+    }
+
+    private func configureDefaultUserShardRoute(
+        _ route: V2UserShardRoute,
+        now: Date,
+        on sql: any SQLDatabase,
+        schema: String = "im_v2"
+    ) async throws {
+        try await sql.raw("""
+            INSERT INTO \(unsafeRaw: schema).user_shard_router_configuration
+                (configuration_key, router_epoch, default_write_bucket,
+                 default_read_fallback_bucket, updated_at)
+            VALUES
+                (TRUE, \(bind: route.observedRouterEpoch), \(bind: route.bucket),
+                 \(bind: route.readFallbackBucket), \(bind: now))
+            ON CONFLICT (configuration_key) DO UPDATE
+            SET router_epoch = EXCLUDED.router_epoch,
+                default_write_bucket = EXCLUDED.default_write_bucket,
+                default_read_fallback_bucket = EXCLUDED.default_read_fallback_bucket,
+                updated_at = EXCLUDED.updated_at
+            """).run()
     }
 
     private func drainV3Projection(database: any Database) async throws {
@@ -8221,25 +8252,6 @@ private let senderID = try! UserID(senderUUID.uuidString)
 private let clientMessageID = try! ClientMessageID(clientUUID.uuidString)
 private let deviceID = try! DeviceID("00000000-0000-0000-0000-000000000017")
 private let snapshotID = try! SnapshotID("00000000-0000-0000-0000-000000000018")
-private let testUserShardRouter = V2SingleUserShardRouter(route: try! .init(bucket: "test-users", observedRouterEpoch: 9))
-
-/// The recovery soak uses one deterministic logical bucket per 1,000-member
-/// completion unit. This is test-only routing: it lets the test abandon and
-/// reclaim one unit without a globally ordered worker also claiming the next
-/// unit in the same batch.
-private struct CompletionUnitRecoveryTestRouter: V2UserShardRouter {
-    func routes(for users: [UserID]) async throws -> [V2UserShardRoute] {
-        try users.map { user in
-            guard let value = UUID(uuidString: user.rawValue)?.uuidString
-                .split(separator: "-").last
-                .flatMap({ Int($0, radix: 16) }),
-                (1...100_000).contains(value)
-            else { throw V2UserShardRouterError.invalidRoute }
-            return try .init(bucket: "recovery-\((value - 1) / 1_000)", observedRouterEpoch: 1)
-        }
-    }
-}
-
 private struct ConcurrentRoomWriteAcceptanceResult: Sendable {
     let outcome: V2SendMessageOutcome
     let elapsedSeconds: TimeInterval

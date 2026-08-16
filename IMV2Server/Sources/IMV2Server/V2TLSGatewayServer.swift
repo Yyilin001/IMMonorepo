@@ -112,7 +112,7 @@ public final class V2TLSGatewayServer {
     private let maximumQueuedInboundChunks: Int
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
-    private let transportMetrics: (any V2GatewayTransportMetricsRecorder)?
+    private let transportMetrics: any V2GatewayTransportMetricsRecorder
     private let group: MultiThreadedEventLoopGroup
     private var channel: Channel?
 
@@ -124,7 +124,7 @@ public final class V2TLSGatewayServer {
         maximumQueuedInboundChunks: Int,
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
-        transportMetrics: (any V2GatewayTransportMetricsRecorder)? = nil,
+        transportMetrics: any V2GatewayTransportMetricsRecorder,
         eventLoopThreads: Int = System.coreCount
     ) throws {
         precondition(
@@ -162,7 +162,7 @@ public final class V2TLSGatewayServer {
         let channel = try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
                 guard admission.acquire() else {
-                    transportMetrics?.connectionRejected(reason: .connectionLimit)
+                    transportMetrics.connectionRejected(reason: .connectionLimit)
                     return channel.close()
                 }
                 let lease = V2GatewayConnectionLease(admission: admission)

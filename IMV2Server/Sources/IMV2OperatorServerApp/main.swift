@@ -113,7 +113,6 @@ enum IMV2OperatorServerApp {
             V2VaporDeviceSnapshotResetOperatorRoutes(
                 authenticator: configuration.authenticator,
                 service: try V2PostgresDeviceSnapshotResetService(
-                    router: V2PostgresUserShardRouter(database: database),
                     registry: userShardStorage,
                     deviceAvailability: V2PostgresDeviceAvailabilityChecker(
                         database: database

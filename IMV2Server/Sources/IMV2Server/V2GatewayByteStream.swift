@@ -11,7 +11,7 @@ public actor V2GatewayByteStream {
     private let session: V2GatewaySession
     private let handler: any V2GatewayCommandHandler
     private let connectionID: UUID
-    private let registry: V2DeviceConnectionRegistry?
+    private let registry: V2DeviceConnectionRegistry
     private var registeredIdentity: V2AuthenticatedConnection?
     // A revocation worker must not advance its durable cursor until the
     // transport confirms the local channel has closed. The handler therefore
@@ -29,7 +29,7 @@ public actor V2GatewayByteStream {
         session: V2GatewaySession,
         handler: any V2GatewayCommandHandler,
         connectionID: UUID = UUID(),
-        registry: V2DeviceConnectionRegistry? = nil
+        registry: V2DeviceConnectionRegistry
     ) {
         self.decoder = .init(limits: frameLimits)
         self.frameLimits = frameLimits
@@ -198,7 +198,7 @@ public actor V2GatewayByteStream {
     }
 
     private func registerAuthenticatedDeviceIfNeeded() async throws {
-        guard registeredIdentity == nil, let registry, let identity = await session.authenticatedIdentity() else { return }
+        guard registeredIdentity == nil, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
         let accepted = await registry.register(self, connectionID: connectionID, identity: identity)
         guard accepted, registeredIdentity == identity, !transportClosed else {
@@ -211,11 +211,10 @@ public actor V2GatewayByteStream {
     private func unregisterAuthenticatedDevice() async {
         guard registeredIdentity != nil else { return }
         registeredIdentity = nil
-        await registry?.unregister(connectionID: connectionID)
+        await registry.unregister(connectionID: connectionID)
     }
 
     private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: V2Frame) async throws {
-        guard let registry else { return }
         switch inbound.body {
         case .setLiveActivityPreferences:
             let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)

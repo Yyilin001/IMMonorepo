@@ -18,7 +18,7 @@ struct V2GatewayDomainCommandHandlerTests {
             }
         )
         let telemetry = V2InMemoryTelemetrySink()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: store),
             sync: fixture.syncService(),
             telemetry: telemetry,
@@ -90,7 +90,7 @@ struct V2GatewayDomainCommandHandlerTests {
             createdAt: fixture.now
         )
         let hints = GatewayForegroundHintRecorder()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))),
             foregroundGroupEventHints: hints,
             sync: fixture.syncService()
@@ -110,7 +110,7 @@ struct V2GatewayDomainCommandHandlerTests {
     @Test("invalid sync state is returned as a stable protocol error")
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             sync: .init(store: GatewayRejectingSyncStore())
         )
@@ -131,7 +131,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func membershipChangeUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let membershipStore = GatewayMembershipStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             membership: .init(store: membershipStore, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
             sync: fixture.syncService()
@@ -167,7 +167,7 @@ struct V2GatewayDomainCommandHandlerTests {
             groupMessaging: groupMessaging,
             now: { fixture.now }
         )
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupAudienceImports: audienceImports,
             sync: fixture.syncService()
@@ -268,7 +268,7 @@ struct V2GatewayDomainCommandHandlerTests {
             roomShardID: "rooms-primary",
             now: { fixture.now }
         )
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupAudienceImports: .init(store: audienceStore, groupMessaging: groupMessaging, now: { fixture.now }),
             sync: fixture.syncService()
@@ -283,7 +283,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func groupEventSubscriptionUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayGroupEventLogStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupEventLog: .init(store: store),
             sync: fixture.syncService()
@@ -303,7 +303,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func membershipDirectoryUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayMembershipDirectoryStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             membershipDirectory: .init(store: store),
             sync: fixture.syncService()
@@ -327,7 +327,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func socialCommandsUseAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewaySocialRelationshipStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             socialRelationships: .init(store: store, now: { fixture.now }),
             sync: fixture.syncService()
@@ -352,7 +352,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func moderationUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayModerationStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
             sync: fixture.syncService()
@@ -372,7 +372,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func memberMuteUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayModerationStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
             sync: fixture.syncService()
@@ -393,7 +393,7 @@ struct V2GatewayDomainCommandHandlerTests {
     func moderatedMemberRemovalUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayModerationStore()
-        let handler = V2GatewayDomainCommandHandler(
+        let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
             sync: fixture.syncService()

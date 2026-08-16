@@ -245,11 +245,6 @@ public enum V2FanoutTelemetryStage: String, CaseIterable, Equatable, Sendable {
     case pipeline
 }
 
-public struct V2NoopTelemetrySink: V2TelemetrySink {
-    public init() {}
-    public func record(_: V2TelemetryEvent) async {}
-}
-
 /// Sends the same privacy-reviewed event to several sinks. This keeps the
 /// production structured log and the metrics aggregate in lockstep without
 /// giving either sink access to request payloads or identifiers.
@@ -264,22 +259,6 @@ public struct V2CompositeTelemetrySink: V2TelemetrySink {
         for sink in sinks {
             await sink.record(event)
         }
-    }
-}
-
-/// A deterministic test probe and a minimal adapter for an operations layer
-/// that periodically consumes aggregate events. It never stores raw payloads.
-public actor V2InMemoryTelemetrySink: V2TelemetrySink {
-    private var recordedEvents: [V2TelemetryEvent] = []
-
-    public init() {}
-
-    public func record(_ event: V2TelemetryEvent) {
-        recordedEvents.append(event)
-    }
-
-    public func events() -> [V2TelemetryEvent] {
-        recordedEvents
     }
 }
 

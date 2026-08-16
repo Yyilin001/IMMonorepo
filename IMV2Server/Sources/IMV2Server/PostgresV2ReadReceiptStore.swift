@@ -8,9 +8,9 @@ import SQLKit
 /// advances explicit human-viewing state and records its stable operation ID.
 public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
     private let database: any Database
-    private let shadowForwarder: (any V2UserShardProjectionShadowing)?
+    private let shadowForwarder: any V2UserShardProjectionShadowing
 
-    public init(database: any Database, shadowForwarder: (any V2UserShardProjectionShadowing)? = nil) {
+    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
         self.database = database
         self.shadowForwarder = shadowForwarder
     }
@@ -43,7 +43,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
             try await sql.raw("INSERT INTO im_v2.read_receipt_operations (user_id, operation_id, room_id, requested_room_sequence, resulting_room_sequence, recorded_at, projection_recipient_user_id) VALUES (\(bind: userID), \(bind: operationID), \(bind: roomID), \(bind: requested), \(bind: resulting), \(bind: now), \(bind: recipient.flatMap { UUID(uuidString: $0.rawValue) }))").run()
             return (.recorded(receipt), recipient)
         }
-        if let recipient = result.projectionRecipient, let shadowForwarder {
+        if let recipient = result.projectionRecipient {
             _ = try await shadowForwarder.shadowIfForwarding(
                 userID: recipient,
                 sourceEventID: try .init(command.operationID.rawValue),
@@ -86,14 +86,12 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
             }
             return (.updated(.init(allowsDirectReadReceipts: command.allowsDirectReadReceipts, allowsGroupReadReceipts: command.allowsGroupReadReceipts, updatedAt: now)), shadowRequests)
         }
-        if let shadowForwarder {
-            for request in result.shadowRequests {
-                _ = try await shadowForwarder.shadowIfForwarding(
-                    userID: request.userID,
-                    sourceEventID: request.sourceEventID,
-                    projectionKinds: request.projectionKinds
-                )
-            }
+        for request in result.shadowRequests {
+            _ = try await shadowForwarder.shadowIfForwarding(
+                userID: request.userID,
+                sourceEventID: request.sourceEventID,
+                projectionKinds: request.projectionKinds
+            )
         }
         return result.outcome
     }

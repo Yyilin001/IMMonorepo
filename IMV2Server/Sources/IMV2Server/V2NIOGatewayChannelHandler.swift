@@ -14,7 +14,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let stream: V2GatewayByteStream
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
-    private let transportMetrics: (any V2GatewayTransportMetricsRecorder)?
+    private let transportMetrics: any V2GatewayTransportMetricsRecorder
     private var pending: V2GatewayInboundQueue
     private var processing = false
     /// Exactly one request task belongs to the channel. EOF, timeout,
@@ -43,7 +43,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         maximumQueuedInboundChunks: Int,
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
-        transportMetrics: (any V2GatewayTransportMetricsRecorder)? = nil
+        transportMetrics: any V2GatewayTransportMetricsRecorder
     ) {
         precondition(
             maximumQueuedInboundBytes > 0 &&
@@ -63,9 +63,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     public func handlerAdded(context: ChannelHandlerContext) {
         lastInboundAt = .now()
-        if let transportMetrics {
-            transportMetrics.connectionOpened()
-        }
+        transportMetrics.connectionOpened()
         scheduleIdleCheck(context: context)
         scheduleAuthenticationDeadline(context: context)
         let boundContext = context.loopBound
@@ -125,9 +123,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
-        if let transportMetrics {
-            transportMetrics.observeQueuedInboundBytes(pending.queuedBytes)
-        }
+        transportMetrics.observeQueuedInboundBytes(pending.queuedBytes)
         processNext(context: context)
     }
 
@@ -144,10 +140,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         processing = false
         let stream = stream
         Task { await stream.finishSilently() }
-        if let transportMetrics {
-            let reason = closeReason ?? .peerDisconnected
-            transportMetrics.connectionClosed(reason: reason)
-        }
+        let reason = closeReason ?? .peerDisconnected
+        transportMetrics.connectionClosed(reason: reason)
         context.fireChannelInactive()
     }
 

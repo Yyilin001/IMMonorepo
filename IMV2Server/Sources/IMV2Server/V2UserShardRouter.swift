@@ -65,21 +65,6 @@ public enum V2UserShardRouterError: Error, Equatable, Sendable {
     case resultCountMismatch
 }
 
-/// First-deployment router. It is explicit configuration rather than an
-/// inferred hash; a future control-plane router can replace it without
-/// changing planner or delivery contracts.
-public struct V2SingleUserShardRouter: V2UserShardRouter {
-    private let route: V2UserShardRoute
-
-    public init(route: V2UserShardRoute) {
-        self.route = route
-    }
-
-    public func routes(for users: [UserID]) async throws -> [V2UserShardRoute] {
-        Array(repeating: route, count: users.count)
-    }
-}
-
 /// PostgreSQL-backed logical router. It stores user overrides rather than
 /// physical hosts, so an application process can reload routing decisions on
 /// every bounded planner/delivery batch without making a database address part
@@ -224,12 +209,12 @@ public struct V2PostgresUserShardRouteControl: Sendable {
     private let database: any Database
     private let operatorPrincipal: String
     private let retentionWindow: TimeInterval
-    private let finalizer: (any V2UserShardCutoverFinalizing)?
+    private let finalizer: any V2UserShardCutoverFinalizing
 
     public init(
         database: any Database, operatorPrincipal: String,
         retentionWindow: TimeInterval = 86_400,
-        finalizer: (any V2UserShardCutoverFinalizing)? = nil
+        finalizer: any V2UserShardCutoverFinalizing
     ) {
         precondition(V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal))
         precondition(retentionWindow > 0)
@@ -275,7 +260,6 @@ public struct V2PostgresUserShardRouteControl: Sendable {
             guard migration.cutoverOperationID == nil || migration.cutoverOperationID == command.operationID else {
                 throw V2UserShardRouteControlError.operationConflict
             }
-            guard let finalizer else { throw V2UserShardRouteControlError.finalVerificationFailed }
             do {
                 try await finalizer.finalizeForCutover(
                     migrationID: migration.migrationID, userID: command.userID,
@@ -351,7 +335,6 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                   let retentionUntil = migration.retentionUntil, retentionUntil > now
             else { throw V2UserShardRouteControlError.migrationNotVerified }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: command.userID.rawValue), 0))").run()
-            guard let finalizer else { throw V2UserShardRouteControlError.finalVerificationFailed }
             do {
                 try await finalizer.finalizeForRollback(
                     migrationID: migration.migrationID, userID: command.userID,

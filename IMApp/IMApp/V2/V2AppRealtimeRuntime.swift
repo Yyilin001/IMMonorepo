@@ -35,13 +35,6 @@ protocol V2ConversationLiveActivityManaging: Sendable {
     func nextEvent() async throws -> V2LiveActivityEvent
 }
 
-extension V2ConversationSending {
-    func send(text: String, in roomID: String) async throws -> V2ConversationSendOutcome {
-        try await send(text: text, media: [], in: roomID)
-    }
-
-}
-
 enum V2MessageWithdrawalOutcome: Equatable, Sendable {
     case accepted
     case queuedForRetry

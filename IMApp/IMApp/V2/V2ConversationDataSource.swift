@@ -32,10 +32,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
                     surface: .directConversation
                 ).displayName
             }
-            let kind: V2ConversationListItem.Kind = if entry.roomProfile != nil {
+            let kind: V2ConversationKind = if entry.roomProfile != nil {
                 .group
-            } else if entry.directIdentity != nil {
-                .direct
+            } else if let identity = entry.directIdentity {
+                .direct(accountKind: identity.publicIdentity.accountKind)
             } else {
                 .unknown
             }
@@ -46,7 +46,6 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
                 lastActivity: entry.lastActivity,
                 isOutgoing: entry.lastMessage?.senderUserID.rawValue == userID,
                 kind: kind,
-                accountKind: entry.directIdentity?.publicIdentity.accountKind ?? .regular,
                 isPinned: entry.isPinned,
                 isArchived: entry.isArchived,
                 muteUntil: entry.muteUntil
@@ -90,8 +89,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
                 preview: "暂无消息",
                 lastActivity: identity.updatedAt,
                 isOutgoing: false,
-                kind: .direct,
-                accountKind: identity.publicIdentity.accountKind,
+                kind: .direct(accountKind: identity.publicIdentity.accountKind),
                 isPinned: conversationStates[identity.roomID]?.isPinned ?? false,
                 isArchived: conversationStates[identity.roomID]?.isArchived ?? false,
                 muteUntil: conversationStates[identity.roomID]?.muteUntil

@@ -36,14 +36,14 @@ public struct V2FanoutPipeline: Sendable {
     private let telemetry: any V2TelemetrySink
     private let now: @Sendable () -> Date
 
-    public init(relay: V2OutboxRelay, deliveryWorker: V2FanoutDeliveryWorker, telemetry: any V2TelemetrySink = V2NoopTelemetrySink(), now: @escaping @Sendable () -> Date = Date.init) {
+    public init(relay: V2OutboxRelay, deliveryWorker: V2FanoutDeliveryWorker, telemetry: any V2TelemetrySink, now: @escaping @Sendable () -> Date = Date.init) {
         self.init(relay: relay, deliveryWorkers: [deliveryWorker], telemetry: telemetry, now: now)
     }
 
     /// Each logical bucket receives a bounded claim pass on every pipeline
     /// tick. `deliveryConcurrency` remains a process-wide cap, not a hidden
     /// multiplier by bucket count.
-    public init(relay: V2OutboxRelay, deliveryWorkers: [V2FanoutDeliveryWorker], telemetry: any V2TelemetrySink = V2NoopTelemetrySink(), now: @escaping @Sendable () -> Date = Date.init) {
+    public init(relay: V2OutboxRelay, deliveryWorkers: [V2FanoutDeliveryWorker], telemetry: any V2TelemetrySink, now: @escaping @Sendable () -> Date = Date.init) {
         precondition(!deliveryWorkers.isEmpty)
         self.relay = relay
         self.deliveryWorkers = deliveryWorkers

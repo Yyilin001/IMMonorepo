@@ -48,11 +48,6 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundHint(_ hint: V2GroupEventWake) async
 }
 
-public struct V2NoopForegroundGroupEventHintPublisher: V2ForegroundGroupEventHintPublishing {
-    public init() {}
-    public func publishForegroundHint(_: V2GroupEventWake) async {}
-}
-
 /// Runtime-owned mailbox for foreground hints. It coalesces watermarks per
 /// room and deliberately returns from `publishForegroundHint` before broker
 /// I/O begins, keeping a sender's acceptance response independent from an

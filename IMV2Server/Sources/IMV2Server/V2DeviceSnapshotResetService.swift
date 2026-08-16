@@ -74,10 +74,9 @@ public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking 
 /// to `PostgresV2SnapshotArtifactBuilder`, so this operator request never holds
 /// a user's full current projection in its task or HTTP response lifecycle.
 public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, Sendable {
-    private let router: any V2UserShardRouter
     private let registry: any V2UserShardStorageResolving
     private let deviceAvailability: any V2DeviceAvailabilityChecking
-    private let routeFence: (any V2UserShardRouteFencing)?
+    private let routeFence: any V2UserShardRouteFencing
     private let coLocatedControlBuckets: Set<String>
     private let capabilityProfile: String
     private let capabilityLifetime: TimeInterval
@@ -85,10 +84,9 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     private let now: @Sendable () -> Date
 
     public init(
-        router: any V2UserShardRouter,
         registry: any V2UserShardStorageResolving,
         deviceAvailability: any V2DeviceAvailabilityChecking,
-        routeFence: (any V2UserShardRouteFencing)? = nil,
+        routeFence: any V2UserShardRouteFencing,
         coLocatedControlBuckets: Set<String> = [],
         capabilityProfile: String,
         capabilityLifetime: TimeInterval = 86_400,
@@ -97,7 +95,7 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     ) throws {
         let normalized = capabilityProfile.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, capabilityLifetime > 0 else { throw V2DeviceSnapshotResetError.unavailable }
-        self.router = router; self.registry = registry
+        self.registry = registry
         self.deviceAvailability = deviceAvailability; self.routeFence = routeFence
         self.coLocatedControlBuckets = coLocatedControlBuckets; self.capabilityProfile = normalized
         self.capabilityLifetime = capabilityLifetime; self.makeUUID = makeUUID; self.now = now
@@ -110,16 +108,13 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
         ) else {
             throw V2DeviceSnapshotResetError.deviceUnavailable
         }
-        if let routeFence {
-            return try await routeFence.withCurrentRoute(for: command.userID) { route, fencedDatabase in
-                var location = try registry.location(for: route.bucket)
-                if coLocatedControlBuckets.contains(route.bucket) {
-                    location = try .init(bucket: location.bucket, database: fencedDatabase, schema: location.schema)
-                }
-                return try await stage(command, at: location)
+        return try await routeFence.withCurrentRoute(for: command.userID) { route, fencedDatabase in
+            var location = try registry.location(for: route.bucket)
+            if coLocatedControlBuckets.contains(route.bucket) {
+                location = try .init(bucket: location.bucket, database: fencedDatabase, schema: location.schema)
             }
+            return try await stage(command, at: location)
         }
-        return try await stage(command, at: location(for: command.userID))
     }
 
     private func stage(_ command: V2DeviceSnapshotResetCommand, at location: V2UserShardStorageLocation) async throws -> V2DeviceSnapshotResetResult {
@@ -247,12 +242,6 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
                 """).run()
             return .init(generation: try unsigned(generation), state: .preparing, wasIdempotent: false)
         }
-    }
-
-    private func location(for userID: UserID) async throws -> V2UserShardStorageLocation {
-        let routes = try await router.routes(for: [userID])
-        guard routes.count == 1 else { throw V2DeviceSnapshotResetError.unavailable }
-        return try registry.location(for: routes[0].bucket)
     }
 
     private func existing(operationID: UUID, userID: UUID, deviceID: UUID, schema: String, sql: any SQLDatabase) async throws -> ExistingResetRow? {

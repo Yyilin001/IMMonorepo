@@ -9,7 +9,13 @@ struct V2GatewaySessionTests {
     @Test("hello then authenticated device identity is the only session identity")
     func bootstrapAuthentication() async throws {
         let auth = GatewayAuthFake(userID: try .init("user-a"))
-        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2), authenticator: auth, capabilityProfile: "base", now: { Date(timeIntervalSince1970: 0) })
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: auth,
+            capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 0) }
+        )
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         let helloResponse = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
         #expect(try V2ServerProtobufFrameCodec.decode(helloResponse).serverHello.selectedProtocolVersion == UInt32(protocolVersion))
@@ -29,6 +35,7 @@ struct V2GatewaySessionTests {
             limits: try .init(maximumInFlightRequests: 1),
             authenticator: auth,
             capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { Date(timeIntervalSince1970: 10) }
         )
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
@@ -47,6 +54,7 @@ struct V2GatewaySessionTests {
             authenticator: auth,
             capabilityProfile: "base",
             maximumProtobufMessageDepth: 2,
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { Date(timeIntervalSince1970: 0) }
         )
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
@@ -65,7 +73,13 @@ struct V2GatewaySessionTests {
     func expiresAuthenticatedSessionLease() async throws {
         let clock = SessionClock(Date(timeIntervalSince1970: 10))
         let auth = GatewayAuthFake(userID: try .init("user-a"), expiresAt: Date(timeIntervalSince1970: 11))
-        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2), authenticator: auth, capabilityProfile: "base", now: { clock.now })
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: auth,
+            capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { clock.now }
+        )
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
