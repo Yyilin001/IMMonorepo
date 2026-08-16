@@ -15,6 +15,26 @@ public struct V2FanoutPlanningResult: Equatable, Sendable {
 
 public protocol V2FanoutPlanStore: Sendable {
     func plan(_ trigger: V2FanoutPlanTrigger, pageSize: Int, now: Date) async throws -> V2FanoutPlanningResult
+    func planBatch(_ triggers: [V2FanoutPlanTrigger], pageSize: Int, now: Date) async throws -> [V2FanoutPlanningResult]
+}
+
+public extension V2FanoutPlanStore {
+    /// Stores without a native set-based implementation retain the exact
+    /// single-plan semantics. PostgreSQL overrides this requirement so a
+    /// relay claim costs one round trip per audience page rather than one
+    /// transaction per source event.
+    func planBatch(
+        _ triggers: [V2FanoutPlanTrigger],
+        pageSize: Int,
+        now: Date
+    ) async throws -> [V2FanoutPlanningResult] {
+        var results: [V2FanoutPlanningResult] = []
+        results.reserveCapacity(triggers.count)
+        for trigger in triggers {
+            results.append(try await plan(trigger, pageSize: pageSize, now: now))
+        }
+        return results
+    }
 }
 
 /// The planner owns immutable membership-revision enumeration. Delivery work
@@ -38,5 +58,10 @@ public struct V2FanoutPlanner: Sendable {
 
     public func plan(_ trigger: V2FanoutPlanTrigger) async throws -> V2FanoutPlanningResult {
         try await store.plan(trigger, pageSize: pageSize, now: now())
+    }
+
+    public func planBatch(_ triggers: [V2FanoutPlanTrigger]) async throws -> [V2FanoutPlanningResult] {
+        guard !triggers.isEmpty else { return [] }
+        return try await store.planBatch(triggers, pageSize: pageSize, now: now())
     }
 }

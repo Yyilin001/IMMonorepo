@@ -5,10 +5,11 @@ import SQLKit
 
 /// PostgreSQL implementation of the V2 acceptance boundary.
 ///
-/// Lock order is fixed as `rooms -> room_admission -> shard_admission_pools
-/// -> room_memberships -> media_objects`. The reducer runs while the admission
-/// rows are locked and every successful value is committed by the same
-/// database transaction.
+/// Room-local state is serialized by `rooms -> room_admission`. Shard
+/// admission is evaluated optimistically, then reserved with one conditional
+/// atomic increment as the final statement in the transaction. This preserves
+/// exact capacity and lease fencing without holding the shared shard row while
+/// policy checks and durable message writes run.
 public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let database: any Database
     private let strangerMessagePolicy: V2StrangerMessagePolicy
@@ -30,7 +31,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2SendMessageOutcome {
-        let outcome: V2SendMessageOutcome = try await database.transaction { transaction in
+        let commit: RoomWriteCommit
+        do {
+            commit = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -81,59 +84,97 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     mentions: try priorMentions.map { try $0.target },
                     groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
                 )
-                return accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
+                let outcome: V2SendMessageOutcome = accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
                     && accepted.entities == command.entities && accepted.replyTo == command.replyTo
                     ? .idempotent(accepted)
                     : .idempotencyConflict
+                // A retry may be recovering a crash after the source
+                // transaction committed but before cross-shard shadowing.
+                // Preserve the lookup-based recovery path only for this rare
+                // replay; new acceptances carry their exact projection delta.
+                return .init(outcome: outcome, acceptedDirectProjectionShadows: nil)
             }
             if let priorDenial = try await existingDirectMessageDenial(
                 senderID: senderID,
                 clientMessageID: clientMessageID,
                 sql: sql
             ) {
-                return priorDenial.roomID == command.roomID
-                    ? .denied(priorDenial)
-                    : .idempotencyConflict
+                return .init(
+                    outcome: priorDenial.roomID == command.roomID
+                        ? .denied(priorDenial)
+                        : .idempotencyConflict,
+                    acceptedDirectProjectionShadows: []
+                )
             }
-            let senderIsActive = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: senderID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-            guard senderIsActive else { throw V2RoomWriteStoreError.actorNotEligible }
             guard room.frozenAt == nil else {
                 throw V2RoomWriteStoreError.roomFrozen
             }
-            guard let admission = try await sql.raw("""
-                SELECT eligible_member_count, command_window_limit, command_window_used,
-                       fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
-                       outstanding_fanout_units, max_outstanding_plans, outstanding_plans,
-                       shard_lease_id, shard_lease_generation
-                FROM im_v2.room_admission WHERE room_id = \(bind: roomID) FOR UPDATE
-                """).first(decoding: AdmissionRow.self),
-                  let shard = try await sql.raw("""
-                SELECT lease_id, generation, valid_until, command_window_limit,
-                       command_window_used, fanout_window_limit, fanout_window_used,
-                       max_outstanding_fanout_units, outstanding_fanout_units,
-                       max_outstanding_plans, outstanding_plans
-                FROM im_v2.shard_admission_pools
-                WHERE room_shard_id = \(bind: room.roomShardID)
-                  AND capacity_profile_id = \(bind: room.capacityProfileID)
-                FOR UPDATE
-                """).first(decoding: ShardRow.self)
+            guard let admissionSnapshot = try await sql.raw("""
+                SELECT admission.eligible_member_count AS room_eligible_member_count,
+                       admission.command_window_limit AS room_command_window_limit,
+                       admission.command_window_used AS room_command_window_used,
+                       admission.fanout_window_limit AS room_fanout_window_limit,
+                       admission.fanout_window_used AS room_fanout_window_used,
+                       admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
+                       admission.outstanding_fanout_units AS room_outstanding_fanout_units,
+                       admission.max_outstanding_plans AS room_max_outstanding_plans,
+                       admission.outstanding_plans AS room_outstanding_plans,
+                       admission.shard_lease_id AS room_shard_lease_id,
+                       admission.shard_lease_generation AS room_shard_lease_generation,
+                       shard.lease_id AS shard_lease_id,
+                       shard.generation AS shard_generation,
+                       shard.valid_until AS shard_valid_until,
+                       shard.command_window_limit AS shard_command_window_limit,
+                       shard.command_window_used AS shard_command_window_used,
+                       shard.fanout_window_limit AS shard_fanout_window_limit,
+                       shard.fanout_window_used AS shard_fanout_window_used,
+                       shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
+                       shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
+                       shard.max_outstanding_plans AS shard_max_outstanding_plans,
+                       shard.outstanding_plans AS shard_outstanding_plans
+                FROM im_v2.room_admission AS admission
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = \(bind: room.roomShardID)
+                 AND shard.capacity_profile_id = \(bind: room.capacityProfileID)
+                WHERE admission.room_id = \(bind: roomID)
+                FOR UPDATE OF admission
+                """).first(decoding: AdmissionSnapshotRow.self)
             else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            let admission = admissionSnapshot.room
+            let shard = admissionSnapshot.shard
             guard admission.shardLeaseID == shard.leaseID,
                   admission.shardLeaseGeneration == shard.generation
             else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard let actor = try await sql.raw("""
-                SELECT role
-                FROM im_v2.room_memberships
-                WHERE room_id = \(bind: roomID)
-                  AND user_id = \(bind: senderID)
-                  AND joined_revision <= \(bind: room.membershipRevision)
-                  AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))
-                FOR UPDATE
-                """).first(decoding: MembershipRoleRow.self),
+                SELECT membership.role,
+                       EXISTS (
+                           SELECT 1
+                           FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = \(bind: senderID)
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS sender_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_member_mutes AS mute
+                           WHERE mute.room_id = \(bind: roomID)
+                             AND mute.user_id = \(bind: senderID)
+                             AND mute.mute_until > \(bind: now)
+                       ) AS muted
+                FROM im_v2.room_memberships AS membership
+                WHERE membership.room_id = \(bind: roomID)
+                  AND membership.user_id = \(bind: senderID)
+                  AND membership.joined_revision <= \(bind: room.membershipRevision)
+                  AND (membership.left_revision IS NULL OR membership.left_revision > \(bind: room.membershipRevision))
+                FOR UPDATE OF membership
+                """).first(decoding: ActorAuthorizationSnapshotRow.self),
+                actor.senderIsActive,
                 let actorRole = V2RoomMembershipRole(rawValue: actor.role)
             else {
                 throw V2RoomWriteStoreError.actorNotEligible
@@ -144,29 +185,34 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     throw V2RoomWriteStoreError.actorNotEligible
                 }
             }
-            let actorIsMuted = try await sql.raw("""
-                SELECT EXISTS (
-                    SELECT 1 FROM im_v2.room_member_mutes
-                    WHERE room_id = \(bind: roomID) AND user_id = \(bind: senderID)
-                      AND mute_until > \(bind: now)
-                ) AS muted
-                """).first(decoding: MuteAuthorizationRow.self)?.muted ?? false
-            guard !actorIsMuted else {
+            guard !actor.muted else {
                 throw V2RoomWriteStoreError.actorMuted
             }
-            if room.kind == "direct", let restriction = try await directMessageRestriction(roomID: roomID, senderID: senderID, sql: sql) {
-                let denied = try await persistDirectMessageDenied(
-                    roomID: command.roomID,
-                    roomUUID: roomID,
+            let directContext: DirectMessageAcceptanceContext?
+            if room.kind == "direct" {
+                let context = try await directMessageContext(
+                    roomID: roomID,
                     senderID: senderID,
-                    clientMessageID: clientMessageID,
-                    sourceEventID: try uuid(identifiers.eventID),
-                    nextTimelineSequence: try unsigned(room.timelineSequence + 1),
-                    createdAt: now,
-                    reason: restriction,
                     sql: sql
                 )
-                return .denied(denied)
+                directContext = context
+                if let restriction = context.restriction {
+                    let denied = try await persistDirectMessageDenied(
+                        roomID: command.roomID,
+                        roomUUID: roomID,
+                        senderID: senderID,
+                        clientMessageID: clientMessageID,
+                        sourceEventID: try uuid(identifiers.eventID),
+                        nextTimelineSequence: try unsigned(room.timelineSequence + 1),
+                        createdAt: now,
+                        reason: restriction,
+                        currentCanSend: context.senderCanSend,
+                        sql: sql
+                    )
+                    return .init(outcome: .denied(denied), acceptedDirectProjectionShadows: [])
+                }
+            } else {
+                directContext = nil
             }
             try await assertMentionsAuthorized(command.mentions, roomID: roomID, membershipRevision: room.membershipRevision, senderID: senderID, sql: sql)
             let mediaOwnerID: UUID
@@ -222,44 +268,170 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 )
             }
             guard case .accepted(let writeSet) = result else {
-                return result.outcome(
-                    mediaPresentations: mediaPresentations,
-                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                return .init(
+                    outcome: result.outcome(
+                        mediaPresentations: mediaPresentations,
+                        groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                    ),
+                    acceptedDirectProjectionShadows: []
                 )
             }
             // Do this only after the generic admission reducer accepts. A
             // capacity rejection returns normally from this transaction, so
             // consuming the stranger window earlier would be a silent quota
             // loss despite no accepted message.
-            if room.kind == "direct" {
-                try await consumeDirectMessageQuota(roomID: roomID, senderID: senderID, policy: strangerMessagePolicy, now: now, sql: sql)
+            if let directContext, directContext.requiresStrangerQuota {
+                try await consumeDirectMessageQuota(
+                    senderID: senderID,
+                    recipientID: directContext.recipientID,
+                    policy: strangerMessagePolicy,
+                    now: now,
+                    sql: sql
+                )
             }
 
             let timelineWriteSet = try withTimelineSequence(writeSet, timelineSequence: unsigned(room.timelineSequence + 1))
             try await persist(timelineWriteSet, command: command, mediaPresentations: mediaPresentations, room: room, sql: sql)
-            if room.kind == "direct" {
-                try await appendRecipientDirectRoomProfile(
+            var acceptedDirectProjectionShadows: [DirectProjectionShadowRequest] = []
+            if let directContext {
+                let recipientID = directContext.recipientID
+                let sourceEventID = try uuid(timelineWriteSet.eventID)
+                let projectionChanges = try await appendDirectPostAcceptanceProjections(
                     roomID: roomID,
                     senderID: senderID,
-                    sourceEventID: try uuid(timelineWriteSet.eventID),
+                    recipientID: recipientID,
+                    senderProfileVisibleToRecipient: directContext.senderProfileVisibleToRecipient,
+                    senderCanSend: directContext.senderCanSend,
+                    sourceEventID: sourceEventID,
                     createdAt: timelineWriteSet.acceptedMessage.createdAt,
                     sql: sql
                 )
-                try await appendDirectSendingCapability(roomID: roomID, recipientID: senderID, sourceEventID: try uuid(timelineWriteSet.eventID), canSend: true, createdAt: timelineWriteSet.acceptedMessage.createdAt, sql: sql)
-                try await openSupportSessionIfNeeded(roomID: roomID, senderID: senderID, createdAt: timelineWriteSet.acceptedMessage.createdAt, sql: sql)
+                if projectionChanges.recipientProfileInserted {
+                    acceptedDirectProjectionShadows.append(.init(
+                        userID: try .init(recipientID.uuidString),
+                        sourceEventID: timelineWriteSet.eventID,
+                        projectionKinds: ["direct_room_profile"]
+                    ))
+                }
+                if projectionChanges.senderCapabilityInserted {
+                    acceptedDirectProjectionShadows.append(.init(
+                        userID: command.senderUserID,
+                        sourceEventID: timelineWriteSet.eventID,
+                        projectionKinds: ["direct_sending_capability"]
+                    ))
+                }
+                if let supportAccountID = directContext.supportAccountID {
+                    try await openSupportSessionIfNeeded(
+                        roomID: roomID,
+                        senderID: senderID,
+                        supportAccountID: supportAccountID,
+                        createdAt: timelineWriteSet.acceptedMessage.createdAt,
+                        sql: sql
+                    )
+                }
             }
+            // Keep this as the final database statement. The conditional
+            // increment is the authoritative shard-capacity decision; a
+            // rejection throws so every preceding room/message write rolls
+            // back with the transaction.
+            try await reserveShardAdmission(
+                from: shardState,
+                to: timelineWriteSet.nextShardState,
+                room: room,
+                retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
+                now: now,
+                sql: sql
+            )
             let message = timelineWriteSet.acceptedMessage
             // The room row is locked for this transaction, so this metadata
             // is exactly the immutable mode that committed the event.  It is
             // used only to avoid emitting foreground-group hints for direct
             // rooms after the source transaction succeeds.
-            return .accepted(message.materialized(
-                mediaPresentations: mediaPresentations,
-                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
-            ))
+            return .init(
+                outcome: .accepted(message.materialized(
+                    mediaPresentations: mediaPresentations,
+                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                )),
+                acceptedDirectProjectionShadows: acceptedDirectProjectionShadows
+            )
+            }
+        } catch let rejection as LateShardAdmissionRejection {
+            switch rejection {
+            case .rateLimited(let retryAfterSeconds):
+                commit = .init(
+                    outcome: .rateLimited(retryAfterSeconds: retryAfterSeconds),
+                    acceptedDirectProjectionShadows: []
+                )
+            case .unavailable(let reason):
+                commit = .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
+            }
         }
-        try await shadowDirectRoomProfileIfNeeded(command: command, outcome: outcome)
-        return outcome
+        try await shadowCommittedDirectProjectionsIfNeeded(command: command, commit: commit)
+        return commit.outcome
+    }
+
+    /// Applies the reducer's shard delta against the current row instead of
+    /// overwriting counters derived from an earlier snapshot. Concurrent rooms
+    /// can therefore perform all expensive work in parallel and serialize only
+    /// for this single tail update. Predicates mirror the schema constraints so
+    /// a capacity race becomes a normal admission rejection, never a partial
+    /// commit or a constraint error.
+    private func reserveShardAdmission(
+        from initial: ShardAdmissionState,
+        to next: ShardAdmissionState,
+        room: RoomRow,
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        guard let initialLease = initial.lease, let nextLease = next.lease,
+              initialLease.id == nextLease.id,
+              initialLease.generation == nextLease.generation
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+        let commandDelta = nextLease.commandWindow.used - initialLease.commandWindow.used
+        let fanoutDelta = nextLease.fanoutWindow.used - initialLease.fanoutWindow.used
+        let outstandingUnitDelta = next.outstandingFanoutUnits - initial.outstandingFanoutUnits
+        let outstandingPlanDelta = next.outstandingPlans - initial.outstandingPlans
+        guard commandDelta >= 0, fanoutDelta >= 0,
+              outstandingUnitDelta >= 0, outstandingPlanDelta >= 0
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+        let leaseID = try uuid(nextLease.id)
+        let generation = try signed(nextLease.generation)
+        let applied = try await sql.raw("""
+            UPDATE im_v2.shard_admission_pools
+            SET command_window_used = command_window_used + \(bind: commandDelta),
+                fanout_window_used = fanout_window_used + \(bind: fanoutDelta),
+                outstanding_fanout_units = outstanding_fanout_units + \(bind: outstandingUnitDelta),
+                outstanding_plans = outstanding_plans + \(bind: outstandingPlanDelta)
+            WHERE room_shard_id = \(bind: room.roomShardID)
+              AND capacity_profile_id = \(bind: room.capacityProfileID)
+              AND lease_id = \(bind: leaseID)
+              AND generation = \(bind: generation)
+              AND valid_until > \(bind: now)
+              AND command_window_used <= command_window_limit - \(bind: commandDelta)
+              AND fanout_window_used <= fanout_window_limit - \(bind: fanoutDelta)
+              AND outstanding_fanout_units <= max_outstanding_fanout_units - \(bind: outstandingUnitDelta)
+              AND outstanding_plans <= max_outstanding_plans - \(bind: outstandingPlanDelta)
+            RETURNING 1 AS applied
+            """).first(decoding: ShardAdmissionMutationRow.self)
+        guard applied != nil else {
+            guard let current = try await sql.raw("""
+                SELECT lease_id, generation, valid_until
+                FROM im_v2.shard_admission_pools
+                WHERE room_shard_id = \(bind: room.roomShardID)
+                  AND capacity_profile_id = \(bind: room.capacityProfileID)
+                """).first(decoding: CurrentShardLeaseRow.self)
+            else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
+            guard current.leaseID == leaseID, current.generation == generation else {
+                throw LateShardAdmissionRejection.unavailable(.missingShardLease)
+            }
+            guard current.validUntil > now else {
+                throw LateShardAdmissionRejection.unavailable(.expiredShardLease)
+            }
+            throw LateShardAdmissionRejection.rateLimited(retryAfterSeconds: retryAfterSeconds)
+        }
     }
 
     /// The control store remains the source of truth for direct-profile
@@ -268,13 +440,29 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     /// Running this after the transaction is deliberate: a retry of the same
     /// immutable client message repeats the idempotent shadow if a process
     /// crashed after commit but before forwarding.
-    private func shadowDirectRoomProfileIfNeeded(
+    private func shadowCommittedDirectProjectionsIfNeeded(
         command: V2SendMessageCommand,
-        outcome: V2SendMessageOutcome
+        commit: RoomWriteCommit
     ) async throws {
         let message: V2AcceptedMessage
-        switch outcome {
-        case .accepted(let value), .idempotent(let value):
+        switch commit.outcome {
+        case .accepted(let value):
+            // The normal hot path knows exactly which source projections were
+            // inserted. Established conversations usually insert none, so
+            // they no longer pay route, migration and projection lookups after
+            // every committed message.
+            if let shadows = commit.acceptedDirectProjectionShadows {
+                for shadow in shadows {
+                    _ = try await shadowForwarder.shadowIfForwarding(
+                        userID: shadow.userID,
+                        sourceEventID: shadow.sourceEventID,
+                        projectionKinds: shadow.projectionKinds
+                    )
+                }
+                return
+            }
+            message = value
+        case .idempotent(let value):
             message = value
         case .denied(let denied):
             _ = try await shadowForwarder.shadowIfForwarding(userID: command.senderUserID, sourceEventID: denied.sourceEventID, projectionKinds: ["timeline_activity", "direct_sending_capability"])
@@ -307,53 +495,121 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         )
     }
 
-    /// Evaluates only the non-retryable direct-message restriction. The
-    /// caller has already authenticated and authorized room membership, so a
-    /// generic denial does not become a policy-probing side channel.
-    private func directMessageRestriction(roomID: UUID, senderID: UUID, sql: any SQLDatabase) async throws -> V2DirectMessageDenied.Reason? {
-        guard let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: DirectRoomPairRow.self) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let recipientID: UUID
-        if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
-        else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
+    /// Reads the immutable pair plus all ordinary relationship gates in one
+    /// snapshot. The result is reused for quota admission and post-commit
+    /// direct projections, avoiding a second policy scan inside the same
+    /// room-serialized transaction.
+    private func directMessageContext(
+        roomID: UUID,
+        senderID: UUID,
+        sql: any SQLDatabase
+    ) async throws -> DirectMessageAcceptanceContext {
+        guard let policy = try await sql.raw("""
+            WITH pair AS MATERIALIZED (
+                SELECT room_id, lower_user_id, higher_user_id,
+                       lower_profile_visible_to_higher, higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send,
+                       CASE WHEN lower_user_id = \(bind: senderID)
+                            THEN higher_user_id ELSE lower_user_id END AS recipient_user_id
+                FROM im_v2.direct_room_pairs
+                WHERE room_id = \(bind: roomID)
+                  AND (lower_user_id = \(bind: senderID) OR higher_user_id = \(bind: senderID))
+                FOR UPDATE
+            ), special AS MATERIALIZED (
+                SELECT account.account_user_id, account.account_kind, account.status,
+                       account.allows_customer_messages, account.allows_service_messages
+                FROM im_v2.special_accounts AS account
+                JOIN pair
+                  ON account.account_user_id = \(bind: senderID)
+                  OR account.account_user_id = pair.recipient_user_id
+                ORDER BY account.account_user_id
+                FOR KEY SHARE OF account
+            )
+            SELECT pair.recipient_user_id,
+                   CASE WHEN pair.lower_user_id = \(bind: senderID)
+                        THEN pair.lower_profile_visible_to_higher
+                        ELSE pair.higher_profile_visible_to_lower
+                   END AS sender_profile_visible_to_recipient,
+                   CASE WHEN pair.lower_user_id = \(bind: senderID)
+                        THEN pair.lower_can_send
+                        ELSE pair.higher_can_send
+                   END AS sender_can_send,
+                   EXISTS (
+                       SELECT 1 FROM im_v2.public_user_profiles AS profile
+                       WHERE profile.user_id = pair.recipient_user_id
+                         AND profile.state = 'active'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM im_v2.account_disables AS disabled
+                             WHERE disabled.user_id = profile.user_id
+                         )
+                   ) AS recipient_is_active,
+                   EXISTS (
+                       SELECT 1 FROM im_v2.user_blocks AS block
+                       WHERE (block.blocker_user_id = pair.lower_user_id AND block.blocked_user_id = pair.higher_user_id)
+                          OR (block.blocker_user_id = pair.higher_user_id AND block.blocked_user_id = pair.lower_user_id)
+                   ) AS blocked,
+                   EXISTS (
+                       SELECT 1 FROM im_v2.user_relationships AS relationship
+                       WHERE relationship.lower_user_id = pair.lower_user_id
+                         AND relationship.higher_user_id = pair.higher_user_id
+                         AND relationship.state = 'accepted'
+                   ) AS is_friend,
+                   EXISTS (
+                       SELECT 1 FROM im_v2.messages AS message
+                       WHERE message.room_id = pair.room_id
+                         AND message.sender_user_id = pair.recipient_user_id
+                   ) AS recipient_has_replied,
+                   COALESCE((
+                       SELECT preference.allows_stranger_messages
+                       FROM im_v2.user_stranger_message_preferences AS preference
+                       WHERE preference.user_id = pair.recipient_user_id
+                   ), TRUE) AS allows_strangers,
+                   (SELECT account_kind FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_kind,
+                   (SELECT status FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_status,
+                   (SELECT allows_service_messages FROM special WHERE account_user_id = \(bind: senderID)) AS sender_allows_service_messages,
+                   (SELECT account_kind FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_kind,
+                   (SELECT status FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_status,
+                   (SELECT allows_customer_messages FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
+            FROM pair
+            """).first(decoding: DirectMessagePolicySnapshotRow.self)
         else { throw V2RoomWriteStoreError.actorNotEligible }
 
-        let recipientIsActive = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: recipientID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        guard recipientIsActive else { return .generic }
-
-        let blocked = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_blocks WHERE (blocker_user_id = \(bind: senderID) AND blocked_user_id = \(bind: recipientID)) OR (blocker_user_id = \(bind: recipientID) AND blocked_user_id = \(bind: senderID))) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? true
-        guard !blocked else { return .generic }
-        let special = try await sql.raw("SELECT account_user_id, account_kind, status, allows_customer_messages, allows_service_messages FROM im_v2.special_accounts WHERE account_user_id = \(bind: senderID) OR account_user_id = \(bind: recipientID) FOR KEY SHARE").all(decoding: DirectSpecialAccountRow.self)
-        if let senderAccount = special.first(where: { $0.accountUserID == senderID }) {
-            guard senderAccount.status == "active", senderAccount.allowsServiceMessages else { return .generic }
+        let recipientID = policy.recipientUserID
+        let restriction: V2DirectMessageDenied.Reason?
+        if policy.senderAccountKind != nil {
+            restriction = policy.senderAccountStatus == "active" && policy.senderAllowsServiceMessages == true ? nil : .generic
             // Special subjects have no public gateway credential. A call that
             // reaches this branch originated at the trusted service boundary.
-            return nil
+        } else if let recipientAccountKind = policy.recipientAccountKind {
+            if policy.recipientAccountStatus != "active" {
+                restriction = .generic
+            } else if recipientAccountKind == "system" {
+                restriction = .systemAccountReadOnly
+            } else {
+                restriction = policy.recipientAllowsCustomerMessages == true ? nil : .generic
+            }
+        } else if !policy.recipientIsActive || policy.blocked {
+            restriction = .generic
+        } else if policy.isFriend || policy.recipientHasReplied {
+            restriction = nil
+        } else {
+            restriction = policy.allowsStrangers ? nil : .generic
         }
-        if let recipientAccount = special.first(where: { $0.accountUserID == recipientID }) {
-            guard recipientAccount.status == "active" else { return .generic }
-            if recipientAccount.accountKind == "system" { return .systemAccountReadOnly }
-            return recipientAccount.allowsCustomerMessages ? nil : .generic
-        }
-        let isFriend = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lowerUserID) AND higher_user_id = \(bind: pair.higherUserID) AND state = 'accepted') AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        let hasRecipientReplied = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.messages WHERE room_id = \(bind: roomID) AND sender_user_id = \(bind: recipientID)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        guard !isFriend && !hasRecipientReplied else { return nil }
-        let allowsStrangers = try await sql.raw("SELECT COALESCE((SELECT allows_stranger_messages FROM im_v2.user_stranger_message_preferences WHERE user_id = \(bind: recipientID)), TRUE) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        return allowsStrangers ? nil : .generic
+        return .init(
+            recipientID: recipientID,
+            restriction: restriction,
+            requiresStrangerQuota: policy.senderAccountKind == nil && policy.recipientAccountKind == nil && !policy.isFriend && !policy.recipientHasReplied,
+            senderProfileVisibleToRecipient: policy.senderProfileVisibleToRecipient,
+            senderCanSend: policy.senderCanSend,
+            supportAccountID: policy.recipientAccountKind == "customer_support" && policy.recipientAccountStatus == "active"
+                ? recipientID
+                : nil
+        )
     }
 
     /// Capacity is consumed only after the generic admission reducer accepts,
     /// preserving the existing no-quota-loss invariant for a rejected send.
-    private func consumeDirectMessageQuota(roomID: UUID, senderID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
-        guard let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: DirectRoomPairRow.self) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let recipientID: UUID
-        if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
-        else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
-        else { throw V2RoomWriteStoreError.actorNotEligible }
-        let specialPair = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.special_accounts WHERE account_user_id = \(bind: senderID) OR account_user_id = \(bind: recipientID)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        guard !specialPair else { return }
-        let isFriend = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lowerUserID) AND higher_user_id = \(bind: pair.higherUserID) AND state = 'accepted') AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        let hasRecipientReplied = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.messages WHERE room_id = \(bind: roomID) AND sender_user_id = \(bind: recipientID)) AS value").first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        guard !isFriend && !hasRecipientReplied else { return }
+    private func consumeDirectMessageQuota(senderID: UUID, recipientID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
         let windowStart = now.addingTimeInterval(-policy.window)
         let consumed = try await sql.raw("""
             INSERT INTO im_v2.stranger_message_windows (sender_user_id, recipient_user_id, window_started_at, message_count)
@@ -380,6 +636,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         nextTimelineSequence: UInt64,
         createdAt: Date,
         reason: V2DirectMessageDenied.Reason,
+        currentCanSend: Bool?,
         sql: any SQLDatabase
     ) async throws -> V2DirectMessageDenied {
         let timelineSequence = try signed(nextTimelineSequence)
@@ -392,7 +649,15 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         try await sql.raw("INSERT INTO im_v2.direct_message_denials (sender_user_id, client_message_id, room_id, source_event_id, timeline_sequence, created_at, reason) VALUES (\(bind: senderID), \(bind: clientMessageID), \(bind: roomUUID), \(bind: sourceEventID), \(bind: timelineSequence), \(bind: createdAt), \(bind: reason.rawValue))").run()
         let activityPayload = try JSONSerialization.data(withJSONObject: ["event_type": activityType, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": Int64(createdAt.timeIntervalSince1970 * 1_000)])
         try await appendPrivateSyncRecord(userID: senderID, sourceEventID: sourceEventID, projectionKind: "timeline_activity", payload: activityPayload, createdAt: createdAt, sql: sql)
-        try await appendDirectSendingCapability(roomID: roomUUID, recipientID: senderID, sourceEventID: sourceEventID, canSend: false, createdAt: createdAt, sql: sql)
+        try await appendDirectSendingCapabilityIfChanged(
+            roomID: roomUUID,
+            recipientID: senderID,
+            sourceEventID: sourceEventID,
+            canSend: false,
+            currentCanSend: currentCanSend,
+            createdAt: createdAt,
+            sql: sql
+        )
         return try .init(roomID: roomID, sourceEventID: .init(sourceEventID.uuidString), timelineSequence: nextTimelineSequence, createdAt: createdAt, reason: reason)
     }
 
@@ -414,24 +679,64 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         return try .init(roomID: .init(existing.roomID.uuidString), sourceEventID: .init(existing.sourceEventID.uuidString), timelineSequence: unsigned(existing.timelineSequence), createdAt: existing.createdAt, reason: reason)
     }
 
-    private func appendDirectSendingCapability(roomID: UUID, recipientID: UUID, sourceEventID: UUID, canSend: Bool, createdAt: Date, sql: any SQLDatabase) async throws {
-        let payload = try JSONSerialization.data(withJSONObject: ["room_id": roomID.uuidString, "can_send": canSend, "updated_at_ms": Int64(createdAt.timeIntervalSince1970 * 1_000)])
-        try await appendPrivateSyncRecord(userID: recipientID, sourceEventID: sourceEventID, projectionKind: "direct_sending_capability", payload: payload, createdAt: createdAt, sql: sql)
+    private func appendDirectSendingCapabilityIfChanged(
+        roomID: UUID,
+        recipientID: UUID,
+        sourceEventID: UUID,
+        canSend: Bool,
+        currentCanSend: Bool?,
+        createdAt: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        guard currentCanSend != canSend else { return }
+        guard let mutation = try await sql.raw("""
+            WITH sequence AS (
+                INSERT INTO im_v2.user_sync_sequences AS current (user_id, next_sequence)
+                VALUES (\(bind: recipientID), 1)
+                ON CONFLICT (user_id) DO UPDATE
+                SET next_sequence = current.next_sequence + 1
+                RETURNING next_sequence
+            ), log_insert AS (
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+                SELECT \(bind: recipientID), sequence.next_sequence, \(bind: sourceEventID),
+                       'direct_sending_capability',
+                       jsonb_build_object('room_id', \(bind: roomID.uuidString),
+                                          'can_send', \(bind: canSend),
+                                          'updated_at_ms', \(bind: Int64(createdAt.timeIntervalSince1970 * 1_000))),
+                       \(bind: createdAt)
+                FROM sequence
+                RETURNING user_id
+            ), pair_update AS (
+                UPDATE im_v2.direct_room_pairs AS pair
+                SET lower_can_send = CASE
+                        WHEN pair.lower_user_id = \(bind: recipientID) THEN \(bind: canSend)
+                        ELSE pair.lower_can_send
+                    END,
+                    higher_can_send = CASE
+                        WHEN pair.higher_user_id = \(bind: recipientID) THEN \(bind: canSend)
+                        ELSE pair.higher_can_send
+                    END
+                WHERE pair.room_id = \(bind: roomID)
+                  AND EXISTS (SELECT 1 FROM log_insert)
+                RETURNING pair.room_id
+            )
+            SELECT (SELECT count(*) FROM log_insert) AS inserted_count,
+                   (SELECT count(*) FROM pair_update) AS pair_count
+            """).first(decoding: DirectCapabilityMutationRow.self),
+              mutation.insertedCount == 1,
+              mutation.pairCount == 1
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
     }
 
     /// The customer's first accepted message creates the service session in
     /// the same transaction as the message. Retried messages reuse the room
     /// row, while a closed session is deliberately not reopened by a stale
     /// duplicate operation.
-    private func openSupportSessionIfNeeded(roomID: UUID, senderID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
-        guard let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        let recipientID = pair.lowerUserID == senderID ? pair.higherUserID : pair.lowerUserID
-        guard let support = try await sql.raw("SELECT account_user_id, account_kind, status, allows_customer_messages, allows_service_messages FROM im_v2.special_accounts WHERE account_user_id = \(bind: recipientID)").first(decoding: DirectSpecialAccountRow.self), support.accountKind == "customer_support", support.status == "active" else {
-            return
-        }
-        try await sql.raw("INSERT INTO im_v2.support_conversation_sessions (room_id, support_account_user_id, customer_user_id, state, opened_at, last_activity_at, closed_at) VALUES (\(bind: roomID), \(bind: recipientID), \(bind: senderID), 'open', \(bind: createdAt), \(bind: createdAt), NULL) ON CONFLICT (room_id) DO UPDATE SET last_activity_at = EXCLUDED.last_activity_at, state = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN 'open' ELSE im_v2.support_conversation_sessions.state END, closed_at = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN NULL ELSE im_v2.support_conversation_sessions.closed_at END").run()
+    private func openSupportSessionIfNeeded(roomID: UUID, senderID: UUID, supportAccountID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
+        try await sql.raw("INSERT INTO im_v2.support_conversation_sessions (room_id, support_account_user_id, customer_user_id, state, opened_at, last_activity_at, closed_at) VALUES (\(bind: roomID), \(bind: supportAccountID), \(bind: senderID), 'open', \(bind: createdAt), \(bind: createdAt), NULL) ON CONFLICT (room_id) DO UPDATE SET last_activity_at = EXCLUDED.last_activity_at, state = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN 'open' ELSE im_v2.support_conversation_sessions.state END, closed_at = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN NULL ELSE im_v2.support_conversation_sessions.closed_at END").run()
     }
 
     private func appendPrivateSyncRecord(userID: UUID, sourceEventID: UUID, projectionKind: String, payload: Data, createdAt: Date, sql: any SQLDatabase) async throws {
@@ -451,53 +756,112 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     /// this same transaction. The profile precedes the asynchronous message
     /// fan-out in that recipient's sync stream, so a delivered first message
     /// always has a stable conversation identity.
-    private func appendRecipientDirectRoomProfile(roomID: UUID, senderID: UUID, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
-        guard let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
+    /// Pair-local producer markers are locked by `directMessageContext` and
+    /// therefore remain an exact, compaction-independent answer to whether a
+    /// projection changed. Established conversations return without another
+    /// PostgreSQL round trip; a state transition allocates its sequences and
+    /// advances the markers atomically with the message transaction.
+    private func appendDirectPostAcceptanceProjections(
+        roomID: UUID,
+        senderID: UUID,
+        recipientID: UUID,
+        senderProfileVisibleToRecipient: Bool,
+        senderCanSend: Bool?,
+        sourceEventID: UUID,
+        createdAt: Date,
+        sql: any SQLDatabase
+    ) async throws -> DirectPostAcceptanceProjectionChanges {
+        guard !senderProfileVisibleToRecipient || senderCanSend != true else {
+            return .init(senderCapabilityInserted: false, recipientProfileInserted: false)
         }
-        let recipientID: UUID
-        if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
-        else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
-        else { throw V2RoomWriteStoreError.actorNotEligible }
-        let alreadyVisible = try await sql.raw("""
-            SELECT EXISTS (
-                SELECT 1 FROM im_v2.user_projection_effects
-                WHERE user_id = \(bind: recipientID)
-                  AND projection_kind = 'direct_room_profile'
-                  AND payload->>'room_id' = \(bind: roomID.uuidString)
+        guard let mutation = try await sql.raw("""
+            WITH profile AS MATERIALIZED (
+                SELECT public_handle, display_name, account_kind, revision, updated_at
+                FROM im_v2.public_user_profiles
+                WHERE user_id = \(bind: senderID)
+                  AND state = 'active'
+                  AND revision > 0
+            ), needed AS MATERIALIZED (
+                SELECT \(bind: senderID)::uuid AS user_id,
+                       'direct_sending_capability'::text AS projection_kind,
+                       jsonb_build_object(
+                           'room_id', \(bind: roomID.uuidString),
+                           'can_send', TRUE,
+                           'updated_at_ms', \(bind: Int64(createdAt.timeIntervalSince1970 * 1_000))
+                       ) AS payload
+                WHERE \(bind: senderCanSend != true)
                 UNION ALL
-                SELECT 1 FROM im_v2.user_projection_versions
-                WHERE user_id = \(bind: recipientID)
-                  AND projection_kind = 'direct_room_profile'
-                  AND entity_key = \(bind: roomID.uuidString)
-                  AND valid_to_sequence IS NULL
-            ) AS value
-            """).first(decoding: DirectPolicyBooleanRow.self)?.value ?? false
-        guard !alreadyVisible else { return }
-        guard let profile = try await sql.raw("""
-            SELECT public_handle, display_name, account_kind, revision, updated_at
-            FROM im_v2.public_user_profiles WHERE user_id = \(bind: senderID) AND state = 'active'
-            """).first(decoding: DirectMessageSenderProfileRow.self), profile.revision > 0 else {
+                SELECT \(bind: recipientID), 'direct_room_profile',
+                       jsonb_build_object(
+                           'room_id', \(bind: roomID.uuidString),
+                           'target_user_id', \(bind: senderID.uuidString),
+                           'public_handle', profile.public_handle,
+                           'display_name', profile.display_name,
+                           'account_kind', profile.account_kind,
+                           'revision', profile.revision,
+                           'updated_at_ms', (extract(epoch FROM profile.updated_at) * 1000)::bigint
+                       )
+                FROM profile
+                WHERE \(bind: !senderProfileVisibleToRecipient)
+            ), sequence_insert AS (
+                INSERT INTO im_v2.user_sync_sequences AS current (user_id, next_sequence)
+                SELECT user_id, 1
+                FROM needed
+                ORDER BY user_id
+                ON CONFLICT (user_id) DO UPDATE
+                SET next_sequence = current.next_sequence + 1
+                RETURNING user_id, next_sequence
+            ), log_insert AS (
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+                SELECT needed.user_id, sequence_insert.next_sequence, \(bind: sourceEventID),
+                       needed.projection_kind, needed.payload,
+                       \(bind: createdAt)
+                FROM needed
+                JOIN sequence_insert USING (user_id)
+                RETURNING user_id, projection_kind
+            ), pair_update AS (
+                UPDATE im_v2.direct_room_pairs AS pair
+                SET lower_profile_visible_to_higher = CASE
+                        WHEN pair.lower_user_id = \(bind: senderID) THEN TRUE
+                        ELSE pair.lower_profile_visible_to_higher
+                    END,
+                    higher_profile_visible_to_lower = CASE
+                        WHEN pair.higher_user_id = \(bind: senderID) THEN TRUE
+                        ELSE pair.higher_profile_visible_to_lower
+                    END,
+                    lower_can_send = CASE
+                        WHEN pair.lower_user_id = \(bind: senderID) THEN TRUE
+                        ELSE pair.lower_can_send
+                    END,
+                    higher_can_send = CASE
+                        WHEN pair.higher_user_id = \(bind: senderID) THEN TRUE
+                        ELSE pair.higher_can_send
+                    END
+                WHERE pair.room_id = \(bind: roomID)
+                  AND (SELECT count(*) FROM log_insert) = (SELECT count(*) FROM needed)
+                RETURNING pair.room_id
+            )
+            SELECT EXISTS (SELECT 1 FROM profile) AS profile_exists,
+                   (SELECT count(*) FROM needed) AS needed_count,
+                   (SELECT count(*) FROM log_insert WHERE projection_kind = 'direct_room_profile') AS profile_inserted_count,
+                   (SELECT count(*) FROM log_insert) AS inserted_count,
+                   (SELECT count(*) FROM pair_update) AS pair_count
+            """).first(decoding: DirectRoomProfileMutationRow.self),
+              mutation.profileExists,
+              mutation.insertedCount == mutation.neededCount,
+              mutation.pairCount == 1,
+              (0...2).contains(mutation.neededCount),
+              (0...1).contains(mutation.profileInsertedCount),
+              mutation.profileInsertedCount <= mutation.insertedCount,
+              (0...1).contains(mutation.insertedCount - mutation.profileInsertedCount)
+        else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        guard let sequence = try await sql.raw("""
-            INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
-            VALUES (\(bind: recipientID), 1)
-            ON CONFLICT (user_id) DO UPDATE
-            SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
-            RETURNING next_sequence
-            """).first(decoding: DirectMessageSyncSequenceRow.self) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        try await sql.raw("""
-            INSERT INTO im_v2.user_sync_log
-                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
-            VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile',
-                    jsonb_build_object('room_id', \(bind: roomID.uuidString), 'target_user_id', \(bind: senderID.uuidString),
-                                       'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind),
-                                       'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))),
-                    \(bind: createdAt))
-            """).run()
+        return .init(
+            senderCapabilityInserted: mutation.insertedCount - mutation.profileInsertedCount == 1,
+            recipientProfileInserted: mutation.profileInsertedCount == 1
+        )
     }
 
     private func persist(
@@ -517,17 +881,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         let roomSequence = try signed(message.roomSequence)
         let timelineSequence = try signed(message.timelineSequence)
         let roomAdmission = writeSet.nextRoomState.admission
-        let shardState = writeSet.nextShardState
-        guard let shardLease = shardState.lease else {
+        guard let shardLease = writeSet.nextShardState.lease else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         let shardLeaseID = try uuid(shardLease.id)
         let shardLeaseGeneration = try signed(shardLease.generation)
 
-        try await sql.raw("""
-            UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence), timeline_sequence = \(bind: timelineSequence)
-            WHERE room_id = \(bind: roomID)
-            """).run()
         guard let mediaJSON = String(data: try JSONEncoder().encode(message.media.map { $0.mediaID.rawValue }), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
@@ -555,6 +914,61 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         guard let mentionedUsersJSON = String(data: try JSONEncoder().encode(mentionedUserIDs), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        let references = try message.media.enumerated().map { ordinal, reference in
+            OrderedMediaReferenceInput(ordinal: ordinal, mediaID: try uuid(reference.mediaID))
+        }
+        let referencesJSON = try roomWriteJSON(references)
+        let mentions = try message.mentions.enumerated().map { ordinal, target in
+            switch target {
+            case .user(let userID):
+                return OrderedMentionInput(
+                    ordinal: ordinal,
+                    mentionKind: "user",
+                    mentionedUserID: try uuid(userID)
+                )
+            case .everyone:
+                return OrderedMentionInput(
+                    ordinal: ordinal,
+                    mentionKind: "everyone",
+                    mentionedUserID: nil
+                )
+            }
+        }
+        let mentionsJSON = try roomWriteJSON(mentions)
+
+        if room.deliveryMode == .standardFanout {
+            try await persistStandardFanout(
+                writeSet,
+                command: command,
+                room: room,
+                roomID: roomID,
+                messageID: messageID,
+                eventID: eventID,
+                planID: planID,
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                roomSequence: roomSequence,
+                timelineSequence: timelineSequence,
+                shardLeaseID: shardLeaseID,
+                shardLeaseGeneration: shardLeaseGeneration,
+                entitiesJSON: entitiesJSON,
+                mediaJSON: mediaJSON,
+                mediaPresentationsJSON: mediaPresentationsJSON,
+                mentionedUsersJSON: mentionedUsersJSON,
+                referencesJSON: referencesJSON,
+                mentionsJSON: mentionsJSON,
+                replyToMessageID: replyToMessageID,
+                forwardedFromMessageID: forwardedFromMessageID,
+                forwardedFromUserID: forwardedFromUserID,
+                sql: sql
+            )
+            return
+        }
+
+        try await sql.raw("""
+            UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence), timeline_sequence = \(bind: timelineSequence)
+            WHERE room_id = \(bind: roomID)
+            """).run()
         let hybridReliableTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
         try await sql.raw("""
             UPDATE im_v2.room_admission
@@ -565,17 +979,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 shard_lease_id = \(bind: shardLeaseID),
                 shard_lease_generation = \(bind: shardLeaseGeneration)
             WHERE room_id = \(bind: roomID)
-            """).run()
-        try await sql.raw("""
-            UPDATE im_v2.shard_admission_pools
-            SET command_window_used = \(bind: shardLease.commandWindow.used),
-                fanout_window_used = \(bind: shardLease.fanoutWindow.used),
-                outstanding_fanout_units = \(bind: shardState.outstandingFanoutUnits),
-                outstanding_plans = \(bind: shardState.outstandingPlans)
-            WHERE room_shard_id = \(bind: room.roomShardID)
-              AND capacity_profile_id = \(bind: room.capacityProfileID)
-              AND lease_id = \(bind: shardLeaseID)
-              AND generation = \(bind: shardLeaseGeneration)
             """).run()
         try await sql.raw("""
             INSERT INTO im_v2.messages
@@ -593,10 +996,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             VALUES (\(bind: messageID), \(bind: roomID), 1, 'pending', \(bind: message.createdAt))
             """).run()
         if !message.media.isEmpty {
-            let references = try message.media.enumerated().map { ordinal, reference in
-                OrderedMediaReferenceInput(ordinal: ordinal, mediaID: try uuid(reference.mediaID))
-            }
-            let referencesJSON = try roomWriteJSON(references)
             try await sql.raw("""
                 INSERT INTO im_v2.message_media_references
                     (message_id, media_id, ordinal, referenced_at)
@@ -606,23 +1005,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 """).run()
         }
         if !message.mentions.isEmpty {
-            let mentions = try message.mentions.enumerated().map { ordinal, target in
-                switch target {
-                case .user(let userID):
-                    return OrderedMentionInput(
-                        ordinal: ordinal,
-                        mentionKind: "user",
-                        mentionedUserID: try uuid(userID)
-                    )
-                case .everyone:
-                    return OrderedMentionInput(
-                        ordinal: ordinal,
-                        mentionKind: "everyone",
-                        mentionedUserID: nil
-                    )
-                }
-            }
-            let mentionsJSON = try roomWriteJSON(mentions)
             try await sql.raw("""
                 INSERT INTO im_v2.message_mentions
                     (message_id, ordinal, mention_kind, mentioned_user_id, created_at)
@@ -660,20 +1042,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             """).run()
         switch room.deliveryMode {
         case .standardFanout:
-            try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans
-                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
-                VALUES
-                    (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
-                     \(bind: targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule))::jsonb,
-                     jsonb_build_object('after_user_id', NULL),
-                     \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), \(bind: writeSet.fanoutPlan.reservation.cost.targetCount), 'planning', \(bind: message.createdAt))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
-                VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))
-                """).run()
+            preconditionFailure("standard fan-out returns through the set-based persistence path")
         case .largeGroupHybrid:
             guard writeSet.fanoutPlan.reservation.cost.targetCount == hybridReliableTargets.count else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -709,6 +1078,164 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     """).run()
                 try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))").run()
             }
+        }
+    }
+
+    /// The ordinary direct/group send path used to issue one network round
+    /// trip per durable row. PostgreSQL already gives a data-modifying CTE one
+    /// statement-level transaction boundary, so chain every dependent write
+    /// through `RETURNING` and validate the exact mutation cardinality once.
+    private func persistStandardFanout(
+        _ writeSet: V2MessageAcceptanceTransaction,
+        command: V2SendMessageCommand,
+        room: RoomRow,
+        roomID: UUID,
+        messageID: UUID,
+        eventID: UUID,
+        planID: UUID,
+        senderID: UUID,
+        clientMessageID: UUID,
+        roomSequence: Int64,
+        timelineSequence: Int64,
+        shardLeaseID: UUID,
+        shardLeaseGeneration: Int64,
+        entitiesJSON: String,
+        mediaJSON: String,
+        mediaPresentationsJSON: String,
+        mentionedUsersJSON: String,
+        referencesJSON: String,
+        mentionsJSON: String,
+        replyToMessageID: String,
+        forwardedFromMessageID: UUID?,
+        forwardedFromUserID: UUID?,
+        sql: any SQLDatabase
+    ) async throws {
+        let message = writeSet.acceptedMessage
+        let admission = writeSet.nextRoomState.admission
+        let targetCount = writeSet.fanoutPlan.reservation.cost.targetCount
+        let targetRule = targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule)
+        guard let mutation = try await sql.raw("""
+            WITH room_update AS (
+                UPDATE im_v2.rooms
+                SET room_sequence = \(bind: roomSequence),
+                    timeline_sequence = \(bind: timelineSequence)
+                WHERE room_id = \(bind: roomID)
+                RETURNING room_id
+            ), admission_update AS (
+                UPDATE im_v2.room_admission AS admission
+                SET command_window_used = \(bind: admission.commandWindow.used),
+                    fanout_window_used = \(bind: admission.fanoutWindow.used),
+                    outstanding_fanout_units = \(bind: admission.outstandingFanoutUnits),
+                    outstanding_plans = \(bind: admission.outstandingPlans),
+                    shard_lease_id = \(bind: shardLeaseID),
+                    shard_lease_generation = \(bind: shardLeaseGeneration)
+                FROM room_update
+                WHERE admission.room_id = room_update.room_id
+                RETURNING admission.room_id
+            ), message_insert AS (
+                INSERT INTO im_v2.messages
+                    (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
+                     client_message_id, text_body, rich_entities, reply_to_message_id,
+                     forwarded_from_message_id, forwarded_from_user_id, created_at)
+                SELECT \(bind: messageID), admission_update.room_id, \(bind: roomSequence),
+                       \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
+                       \(bind: message.text), \(bind: entitiesJSON)::jsonb,
+                       NULLIF(\(bind: replyToMessageID), '')::uuid,
+                       \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
+                       \(bind: message.createdAt)
+                FROM admission_update
+                RETURNING message_id, room_id
+            ), review_insert AS (
+                INSERT INTO im_v2.content_review_jobs
+                    (message_id, room_id, expected_content_revision, state, created_at)
+                SELECT message_id, room_id, 1, 'pending', \(bind: message.createdAt)
+                FROM message_insert
+                RETURNING message_id
+            ), media_insert AS (
+                INSERT INTO im_v2.message_media_references
+                    (message_id, media_id, ordinal, referenced_at)
+                SELECT message_insert.message_id, reference.media_id, reference.ordinal,
+                       \(bind: message.createdAt)
+                FROM message_insert
+                CROSS JOIN jsonb_to_recordset(\(bind: referencesJSON)::jsonb)
+                     AS reference(ordinal integer, media_id uuid)
+                RETURNING message_id
+            ), mention_insert AS (
+                INSERT INTO im_v2.message_mentions
+                    (message_id, ordinal, mention_kind, mentioned_user_id, created_at)
+                SELECT message_insert.message_id, mention.ordinal, mention.mention_kind,
+                       mention.mentioned_user_id, \(bind: message.createdAt)
+                FROM message_insert
+                CROSS JOIN jsonb_to_recordset(\(bind: mentionsJSON)::jsonb)
+                     AS mention(ordinal integer, mention_kind text, mentioned_user_id uuid)
+                RETURNING message_id
+            ), event_insert AS (
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
+                     committed_membership_revision, created_at)
+                SELECT \(bind: eventID), message_insert.room_id, \(bind: roomSequence),
+                       'message.accepted', \(bind: senderID),
+                       jsonb_build_object(
+                           'event_type', 'message.accepted',
+                           'message_id', \(bind: messageID.uuidString),
+                           'room_id', \(bind: roomID.uuidString),
+                           'room_sequence', \(bind: roomSequence),
+                           'timeline_sequence', \(bind: timelineSequence),
+                           'sender_user_id', \(bind: senderID.uuidString),
+                           'text', \(bind: message.text),
+                           'media_ids', \(bind: mediaJSON)::jsonb,
+                           'media_presentations', \(bind: mediaPresentationsJSON)::jsonb,
+                           'mention_user_ids', \(bind: mentionedUsersJSON)::jsonb,
+                           'mentions_everyone', \(bind: message.mentions.contains(.everyone)),
+                           'entities', \(bind: entitiesJSON)::jsonb,
+                           'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
+                           'forwarded_from_message_id', NULLIF(\(bind: command.forwardedFrom?.messageID.rawValue ?? ""), ''),
+                           'forwarded_from_user_id', NULLIF(\(bind: command.forwardedFrom?.senderUserID.rawValue ?? ""), ''),
+                           'message_revision', 1,
+                           'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000))
+                       ),
+                       \(bind: room.membershipRevision), \(bind: message.createdAt)
+                FROM message_insert
+                RETURNING event_id, room_id
+            ), plan_insert AS (
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence,
+                     committed_membership_revision, target_rule, enumeration_checkpoint,
+                     target_count, reserved_fanout_cost, state, created_at)
+                SELECT \(bind: planID), event_insert.event_id, event_insert.room_id,
+                       \(bind: roomSequence), \(bind: room.membershipRevision),
+                       \(bind: targetRule)::jsonb, jsonb_build_object('after_user_id', NULL),
+                       \(bind: targetCount), \(bind: targetCount), 'planning',
+                       \(bind: message.createdAt)
+                FROM event_insert
+                RETURNING plan_id, source_event_id
+            ), outbox_insert AS (
+                INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
+                SELECT source_event_id, plan_id, 'pending', \(bind: message.createdAt)
+                FROM plan_insert
+                RETURNING source_event_id
+            )
+            SELECT (SELECT count(*) FROM room_update) AS room_count,
+                   (SELECT count(*) FROM admission_update) AS admission_count,
+                   (SELECT count(*) FROM message_insert) AS message_count,
+                   (SELECT count(*) FROM review_insert) AS review_count,
+                   (SELECT count(*) FROM media_insert) AS media_count,
+                   (SELECT count(*) FROM mention_insert) AS mention_count,
+                   (SELECT count(*) FROM event_insert) AS event_count,
+                   (SELECT count(*) FROM plan_insert) AS plan_count,
+                   (SELECT count(*) FROM outbox_insert) AS outbox_count
+            """).first(decoding: SetBasedRoomWriteMutationRow.self),
+              mutation.roomCount == 1,
+              mutation.admissionCount == 1,
+              mutation.messageCount == 1,
+              mutation.reviewCount == 1,
+              mutation.mediaCount == Int64(message.media.count),
+              mutation.mentionCount == Int64(message.mentions.count),
+              mutation.eventCount == 1,
+              mutation.planCount == 1,
+              mutation.outboxCount == 1
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
         }
     }
 
@@ -946,6 +1473,88 @@ private struct OrderedMentionInput: Encodable {
     }
 }
 
+private struct AdmissionSnapshotRow: Decodable {
+    let roomEligibleMemberCount: Int
+    let roomCommandWindowLimit: Int
+    let roomCommandWindowUsed: Int
+    let roomFanoutWindowLimit: Int
+    let roomFanoutWindowUsed: Int
+    let roomMaxOutstandingFanoutUnits: Int
+    let roomOutstandingFanoutUnits: Int
+    let roomMaxOutstandingPlans: Int
+    let roomOutstandingPlans: Int
+    let roomShardLeaseID: UUID
+    let roomShardLeaseGeneration: Int64
+    let shardLeaseID: UUID
+    let shardGeneration: Int64
+    let shardValidUntil: Date
+    let shardCommandWindowLimit: Int
+    let shardCommandWindowUsed: Int
+    let shardFanoutWindowLimit: Int
+    let shardFanoutWindowUsed: Int
+    let shardMaxOutstandingFanoutUnits: Int
+    let shardOutstandingFanoutUnits: Int
+    let shardMaxOutstandingPlans: Int
+    let shardOutstandingPlans: Int
+
+    var room: AdmissionRow {
+        .init(
+            eligibleMemberCount: roomEligibleMemberCount,
+            commandWindowLimit: roomCommandWindowLimit,
+            commandWindowUsed: roomCommandWindowUsed,
+            fanoutWindowLimit: roomFanoutWindowLimit,
+            fanoutWindowUsed: roomFanoutWindowUsed,
+            maxOutstandingFanoutUnits: roomMaxOutstandingFanoutUnits,
+            outstandingFanoutUnits: roomOutstandingFanoutUnits,
+            maxOutstandingPlans: roomMaxOutstandingPlans,
+            outstandingPlans: roomOutstandingPlans,
+            shardLeaseID: roomShardLeaseID,
+            shardLeaseGeneration: roomShardLeaseGeneration
+        )
+    }
+
+    var shard: ShardRow {
+        .init(
+            leaseID: shardLeaseID,
+            generation: shardGeneration,
+            validUntil: shardValidUntil,
+            commandWindowLimit: shardCommandWindowLimit,
+            commandWindowUsed: shardCommandWindowUsed,
+            fanoutWindowLimit: shardFanoutWindowLimit,
+            fanoutWindowUsed: shardFanoutWindowUsed,
+            maxOutstandingFanoutUnits: shardMaxOutstandingFanoutUnits,
+            outstandingFanoutUnits: shardOutstandingFanoutUnits,
+            maxOutstandingPlans: shardMaxOutstandingPlans,
+            outstandingPlans: shardOutstandingPlans
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case roomEligibleMemberCount = "room_eligible_member_count"
+        case roomCommandWindowLimit = "room_command_window_limit"
+        case roomCommandWindowUsed = "room_command_window_used"
+        case roomFanoutWindowLimit = "room_fanout_window_limit"
+        case roomFanoutWindowUsed = "room_fanout_window_used"
+        case roomMaxOutstandingFanoutUnits = "room_max_outstanding_fanout_units"
+        case roomOutstandingFanoutUnits = "room_outstanding_fanout_units"
+        case roomMaxOutstandingPlans = "room_max_outstanding_plans"
+        case roomOutstandingPlans = "room_outstanding_plans"
+        case roomShardLeaseID = "room_shard_lease_id"
+        case roomShardLeaseGeneration = "room_shard_lease_generation"
+        case shardLeaseID = "shard_lease_id"
+        case shardGeneration = "shard_generation"
+        case shardValidUntil = "shard_valid_until"
+        case shardCommandWindowLimit = "shard_command_window_limit"
+        case shardCommandWindowUsed = "shard_command_window_used"
+        case shardFanoutWindowLimit = "shard_fanout_window_limit"
+        case shardFanoutWindowUsed = "shard_fanout_window_used"
+        case shardMaxOutstandingFanoutUnits = "shard_max_outstanding_fanout_units"
+        case shardOutstandingFanoutUnits = "shard_outstanding_fanout_units"
+        case shardMaxOutstandingPlans = "shard_max_outstanding_plans"
+        case shardOutstandingPlans = "shard_outstanding_plans"
+    }
+}
+
 private struct AdmissionRow: Decodable {
     let eligibleMemberCount: Int
     let commandWindowLimit: Int
@@ -986,6 +1595,50 @@ private struct ShardRow: Decodable {
     }
 }
 
+private enum LateShardAdmissionRejection: Error, Sendable {
+    case rateLimited(retryAfterSeconds: Int)
+    case unavailable(FanoutAdmissionUnavailableReason)
+}
+
+private struct ShardAdmissionMutationRow: Decodable {
+    let applied: Int
+}
+
+private struct CurrentShardLeaseRow: Decodable {
+    let leaseID: UUID
+    let generation: Int64
+    let validUntil: Date
+    enum CodingKeys: String, CodingKey {
+        case leaseID = "lease_id"
+        case generation
+        case validUntil = "valid_until"
+    }
+}
+
+private struct SetBasedRoomWriteMutationRow: Decodable {
+    let roomCount: Int64
+    let admissionCount: Int64
+    let messageCount: Int64
+    let reviewCount: Int64
+    let mediaCount: Int64
+    let mentionCount: Int64
+    let eventCount: Int64
+    let planCount: Int64
+    let outboxCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case roomCount = "room_count"
+        case admissionCount = "admission_count"
+        case messageCount = "message_count"
+        case reviewCount = "review_count"
+        case mediaCount = "media_count"
+        case mentionCount = "mention_count"
+        case eventCount = "event_count"
+        case planCount = "plan_count"
+        case outboxCount = "outbox_count"
+    }
+}
+
 private struct MessageRow: Decodable {
     let messageID: UUID
     let roomID: UUID
@@ -1018,41 +1671,102 @@ private struct MessageRow: Decodable {
     }
 }
 
-private struct MembershipRoleRow: Decodable { let role: String }
+private struct ActorAuthorizationSnapshotRow: Decodable {
+    let role: String
+    let senderIsActive: Bool
+    let muted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case senderIsActive = "sender_is_active"
+        case muted
+    }
+}
 private struct AuthorizationRow: Decodable { let authorized: Bool }
-private struct MuteAuthorizationRow: Decodable { let muted: Bool }
 private struct DirectRoomPairRow: Decodable {
     let lowerUserID: UUID
     let higherUserID: UUID
     enum CodingKeys: String, CodingKey { case lowerUserID = "lower_user_id", higherUserID = "higher_user_id" }
 }
 private struct DirectPolicyBooleanRow: Decodable { let value: Bool }
-private struct DirectSpecialAccountRow: Decodable {
-    let accountUserID: UUID
-    let accountKind: String
-    let status: String
-    let allowsCustomerMessages: Bool
-    let allowsServiceMessages: Bool
+private struct DirectMessageAcceptanceContext {
+    let recipientID: UUID
+    let restriction: V2DirectMessageDenied.Reason?
+    let requiresStrangerQuota: Bool
+    let senderProfileVisibleToRecipient: Bool
+    let senderCanSend: Bool?
+    let supportAccountID: UUID?
+}
+private struct RoomWriteCommit {
+    let outcome: V2SendMessageOutcome
+    /// `nil` means an idempotent acceptance must recover shadowing from the
+    /// committed source rows. A non-nil array is the exact delta from a new
+    /// transaction; an empty array deliberately skips all post-commit reads.
+    let acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?
+}
+private struct DirectProjectionShadowRequest {
+    let userID: UserID
+    let sourceEventID: EventID
+    let projectionKinds: Set<String>
+}
+private struct DirectPostAcceptanceProjectionChanges {
+    let senderCapabilityInserted: Bool
+    let recipientProfileInserted: Bool
+}
+private struct DirectMessagePolicySnapshotRow: Decodable {
+    let recipientUserID: UUID
+    let senderProfileVisibleToRecipient: Bool
+    let senderCanSend: Bool?
+    let recipientIsActive: Bool
+    let blocked: Bool
+    let isFriend: Bool
+    let recipientHasReplied: Bool
+    let allowsStrangers: Bool
+    let senderAccountKind: String?
+    let senderAccountStatus: String?
+    let senderAllowsServiceMessages: Bool?
+    let recipientAccountKind: String?
+    let recipientAccountStatus: String?
+    let recipientAllowsCustomerMessages: Bool?
+
     enum CodingKeys: String, CodingKey {
-        case accountUserID = "account_user_id"
-        case accountKind = "account_kind"
-        case status
-        case allowsCustomerMessages = "allows_customer_messages"
-        case allowsServiceMessages = "allows_service_messages"
+        case recipientUserID = "recipient_user_id"
+        case senderProfileVisibleToRecipient = "sender_profile_visible_to_recipient"
+        case senderCanSend = "sender_can_send"
+        case recipientIsActive = "recipient_is_active"
+        case blocked
+        case isFriend = "is_friend"
+        case recipientHasReplied = "recipient_has_replied"
+        case allowsStrangers = "allows_strangers"
+        case senderAccountKind = "sender_account_kind"
+        case senderAccountStatus = "sender_account_status"
+        case senderAllowsServiceMessages = "sender_allows_service_messages"
+        case recipientAccountKind = "recipient_account_kind"
+        case recipientAccountStatus = "recipient_account_status"
+        case recipientAllowsCustomerMessages = "recipient_allows_customer_messages"
     }
 }
-private struct DirectMessageSenderProfileRow: Decodable {
-    let publicHandle: String
-    let displayName: String
-    let accountKind: String
-    let revision: Int64
-    let updatedAt: Date
+private struct DirectRoomProfileMutationRow: Decodable {
+    let profileExists: Bool
+    let neededCount: Int64
+    let profileInsertedCount: Int64
+    let insertedCount: Int64
+    let pairCount: Int64
+
     enum CodingKeys: String, CodingKey {
-        case publicHandle = "public_handle"
-        case displayName = "display_name"
-        case accountKind = "account_kind"
-        case revision
-        case updatedAt = "updated_at"
+        case profileExists = "profile_exists"
+        case neededCount = "needed_count"
+        case profileInsertedCount = "profile_inserted_count"
+        case insertedCount = "inserted_count"
+        case pairCount = "pair_count"
+    }
+}
+private struct DirectCapabilityMutationRow: Decodable {
+    let insertedCount: Int64
+    let pairCount: Int64
+    enum CodingKeys: String, CodingKey {
+        case insertedCount = "inserted_count"
+        case pairCount = "pair_count"
     }
 }
 private struct DirectMessageSyncSequenceRow: Decodable {

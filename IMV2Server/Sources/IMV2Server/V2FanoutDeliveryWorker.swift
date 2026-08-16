@@ -54,6 +54,21 @@ public enum V2FanoutDeliveryClaimLane: Sendable, Equatable {
     case expiredLease
 }
 
+/// One stable share of a concurrent claim pass. Every delivery for the same
+/// target user resolves to the same partition, so parallel workers do not
+/// contend on that user's monotonic sync-sequence row. Durable lease tokens
+/// remain the correctness fence if the process concurrency changes later.
+public struct V2FanoutDeliveryClaimPartition: Sendable, Equatable {
+    public let index: Int
+    public let count: Int
+
+    public init(index: Int, count: Int) {
+        precondition(count > 0 && index >= 0 && index < count)
+        self.index = index
+        self.count = count
+    }
+}
+
 public protocol V2FanoutDeliveryStore: Sendable {
     func claimPending(bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease]
     func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit
@@ -69,6 +84,17 @@ public protocol V2FanoutDeliveryStore: Sendable {
     func handoff(_ lease: V2FanoutDeliveryLease, to route: V2UserShardRoute) async throws
     func release(_ lease: V2FanoutDeliveryLease) async throws
     func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition: V2DurableRetryDisposition, now: Date) async throws
+}
+
+/// Optional claim capability for stores that can keep concurrent delivery
+/// workers target-user-disjoint. Other stores retain the original fenced
+/// `SKIP LOCKED` claim behavior.
+public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
+    func claimPending(
+        bucket: String?, lane: V2FanoutDeliveryClaimLane,
+        partition: V2FanoutDeliveryClaimPartition,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease]
 }
 
 /// Optional topology-specific cap for concurrent claim passes against one
@@ -227,13 +253,36 @@ public struct V2FanoutDeliveryWorker: Sendable {
     }
 
     public func runOnce(limit: Int) async throws -> V2FanoutDeliveryReport {
+        try await runOnce(limit: limit, claimPartition: nil)
+    }
+
+    func runOnce(
+        limit: Int,
+        claimPartition: V2FanoutDeliveryClaimPartition
+    ) async throws -> V2FanoutDeliveryReport {
+        try await runOnce(limit: limit, claimPartition: Optional(claimPartition))
+    }
+
+    private func runOnce(
+        limit: Int,
+        claimPartition: V2FanoutDeliveryClaimPartition?
+    ) async throws -> V2FanoutDeliveryReport {
         precondition(limit > 0)
         let claimTime = now()
         var leases: [V2FanoutDeliveryLease] = []
         for lane in await claimScheduler.lanesForNextClaim() {
-            leases = try await store.claimPending(
-                bucket: bucket, lane: lane, now: claimTime, leaseDuration: leaseDuration, limit: limit
-            )
+            if let claimPartition,
+               let partitionedStore = store as? any V2PartitionedFanoutDeliveryStore {
+                leases = try await partitionedStore.claimPending(
+                    bucket: bucket, lane: lane, partition: claimPartition,
+                    now: claimTime, leaseDuration: leaseDuration, limit: limit
+                )
+            } else {
+                leases = try await store.claimPending(
+                    bucket: bucket, lane: lane, now: claimTime,
+                    leaseDuration: leaseDuration, limit: limit
+                )
+            }
             if !leases.isEmpty { break }
         }
         var committed = 0

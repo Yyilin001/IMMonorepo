@@ -18,8 +18,10 @@ public struct V2ExternalFanoutDeliveryAcknowledgement: Sendable {
 }
 
 /// Commits a target's user-sync projection and advances the completion unit in
-/// the same transaction. A consumer-inbox row makes broker redelivery safe.
-public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
+/// the same transaction. Capacity release is deliberately a separate durable
+/// phase: projection transactions never acquire room or shard-admission locks.
+/// A consumer-inbox row makes broker redelivery safe.
+public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V2FanoutCompletionReleaseStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
     private let batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
@@ -51,6 +53,18 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         )
     }
 
+    public func claimPending(
+        bucket: String?, lane: V2FanoutDeliveryClaimLane,
+        partition: V2FanoutDeliveryClaimPartition,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
+        try await claimPendingRows(
+            bucket: bucket, lane: lane, now: now,
+            leaseDuration: leaseDuration, limit: limit,
+            partition: partition
+        )
+    }
+
     /// Cross-store delivery inlines a bounded immutable source payload on
     /// every claimed lease. A larger payload is emitted once per source event
     /// in that same lease-fenced result; the cross-store worker then expands
@@ -62,25 +76,41 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     public func claimPendingIncludingProjectionPayload(
         bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date,
         leaseDuration: TimeInterval, limit: Int,
-        maximumInlinePayloadBytes: Int
+        maximumInlinePayloadBytes: Int,
+        partition: V2FanoutDeliveryClaimPartition? = nil
     ) async throws -> [V2FanoutDeliveryLease] {
         precondition(maximumInlinePayloadBytes > 0)
         return try await claimPendingRows(
             bucket: bucket, lane: lane, now: now, leaseDuration: leaseDuration,
-            limit: limit, maximumInlinePayloadBytes: maximumInlinePayloadBytes
+            limit: limit, maximumInlinePayloadBytes: maximumInlinePayloadBytes,
+            partition: partition
         )
     }
 
     private func claimPendingRows(
         bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date,
-        leaseDuration: TimeInterval, limit: Int, maximumInlinePayloadBytes: Int? = nil
+        leaseDuration: TimeInterval, limit: Int,
+        maximumInlinePayloadBytes: Int? = nil,
+        partition: V2FanoutDeliveryClaimPartition? = nil
     ) async throws -> [V2FanoutDeliveryLease] {
         guard leaseDuration > 0, limit > 0 else { return [] }
         let token = makeUUID()
         let expiry = now.addingTimeInterval(leaseDuration)
         let eligibility = lane.sqlEligibilityPredicate(now: now)
         let ordering = lane.sqlOrdering
-        return try await database.transaction { transaction in
+        let partitionEligibility: SQLQueryString
+        if let partition {
+            partitionEligibility = """
+                AND mod(
+                    hashtextextended(delivery.target_user_id::text, 0)
+                        & 9223372036854775807,
+                    \(bind: Int64(partition.count))
+                ) = \(bind: Int64(partition.index))
+                """
+        } else {
+            partitionEligibility = ""
+        }
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows: [ClaimedDeliveryRow]
             if let bucket {
@@ -94,6 +124,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                             WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
                               AND plan.state = 'planned'
                               AND \(eligibility)
+                              \(partitionEligibility)
                             ORDER BY \(ordering)
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                         ), claimed AS (
@@ -139,6 +170,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                         WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
                           AND plan.state = 'planned'
                           AND \(eligibility)
+                          \(partitionEligibility)
                         ORDER BY \(ordering)
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     )
@@ -162,6 +194,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                               ON plan.source_event_id = delivery.source_event_id
                             WHERE delivery.state = 'pending' AND plan.state = 'planned'
                               AND \(eligibility)
+                              \(partitionEligibility)
                             ORDER BY \(ordering)
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                         ), claimed AS (
@@ -206,6 +239,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                           ON plan.source_event_id = delivery.source_event_id
                         WHERE delivery.state = 'pending' AND plan.state = 'planned'
                           AND \(eligibility)
+                          \(partitionEligibility)
                         ORDER BY \(ordering)
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     )
@@ -236,7 +270,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     }
 
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return try await commit(sql: sql, lease: lease, now: now)
         }
@@ -274,7 +308,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         guard Set(ordered.map(\.key)).count == ordered.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             var results = Array<V2FanoutDeliveryCommit?>(repeating: nil, count: leases.count)
             let committable: [BatchFanoutDeliveryLease]
@@ -302,7 +336,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
             for item in committable where !committedIndexes.contains(item.index) {
                 results[item.index] = .staleLease
             }
-            for (index, commit) in try await completeBatch(sql: sql, prepared: prepared, now: now) {
+            for (index, commit) in try await completeBatch(sql: sql, prepared: prepared) {
                 results[index] = commit
             }
             guard results.allSatisfy({ $0 != nil }) else {
@@ -421,7 +455,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     ) async throws -> V2FanoutDeliveryCommit {
         let sourceEventID = try uuid(lease.sourceEventID)
         let targetUserID = try uuid(lease.targetUserID)
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let currentRoute = try await currentRoutes(for: [lease.targetUserID], sql: sql)[0]
             if currentRoute.writeIdentity != lease.observedRoute.writeIdentity {
@@ -454,7 +488,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
     ) async throws -> [V2FanoutDeliveryCommit] {
         guard !acknowledgements.isEmpty else { return [] }
         let ordered = try externalBatchAcknowledgementInputs(acknowledgements)
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let currentRoutes = try await currentRoutes(
                 for: acknowledgements.map { $0.lease.targetUserID }, sql: sql
@@ -539,7 +573,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                     userSyncSequence: try unsigned(row.userSyncSequence)
                 ))
             }
-            for (index, commit) in try await completeBatch(sql: sql, prepared: prepared, now: now) {
+            for (index, commit) in try await completeBatch(sql: sql, prepared: prepared) {
                 results[index] = commit
             }
             guard results.allSatisfy({ $0 != nil }) else {
@@ -825,6 +859,7 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                 INSERT INTO im_v2.user_sync_sequences AS sequence (user_id, next_sequence)
                 SELECT target_user_id, 1
                 FROM pending_inbox
+                ORDER BY target_user_id
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = sequence.next_sequence + 1
                 RETURNING user_id, next_sequence
@@ -1060,22 +1095,22 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
             SELECT payload_keys.source_event_id, payload_keys.projection_kind, event.payload, \(bind: now)
             FROM payload_keys
             JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
+            ORDER BY payload_keys.source_event_id, payload_keys.projection_kind
             ON CONFLICT DO NOTHING
             """).run()
     }
 
-    /// Completes the accounting/release side without repeatedly locking the
-    /// same completion-unit row. Delivery terminalization has already occurred
-    /// in the fenced set-based projection statement; this phase aggregates by
-    /// `(source event, completion unit)` and acquires one counter lock per
-    /// represented unit rather than one per target. All counter updates finish
-    /// before a terminal unit acquires the plan/admission locks: otherwise a
-    /// batch spanning two units can hold the plan while waiting for a later
-    /// completion unit that another batch holds while waiting for that plan.
+    /// Completes the accounting/release side without a completion-unit N+1.
+    /// Delivery terminalization has already occurred in the fenced set-based
+    /// projection statement; this phase aggregates by `(source event,
+    /// completion unit)`, locks those counters in canonical order, and applies
+    /// every increment in one statement. This is phase A of the durable
+    /// protocol: it terminalizes projections and completion counters, but
+    /// never acquires room/admission locks. A separate release worker owns
+    /// phase B after this transaction commits.
     private func completeBatch(
         sql: any SQLDatabase,
-        prepared: [PreparedFanoutDeliveryCommit],
-        now: Date
+        prepared: [PreparedFanoutDeliveryCommit]
     ) async throws -> [(Int, V2FanoutDeliveryCommit)] {
         guard !prepared.isEmpty else { return [] }
         let grouped = Dictionary(grouping: prepared) { item in
@@ -1084,48 +1119,84 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
                 completionUnitID: item.delivery.completionUnitID
             )
         }
-        var completedUnits: [CompletedBatchUnit] = []
-        completedUnits.reserveCapacity(grouped.count)
-        for key in grouped.keys.sorted() {
-            guard let items = grouped[key] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            guard let unit = try await sql.raw("""
-                UPDATE im_v2.fanout_completion_units
-                SET committed_target_count = committed_target_count + \(bind: items.count),
+        let orderedKeys = grouped.keys.sorted()
+        let increments = try orderedKeys.map { key in
+            guard let items = grouped[key], !items.isEmpty else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return CompletionUnitIncrementInput(
+                sourceEventID: key.sourceEventID,
+                completionUnitID: key.completionUnitID,
+                committedTargetDelta: items.count
+            )
+        }
+        let inputJSON = try batchJSON(increments)
+        let updated = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT source_event_id, completion_unit_id, committed_target_delta
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                    source_event_id uuid,
+                    completion_unit_id uuid,
+                    committed_target_delta integer
+                )
+            ), locked AS MATERIALIZED (
+                -- Multiple gateway replicas may touch distinct targets in one
+                -- large completion unit. Lock every represented counter in a
+                -- stable order before updating so overlapping batches cannot
+                -- form opposite-order lock cycles.
+                SELECT unit.source_event_id, unit.completion_unit_id
+                FROM input
+                JOIN im_v2.fanout_completion_units AS unit
+                  USING (source_event_id, completion_unit_id)
+                WHERE unit.state = 'pending'
+                  AND input.committed_target_delta > 0
+                  AND unit.committed_target_count + unit.policy_skipped_target_count
+                        + input.committed_target_delta <= unit.target_count
+                ORDER BY unit.source_event_id, unit.completion_unit_id
+                FOR UPDATE OF unit
+            ), updated AS (
+                UPDATE im_v2.fanout_completion_units AS unit
+                SET committed_target_count = unit.committed_target_count
+                        + input.committed_target_delta,
                     state = CASE
-                        WHEN committed_target_count + policy_skipped_target_count + \(bind: items.count) = target_count THEN 'terminal'
+                        WHEN unit.committed_target_count + unit.policy_skipped_target_count
+                                + input.committed_target_delta = unit.target_count
+                            THEN 'terminal'
                         ELSE 'pending'
                     END,
                     lease_expires_at = NULL
-                WHERE source_event_id = \(bind: key.sourceEventID)
-                  AND completion_unit_id = \(bind: key.completionUnitID)
-                  AND state = 'pending'
-                RETURNING target_count, state
-                """).first(decoding: CompletionUnitRow.self)
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let isTerminal = unit.state == "terminal"
-            completedUnits.append(.init(key: key, items: items, targetCount: unit.targetCount, isTerminal: isTerminal))
+                FROM input
+                JOIN locked USING (source_event_id, completion_unit_id)
+                WHERE unit.source_event_id = input.source_event_id
+                  AND unit.completion_unit_id = input.completion_unit_id
+                  AND unit.state = 'pending'
+                RETURNING unit.source_event_id, unit.completion_unit_id
+            )
+            SELECT source_event_id, completion_unit_id
+            FROM updated
+            ORDER BY source_event_id, completion_unit_id
+            """).all(decoding: UpdatedCompletionUnitRow.self)
+        let updatedKeys = updated.map {
+            CompletionUnitBatchKey(
+                sourceEventID: $0.sourceEventID,
+                completionUnitID: $0.completionUnitID
+            )
         }
-
-        var closedPlans: Set<CompletionUnitBatchKey> = []
-        for unit in completedUnits where unit.isTerminal {
-            if try await releaseTerminalUnit(
-                sql: sql, sourceEventID: unit.key.sourceEventID,
-                completionUnitID: unit.key.completionUnitID, targetCount: unit.targetCount, now: now
-            ) {
-                closedPlans.insert(unit.key)
-            }
+        guard updatedKeys == orderedKeys else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
         }
 
         var outcomes: [(Int, V2FanoutDeliveryCommit)] = []
         outcomes.reserveCapacity(prepared.count)
-        for unit in completedUnits {
-            let closesPlan = closedPlans.contains(unit.key)
-            for (offset, item) in unit.items.enumerated() {
-                let releasesUnit = unit.isTerminal && offset == unit.items.count - 1
+        for key in orderedKeys {
+            guard let items = grouped[key] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            for item in items {
                 outcomes.append((item.index, .committed(
                     userSyncSequence: item.userSyncSequence,
-                    releasedCompletionUnit: releasesUnit,
-                    closedPlan: releasesUnit && closesPlan
+                    releasedCompletionUnit: false,
+                    closedPlan: false
                 )))
             }
         }
@@ -1193,124 +1264,362 @@ public struct PostgresV2FanoutDeliveryStore: V2FanoutDeliveryStore {
         guard unit.state == "terminal" else {
             return .committed(userSyncSequence: userSyncSequence, releasedCompletionUnit: false, closedPlan: false)
         }
-        let closesPlan = try await releaseTerminalUnit(
-            sql: sql, sourceEventID: sourceEventID,
-            completionUnitID: delivery.completionUnitID, targetCount: unit.targetCount, now: now
-        )
-        return .committed(userSyncSequence: userSyncSequence, releasedCompletionUnit: true, closedPlan: closesPlan)
+        return .committed(userSyncSequence: userSyncSequence, releasedCompletionUnit: false, closedPlan: false)
     }
 
-    private func releaseTerminalUnit(
-        sql: any SQLDatabase,
-        sourceEventID: UUID,
-        completionUnitID: UUID,
-        targetCount: Int,
-        now: Date
-    ) async throws -> Bool {
-        // Completion-unit release is serialized by its room admission row.
-        // Do not take the plan lock for every terminal unit: a large plan has
-        // many independent units, but only the last release can transition
-        // the plan/outbox to terminal. Holding the admission lock before the
-        // unreleased-unit check also makes that check a durable finalization
-        // decision rather than a racy snapshot of concurrent unit releases.
-        guard let plan = try await sql.raw("""
-            SELECT room_id, state FROM im_v2.fanout_plans
-            WHERE source_event_id = \(bind: sourceEventID)
-            """).first(decoding: ReleasePlanRow.self), plan.state == "planned"
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        guard let room = try await sql.raw("""
-            SELECT room_shard_id, capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: plan.roomID) FOR UPDATE
-            """).first(decoding: ReleaseRoomRow.self),
-            let admission = try await sql.raw("""
-            SELECT eligible_member_count, command_window_limit, command_window_used,
-                   fanout_window_limit, fanout_window_used, outstanding_fanout_units, outstanding_plans,
-                   shard_lease_id, shard_lease_generation
-            FROM im_v2.room_admission WHERE room_id = \(bind: plan.roomID) FOR UPDATE
-            """).first(decoding: ReleaseAdmissionRow.self),
-            let shard = try await sql.raw("""
-            SELECT lease_id, generation, pool.capacity_profile_id, command_window_limit, command_window_used,
-                   fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
-                   outstanding_fanout_units, max_outstanding_plans, outstanding_plans
-            FROM im_v2.shard_admission_pools AS pool
-            JOIN im_v2.rooms AS room ON room.room_shard_id = pool.room_shard_id
-            WHERE room.room_id = \(bind: plan.roomID)
-              AND pool.capacity_profile_id = room.capacity_profile_id
-            FOR UPDATE OF pool
-            """).first(decoding: ReleaseShardRow.self)
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        guard room.capacityProfileID == shard.capacityProfileID,
-              admission.shardLeaseID == shard.leaseID,
-              admission.shardLeaseGeneration == shard.generation
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    /// Releases a bounded terminal batch in one transaction. Unit claiming is
+    /// skip-locked for replica safety; room, admission and shard rows are then
+    /// locked in stable order. A crash before commit rolls back every counter
+    /// and state transition, leaving the same units eligible for recovery.
+    public func releaseTerminalCompletionUnits(
+        now: Date,
+        limit: Int
+    ) async throws -> V2FanoutCompletionReleaseReport {
+        precondition(limit > 0)
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let units = try await sql.raw("""
+                SELECT source_event_id, completion_unit_id, target_count
+                FROM im_v2.fanout_completion_units
+                WHERE state = 'terminal'
+                ORDER BY source_event_id, completion_unit_id
+                LIMIT \(bind: limit)
+                FOR UPDATE SKIP LOCKED
+                """).all(decoding: TerminalCompletionUnitRow.self)
+            guard !units.isEmpty else {
+                return .init(releasedCount: 0, closedPlanCount: 0)
+            }
+            return try await releaseTerminalCompletionUnits(
+                sql: sql,
+                units: units,
+                now: now
+            )
+        }
+    }
 
-        let hasOtherUnreleasedUnits = try await sql.raw("""
-            SELECT EXISTS (
-                SELECT 1 FROM im_v2.fanout_completion_units
-                WHERE source_event_id = \(bind: sourceEventID)
-                  AND completion_unit_id <> \(bind: completionUnitID)
-                  AND state <> 'released'
-            ) AS value
-            """).first(decoding: BooleanRow.self)?.value ?? true
-        if !hasOtherUnreleasedUnits {
-            // The admission row serializes every completion release for this
-            // room, so this is the sole candidate to close the plan. Lock it
-            // only now to preserve the plan/outbox terminal transition while
-            // avoiding a shared plan lock for all earlier unit releases.
-            guard let lockedPlan = try await sql.raw("""
-                SELECT room_id, state FROM im_v2.fanout_plans
-                WHERE source_event_id = \(bind: sourceEventID) FOR UPDATE
-                """).first(decoding: ReleasePlanRow.self), lockedPlan.state == "planned"
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    private func releaseTerminalCompletionUnits(
+        sql: any SQLDatabase,
+        units: [TerminalCompletionUnitRow],
+        now: Date
+    ) async throws -> V2FanoutCompletionReleaseReport {
+        let keys = units.map {
+            TerminalCompletionReleaseInput(
+                sourceEventID: $0.sourceEventID,
+                completionUnitID: $0.completionUnitID
+            )
+        }
+        guard Set(keys).count == units.count,
+              units.allSatisfy({ $0.targetCount >= 0 })
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let inputJSON = try batchJSON(keys)
+
+        let plans = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT DISTINCT source_event_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                    AS value(source_event_id uuid, completion_unit_id uuid)
+            )
+            SELECT plan.source_event_id, plan.room_id, plan.state
+            FROM input
+            JOIN im_v2.fanout_plans AS plan USING (source_event_id)
+            ORDER BY plan.source_event_id
+            """).all(decoding: BatchReleasePlanRow.self)
+        let sourceEventIDs = Set(units.map(\.sourceEventID))
+        guard plans.count == sourceEventIDs.count,
+              Set(plans.map(\.sourceEventID)) == sourceEventIDs,
+              plans.allSatisfy({ $0.state == "planned" })
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let planByEvent = Dictionary(uniqueKeysWithValues: plans.map { ($0.sourceEventID, $0) })
+        let roomIDs = Set(plans.map(\.roomID))
+
+        // Room-local writes use `rooms -> room_admission`. Acquiring every row
+        // in sorted order preserves that contract even when one recovery batch
+        // spans rooms, and the admission locks serialize the final-plan test.
+        let rooms = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT DISTINCT plan.room_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                    AS value(source_event_id uuid, completion_unit_id uuid)
+                JOIN im_v2.fanout_plans AS plan USING (source_event_id)
+            )
+            SELECT room.room_id, room.room_shard_id, room.capacity_profile_id
+            FROM input
+            JOIN im_v2.rooms AS room USING (room_id)
+            ORDER BY room.room_id
+            FOR UPDATE OF room
+            """).all(decoding: BatchReleaseRoomRow.self)
+        guard rooms.count == roomIDs.count, Set(rooms.map(\.roomID)) == roomIDs else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let roomByID = Dictionary(uniqueKeysWithValues: rooms.map { ($0.roomID, $0) })
+
+        let admissions = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT DISTINCT plan.room_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                    AS value(source_event_id uuid, completion_unit_id uuid)
+                JOIN im_v2.fanout_plans AS plan USING (source_event_id)
+            )
+            SELECT admission.room_id, admission.shard_lease_id,
+                   admission.shard_lease_generation
+            FROM input
+            JOIN im_v2.room_admission AS admission USING (room_id)
+            ORDER BY admission.room_id
+            FOR UPDATE OF admission
+            """).all(decoding: BatchReleaseAdmissionRow.self)
+        guard admissions.count == roomIDs.count, Set(admissions.map(\.roomID)) == roomIDs else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let admissionByRoom = Dictionary(uniqueKeysWithValues: admissions.map { ($0.roomID, $0) })
+
+        // Exclude every unit selected by this transaction. An event closes
+        // only when no other unit remains unreleased. A replica that already
+        // claimed a sibling leaves that sibling visible as terminal here; once
+        // it obtains the admission lock it will perform the sole close.
+        let closingEvents = try await sql.raw("""
+            WITH selected AS MATERIALIZED (
+                SELECT source_event_id, completion_unit_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                    AS value(source_event_id uuid, completion_unit_id uuid)
+            ), selected_events AS (
+                SELECT DISTINCT source_event_id FROM selected
+            )
+            SELECT event.source_event_id
+            FROM selected_events AS event
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM im_v2.fanout_completion_units AS other
+                WHERE other.source_event_id = event.source_event_id
+                  AND other.state <> 'released'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM selected
+                      WHERE selected.source_event_id = other.source_event_id
+                        AND selected.completion_unit_id = other.completion_unit_id
+                  )
+            )
+            ORDER BY event.source_event_id
+            """).all(decoding: SourceEventRow.self)
+        let closingEventIDs = Set(closingEvents.map(\.sourceEventID))
+        guard closingEventIDs.isSubset(of: sourceEventIDs) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let closingJSON = try batchJSON(closingEvents.map(\.sourceEventID))
+        if !closingEvents.isEmpty {
+            let lockedPlans = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT value::uuid AS source_event_id
+                    FROM jsonb_array_elements_text(\(bind: closingJSON)::jsonb)
+                )
+                SELECT plan.source_event_id
+                FROM input
+                JOIN im_v2.fanout_plans AS plan USING (source_event_id)
+                WHERE plan.state = 'planned'
+                ORDER BY plan.source_event_id
+                FOR UPDATE OF plan
+                """).all(decoding: SourceEventRow.self)
+            guard Set(lockedPlans.map(\.sourceEventID)) == closingEventIDs else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
         }
 
-        let reduced = try FanoutAdmissionEvaluator.release(
-            completedUnit: try FanoutCost(targetCount: targetCount),
-            roomState: try admission.roomState(),
-            shardState: try shard.shardState(),
-            closesPlan: !hasOtherUnreleasedUnits
-        )
-        try await sql.raw("""
-            UPDATE im_v2.room_admission
-            SET outstanding_fanout_units = \(bind: reduced.roomState.outstandingFanoutUnits),
-                outstanding_plans = \(bind: reduced.roomState.outstandingPlans)
-            WHERE room_id = \(bind: plan.roomID)
-            """).run()
-        try await sql.raw("""
-            UPDATE im_v2.shard_admission_pools
-            SET outstanding_fanout_units = \(bind: reduced.shardState.outstandingFanoutUnits),
-                outstanding_plans = \(bind: reduced.shardState.outstandingPlans)
-            WHERE room_shard_id = \(bind: room.roomShardID)
-              AND lease_id = \(bind: shard.leaseID) AND generation = \(bind: shard.generation)
-            """).run()
-        try await sql.raw("""
-            UPDATE im_v2.fanout_completion_units
+        var roomDeltas: [UUID: BatchRoomReleaseDelta] = [:]
+        for unit in units {
+            guard let roomID = planByEvent[unit.sourceEventID]?.roomID else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            var delta = roomDeltas[roomID] ?? .init(roomID: roomID, fanoutUnits: 0, plans: 0)
+            let (fanoutUnits, overflowed) = delta.fanoutUnits.addingReportingOverflow(unit.targetCount)
+            guard !overflowed else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            delta.fanoutUnits = fanoutUnits
+            roomDeltas[roomID] = delta
+        }
+        for eventID in closingEventIDs {
+            guard let roomID = planByEvent[eventID]?.roomID,
+                  var delta = roomDeltas[roomID]
+            else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let (plans, overflowed) = delta.plans.addingReportingOverflow(1)
+            guard !overflowed else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            delta.plans = plans
+            roomDeltas[roomID] = delta
+        }
+        let orderedRoomDeltas = roomDeltas.values.sorted { $0.roomID.uuidString < $1.roomID.uuidString }
+        let roomDeltaJSON = try batchJSON(orderedRoomDeltas)
+
+        let changedRooms = try await sql.raw("""
+            WITH delta AS MATERIALIZED (
+                SELECT room_id, fanout_units, plans
+                FROM jsonb_to_recordset(\(bind: roomDeltaJSON)::jsonb)
+                    AS value(room_id uuid, fanout_units bigint, plans bigint)
+            )
+            UPDATE im_v2.room_admission AS admission
+            SET outstanding_fanout_units = admission.outstanding_fanout_units - delta.fanout_units,
+                outstanding_plans = admission.outstanding_plans - delta.plans
+            FROM delta
+            WHERE admission.room_id = delta.room_id
+              AND admission.outstanding_fanout_units >= delta.fanout_units
+              AND admission.outstanding_plans >= delta.plans
+            RETURNING admission.room_id
+            """).all(decoding: RoomIDRow.self)
+        guard Set(changedRooms.map(\.roomID)) == roomIDs else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+
+        let releasedUnits = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT source_event_id, completion_unit_id
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                    AS value(source_event_id uuid, completion_unit_id uuid)
+            )
+            UPDATE im_v2.fanout_completion_units AS unit
             SET state = 'released', released_at = \(bind: now)
-            WHERE source_event_id = \(bind: sourceEventID) AND completion_unit_id = \(bind: completionUnitID)
-              AND state = 'terminal'
-            """).run()
-        if !hasOtherUnreleasedUnits {
+            FROM input
+            WHERE unit.source_event_id = input.source_event_id
+              AND unit.completion_unit_id = input.completion_unit_id
+              AND unit.state = 'terminal'
+            RETURNING unit.source_event_id, unit.completion_unit_id
+            """).all(decoding: TerminalCompletionReleaseKeyRow.self)
+        guard Set(releasedUnits.map(\.key)) == Set(keys) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+
+        if !closingEvents.isEmpty {
+            let closedPlans = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT value::uuid AS source_event_id
+                    FROM jsonb_array_elements_text(\(bind: closingJSON)::jsonb)
+                )
+                UPDATE im_v2.fanout_plans AS plan
+                SET state = 'terminal', terminal_at = \(bind: now)
+                FROM input
+                WHERE plan.source_event_id = input.source_event_id
+                  AND plan.state = 'planned'
+                RETURNING plan.source_event_id
+                """).all(decoding: SourceEventRow.self)
+            guard Set(closedPlans.map(\.sourceEventID)) == closingEventIDs else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            // Some repair and integration paths persist plans without an
+            // outbox row, so absence is valid; every present source row is
+            // terminalized in the same atomic release transaction.
             try await sql.raw("""
-                UPDATE im_v2.fanout_plans SET state = 'terminal', terminal_at = \(bind: now)
-                WHERE source_event_id = \(bind: sourceEventID)
-                """).run()
-            // A source outbox row is complete only after the immutable plan
-            // and every completion unit have a durable terminal outcome. Do
-            // this in the final unit-release transaction so a crashed worker
-            // cannot leave a plan terminal while its source work is still
-            // advertised as pending/published. This also safely closes tests
-            // and recovery paths that progress a persisted plan directly,
-            // without first sending a broker hint.
-            try await sql.raw("""
-                UPDATE im_v2.room_outbox
+                WITH input AS MATERIALIZED (
+                    SELECT value::uuid AS source_event_id
+                    FROM jsonb_array_elements_text(\(bind: closingJSON)::jsonb)
+                )
+                UPDATE im_v2.room_outbox AS outbox
                 SET state = 'terminal', claim_token = NULL,
                     lease_expires_at = NULL, next_attempt_at = NULL,
                     paused_at = NULL, last_failure_code = NULL,
                     terminal_at = \(bind: now)
-                WHERE source_event_id = \(bind: sourceEventID)
-                  AND state <> 'terminal'
+                FROM input
+                WHERE outbox.source_event_id = input.source_event_id
+                  AND outbox.state <> 'terminal'
                 """).run()
         }
-        return !hasOtherUnreleasedUnits
+
+        var shardDeltas: [BatchShardReleaseKey: BatchShardReleaseDelta] = [:]
+        for delta in orderedRoomDeltas {
+            guard let room = roomByID[delta.roomID],
+                  let admission = admissionByRoom[delta.roomID]
+            else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let key = BatchShardReleaseKey(
+                roomShardID: room.roomShardID,
+                capacityProfileID: room.capacityProfileID
+            )
+            if let existing = shardDeltas[key] {
+                guard existing.leaseID == admission.shardLeaseID,
+                      existing.generation == admission.shardLeaseGeneration
+                else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                let (fanoutUnits, unitsOverflowed) = existing.fanoutUnits.addingReportingOverflow(delta.fanoutUnits)
+                let (plans, plansOverflowed) = existing.plans.addingReportingOverflow(delta.plans)
+                guard !unitsOverflowed, !plansOverflowed else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                shardDeltas[key] = .init(
+                    roomShardID: key.roomShardID,
+                    capacityProfileID: key.capacityProfileID,
+                    leaseID: existing.leaseID,
+                    generation: existing.generation,
+                    fanoutUnits: fanoutUnits,
+                    plans: plans
+                )
+            } else {
+                shardDeltas[key] = .init(
+                    roomShardID: key.roomShardID,
+                    capacityProfileID: key.capacityProfileID,
+                    leaseID: admission.shardLeaseID,
+                    generation: admission.shardLeaseGeneration,
+                    fanoutUnits: delta.fanoutUnits,
+                    plans: delta.plans
+                )
+            }
+        }
+        let orderedShardDeltas = shardDeltas.values.sorted {
+            $0.roomShardID == $1.roomShardID
+                ? $0.capacityProfileID < $1.capacityProfileID
+                : $0.roomShardID < $1.roomShardID
+        }
+        let shardDeltaJSON = try batchJSON(orderedShardDeltas)
+
+        // Shard rows are the only shared global lock. Take all of them at the
+        // transaction tail in canonical order and leave no work after their
+        // set-based decrement except commit.
+        let lockedShards = try await sql.raw("""
+            WITH delta AS MATERIALIZED (
+                SELECT room_shard_id, capacity_profile_id, lease_id, generation
+                FROM jsonb_to_recordset(\(bind: shardDeltaJSON)::jsonb)
+                    AS value(room_shard_id text, capacity_profile_id text, lease_id uuid, generation bigint,
+                             fanout_units bigint, plans bigint)
+            )
+            SELECT pool.room_shard_id, pool.capacity_profile_id
+            FROM delta
+            JOIN im_v2.shard_admission_pools AS pool
+              ON pool.room_shard_id = delta.room_shard_id
+             AND pool.capacity_profile_id = delta.capacity_profile_id
+             AND pool.lease_id = delta.lease_id
+             AND pool.generation = delta.generation
+            ORDER BY pool.room_shard_id, pool.capacity_profile_id
+            FOR UPDATE OF pool
+            """).all(decoding: ShardReleaseKeyRow.self)
+        guard Set(lockedShards.map(\.key)) == Set(shardDeltas.keys) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let changedShards = try await sql.raw("""
+            WITH delta AS MATERIALIZED (
+                SELECT room_shard_id, capacity_profile_id, lease_id, generation,
+                       fanout_units, plans
+                FROM jsonb_to_recordset(\(bind: shardDeltaJSON)::jsonb)
+                    AS value(room_shard_id text, capacity_profile_id text, lease_id uuid, generation bigint,
+                             fanout_units bigint, plans bigint)
+            )
+            UPDATE im_v2.shard_admission_pools AS pool
+            SET outstanding_fanout_units = pool.outstanding_fanout_units - delta.fanout_units,
+                outstanding_plans = pool.outstanding_plans - delta.plans
+            FROM delta
+            WHERE pool.room_shard_id = delta.room_shard_id
+              AND pool.capacity_profile_id = delta.capacity_profile_id
+              AND pool.lease_id = delta.lease_id
+              AND pool.generation = delta.generation
+              AND pool.outstanding_fanout_units >= delta.fanout_units
+              AND pool.outstanding_plans >= delta.plans
+            RETURNING pool.room_shard_id, pool.capacity_profile_id
+            """).all(decoding: ShardReleaseKeyRow.self)
+        guard Set(changedShards.map(\.key)) == Set(shardDeltas.keys) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return .init(releasedCount: units.count, closedPlanCount: closingEvents.count)
     }
 }
 
@@ -1493,11 +1802,25 @@ private struct CompletionUnitBatchKey: Hashable, Comparable {
             : left < right
     }
 }
-private struct CompletedBatchUnit {
-    let key: CompletionUnitBatchKey
-    let items: [PreparedFanoutDeliveryCommit]
-    let targetCount: Int
-    let isTerminal: Bool
+private struct CompletionUnitIncrementInput: Encodable {
+    let sourceEventID: UUID
+    let completionUnitID: UUID
+    let committedTargetDelta: Int
+
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case completionUnitID = "completion_unit_id"
+        case committedTargetDelta = "committed_target_delta"
+    }
+}
+private struct UpdatedCompletionUnitRow: Decodable {
+    let sourceEventID: UUID
+    let completionUnitID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case completionUnitID = "completion_unit_id"
+    }
 }
 private struct ProjectionInputRow: Decodable {
     let eventPayloadJSON: String
@@ -1533,28 +1856,118 @@ private struct InboxInsertRow: Decodable { let sourceEventID: UUID; enum CodingK
 private struct SyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
 private struct UserSyncSequenceRow: Decodable { let userSyncSequence: Int64; enum CodingKeys: String, CodingKey { case userSyncSequence = "user_sync_sequence" } }
 private struct CompletionUnitRow: Decodable { let targetCount: Int; let state: String; enum CodingKeys: String, CodingKey { case targetCount = "target_count", state } }
-private struct ReleasePlanRow: Decodable { let roomID: UUID; let state: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", state } }
-private struct ReleaseRoomRow: Decodable {
-    let roomShardID: String; let capacityProfileID: String
-    enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", capacityProfileID = "capacity_profile_id" }
+private struct TerminalCompletionUnitRow: Decodable {
+    let sourceEventID: UUID
+    let completionUnitID: UUID
+    let targetCount: Int
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case completionUnitID = "completion_unit_id"
+        case targetCount = "target_count"
+    }
 }
-private struct BooleanRow: Decodable { let value: Bool }
+private struct TerminalCompletionReleaseInput: Encodable, Hashable {
+    let sourceEventID: UUID
+    let completionUnitID: UUID
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case completionUnitID = "completion_unit_id"
+    }
+}
+private struct TerminalCompletionReleaseKeyRow: Decodable {
+    let sourceEventID: UUID
+    let completionUnitID: UUID
+    var key: TerminalCompletionReleaseInput {
+        .init(sourceEventID: sourceEventID, completionUnitID: completionUnitID)
+    }
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case completionUnitID = "completion_unit_id"
+    }
+}
+private struct BatchReleasePlanRow: Decodable {
+    let sourceEventID: UUID
+    let roomID: UUID
+    let state: String
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case roomID = "room_id"
+        case state
+    }
+}
+private struct BatchReleaseRoomRow: Decodable {
+    let roomID: UUID
+    let roomShardID: String
+    let capacityProfileID: String
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case roomShardID = "room_shard_id"
+        case capacityProfileID = "capacity_profile_id"
+    }
+}
+private struct BatchReleaseAdmissionRow: Decodable {
+    let roomID: UUID
+    let shardLeaseID: UUID
+    let shardLeaseGeneration: Int64
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case shardLeaseID = "shard_lease_id"
+        case shardLeaseGeneration = "shard_lease_generation"
+    }
+}
+private struct SourceEventRow: Decodable {
+    let sourceEventID: UUID
+    enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" }
+}
+private struct RoomIDRow: Decodable {
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
+}
+private struct BatchRoomReleaseDelta: Encodable {
+    let roomID: UUID
+    var fanoutUnits: Int
+    var plans: Int
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case fanoutUnits = "fanout_units"
+        case plans
+    }
+}
+private struct BatchShardReleaseKey: Hashable {
+    let roomShardID: String
+    let capacityProfileID: String
+}
+private struct BatchShardReleaseDelta: Encodable {
+    let roomShardID: String
+    let capacityProfileID: String
+    let leaseID: UUID
+    let generation: Int64
+    let fanoutUnits: Int
+    let plans: Int
+    enum CodingKeys: String, CodingKey {
+        case roomShardID = "room_shard_id"
+        case capacityProfileID = "capacity_profile_id"
+        case leaseID = "lease_id"
+        case generation
+        case fanoutUnits = "fanout_units"
+        case plans
+    }
+}
+private struct ShardReleaseKeyRow: Decodable {
+    let roomShardID: String
+    let capacityProfileID: String
+    var key: BatchShardReleaseKey {
+        .init(roomShardID: roomShardID, capacityProfileID: capacityProfileID)
+    }
+    enum CodingKeys: String, CodingKey {
+        case roomShardID = "room_shard_id"
+        case capacityProfileID = "capacity_profile_id"
+    }
+}
 
 private func deliveryRetryAttempt(_ value: Int64) throws -> Int {
     guard value > 0, value <= Int64(Int.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return Int(value)
-}
-
-private struct ReleaseAdmissionRow: Decodable {
-    let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let outstandingFanoutUnits: Int; let outstandingPlans: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64
-    enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", outstandingFanoutUnits = "outstanding_fanout_units", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }
-    func roomState() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) }
-}
-
-private struct ReleaseShardRow: Decodable {
-    let leaseID: UUID; let generation: Int64; let capacityProfileID: String; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int
-    enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, capacityProfileID = "capacity_profile_id", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans" }
-    func shardState() throws -> ShardAdmissionState { try .init(lease: .init(id: try .init(leaseID.uuidString), generation: try unsigned(generation), validUntil: .distantFuture, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) }
 }
 
 private func uuid<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {

@@ -365,6 +365,10 @@ CREATE TABLE im_v2.direct_room_pairs (
     higher_user_id uuid NOT NULL,
     room_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
+    lower_profile_visible_to_higher boolean DEFAULT false NOT NULL,
+    higher_profile_visible_to_lower boolean DEFAULT false NOT NULL,
+    lower_can_send boolean,
+    higher_can_send boolean,
     CONSTRAINT direct_room_pairs_check CHECK ((lower_user_id < higher_user_id))
 );
 
@@ -2228,6 +2232,8 @@ CREATE INDEX durable_work_replay_audit_requested_at_idx ON im_v2.durable_work_re
 
 CREATE INDEX fanout_completion_units_released_cleanup_idx ON im_v2.fanout_completion_units USING btree (released_at, source_event_id, completion_unit_id) WHERE (state = 'released'::text);
 
+CREATE INDEX fanout_completion_units_terminal_release_idx ON im_v2.fanout_completion_units USING btree (source_event_id, completion_unit_id) INCLUDE (target_count) WHERE (state = 'terminal'::text);
+
 CREATE INDEX fanout_deliveries_expired_lease_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, lease_expires_at, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (lease_expires_at IS NOT NULL));
 
 CREATE INDEX fanout_deliveries_fresh_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
@@ -2394,6 +2400,8 @@ CREATE INDEX user_projection_checkpoints_claim_idx ON im_v2.user_projection_chec
 
 CREATE INDEX user_projection_effects_cleanup_idx ON im_v2.user_projection_effects USING btree (created_at, user_id, user_sync_sequence, source_event_id);
 
+CREATE INDEX user_projection_effects_direct_capability_idx ON im_v2.user_projection_effects USING btree (user_id, ((payload ->> 'room_id'::text))) WHERE (projection_kind = 'direct_sending_capability'::text);
+
 CREATE INDEX user_projection_effects_direct_room_idx ON im_v2.user_projection_effects USING btree (user_id, ((payload ->> 'room_id'::text))) WHERE (projection_kind = 'direct_room_profile'::text);
 
 CREATE INDEX user_projection_effects_user_sequence_idx ON im_v2.user_projection_effects USING btree (user_id, user_sync_sequence);
@@ -2417,6 +2425,8 @@ CREATE INDEX user_shard_migrations_retention_claim_idx ON im_v2.user_shard_migra
 CREATE INDEX user_shard_route_operations_user_idx ON im_v2.user_shard_route_operations USING btree (user_id, created_at DESC);
 
 CREATE INDEX user_sync_log_compaction_age_idx ON im_v2.user_sync_log USING btree (user_id, created_at, user_sync_sequence);
+
+CREATE INDEX user_sync_log_direct_projection_room_idx ON im_v2.user_sync_log USING btree (user_id, projection_kind, ((payload ->> 'room_id'::text))) WHERE ((projection_kind = ANY (ARRAY['direct_room_profile'::text, 'direct_sending_capability'::text])) AND (payload IS NOT NULL));
 
 CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx ON im_v2.user_sync_log USING btree (user_id, source_event_id, projection_kind) WHERE (projection_kind <> ALL (ARRAY['message'::text, 'membership'::text, 'moderation'::text, 'room'::text]));
 

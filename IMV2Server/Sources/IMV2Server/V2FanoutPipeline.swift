@@ -4,7 +4,7 @@ import Foundation
 /// run on multiple gateway replicas: claims fence concurrent workers, planning
 /// is idempotent, and the delivery store commits a user-sync record exactly
 /// once for each source event and target user.
-public struct V2LocalFanoutPlanPublisher: V2FanoutPlanPublisher {
+public struct V2LocalFanoutPlanPublisher: V2BatchFanoutPlanPublisher {
     private let planner: V2FanoutPlanner
 
     public init(planner: V2FanoutPlanner) {
@@ -13,6 +13,10 @@ public struct V2LocalFanoutPlanPublisher: V2FanoutPlanPublisher {
 
     public func publish(_ trigger: V2FanoutPlanTrigger) async throws {
         _ = try await planner.plan(trigger)
+    }
+
+    public func publishBatch(_ triggers: [V2FanoutPlanTrigger]) async throws {
+        _ = try await planner.planBatch(triggers)
     }
 }
 
@@ -229,8 +233,17 @@ public struct V2FanoutPipeline: Sendable {
         let deliveryWorker = deliveryWorkers[0]
         let effectiveConcurrency = min(concurrency, deliveryWorker.maximumConcurrentClaimsPerBucket)
         return try await withThrowingTaskGroup(of: V2FanoutDeliveryReport.self, returning: V2FanoutDeliveryReport.self) { group in
-            for _ in 0..<effectiveConcurrency {
-                group.addTask { try await deliveryWorker.runOnce(limit: limit) }
+            for partitionIndex in 0..<effectiveConcurrency {
+                let partition = V2FanoutDeliveryClaimPartition(
+                    index: partitionIndex,
+                    count: effectiveConcurrency
+                )
+                group.addTask {
+                    try await deliveryWorker.runOnce(
+                        limit: limit,
+                        claimPartition: partition
+                    )
+                }
             }
             var aggregate = V2FanoutDeliveryReport(claimedCount: 0, committedCount: 0, staleCount: 0, staleRouteCount: 0, releasedCount: 0, pausedCount: 0)
             for try await report in group {

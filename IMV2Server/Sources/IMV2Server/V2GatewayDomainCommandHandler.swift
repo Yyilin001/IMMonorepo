@@ -423,6 +423,13 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "RESET_REQUIRED", retryable: false)
         } catch V2SyncStoreError.acknowledgementBeyondWatermark {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error where v2PostgresFailureDisposition(error) != .other {
+            // A request-scoped database shortage or an exhausted transaction
+            // retry is not a transport failure. Return a sanitized retryable
+            // response and keep the authenticated connection alive.
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         }
     }
 

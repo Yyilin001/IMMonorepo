@@ -317,6 +317,9 @@ enum IMV2ServerApp {
                 telemetry: telemetry
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(database: database)
+            let fanoutCompletionReleaseWorker = V2FanoutCompletionReleaseWorker(
+                store: fanoutDeliveryControlStore
+            )
             let durableFanoutPublisher = V2LocalFanoutPlanPublisher(
                 planner: .init(
                     store: PostgresV2FanoutPlanStore(database: database),
@@ -531,8 +534,13 @@ enum IMV2ServerApp {
                 while !Task.isCancelled {
                     var didWork = false
                     do {
+                        // An idle planner lane publishes each claimed outbox
+                        // item sequentially. Probe with one item so a burst
+                        // cannot strand a full batch at idle concurrency; the
+                        // next pass immediately restores both the configured
+                        // batch and planner concurrency.
                         let report = try await fanoutPipeline.runRelayAndPlanOnce(
-                            limit: configuration.workerBatchSize,
+                            limit: cadence.claimLimit(configuredLimit: configuration.workerBatchSize),
                             concurrency: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxPlannerConcurrency
                         )
                         didWork = report.claimedCount > 0 || report.publishedCount > 0 ||
@@ -576,7 +584,9 @@ enum IMV2ServerApp {
                     var didWork = false
                     do {
                         let report = try await fanoutPipeline.runDeliveryOnce(
-                            claimLimit: configuration.fanoutDeliveryClaimBatchSize,
+                            claimLimit: cadence.claimLimit(
+                                configuredLimit: configuration.fanoutDeliveryClaimBatchSize
+                            ),
                             concurrency: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxDeliveryConcurrency
                         )
                         didWork = report.claimedCount > 0 || report.committedCount > 0 ||
@@ -586,6 +596,36 @@ enum IMV2ServerApp {
                         break
                     } catch {
                         logger.error("IM V2 fan-out delivery failed; retrying")
+                    }
+                    do {
+                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        break
+                    }
+                }
+            }
+            // Projection completion and admission-capacity release are two
+            // durable phases with disjoint lock sets. This independent polling
+            // worker is the crash-recovery path for units committed immediately
+            // before a process exit; an in-process wake is never required for
+            // correctness.
+            let fanoutCompletionReleaseTask = Task {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
+                while !Task.isCancelled {
+                    var didWork = false
+                    do {
+                        let report = try await fanoutCompletionReleaseWorker.runOnce(
+                            limit: configuration.workerBatchSize
+                        )
+                        didWork = report.releasedCount > 0
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 fan-out completion release failed; retrying")
                     }
                     do {
                         try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
@@ -823,6 +863,7 @@ enum IMV2ServerApp {
             userProjectionTasks.forEach { $0.cancel() }
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
+            fanoutCompletionReleaseTask.cancel()
             contentReviewTask.cancel()
             pushWakeTask.cancel()
             revokedDeviceProjectionCleanupTask.cancel()
@@ -832,6 +873,7 @@ enum IMV2ServerApp {
             for task in userProjectionTasks { await task.value }
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value
+            await fanoutCompletionReleaseTask.value
             await contentReviewTask.value
             await pushWakeTask.value
             await revokedDeviceProjectionCleanupTask.value

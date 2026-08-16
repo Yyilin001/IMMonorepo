@@ -29,6 +29,52 @@ struct V2DirectMessagingServiceTests {
         #expect(captured.targetUserID == target)
     }
 
+    @Test("unordered direct pairs choose one stable shard from a bounded pool")
+    func selectsStableShardForPair() async throws {
+        let store = DirectStoreSpy()
+        let service = try V2DirectMessagingService(
+            store: store,
+            capacityProfile: try profile(),
+            roomShardID: "rooms-00, rooms-01,rooms-02,rooms-03"
+        )
+        let first = try UserID("00000000-0000-0000-0000-000000000811")
+        let second = try UserID("00000000-0000-0000-0000-000000000812")
+
+        _ = try await service.open(
+            actorUserID: first,
+            operationID: try .init("00000000-0000-0000-0000-000000000813"),
+            targetUserID: second
+        )
+        _ = try await service.open(
+            actorUserID: second,
+            operationID: try .init("00000000-0000-0000-0000-000000000814"),
+            targetUserID: first
+        )
+
+        let shards = await store.openShards()
+        #expect(shards.count == 2)
+        #expect(shards[0] == shards[1])
+        #expect(Set(["rooms-00", "rooms-01", "rooms-02", "rooms-03"]).contains(shards[0]))
+    }
+
+    @Test("rejects malformed or duplicate direct shard pools")
+    func rejectsInvalidShardPools() throws {
+        #expect(throws: V2DirectMessagingPolicyError.invalidLimit) {
+            _ = try V2DirectMessagingService(
+                store: DirectStoreSpy(),
+                capacityProfile: try profile(),
+                roomShardID: "rooms-00,,rooms-01"
+            )
+        }
+        #expect(throws: V2DirectMessagingPolicyError.invalidLimit) {
+            _ = try V2DirectMessagingService(
+                store: DirectStoreSpy(),
+                capacityProfile: try profile(),
+                roomShardID: "rooms-00,rooms-00"
+            )
+        }
+    }
+
     @Test("rejects opening a direct room with oneself before persistence")
     func rejectsSelfTarget() async throws {
         let store = DirectStoreSpy()
@@ -75,11 +121,13 @@ struct V2DirectMessagingServiceTests {
 
 private actor DirectStoreSpy: V2DirectMessagingStore {
     private var capturedOpen: V2OpenDirectRoomCommand?
+    private var capturedOpenShards: [String] = []
     private var capturedPreference: V2SetStrangerMessagePermissionCommand?
     private var capturedUserAddPreference: V2SetUserAddPermissionCommand?
 
-    func open(command: V2OpenDirectRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, now: Date) throws -> V2OpenDirectRoomOutcome {
+    func open(command: V2OpenDirectRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date) throws -> V2OpenDirectRoomOutcome {
         capturedOpen = command
+        capturedOpenShards.append(roomShardID)
         return .opened(.init(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: now))
     }
 
@@ -94,6 +142,7 @@ private actor DirectStoreSpy: V2DirectMessagingStore {
     }
 
     func openCommand() -> V2OpenDirectRoomCommand? { capturedOpen }
+    func openShards() -> [String] { capturedOpenShards }
     func preferenceCommand() -> V2SetStrangerMessagePermissionCommand? { capturedPreference }
     func userAddPreferenceCommand() -> V2SetUserAddPermissionCommand? { capturedUserAddPreference }
 }

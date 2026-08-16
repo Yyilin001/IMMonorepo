@@ -1,0 +1,29 @@
+# Temporary server-side override for a workstation-driven gateway load test.
+# Apply it only after both the cloud security group and the host firewall
+# restrict TCP/443 to the load generator's current public /32 address.
+services:
+  account:
+    environment:
+      # The account edge remains loopback-only in this stack. Raising this
+      # test-only limit lets credential preparation finish before the short
+      # access-token lifetime expires for the earliest records.
+      IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS: 100000
+
+  gateway:
+    environment:
+      # The normal local profile intentionally allows only 1,000 commands per
+      # 24-hour fenced lease. A distinct immutable profile keeps performance
+      # testing from weakening or mutating that application safety contract.
+      IM_V2_CAPACITY_PROFILE_ID: loadtest-v1
+      IM_V2_MAX_COMMANDS_PER_WINDOW: 100000
+      # Stable pair hashing in the gateway spreads independent direct rooms
+      # across admission rows while all data remains on this one PostgreSQL
+      # instance. The load-test bootstrap provisions the same eight pool IDs.
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-load-00,rooms-load-01,rooms-load-02,rooms-load-03,rooms-load-04,rooms-load-05,rooms-load-06,rooms-load-07
+      # Repeated runs intentionally reuse the same disposable user pairs.
+      # Keep the production stranger-message safety policy in the base file,
+      # but prevent it from turning a transport/database benchmark into a
+      # policy-limit benchmark after the third message for a pair.
+      IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 100000
+    ports:
+      - "0.0.0.0:443:7443"

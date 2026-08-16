@@ -476,7 +476,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
 /// materializing the per-user projection in the physical store chosen by the
 /// durable logical route. All lease/retry/handoff operations remain control
 /// store operations; only the user projection crosses stores.
-public struct V2CrossStoreFanoutDeliveryStore: V2FanoutDeliveryStore, Sendable {
+public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, Sendable {
     private let control: PostgresV2FanoutDeliveryStore
     private let registry: any V2UserShardStorageResolving
     private let migrations: PostgresV2UserShardMigrationStore
@@ -521,6 +521,28 @@ public struct V2CrossStoreFanoutDeliveryStore: V2FanoutDeliveryStore, Sendable {
     }
 
     public func claimPending(bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease] {
+        try await claimPending(
+            bucket: bucket, lane: lane, partition: nil,
+            now: now, leaseDuration: leaseDuration, limit: limit
+        )
+    }
+
+    public func claimPending(
+        bucket: String?, lane: V2FanoutDeliveryClaimLane,
+        partition: V2FanoutDeliveryClaimPartition,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
+        try await claimPending(
+            bucket: bucket, lane: lane, partition: Optional(partition),
+            now: now, leaseDuration: leaseDuration, limit: limit
+        )
+    }
+
+    private func claimPending(
+        bucket: String?, lane: V2FanoutDeliveryClaimLane,
+        partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
         // A co-located target commits through `control.commitBatch`, which
         // reads the immutable payload inside that same control-database
         // transaction. Returning it from the claim would add a room-event
@@ -528,6 +550,12 @@ public struct V2CrossStoreFanoutDeliveryStore: V2FanoutDeliveryStore, Sendable {
         // never consumes. Remote targets retain the enriched claim because
         // their independent target transaction needs the source payload.
         if bucket == coLocatedControlBucket {
+            if let partition {
+                return try await control.claimPending(
+                    bucket: bucket, lane: lane, partition: partition,
+                    now: now, leaseDuration: leaseDuration, limit: limit
+                )
+            }
             return try await control.claimPending(
                 bucket: bucket, lane: lane, now: now,
                 leaseDuration: leaseDuration, limit: limit
@@ -535,7 +563,8 @@ public struct V2CrossStoreFanoutDeliveryStore: V2FanoutDeliveryStore, Sendable {
         }
         let leases = try await control.claimPendingIncludingProjectionPayload(
             bucket: bucket, lane: lane, now: now, leaseDuration: leaseDuration, limit: limit,
-            maximumInlinePayloadBytes: maximumInlineClaimPayloadBytes
+            maximumInlinePayloadBytes: maximumInlineClaimPayloadBytes,
+            partition: partition
         )
         var payloadsBySourceEvent: [EventID: String] = [:]
         for lease in leases {

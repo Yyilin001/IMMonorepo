@@ -80,6 +80,8 @@ struct V2CachedDurableWorkMetricsSourceTests {
         let control = FixedMetricsSource(.init(
             isAvailable: true,
             readyRoomOutboxRows: 2,
+            terminalFanoutCompletionUnits: 6,
+            oldestTerminalFanoutCompletionAgeSeconds: 12,
             pendingDeviceRevocationEvents: 3,
             pendingRevokedDeviceProjectionCleanupEvents: 4
         ))
@@ -108,6 +110,8 @@ struct V2CachedDurableWorkMetricsSourceTests {
         ).durableWorkMetricsSnapshot()
         #expect(aggregate.isAvailable)
         #expect(aggregate.readyRoomOutboxRows == 2)
+        #expect(aggregate.terminalFanoutCompletionUnits == 6)
+        #expect(aggregate.oldestTerminalFanoutCompletionAgeSeconds == 12)
         #expect(aggregate.pendingDeviceRevocationEvents == 3)
         #expect(aggregate.pendingRevokedDeviceProjectionCleanupEvents == 4)
         #expect(aggregate.userSyncLogEstimatedRows == 11)

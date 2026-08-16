@@ -83,6 +83,31 @@ struct V2OutboxRelayTests {
         #expect(await store.publishedTriggers() == [trigger])
     }
 
+    @Test("a multi-lease claim uses one native planning batch and one fenced acknowledgement batch")
+    func nativeBatchPublication() async throws {
+        let triggers = try [
+            makeTrigger(event: "00000000-0000-0000-0000-000000000111", plan: "00000000-0000-0000-0000-000000000112"),
+            makeTrigger(event: "00000000-0000-0000-0000-000000000113", plan: "00000000-0000-0000-0000-000000000114"),
+        ]
+        let store = BatchRecordingOutboxStore(triggers: triggers)
+        let publisher = BatchRecordingPublisher()
+        let relay = V2OutboxRelay(
+            store: store,
+            publisher: publisher,
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+
+        #expect(try await relay.runOnce(limit: 8) == .init(
+            claimedCount: 2,
+            publishedCount: 2,
+            releasedCount: 0
+        ))
+        #expect(await publisher.batches() == [triggers])
+        #expect(await publisher.scalarPublishCount() == 0)
+        #expect(await store.publishedBatches() == [triggers])
+        #expect(await store.scalarPublishCount() == 0)
+    }
+
 }
 
 private actor RecordingPublisher: V2FanoutPlanPublisher {
@@ -99,6 +124,45 @@ private struct FailingPublisher: V2FanoutPlanPublisher {
 private struct FailingHintPublisher: V2FanoutPlanHintPublishing {
     func publishHint(_: V2FanoutPlanTrigger) throws { throw Failure.unavailable }
     private enum Failure: Error { case unavailable }
+}
+
+private actor BatchRecordingPublisher: V2BatchFanoutPlanPublisher {
+    private var recordedBatches: [[V2FanoutPlanTrigger]] = []
+    private var scalarCount = 0
+
+    func publish(_: V2FanoutPlanTrigger) { scalarCount += 1 }
+    func publishBatch(_ triggers: [V2FanoutPlanTrigger]) { recordedBatches.append(triggers) }
+    func batches() -> [[V2FanoutPlanTrigger]] { recordedBatches }
+    func scalarPublishCount() -> Int { scalarCount }
+}
+
+private actor BatchRecordingOutboxStore: V2BatchRoomOutboxStore {
+    private let leases: [V2OutboxLease]
+    private var didClaim = false
+    private var batches: [[V2FanoutPlanTrigger]] = []
+    private var scalarCount = 0
+
+    init(triggers: [V2FanoutPlanTrigger]) {
+        leases = triggers.enumerated().map { offset, trigger in
+            .init(
+                trigger: trigger,
+                claimToken: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", offset + 1))!
+            )
+        }
+    }
+
+    func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2OutboxLease] {
+        guard !didClaim else { return [] }
+        didClaim = true
+        return Array(leases.prefix(limit))
+    }
+
+    func markPublished(_: V2OutboxLease) { scalarCount += 1 }
+    func markPublished(_ leases: [V2OutboxLease]) { batches.append(leases.map(\.trigger)) }
+    func release(_: V2OutboxLease) {}
+    func scheduleRetry(_: V2OutboxLease, disposition _: V2DurableRetryDisposition, now _: Date) {}
+    func publishedBatches() -> [[V2FanoutPlanTrigger]] { batches }
+    func scalarPublishCount() -> Int { scalarCount }
 }
 
 private actor PausingOutboxStore: V2RoomOutboxStore {

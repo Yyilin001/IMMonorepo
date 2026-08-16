@@ -233,7 +233,10 @@ evidence remains local-stack coverage, not a production deployment approval.
   two-database integration is covered locally, while production permissions,
   partition behavior and long-running forwarding evidence remain pending.
 - `IM_V2_DIRECT_ROOM_SHARD_ID` selects the admission pool used for new
-  two-user rooms. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
+  two-user rooms. It accepts either one pool ID or a bounded comma-separated
+  pool list; an unordered user-pair hash selects one stable pool so reciprocal
+  opens cannot split the same conversation. Every configured pool must have a
+  live lease for the selected capacity profile. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
   `IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS` are enforced in the durable message
   transaction; the normal baseline is 3 messages per 24 hours.
 - `IM_V2_GROUP_ROOM_SHARD_ID` selects the admission pool used for atomically

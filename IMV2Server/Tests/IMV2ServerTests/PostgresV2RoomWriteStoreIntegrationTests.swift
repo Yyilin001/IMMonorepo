@@ -206,6 +206,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 WHERE source_event_id = \(bind: triggerRow.sourceEventID)
                 """).first(decoding: PushStateRow.self))
             let delivery = try await deliveryWorker.runOnce(limit: 8)
+            let completionRelease = try await V2FanoutCompletionReleaseWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { Date(timeIntervalSince1970: 1_750_000_002) }
+            ).runOnce(limit: 8)
             let terminalOutbox = try #require(try await sql.raw("""
                 SELECT state, terminal_at IS NOT NULL AS terminalized
                 FROM im_v2.room_outbox
@@ -250,6 +254,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(firstDelivery == .init(claimedCount: 1, committedCount: 1, staleCount: 0, releasedCount: 0))
             #expect(outboxBeforeFinalDelivery.state == "pending")
             #expect(delivery == .init(claimedCount: 2, committedCount: 2, staleCount: 0, releasedCount: 0))
+            #expect(completionRelease == .init(releasedCount: 2, closedPlanCount: 1))
             #expect(terminalOutbox.state == "terminal")
             #expect(terminalOutbox.terminalized)
             #expect(deliveryRoutes == [.init(bucket: "test-users", epoch: 9)])
@@ -346,6 +351,153 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      '00000000-0000-0000-0000-00000000001c', \(bind: Date(timeIntervalSince1970: 1_750_000_000)))
                 """).run()
             #expect(try await v2ResolvedGroupPermissions(roomID: roomUUID, role: .member, sql: sql) == [])
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("terminal fan-out completion survives a crash window and releases capacity exactly once")
+    func terminalFanoutCompletionRecoversAfterWorkerReplacement() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let room = UUID(uuidString: "00000000-0000-0000-0000-0000000003a1")!
+            let user = UUID(uuidString: "00000000-0000-0000-0000-0000000003a2")!
+            let event = UUID(uuidString: "00000000-0000-0000-0000-0000000003a3")!
+            let plan = UUID(uuidString: "00000000-0000-0000-0000-0000000003a4")!
+            let lease = UUID(uuidString: "00000000-0000-0000-0000-0000000003a5")!
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms
+                    (room_id, room_shard_id, capacity_profile_id, created_at)
+                VALUES (\(bind: room), 'release-recovery', 'standard', \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, command_window_used,
+                     fanout_window_limit, fanout_window_used,
+                     max_outstanding_fanout_units, outstanding_fanout_units,
+                     max_outstanding_plans, outstanding_plans)
+                VALUES ('release-recovery', 'standard', \(bind: lease), 1,
+                        \(bind: now.addingTimeInterval(600)),
+                        10, 1, 10, 1, 10, 1, 10, 1)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit, command_window_used,
+                     fanout_window_limit, fanout_window_used,
+                     max_outstanding_fanout_units, outstanding_fanout_units,
+                     max_outstanding_plans, outstanding_plans,
+                     shard_lease_id, shard_lease_generation)
+                VALUES (\(bind: room), 1, 10, 1, 10, 1, 10, 1, 10, 1,
+                        \(bind: lease), 1)
+                """).run()
+            try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision) VALUES (\(bind: room), \(bind: user), 0)").run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, payload,
+                     committed_membership_revision, created_at)
+                VALUES (\(bind: event), \(bind: room), 1, 'message.accepted',
+                        '{}'::jsonb, 0, \(bind: now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence,
+                     committed_membership_revision, target_rule,
+                     enumeration_checkpoint, target_count, reserved_fanout_cost,
+                     state, created_at)
+                VALUES (\(bind: plan), \(bind: event), \(bind: room), 1, 0,
+                        '{"kind":"membership_at_revision"}'::jsonb,
+                        '{}'::jsonb, 1, 1, 'planning', \(bind: now))
+                """).run()
+
+            let trigger = try V2FanoutPlanTrigger(
+                sourceEventID: .init(event.uuidString),
+                planID: .init(plan.uuidString)
+            )
+            #expect(try await V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
+                pageSize: 1,
+                now: { now }
+            ).plan(trigger) == .init(
+                createdCompletionUnits: 1,
+                createdDeliveries: 1,
+                wasAlreadyPlanned: false
+            ))
+
+            let deliveryStore = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+            let deliveryLease = try #require(try await deliveryStore.claimPending(
+                bucket: nil,
+                now: now.addingTimeInterval(1),
+                leaseDuration: 30,
+                limit: 1
+            ).first)
+            guard case .committed(_, false, false) = try await deliveryStore.commit(
+                deliveryLease, now: now.addingTimeInterval(2)
+            ) else {
+                Issue.record("phase A must not release admission capacity")
+                return
+            }
+
+            let terminalUnit = try #require(try await sql.raw("SELECT state FROM im_v2.fanout_completion_units WHERE source_event_id = \(bind: event)").first(decoding: PushStateRow.self))
+            let reservedBeforeRecovery = try #require(try await sql.raw("SELECT outstanding_fanout_units, outstanding_plans FROM im_v2.room_admission WHERE room_id = \(bind: room)").first(decoding: OutstandingRow.self))
+            let planBeforeRecovery = try #require(try await sql.raw("SELECT state FROM im_v2.fanout_plans WHERE plan_id = \(bind: plan)").first(decoding: PushStateRow.self))
+            let metricsBeforeRecovery = try await PostgresV2DurableWorkMetricsSource(
+                database: app.db(.psql)
+            ).loadDurableWorkMetrics()
+            #expect(terminalUnit.state == "terminal")
+            #expect(reservedBeforeRecovery.outstandingFanoutUnits == 1)
+            #expect(reservedBeforeRecovery.outstandingPlans == 1)
+            #expect(planBeforeRecovery.state == "planned")
+            #expect(metricsBeforeRecovery.terminalFanoutCompletionUnits == 1)
+
+            // A newly constructed worker models a process restart after phase
+            // A committed but before any in-process wake reached phase B.
+            let replacement = V2FanoutCompletionReleaseWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(3) }
+            )
+            #expect(try await replacement.runOnce(limit: 8) == .init(
+                releasedCount: 1, closedPlanCount: 1
+            ))
+            #expect(try await replacement.runOnce(limit: 8) == .init(
+                releasedCount: 0, closedPlanCount: 0
+            ))
+
+            let releasedUnit = try #require(try await sql.raw("SELECT state FROM im_v2.fanout_completion_units WHERE source_event_id = \(bind: event)").first(decoding: PushStateRow.self))
+            let reservedAfterRecovery = try #require(try await sql.raw("SELECT outstanding_fanout_units, outstanding_plans FROM im_v2.room_admission WHERE room_id = \(bind: room)").first(decoding: OutstandingRow.self))
+            let planAfterRecovery = try #require(try await sql.raw("SELECT state FROM im_v2.fanout_plans WHERE plan_id = \(bind: plan)").first(decoding: PushStateRow.self))
+            #expect(releasedUnit.state == "released")
+            #expect(reservedAfterRecovery.outstandingFanoutUnits == 0)
+            #expect(reservedAfterRecovery.outstandingPlans == 0)
+            #expect(planAfterRecovery.state == "terminal")
+            #expect(try await PostgresV2DurableWorkMetricsSource(
+                database: app.db(.psql)
+            ).loadDurableWorkMetrics().terminalFanoutCompletionUnits == 0)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -839,6 +991,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 router: plannerRouter,
                 now: { now.addingTimeInterval(4) }
             ).runOnce(limit: 8)
+            let release = try await V2FanoutCompletionReleaseWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(4) }
+            ).runOnce(limit: 8)
 
             #expect(interrupted.state == "planning")
             #expect(interrupted.afterUserID == senderUUID.uuidString)
@@ -849,6 +1005,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(overriddenRoute.bucket == "test-users-override")
             #expect(overriddenRoute.epoch == 10)
             #expect(delivery == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
+            #expect(release == .init(releasedCount: 3, closedPlanCount: 1))
             #expect(try await count("im_v2.fanout_completion_units", on: sql) == 3)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 3)
             #expect(try await count("im_v2.user_sync_log", on: sql) == 3)
@@ -859,6 +1016,111 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("relay plans and acknowledges multiple source events as one fenced database batch")
+    func relayUsesSetBasedPlanAndOutboxBatches() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10,
+                maxCommandsPerWindow: 10,
+                maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100,
+                maxOutstandingPlans: 10,
+                maxEnumerationPageSize: 2,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 3
+            ))
+            let service = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            for (operation, text) in [
+                ("00000000-0000-0000-0000-0000000000b1", "batch one"),
+                ("00000000-0000-0000-0000-0000000000b2", "batch two"),
+            ] {
+                guard case .accepted = try await service.send(.init(
+                    roomID: roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try .init(operation),
+                    text: text
+                )) else {
+                    Issue.record("expected accepted message")
+                    return
+                }
+            }
+
+            let planner = V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
+                pageSize: 2,
+                now: { now.addingTimeInterval(1) }
+            )
+            let triggers = try await sql.raw("""
+                SELECT source_event_id, plan_id
+                FROM im_v2.room_outbox
+                ORDER BY created_at, source_event_id
+                """).all(decoding: TriggerRow.self).map {
+                    try V2FanoutPlanTrigger(
+                        sourceEventID: .init($0.sourceEventID.uuidString),
+                        planID: .init($0.planID.uuidString)
+                    )
+                }
+            #expect(try await planner.planBatch(triggers) == [
+                .init(createdCompletionUnits: 2, createdDeliveries: 3, wasAlreadyPlanned: false),
+                .init(createdCompletionUnits: 2, createdDeliveries: 3, wasAlreadyPlanned: false),
+            ])
+            let relay = V2OutboxRelay(
+                store: PostgresV2RoomOutboxStore(database: app.db(.psql)),
+                publisher: V2LocalFanoutPlanPublisher(planner: planner),
+                now: { now.addingTimeInterval(1) }
+            )
+            #expect(try await relay.runOnce(limit: 8) == .init(
+                claimedCount: 2,
+                publishedCount: 2,
+                releasedCount: 0
+            ))
+            #expect(try await relay.runOnce(limit: 8) == .init(
+                claimedCount: 0,
+                publishedCount: 0,
+                releasedCount: 0
+            ))
+            #expect(try await count("im_v2.fanout_plans WHERE state = 'planned' AND enumerated_target_count = target_count", on: sql) == 2)
+            #expect(try await count("im_v2.room_outbox WHERE state = 'published' AND claim_token IS NULL", on: sql) == 2)
+            #expect(try await count("im_v2.fanout_completion_units", on: sql) == 4)
+            #expect(try await count("im_v2.fanout_deliveries", on: sql) == 6)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
             try? await app.asyncShutdown()
             throw error
         }
@@ -900,6 +1162,18 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(directProfiles == [
                 .init(userID: senderUUID, roomID: room.roomID.rawValue.uppercased(), targetUserID: memberTwoUUID, publicHandle: "member015", displayName: "成员二", revision: 1),
             ])
+            let openedPairState = try #require(try await sql.raw("""
+                SELECT lower_profile_visible_to_higher, higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send
+                FROM im_v2.direct_room_pairs
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: DirectPairProjectionStateAssertionRow.self))
+            #expect(openedPairState == .init(
+                lowerProfileVisibleToHigher: false,
+                higherProfileVisibleToLower: true,
+                lowerCanSend: nil,
+                higherCanSend: nil
+            ))
             try await drainV3Projection(database: app.db(.psql))
             let snapshotDirectProfiles = try await currentV3ProjectionItems(sql: sql, userID: senderID, kind: "direct_room_profile")
             #expect(snapshotDirectProfiles.count == 1)
@@ -1006,7 +1280,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 now: now
             )
             #expect(replayResult.outcome == .requeued)
-            let writer = PostgresV2RoomWriteStore(database: app.db(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400))
+            let messageShadowRecorder = RecordingProjectionShadowForwarder()
+            let writer = PostgresV2RoomWriteStore(
+                database: app.db(.psql),
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
+                shadowForwarder: messageShadowRecorder
+            )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
             guard case .denied(let denial) = deniedOutcome else {
@@ -1025,6 +1304,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(denialActivity.activityType == "direct_message_restricted")
             let deniedRecipientProfiles = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: memberTwoUUID) AND projection_kind = 'direct_room_profile'").first(decoding: CountRow.self))
             #expect(deniedRecipientProfiles.value == 0)
+            let deniedPairState = try #require(try await sql.raw("""
+                SELECT lower_profile_visible_to_higher, higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send
+                FROM im_v2.direct_room_pairs
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: DirectPairProjectionStateAssertionRow.self))
+            #expect(deniedPairState.lowerCanSend == false)
 
             _ = try await directService.setStrangerMessagePermission(actorUserID: recipient, operationID: try .init("00000000-0000-0000-0000-000000000075"), permission: .allow)
             let attempts = await withTaskGroup(of: StrangerMessageAttempt.self, returning: [StrangerMessageAttempt].self) { group in
@@ -1049,10 +1335,35 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(!attempts.contains(.unexpectedFailure))
             let acceptedRecipientProfiles = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: memberTwoUUID) AND projection_kind = 'direct_room_profile' AND payload->>'room_id' = \(bind: room.roomID.rawValue)").first(decoding: CountRow.self))
             #expect(acceptedRecipientProfiles.value == 1)
+            let acceptedPairState = try #require(try await sql.raw("""
+                SELECT lower_profile_visible_to_higher, higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send
+                FROM im_v2.direct_room_pairs
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: DirectPairProjectionStateAssertionRow.self))
+            #expect(acceptedPairState.lowerProfileVisibleToHigher)
+            #expect(acceptedPairState.higherProfileVisibleToLower)
+            #expect(acceptedPairState.lowerCanSend == true)
+            #expect(acceptedPairState.higherCanSend == nil)
             let reply = try await messages.send(.init(roomID: room.roomID, actorUserID: recipient, clientMessageID: try .init("00000000-0000-0000-0000-000000000080"), text: "reply"))
             guard case .accepted = reply else { Issue.record("expected reply"); return }
+            let repliedPairState = try #require(try await sql.raw("""
+                SELECT lower_profile_visible_to_higher, higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send
+                FROM im_v2.direct_room_pairs
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: DirectPairProjectionStateAssertionRow.self))
+            #expect(repliedPairState.lowerCanSend == true)
+            #expect(repliedPairState.higherCanSend == true)
+            let shadowsBeforeEstablishedMessage = await messageShadowRecorder.requestCount()
             let afterReply = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000081"), text: "unlimited-after-reply"))
             guard case .accepted = afterReply else { Issue.record("expected post-reply message"); return }
+            #expect(await messageShadowRecorder.requestCount() == shadowsBeforeEstablishedMessage)
+            let afterReplyReplay = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000081"), text: "unlimited-after-reply"))
+            guard case .idempotent = afterReplyReplay else { Issue.record("expected idempotent post-reply message"); return }
+            // A replay deliberately retains the lookup-based shadow path so a
+            // crash between source commit and forwarding can recover it.
+            #expect(await messageShadowRecorder.requestCount() == shadowsBeforeEstablishedMessage + 2)
             let window = try #require(try await sql.raw("SELECT message_count FROM im_v2.stranger_message_windows WHERE sender_user_id = \(bind: senderUUID) AND recipient_user_id = \(bind: memberTwoUUID)").first(decoding: StrangerWindowAssertionRow.self))
             #expect(window.messageCount == 3)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
@@ -1479,6 +1790,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 now: Date.init
             )
             #expect(try await finalDeliveryWorker.runOnce(limit: deliveryClaimBatchSize) == .init(claimedCount: 0, committedCount: 0, staleCount: 0, staleRouteCount: 0, releasedCount: 0))
+            let completionRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql)
+            )
+            #expect(completionRelease.releasedCount == expectedCompletionUnitCount)
+            #expect(completionRelease.closedPlanCount == 1)
 
             let verificationStartedAt = Date()
             let accounting = try #require(try await sql.raw("""
@@ -1805,6 +2121,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return values
             }
             let (relayResults, deliveryResults) = try await (relayReports, deliveryReports)
+            let completionRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql)
+            )
             #expect(relayResults.reduce(0) { $0 + $1.publishedCount } == messageCount)
             #expect(relayResults.reduce(0) { $0 + $1.pausedCount } == 0)
             #expect(await drainTracker.isComplete)
@@ -1812,6 +2131,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(deliveryResults.reduce(0) { $0 + $1.staleCount } == 0)
             #expect(deliveryResults.reduce(0) { $0 + $1.staleRouteCount } == 0)
             #expect(deliveryResults.reduce(0) { $0 + $1.pausedCount } == 0)
+            #expect(completionRelease.closedPlanCount == messageCount)
             // Measure only the acceptance → relay/planning → durable delivery
             // pipeline. The assertions below intentionally include optional
             // full-payload scans, which are correctness verification and must
@@ -2078,6 +2398,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 durableDeliveries += 1 + beforeTerminalLeases.dropLast().count + recovery.committedCount
             }
             #expect(durableDeliveries == 100_000)
+            let completionRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql)
+            )
+            #expect(completionRelease.releasedCount == 100)
+            #expect(completionRelease.closedPlanCount == 1)
             let accounting = try #require(try await sql.raw("""
                 SELECT
                     (SELECT COUNT(*) FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)) AS sync_records,
@@ -3529,6 +3854,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(abandonedDeliveries.count == 3)
             let recoveredDelivery = V2FanoutDeliveryWorker(store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)), now: { now.addingTimeInterval(64) })
             #expect(try await recoveredDelivery.runOnce(limit: 8) == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
+            #expect(try await V2FanoutCompletionReleaseWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(64) }
+            ).runOnce(limit: 8) == .init(releasedCount: 2, closedPlanCount: 1))
             #expect(try await count("im_v2.user_sync_log", on: sql) == 3)
             #expect(try await count("im_v2.fanout_deliveries WHERE state = 'terminal'", on: sql) == 3)
             #expect(try await count("im_v2.fanout_plans WHERE state = 'terminal'", on: sql) == 1)
@@ -5465,7 +5794,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: crossStore,
                 bucket: "users-source", now: { now.addingTimeInterval(3) }
             ).runOnce(limit: 10)
+            let release = try await V2FanoutCompletionReleaseWorker(
+                store: control,
+                now: { now.addingTimeInterval(3) }
+            ).runOnce(limit: 10)
             #expect(report == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
+            #expect(release == .init(releasedCount: 1, closedPlanCount: 1))
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 1)
             #expect(try await scopedCount("im_v2", "consumer_inbox", user: senderUUID, on: secondarySQL) == 1)
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 1)
@@ -5583,7 +5917,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: V2CrossStoreFanoutDeliveryStore(control: control, registry: recoveredRegistry, migrations: migrations),
                 bucket: "users-remote", retryPolicy: retryPolicy, now: { now.addingTimeInterval(4) }
             ).runOnce(limit: 10)
+            let release = try await V2FanoutCompletionReleaseWorker(
+                store: control,
+                now: { now.addingTimeInterval(4) }
+            ).runOnce(limit: 10)
             #expect(recovered == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
+            #expect(release == .init(releasedCount: 1, closedPlanCount: 1))
             #expect(try await count("im_v2.user_sync_log", on: secondarySQL) == 3)
             #expect(try await count("im_v2.consumer_inbox", on: secondarySQL) == 3)
             let remotePayloadEnvelope = try #require(try await secondarySQL.raw("""
@@ -5929,6 +6268,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 )
             }
             let deliveryMilliseconds = v2LocalElapsedMilliseconds(since: deliveryStartedAt)
+            let completionRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql)
+            )
             let controlProfileReport = try await controlProfile?.finish(on: controlSQL)
             let targetProfileReport = try await targetProfile?.finish(on: targetSQL)
             let crossStoreTiming = await timingRecorder.summary()
@@ -5937,6 +6279,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 claimedCount: memberCount, committedCount: memberCount, staleCount: 0,
                 staleRouteCount: 0, releasedCount: 0, pausedCount: 0
             ))
+            #expect(completionRelease.releasedCount == expectedCompletionUnits)
+            #expect(completionRelease.closedPlanCount == 1)
             #expect(try await count("im_v2.user_sync_log", on: targetSQL) == Int64(memberCount))
             #expect(try await count("im_v2.consumer_inbox", on: targetSQL) == Int64(memberCount))
             #expect(try await count("im_v2.fanout_deliveries WHERE state = 'terminal'", on: controlSQL) == Int64(memberCount))
@@ -8207,6 +8551,27 @@ private actor BoundedForwardRoomWriteStore: V2RoomWriteStore {
 /// Test schema installation must handle PostgreSQL function bodies as a
 /// single statement. A plain `split(separator: ";")` breaks `$$` blocks and
 /// can mask bootstrap failures before a database-backed regression starts.
+private func drainFanoutCompletionReleases(
+    database: any Database,
+    now: @escaping @Sendable () -> Date = Date.init,
+    batchSize: Int = 1_024
+) async throws -> V2FanoutCompletionReleaseReport {
+    precondition(batchSize > 0)
+    let worker = V2FanoutCompletionReleaseWorker(
+        store: PostgresV2FanoutDeliveryStore(database: database),
+        now: now
+    )
+    var released = 0
+    var closedPlans = 0
+    while true {
+        let report = try await worker.runOnce(limit: batchSize)
+        released += report.releasedCount
+        closedPlans += report.closedPlanCount
+        if report.releasedCount < batchSize { break }
+    }
+    return .init(releasedCount: released, closedPlanCount: closedPlans)
+}
+
 private func postgresStatements(in source: String) -> [String] {
     var statements: [String] = []
     var buffer = ""
@@ -8843,6 +9208,18 @@ private struct EdgeClientRateLimitKeyRow: Decodable {
     enum CodingKeys: String, CodingKey { case clientKey = "client_key" }
 }
 private struct CountRow: Decodable { let value: Int64 }
+private struct DirectPairProjectionStateAssertionRow: Decodable, Equatable {
+    let lowerProfileVisibleToHigher: Bool
+    let higherProfileVisibleToLower: Bool
+    let lowerCanSend: Bool?
+    let higherCanSend: Bool?
+    enum CodingKeys: String, CodingKey {
+        case lowerProfileVisibleToHigher = "lower_profile_visible_to_higher"
+        case higherProfileVisibleToLower = "higher_profile_visible_to_lower"
+        case lowerCanSend = "lower_can_send"
+        case higherCanSend = "higher_can_send"
+    }
+}
 
 private actor PostgreSQLTransactionGate {
     private var isHeld = false
@@ -9355,6 +9732,20 @@ private struct SuccessfulProjectionShadowForwarder: V2UserShardProjectionShadowi
         sourceEventID _: EventID,
         projectionKinds _: Set<String>
     ) async throws -> UInt64? { 1 }
+}
+private actor RecordingProjectionShadowForwarder: V2UserShardProjectionShadowing {
+    private var requests = 0
+
+    func shadowIfForwarding(
+        userID _: UserID,
+        sourceEventID _: EventID,
+        projectionKinds _: Set<String>
+    ) async throws -> UInt64? {
+        requests += 1
+        return 1
+    }
+
+    func requestCount() -> Int { requests }
 }
 private enum ProfilePropagationShadowFailure: Error, Equatable, Sendable { case interrupted }
 private struct UnexpectedContentReviewer: V2ContentReviewing {

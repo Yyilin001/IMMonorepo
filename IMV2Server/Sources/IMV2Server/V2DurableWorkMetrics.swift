@@ -32,6 +32,10 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let leasedFanoutDeliveries: Int
     public let scheduledFanoutDeliveries: Int
     public let pausedFanoutDeliveries: Int
+    /// Projection phase A is complete; admission capacity still awaits the
+    /// independent phase-B release worker.
+    public let terminalFanoutCompletionUnits: Int
+    public let oldestTerminalFanoutCompletionAgeSeconds: Int
     public let readyContentReviews: Int
     public let leasedContentReviews: Int
     public let scheduledContentReviews: Int
@@ -97,6 +101,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         leasedFanoutDeliveries: Int = 0,
         scheduledFanoutDeliveries: Int = 0,
         pausedFanoutDeliveries: Int = 0,
+        terminalFanoutCompletionUnits: Int = 0,
+        oldestTerminalFanoutCompletionAgeSeconds: Int = 0,
         readyContentReviews: Int = 0,
         leasedContentReviews: Int = 0,
         scheduledContentReviews: Int = 0,
@@ -148,6 +154,10 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.leasedFanoutDeliveries = max(0, leasedFanoutDeliveries)
         self.scheduledFanoutDeliveries = max(0, scheduledFanoutDeliveries)
         self.pausedFanoutDeliveries = max(0, pausedFanoutDeliveries)
+        self.terminalFanoutCompletionUnits = max(0, terminalFanoutCompletionUnits)
+        self.oldestTerminalFanoutCompletionAgeSeconds = max(
+            0, oldestTerminalFanoutCompletionAgeSeconds
+        )
         self.readyContentReviews = max(0, readyContentReviews)
         self.leasedContentReviews = max(0, leasedContentReviews)
         self.scheduledContentReviews = max(0, scheduledContentReviews)
@@ -483,6 +493,19 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                     WHERE state <> 'terminal'
                       AND (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
                 ),
+                fanout_completion_release_metrics AS (
+                    SELECT
+                        COUNT(*) AS terminal_fanout_completion_units,
+                        COALESCE(EXTRACT(EPOCH FROM (
+                            MAX(snapshot_now.value) - MIN(event.created_at)
+                        )), 0)::BIGINT
+                            AS oldest_terminal_fanout_completion_age_seconds
+                    FROM im_v2.fanout_completion_units AS unit
+                    JOIN im_v2.room_events AS event
+                      ON event.event_id = unit.source_event_id,
+                         snapshot_now
+                    WHERE unit.state = 'terminal'
+                ),
                 content_review_metrics AS (
                     SELECT
                         COUNT(*) FILTER (
@@ -655,7 +678,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                 )
                 SELECT *
                 FROM room_outbox_metrics, profile_metrics, read_receipt_preference_metrics, fanout_plan_metrics,
-                     fanout_delivery_metrics, content_review_metrics, media_scan_metrics,
+                     fanout_delivery_metrics, fanout_completion_release_metrics,
+                     content_review_metrics, media_scan_metrics,
                      media_purge_metrics, sync_metrics, sync_log_storage_metrics,
                      projection_effect_storage_metrics,
                      projection_metrics, snapshot_artifact_metrics,
@@ -682,6 +706,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             leasedFanoutDeliveries: v2MetricCount(row.leasedFanoutDeliveries),
             scheduledFanoutDeliveries: v2MetricCount(row.scheduledFanoutDeliveries),
             pausedFanoutDeliveries: v2MetricCount(row.pausedFanoutDeliveries),
+            terminalFanoutCompletionUnits: v2MetricCount(row.terminalFanoutCompletionUnits),
+            oldestTerminalFanoutCompletionAgeSeconds: v2MetricCount(row.oldestTerminalFanoutCompletionAgeSeconds),
             readyContentReviews: v2MetricCount(row.readyContentReviews),
             leasedContentReviews: v2MetricCount(row.leasedContentReviews),
             scheduledContentReviews: v2MetricCount(row.scheduledContentReviews),
@@ -899,6 +925,8 @@ private func v2AggregateDurableWorkMetrics(
         leasedFanoutDeliveries: sum(\.leasedFanoutDeliveries),
         scheduledFanoutDeliveries: sum(\.scheduledFanoutDeliveries),
         pausedFanoutDeliveries: sum(\.pausedFanoutDeliveries),
+        terminalFanoutCompletionUnits: sum(\.terminalFanoutCompletionUnits),
+        oldestTerminalFanoutCompletionAgeSeconds: maximum(\.oldestTerminalFanoutCompletionAgeSeconds),
         readyContentReviews: sum(\.readyContentReviews),
         leasedContentReviews: sum(\.leasedContentReviews),
         scheduledContentReviews: sum(\.scheduledContentReviews),
@@ -977,6 +1005,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_fanout_delivery_backlog{state=\"leased\"} \(snapshot.leasedFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"scheduled\"} \(snapshot.scheduledFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"paused\"} \(snapshot.pausedFanoutDeliveries)",
+        "# HELP im_v2_fanout_completion_release_backlog Terminal completion units awaiting admission-capacity release.",
+        "# TYPE im_v2_fanout_completion_release_backlog gauge",
+        "im_v2_fanout_completion_release_backlog \(snapshot.terminalFanoutCompletionUnits)",
+        "# HELP im_v2_fanout_completion_release_oldest_age_seconds Age since the source event of the oldest terminal unit awaiting release.",
+        "# TYPE im_v2_fanout_completion_release_oldest_age_seconds gauge",
+        "im_v2_fanout_completion_release_oldest_age_seconds \(snapshot.oldestTerminalFanoutCompletionAgeSeconds)",
         "# HELP im_v2_content_review_backlog Durable content-review jobs by actionable state.",
         "# TYPE im_v2_content_review_backlog gauge",
         "im_v2_content_review_backlog{state=\"ready\"} \(snapshot.readyContentReviews)",
@@ -1064,6 +1098,8 @@ private struct DurableWorkMetricsRow: Decodable {
     let leasedFanoutDeliveries: Int64
     let scheduledFanoutDeliveries: Int64
     let pausedFanoutDeliveries: Int64
+    let terminalFanoutCompletionUnits: Int64
+    let oldestTerminalFanoutCompletionAgeSeconds: Int64
     let readyContentReviews: Int64
     let leasedContentReviews: Int64
     let scheduledContentReviews: Int64
@@ -1113,6 +1149,8 @@ private struct DurableWorkMetricsRow: Decodable {
         case leasedFanoutDeliveries = "leased_fanout_deliveries"
         case scheduledFanoutDeliveries = "scheduled_fanout_deliveries"
         case pausedFanoutDeliveries = "paused_fanout_deliveries"
+        case terminalFanoutCompletionUnits = "terminal_fanout_completion_units"
+        case oldestTerminalFanoutCompletionAgeSeconds = "oldest_terminal_fanout_completion_age_seconds"
         case readyContentReviews = "ready_content_reviews"
         case leasedContentReviews = "leased_content_reviews"
         case scheduledContentReviews = "scheduled_content_reviews"

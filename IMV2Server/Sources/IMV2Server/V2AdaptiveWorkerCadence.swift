@@ -26,6 +26,20 @@ public struct V2AdaptiveWorkerCadence: Equatable, Sendable {
     /// concurrency for the following pass.
     public var isIdle: Bool { consecutiveIdlePasses > 0 }
 
+    /// Bounds the first claim after an idle period to a single durable item.
+    ///
+    /// Merely reducing concurrency is insufficient for workers whose one
+    /// claim lane can acquire a large batch and then process its members
+    /// sequentially. Such a probe cannot report that work exists until the
+    /// complete batch drains, so the runtime may remain at idle concurrency
+    /// for seconds under a sudden burst. A one-item probe preserves cheap
+    /// idle polling and lets the very next pass restore the configured batch
+    /// size and concurrency.
+    public func claimLimit(configuredLimit: Int) -> Int {
+        precondition(configuredLimit > 0)
+        return isIdle ? 1 : configuredLimit
+    }
+
     public mutating func delayAfterPass(didWork: Bool) -> Duration {
         if didWork {
             consecutiveIdlePasses = 0

@@ -298,7 +298,7 @@ private enum V2NATSPublishError: Error, Equatable, Sendable {
     case overlappingPublish
 }
 
-public struct V2BestEffortFanoutPlanHintPublisher: V2FanoutPlanPublisher {
+public struct V2BestEffortFanoutPlanHintPublisher: V2BatchFanoutPlanPublisher {
     private let durablePublisher: any V2FanoutPlanPublisher
     private let hints: V2AsynchronousFanoutHintDispatcher
 
@@ -310,6 +310,15 @@ public struct V2BestEffortFanoutPlanHintPublisher: V2FanoutPlanPublisher {
     public func publish(_ trigger: V2FanoutPlanTrigger) async throws {
         try await durablePublisher.publish(trigger)
         hints.submit(trigger)
+    }
+
+    public func publishBatch(_ triggers: [V2FanoutPlanTrigger]) async throws {
+        if let durableBatch = durablePublisher as? any V2BatchFanoutPlanPublisher {
+            try await durableBatch.publishBatch(triggers)
+        } else {
+            for trigger in triggers { try await durablePublisher.publish(trigger) }
+        }
+        for trigger in triggers { hints.submit(trigger) }
     }
 }
 

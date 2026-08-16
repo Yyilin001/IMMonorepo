@@ -1,3 +1,4 @@
+import AsyncKit
 import Foundation
 import IMV2Core
 @testable import IMV2Server
@@ -5,6 +6,26 @@ import Testing
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
+    @Test("a database pool timeout returns unavailable without escaping the command boundary")
+    func databasePoolTimeoutKeepsCommandBoundaryAlive() async throws {
+        let fixture = try GatewayDomainFixture()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayPoolTimeoutMessageStore()),
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.error.code == "UNAVAILABLE")
+        #expect(response.error.retryable)
+    }
+
     @Test("send validates client data and takes the actor exclusively from the session")
     func sendValidationAndAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
@@ -463,6 +484,17 @@ private struct GatewayAcceptedMessageStore: V2RoomWriteStore {
         now _: Date
     ) async throws -> V2SendMessageOutcome {
         outcome
+    }
+}
+
+private struct GatewayPoolTimeoutMessageStore: V2RoomWriteStore {
+    func accept(
+        command _: V2SendMessageCommand,
+        capacityProfile _: V2CapacityProfile,
+        identifiers _: V2AcceptanceIdentifiers,
+        now _: Date
+    ) async throws -> V2SendMessageOutcome {
+        throw ConnectionPoolTimeoutError.connectionRequestTimeout
     }
 }
 

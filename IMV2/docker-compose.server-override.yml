@@ -1,0 +1,84 @@
+# Single-node deployment overlay for the 8-vCPU / 16-GiB load-test host.
+# The base compose file intentionally stays suitable for a developer laptop;
+# this overlay supplies server restart policy, file-descriptor ceilings and a
+# bounded PostgreSQL memory/WAL budget without weakening commit durability.
+services:
+  postgres:
+    restart: unless-stopped
+    mem_limit: 4g
+    shm_size: 1g
+    command:
+      - postgres
+      - -c
+      - max_connections=150
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=3GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  account:
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  gateway:
+    restart: unless-stopped
+    mem_limit: 4g
+    environment:
+      # A delivery pass holds one PostgreSQL connection while it leases rows,
+      # then performs commit-sized projection transactions. The generic 100k
+      # profile allows eight concurrent 2,000-row claims, but that burst can
+      # monopolize a 32-connection pool on this single 8-vCPU host and reject
+      # foreground sends before PostgreSQL itself is saturated. Eight bounded
+      # claim lanes preserve the measured 2,048-delivery budget per pass. The
+      # server partitions those lanes by target user, so they no longer fight
+      # over the same monotonic user-sequence rows. Four event loops with 16
+      # connections each leave 56 slots for foreground commands while all
+      # eight delivery lanes are busy. Together with PostgreSQL's 150-connection
+      # ceiling, this retains headroom for account, operator and maintenance
+      # traffic without letting the gateway grow the pool without a bound.
+      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 16
+      IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE: 256
+      IM_V2_MAX_DELIVERY_CONCURRENCY: 8
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  operator:
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  caddy:
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536

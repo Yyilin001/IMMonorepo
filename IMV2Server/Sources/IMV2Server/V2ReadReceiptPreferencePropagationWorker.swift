@@ -217,7 +217,7 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                         (\(bind: lease.actorUserID), \(bind: target.peerUserID))
                 ), allocated AS (
                     INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
-                    SELECT user_id, 1 FROM recipients
+                    SELECT user_id, 1 FROM recipients ORDER BY user_id
                     ON CONFLICT (user_id) DO UPDATE
                     SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
                     RETURNING user_id, next_sequence

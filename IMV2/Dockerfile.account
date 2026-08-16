@@ -1,5 +1,5 @@
 # Local-only account service image. Source is compiled in a disposable build
-# stage; the final image contains only the three release executables and their
+# stage; the final image contains only the four release executables and their
 # bundled SwiftPM runtime artifacts. Keeping `.build` and source out of the
 # runtime stage prevents repeated local verification from retaining several
 # gigabytes of compiler products per image.
@@ -27,7 +27,13 @@ COPY IMV2Server ./IMV2Server
 RUN swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2ServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2OperatorServerApp \
-    && swift build -c release --package-path IMV2Server --product IMV2LocalGatewayProbe
+    && swift build -c release --package-path IMV2Server --product IMV2LocalGatewayProbe \
+    && mkdir -p /runtime/IMV2Server/.build/release \
+    && cp /workspace/IMV2Server/.build/release/IMV2AccountServerApp \
+          /workspace/IMV2Server/.build/release/IMV2ServerApp \
+          /workspace/IMV2Server/.build/release/IMV2OperatorServerApp \
+          /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe \
+          /runtime/IMV2Server/.build/release/
 
 FROM swift:6.3-jammy
 
@@ -37,10 +43,10 @@ RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://ports.ubuntu.com/ubu
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
-# The Compose services intentionally retain these paths as their command
-# contract. Copying only `release` also includes SwiftPM's dynamically-linked
-# support artifacts without carrying debug objects, dependency checkouts, or
-# the compiler cache into the runnable image.
-COPY --from=build /workspace/IMV2Server/.build/release ./IMV2Server/.build/release
+# The package products statically contain their SwiftPM dependencies; the
+# runtime image already supplies the Swift/Foundation shared libraries. Keep
+# the existing Compose command paths, but copy only the four executable
+# products instead of SwiftPM's multi-gigabyte object/module/compiler cache.
+COPY --from=build /runtime/IMV2Server/.build/release ./IMV2Server/.build/release
 
 CMD ["/workspace/IMV2Server/.build/release/IMV2AccountServerApp"]

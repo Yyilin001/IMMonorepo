@@ -1,0 +1,8 @@
+.git
+.DS_Store
+**/.DS_Store
+**/.build
+**/.swiftpm
+**/.env
+**/.env.*
+!**/.env.example

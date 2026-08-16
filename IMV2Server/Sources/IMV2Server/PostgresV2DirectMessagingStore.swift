@@ -16,7 +16,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 
     public func open(command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date) async throws -> V2OpenDirectRoomOutcome {
-        let outcome: V2OpenDirectRoomOutcome = try await database.transaction { transaction in
+        let outcome: V2OpenDirectRoomOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let actorID = try directUUID(command.actorUserID)
             let targetID = try directUUID(command.targetUserID)
@@ -50,7 +50,19 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 return .unavailable
             }
             try await sql.raw("INSERT INTO im_v2.rooms (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, created_at) VALUES (\(bind: createdRoomID), 'direct', \(bind: roomShardID), 0, 1, \(bind: capacityProfile.id), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.direct_room_pairs (lower_user_id, higher_user_id, room_id, created_at) VALUES (\(bind: pair.lower), \(bind: pair.higher), \(bind: createdRoomID), \(bind: now))").run()
+            // Opening a room immediately projects the target's profile to the
+            // actor. Persist that producer-side fact beside the pair so later
+            // sends do not have to rediscover it by scanning compacted and
+            // uncompacted sync history. The projection and marker share this
+            // transaction, so neither can survive without the other.
+            try await sql.raw("""
+                INSERT INTO im_v2.direct_room_pairs
+                    (lower_user_id, higher_user_id, room_id, created_at,
+                     lower_profile_visible_to_higher, higher_profile_visible_to_lower)
+                VALUES
+                    (\(bind: pair.lower), \(bind: pair.higher), \(bind: createdRoomID), \(bind: now),
+                     \(bind: actorID == pair.higher), \(bind: actorID == pair.lower))
+                """).run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, createdAt: now, sql: sql)
@@ -68,7 +80,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 
     public func setStrangerMessagePermission(command: V2SetStrangerMessagePermissionCommand, now: Date) async throws -> V2SetStrangerMessagePermissionOutcome {
-        let outcome: V2SetStrangerMessagePermissionOutcome = try await database.transaction { transaction in
+        let outcome: V2SetStrangerMessagePermissionOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)
@@ -98,7 +110,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 
     public func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) async throws -> V2SetUserAddPermissionOutcome {
-        let outcome: V2SetUserAddPermissionOutcome = try await database.transaction { transaction in
+        let outcome: V2SetUserAddPermissionOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)

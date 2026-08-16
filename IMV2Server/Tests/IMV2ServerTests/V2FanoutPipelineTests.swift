@@ -81,6 +81,11 @@ struct V2FanoutPipelineTests {
         #expect(report.delivery == .init(claimedCount: 3, committedCount: 3, staleCount: 0, releasedCount: 0))
         #expect(await plannerStore.plannedCount() == 2)
         #expect(await deliveryStore.committedCount() == 3)
+        #expect(await deliveryStore.claimPartitions().sorted(by: { $0.index < $1.index }) == [
+            .init(index: 0, count: 3),
+            .init(index: 1, count: 3),
+            .init(index: 2, count: 3),
+        ])
         let events = await telemetry.events()
         guard case .fanoutProgress(_, 2, 2, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0) = try #require(events.first) else {
             Issue.record("expected one aggregate fan-out metric for all bounded workers")
@@ -354,9 +359,10 @@ private actor ConcurrentPipelinePlanStore: V2FanoutPlanStore {
     func plannedCount() -> Int { planned }
 }
 
-private actor ConcurrentPipelineDeliveryStore: V2FanoutDeliveryStore {
+private actor ConcurrentPipelineDeliveryStore: V2PartitionedFanoutDeliveryStore {
     private var pending: [V2FanoutDeliveryLease]
     private var committed = 0
+    private var partitions: [V2FanoutDeliveryClaimPartition] = []
 
     init(leases: [V2FanoutDeliveryLease]) { pending = leases }
 
@@ -364,6 +370,18 @@ private actor ConcurrentPipelineDeliveryStore: V2FanoutDeliveryStore {
         let claimed = Array(pending.prefix(limit))
         pending.removeFirst(claimed.count)
         return claimed
+    }
+
+    func claimPending(
+        bucket: String?, lane: V2FanoutDeliveryClaimLane,
+        partition: V2FanoutDeliveryClaimPartition,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) -> [V2FanoutDeliveryLease] {
+        partitions.append(partition)
+        return claimPending(
+            bucket: bucket, lane: lane, now: now,
+            leaseDuration: leaseDuration, limit: limit
+        )
     }
 
     func commit(_: V2FanoutDeliveryLease, now _: Date) -> V2FanoutDeliveryCommit {
@@ -376,6 +394,7 @@ private actor ConcurrentPipelineDeliveryStore: V2FanoutDeliveryStore {
     func handoff(_ lease: V2FanoutDeliveryLease, to _: V2UserShardRoute) { release(lease) }
     func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition, now _: Date) { release(lease) }
     func committedCount() -> Int { committed }
+    func claimPartitions() -> [V2FanoutDeliveryClaimPartition] { partitions }
 }
 
 private actor CappedPipelineDeliveryStore: V2FanoutDeliveryStore, V2FanoutDeliveryBucketConcurrencyControlling {

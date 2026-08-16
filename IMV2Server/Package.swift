@@ -11,12 +11,15 @@ let package = Package(
         .executable(name: "IMV2AccountServerApp", targets: ["IMV2AccountServerApp"]),
         .executable(name: "IMV2OperatorServerApp", targets: ["IMV2OperatorServerApp"]),
         .executable(name: "IMV2LocalGatewayProbe", targets: ["IMV2LocalGatewayProbe"]),
+        .executable(name: "IMV2GatewayLoadGenerator", targets: ["IMV2GatewayLoadGenerator"]),
     ],
     dependencies: [
         .package(path: "../IMV2Core"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
         .package(url: "https://github.com/vapor/fluent.git", from: "4.11.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver.git", from: "2.9.0"),
+        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.33.1"),
+        .package(url: "https://github.com/vapor/async-kit.git", from: "1.22.0"),
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.35.0"),
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.29.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
@@ -29,6 +32,8 @@ let package = Package(
             dependencies: [
                 "IMV2Core",
                 .product(name: "Fluent", package: "fluent"),
+                .product(name: "PostgresNIO", package: "postgres-nio"),
+                .product(name: "AsyncKit", package: "async-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -88,6 +93,19 @@ let package = Package(
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ]
         ),
+        // macOS-only operator tool for bounded, real-protocol load tests. It
+        // is intentionally absent from the server image build products.
+        .executableTarget(
+            name: "IMV2GatewayLoadGenerator",
+            dependencies: [
+                "IMV2Core",
+                "IMV2Server",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
+        ),
         .testTarget(
             name: "IMV2ServerTests",
             dependencies: [
@@ -96,6 +114,7 @@ let package = Package(
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "VaporTesting", package: "vapor"),
+                .product(name: "AsyncKit", package: "async-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

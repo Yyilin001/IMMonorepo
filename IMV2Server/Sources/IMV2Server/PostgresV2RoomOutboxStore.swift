@@ -5,7 +5,7 @@ import SQLKit
 
 /// Durable at-least-once outbox implementation. The lease token fences a
 /// stale worker from marking a newer claim as published or released.
-public struct PostgresV2RoomOutboxStore: V2RoomOutboxStore {
+public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
@@ -67,6 +67,49 @@ public struct PostgresV2RoomOutboxStore: V2RoomOutboxStore {
               AND state = 'pending'
               AND claim_token = \(bind: lease.claimToken)
             """).run()
+    }
+
+    public func markPublished(_ leases: [V2OutboxLease]) async throws {
+        guard !leases.isEmpty else { return }
+        let input = try leases.map {
+            OutboxPublishInput(
+                sourceEventID: try eventUUID($0.trigger.sourceEventID),
+                claimToken: $0.claimToken
+            )
+        }
+        guard Set(input.map(\.sourceEventID)).count == input.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let inputJSON = try outboxJSON(input)
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard let mutation = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT source_event_id, claim_token
+                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb)
+                        AS value(source_event_id uuid, claim_token uuid)
+                ), published AS (
+                    UPDATE im_v2.room_outbox AS outbox
+                    SET state = 'published', claim_token = NULL,
+                        lease_expires_at = NULL, next_attempt_at = NULL,
+                        paused_at = NULL, last_failure_code = NULL
+                    FROM input
+                    WHERE outbox.source_event_id = input.source_event_id
+                      AND outbox.state = 'pending'
+                      AND outbox.claim_token = input.claim_token
+                    RETURNING outbox.source_event_id
+                )
+                SELECT (SELECT COUNT(*)::bigint FROM input) AS input_count,
+                       (SELECT COUNT(*)::bigint FROM published) AS published_count
+                """).first(decoding: OutboxBatchPublishMutationRow.self),
+                  mutation.inputCount == Int64(leases.count),
+                  mutation.publishedCount == Int64(leases.count)
+            else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+        }
     }
 
     public func release(_ lease: V2OutboxLease) async throws {
@@ -134,6 +177,24 @@ private struct OutboxRow: Decodable {
     enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", planID = "plan_id", retryCount = "retry_count" }
 }
 
+private struct OutboxPublishInput: Encodable {
+    let sourceEventID: UUID
+    let claimToken: UUID
+    enum CodingKeys: String, CodingKey {
+        case sourceEventID = "source_event_id"
+        case claimToken = "claim_token"
+    }
+}
+
+private struct OutboxBatchPublishMutationRow: Decodable {
+    let inputCount: Int64
+    let publishedCount: Int64
+    enum CodingKeys: String, CodingKey {
+        case inputCount = "input_count"
+        case publishedCount = "published_count"
+    }
+}
+
 private func retryAttempt(_ value: Int64) throws -> Int {
     guard value > 0, value <= Int64(Int.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return Int(value)
@@ -144,4 +205,13 @@ private func eventUUID(_ identifier: EventID) throws -> UUID {
         throw V2RoomWriteStoreError.corruptPersistenceState
     }
     return value
+}
+
+
+private func outboxJSON<T: Encodable>(_ value: T) throws -> String {
+    let encoder = JSONEncoder()
+    guard let json = String(data: try encoder.encode(value), encoding: .utf8) else {
+        throw V2RoomWriteStoreError.corruptPersistenceState
+    }
+    return json
 }

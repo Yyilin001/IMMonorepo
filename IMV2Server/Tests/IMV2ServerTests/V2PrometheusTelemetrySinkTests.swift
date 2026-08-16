@@ -121,6 +121,8 @@ struct V2PrometheusTelemetrySinkTests {
             leasedFanoutDeliveries: 7,
             scheduledFanoutDeliveries: 8,
             pausedFanoutDeliveries: 9,
+            terminalFanoutCompletionUnits: 10,
+            oldestTerminalFanoutCompletionAgeSeconds: 11,
             readyContentReviews: 17,
             leasedContentReviews: 18,
             scheduledContentReviews: 19,
@@ -171,6 +173,8 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 7"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
+        #expect(rendered.contains("im_v2_fanout_completion_release_backlog 10"))
+        #expect(rendered.contains("im_v2_fanout_completion_release_oldest_age_seconds 11"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"ready\"} 17"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"leased\"} 18"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"scheduled\"} 19"))

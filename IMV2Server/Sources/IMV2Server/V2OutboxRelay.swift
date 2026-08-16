@@ -33,10 +33,24 @@ public protocol V2RoomOutboxStore: Sendable {
     func scheduleRetry(_ lease: V2OutboxLease, disposition: V2DurableRetryDisposition, now: Date) async throws
 }
 
+/// Optional persistence specialization used when every lease can be fenced
+/// and finalized by one set-based statement. The scalar protocol remains the
+/// compatibility and recovery boundary for non-PostgreSQL stores.
+public protocol V2BatchRoomOutboxStore: V2RoomOutboxStore {
+    func markPublished(_ leases: [V2OutboxLease]) async throws
+}
+
 /// NATS is one possible implementation. Keeping it as a protocol makes the
 /// at-least-once contract testable and permits a local deterministic adapter.
 public protocol V2FanoutPlanPublisher: Sendable {
     func publish(_ trigger: V2FanoutPlanTrigger) async throws
+}
+
+/// Optional publication specialization for co-located durable planners. A
+/// batch either commits all of its plan pages or throws, so the relay can
+/// retry every fenced lease without inventing partial acknowledgement state.
+public protocol V2BatchFanoutPlanPublisher: V2FanoutPlanPublisher {
+    func publishBatch(_ triggers: [V2FanoutPlanTrigger]) async throws
 }
 
 public struct V2OutboxRelayReport: Equatable, Sendable {
@@ -80,6 +94,9 @@ public struct V2OutboxRelay: Sendable {
     public func runOnce(limit: Int) async throws -> V2OutboxRelayReport {
         precondition(limit > 0)
         let leases = try await store.claimPending(now: now(), leaseDuration: leaseDuration, limit: limit)
+        if leases.count > 1, let batchPublisher = publisher as? any V2BatchFanoutPlanPublisher {
+            return try await publishBatch(leases, with: batchPublisher)
+        }
         var published = 0
         var released = 0
         var paused = 0
@@ -101,5 +118,46 @@ public struct V2OutboxRelay: Sendable {
             }
         }
         return .init(claimedCount: leases.count, publishedCount: published, releasedCount: released, pausedCount: paused)
+    }
+
+    private func publishBatch(
+        _ leases: [V2OutboxLease],
+        with publisher: any V2BatchFanoutPlanPublisher
+    ) async throws -> V2OutboxRelayReport {
+        do {
+            try await publisher.publishBatch(leases.map(\.trigger))
+            if let batchStore = store as? any V2BatchRoomOutboxStore {
+                try await batchStore.markPublished(leases)
+            } else {
+                for lease in leases { try await store.markPublished(lease) }
+            }
+            return .init(
+                claimedCount: leases.count,
+                publishedCount: leases.count,
+                releasedCount: 0
+            )
+        } catch {
+            var released = 0
+            var paused = 0
+            for lease in leases {
+                let failureTime = now()
+                let disposition = retryPolicy.disposition(
+                    attempt: lease.attempt,
+                    claimToken: lease.claimToken,
+                    now: failureTime
+                )
+                try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
+                switch disposition {
+                case .retry: released += 1
+                case .pause: paused += 1
+                }
+            }
+            return .init(
+                claimedCount: leases.count,
+                publishedCount: 0,
+                releasedCount: released,
+                pausedCount: paused
+            )
+        }
     }
 }
