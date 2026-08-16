@@ -25,6 +25,7 @@ enum IMV2ServerApp {
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
+        V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         do {

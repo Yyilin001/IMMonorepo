@@ -2,6 +2,25 @@ import Crypto
 import Foundation
 import IMV2Core
 
+/// Opaque authorization for one local-development upload. The HTTP adapter may
+/// write only to the random staging URL; signed-target claims and the final
+/// object path remain owned and revalidated by the provider actor.
+public struct V2LocalFilesystemStagedUpload: Sendable {
+    package let fileURL: URL
+    fileprivate let mediaID: MediaID
+    fileprivate let targetURL: URL
+    fileprivate let contentType: String
+    fileprivate let expectedByteCount: Int64
+}
+
+/// File metadata returned after a signed local-development download target has
+/// been authorized. The byte edge streams this file instead of materializing
+/// its contents in process memory.
+public struct V2LocalFilesystemDownloadedObject: Sendable {
+    package let fileURL: URL
+    package let byteCount: Int64
+}
+
 /// A local-only object provider for repeatable developer and isolated-test
 /// verification. It is intentionally not composed by a production runtime:
 /// the URL host, TLS termination, durable object store and malware scanner
@@ -15,6 +34,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     private let targetBaseURL: URL
     private let signingKey: Data
     private let now: @Sendable () -> Date
+    private var didPrepare = false
 
     public init(
         rootDirectory: URL,
@@ -34,17 +54,29 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         self.now = now
     }
 
-    /// Creates the private directory before a local test begins. Calling it
-    /// repeatedly is safe.
+    /// Establishes the private directory at process start and removes upload
+    /// fragments left by a previous process crash. A repeated call on this
+    /// provider is a no-op so it cannot delete a currently streaming upload.
     public func prepare() async throws {
+        guard !didPrepare else { return }
         let rootDirectory = self.rootDirectory
+        let stagingDirectory = self.stagingDirectory
         try await Self.performBlocking {
             try FileManager.default.createDirectory(
                 at: rootDirectory,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
+            if FileManager.default.fileExists(atPath: stagingDirectory.path) {
+                try FileManager.default.removeItem(at: stagingDirectory)
+            }
+            try FileManager.default.createDirectory(
+                at: stagingDirectory,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
         }
+        didPrepare = true
     }
 
     public func issueUploadTarget(
@@ -95,6 +127,78 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         return .init(url: url, expiresAt: expiresAt, expectedByteCount: byteCount)
     }
 
+    /// Validates the signed upload claims before the HTTP body is accepted and
+    /// reserves a random file in the provider's private staging directory.
+    /// The returned path does not identify the final object.
+    public func beginUploadedObject(
+        mediaID: MediaID,
+        targetURL: URL,
+        contentType: String,
+        declaredByteCount: Int64
+    ) async throws -> V2LocalFilesystemStagedUpload {
+        let claims = try verify(targetURL: targetURL, kind: .upload, mediaID: mediaID)
+        guard claims.contentType == contentType,
+              claims.byteCount == declaredByteCount,
+              declaredByteCount >= 0
+        else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
+        let stagingDirectory = self.stagingDirectory
+        try await Self.performBlocking {
+            try FileManager.default.createDirectory(
+                at: stagingDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        return .init(
+            fileURL: stagingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false),
+            mediaID: mediaID,
+            targetURL: targetURL,
+            contentType: contentType,
+            expectedByteCount: declaredByteCount
+        )
+    }
+
+    /// Revalidates target expiry and exact byte count, then atomically moves
+    /// the staged file into its immutable object location on the same volume.
+    public func commitUploadedObject(
+        _ upload: V2LocalFilesystemStagedUpload,
+        actualByteCount: Int64
+    ) async throws {
+        let claims = try verify(targetURL: upload.targetURL, kind: .upload, mediaID: upload.mediaID)
+        guard claims.contentType == upload.contentType,
+              claims.byteCount == upload.expectedByteCount,
+              actualByteCount == upload.expectedByteCount,
+              isValidStagingURL(upload.fileURL)
+        else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
+        let rootDirectory = self.rootDirectory
+        let objectURL = try objectURL(for: upload.mediaID)
+        try await Self.performBlocking {
+            let attributes = try FileManager.default.attributesOfItem(atPath: upload.fileURL.path)
+            guard let size = attributes[.size] as? NSNumber,
+                  size.int64Value == actualByteCount
+            else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
+            try FileManager.default.createDirectory(
+                at: rootDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: upload.fileURL.path
+            )
+            try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+        }
+    }
+
+    public func discardUploadedObject(_ upload: V2LocalFilesystemStagedUpload) async {
+        guard isValidStagingURL(upload.fileURL) else { return }
+        let fileURL = upload.fileURL
+        try? await Self.performBlocking {
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+            try FileManager.default.removeItem(at: fileURL)
+        }
+    }
+
     /// Accepts bytes only when they are presented with the exact signed local
     /// upload target. This is used by local HTTP-free tests; a production
     /// object edge must validate its own provider-native target instead.
@@ -104,38 +208,49 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         contentType: String,
         bytes: Data
     ) async throws {
-        let claims = try verify(targetURL: targetURL, kind: .upload, mediaID: mediaID)
-        guard claims.contentType == contentType,
-              claims.byteCount == Int64(bytes.count)
-        else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
-        let rootDirectory = self.rootDirectory
-        let objectURL = try objectURL(for: mediaID)
-        try await Self.performBlocking {
-            try FileManager.default.createDirectory(
-                at: rootDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try bytes.write(to: objectURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: objectURL.path)
+        let upload = try await beginUploadedObject(
+            mediaID: mediaID,
+            targetURL: targetURL,
+            contentType: contentType,
+            declaredByteCount: Int64(bytes.count)
+        )
+        do {
+            try await Self.performBlocking {
+                try bytes.write(to: upload.fileURL, options: .withoutOverwriting)
+            }
+            try await commitUploadedObject(upload, actualByteCount: Int64(bytes.count))
+        } catch {
+            await discardUploadedObject(upload)
+            throw error
         }
+    }
+
+    public func downloadedObject(
+        mediaID: MediaID,
+        targetURL: URL
+    ) async throws -> V2LocalFilesystemDownloadedObject {
+        let claims = try verify(targetURL: targetURL, kind: .download, mediaID: mediaID)
+        let objectURL = try objectURL(for: mediaID)
+        let byteCount = try await Self.performBlocking { () throws -> Int64 in
+            guard FileManager.default.fileExists(atPath: objectURL.path) else {
+                throw V2LocalFilesystemMediaProviderError.objectUnavailable
+            }
+            let attributes = try FileManager.default.attributesOfItem(atPath: objectURL.path)
+            guard let size = attributes[.size] as? NSNumber,
+                  size.int64Value == claims.byteCount
+            else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+            return size.int64Value
+        }
+        return .init(fileURL: objectURL, byteCount: byteCount)
     }
 
     /// Reads bytes only when they are presented with the exact signed local
     /// download target. The returned data is intended solely for a local
     /// object-edge test, never for chat event serialization.
     public func readDownloadedObject(mediaID: MediaID, targetURL: URL) async throws -> Data {
-        let claims = try verify(targetURL: targetURL, kind: .download, mediaID: mediaID)
-        let objectURL = try objectURL(for: mediaID)
+        let object = try await downloadedObject(mediaID: mediaID, targetURL: targetURL)
         return try await Self.performBlocking {
-            guard FileManager.default.fileExists(atPath: objectURL.path) else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            let data = try Data(contentsOf: objectURL, options: [.mappedIfSafe])
-            guard Int64(data.count) == claims.byteCount else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            return data
+            try Data(contentsOf: object.fileURL, options: [.mappedIfSafe])
         }
     }
 
@@ -223,6 +338,16 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
             throw V2LocalFilesystemMediaProviderError.invalidMediaID
         }
         return rootDirectory.appendingPathComponent(mediaID.rawValue, isDirectory: false)
+    }
+
+    private var stagingDirectory: URL {
+        rootDirectory.appendingPathComponent(".upload-staging", isDirectory: true)
+    }
+
+    private func isValidStagingURL(_ url: URL) -> Bool {
+        let standardized = url.standardizedFileURL
+        return standardized.deletingLastPathComponent() == stagingDirectory.standardizedFileURL
+            && UUID(uuidString: standardized.lastPathComponent) != nil
     }
 
     private nonisolated static func performBlocking<Value: Sendable>(

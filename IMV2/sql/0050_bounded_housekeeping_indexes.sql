@@ -22,6 +22,8 @@ CREATE INDEX push_wake_outbox_terminal_cleanup_idx
 
 CREATE INDEX fanout_plans_terminal_cleanup_idx
     ON im_v2.fanout_plans (terminal_at, source_event_id) WHERE state = 'terminal';
+CREATE INDEX room_outbox_terminal_cleanup_idx
+    ON im_v2.room_outbox (terminal_at, source_event_id) WHERE state = 'terminal';
 CREATE INDEX fanout_deliveries_terminal_source_idx
     ON im_v2.fanout_deliveries (source_event_id, target_user_id, projection_kind)
     WHERE state = 'terminal';

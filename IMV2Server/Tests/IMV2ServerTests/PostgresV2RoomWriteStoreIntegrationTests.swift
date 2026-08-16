@@ -6175,7 +6175,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
         let app = try await Application.make(.testing)
         do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
             guard let sql = app.db(.psql) as? any SQLDatabase else {
                 throw V2PasswordLoginRateLimitError.unavailable
             }
@@ -6209,6 +6209,60 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(audits.dropLast().allSatisfy { $0.userID == UUID(uuidString: userID.rawValue) && $0.deviceID == UUID(uuidString: deviceID.rawValue) })
             #expect(audits.last?.userID == nil)
             #expect(audits.last?.deviceID == UUID(uuidString: deviceID.rawValue))
+
+            // Hold the canonical handle lock, queue a rejection first, then a
+            // success. Without the same advisory lock on the success path,
+            // DELETE observes an empty table and the later rejected attempt
+            // leaves a stale failure window after a successful login.
+            let raceHandle = "success-rejection-race"
+            let gate = PostgreSQLTransactionGate()
+            let blocker = Task {
+                try await app.db(.psql).transaction { transaction in
+                    guard let transactionSQL = transaction as? any SQLDatabase else {
+                        throw V2PasswordLoginRateLimitError.unavailable
+                    }
+                    let lockKey = "v2-password-login-rate:" + raceHandle
+                    try await transactionSQL.raw(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))"
+                    ).run()
+                    await gate.holdTransaction()
+                }
+            }
+            await gate.waitUntilHeld()
+            var rejected: Task<Void, Error>?
+            var succeeded: Task<Void, Error>?
+            do {
+                rejected = Task {
+                    try await firstInstance.recordRejectedAttempt(
+                        accountHandle: raceHandle,
+                        userID: userID,
+                        deviceID: deviceID
+                    )
+                }
+                try await waitForAdvisoryWaiters(1, on: sql)
+                succeeded = Task {
+                    try await secondInstance.recordSuccessfulAttempt(
+                        accountHandle: raceHandle,
+                        userID: userID,
+                        deviceID: deviceID
+                    )
+                }
+                try await waitForAdvisoryWaiters(2, on: sql)
+            } catch {
+                rejected?.cancel()
+                succeeded?.cancel()
+                await gate.releaseTransaction()
+                _ = try? await blocker.value
+                _ = try? await rejected?.value
+                _ = try? await succeeded?.value
+                throw error
+            }
+            await gate.releaseTransaction()
+            try await blocker.value
+            try await rejected?.value
+            try await succeeded?.value
+            #expect(try await firstInstance.blockedRetryAfterSeconds(accountHandle: raceHandle) == nil)
+            #expect(try await sql.raw("SELECT 1 FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: raceHandle)").first() == nil)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -7817,6 +7871,24 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     (source_event_id, plan_id, state, created_at, terminal_at)
                 VALUES (\(bind: event), \(bind: plan), 'terminal', \(bind: old), \(bind: old))
                 """).run()
+            #expect(try await sql.raw("""
+                SELECT to_regclass('im_v2.room_outbox_terminal_cleanup_idx') IS NOT NULL AS exists
+                """).first(decoding: ExistsRow.self)?.exists == true)
+            try await sql.raw("SET enable_seqscan = off").run()
+            let cleanupPlanRows = try await sql.raw("""
+                EXPLAIN (COSTS OFF)
+                SELECT source_event_id
+                FROM im_v2.room_outbox
+                WHERE state = 'terminal' AND terminal_at <= \(bind: now)
+                ORDER BY terminal_at, source_event_id
+                LIMIT 8
+                FOR UPDATE SKIP LOCKED
+                """).all()
+            try await sql.raw("RESET enable_seqscan").run()
+            let cleanupPlan = try cleanupPlanRows.map {
+                try $0.decode(column: "QUERY PLAN", as: String.self)
+            }.joined(separator: "\n")
+            #expect(cleanupPlan.contains("room_outbox_terminal_cleanup_idx"))
 
             let veryOld = now.addingTimeInterval(-40 * 86_400)
             let directOperation = UUID(uuidString: "00000000-0000-0000-0000-0000000008b4")!
@@ -8760,6 +8832,41 @@ private struct EdgeClientRateLimitKeyRow: Decodable {
 }
 private struct CountRow: Decodable { let value: Int64 }
 
+private actor PostgreSQLTransactionGate {
+    private var isHeld = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func waitUntilHeld() async {
+        guard !isHeld else { return }
+        await withCheckedContinuation { heldWaiters.append($0) }
+    }
+
+    func holdTransaction() async {
+        isHeld = true
+        let waiters = heldWaiters
+        heldWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func releaseTransaction() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private func waitForAdvisoryWaiters(_ expected: Int64, on sql: any SQLDatabase) async throws {
+    for _ in 0 ..< 300 {
+        let count = try await sql.raw(
+            "SELECT COUNT(*)::bigint AS value FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+        ).first(decoding: CountRow.self)?.value ?? 0
+        if count >= expected { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw TestConfigurationError.advisoryWaiterTimeout
+}
+
 private struct SnapshotV3ArtifactAssertionRow: Decodable {
     let state: String
     let rootDigest: String?
@@ -9325,4 +9432,5 @@ private enum TestConfigurationError: Error {
     case invalidCrossStoreBatchCommitConcurrency(String)
     case invalidCrossStoreEventPayloadBytes(String)
     case postgresProfileUnavailable
+    case advisoryWaiterTimeout
 }

@@ -27,6 +27,8 @@ enum IMV2AccountServerApp {
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
+        V2RedactedHTTPMiddlewareConfiguration.install(on: app)
+        let runtimeTasks = RuntimeTaskSupervisor()
         do {
             // Keep the password fallback cost explicit. The dummy verifier in
             // the runtime configuration must be generated at this same cost.
@@ -74,8 +76,7 @@ enum IMV2AccountServerApp {
                 database: database,
                 tokenKey: configuration.accessTokenKey
             )
-            var localMediaScanTask: Task<Void, Never>?
-            let edgeRateLimitRetentionTask = Task {
+            await runtimeTasks.start {
                 while !Task.isCancelled {
                     do {
                         _ = try await edgeClientRateLimiter.purgeExpired(limit: 1_000)
@@ -133,7 +134,7 @@ enum IMV2AccountServerApp {
                     provider: provider
                 )
                 let logger = app.logger
-                localMediaScanTask = Task {
+                await runtimeTasks.start {
                     while !Task.isCancelled {
                         do {
                             async let scanReport = scanner.runOnce(limit: 16)
@@ -190,7 +191,7 @@ enum IMV2AccountServerApp {
                 presentations: PostgresV2ProfilePresentationStore(database: database)
             ).register(on: app)
             V2PasswordAccountRoutes(
-                store: .init(database: database),
+                store: V2PostgresPasswordAccountStore(database: database),
                 assertionIssuer: assertionIssuer,
                 dummyPasswordHash: configuration.dummyPasswordHash,
                 loginAttemptLimiter: V2PostgresPasswordLoginAttemptLimiter(
@@ -201,15 +202,11 @@ enum IMV2AccountServerApp {
             try await app.startup()
             app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
             await TerminationSignal.wait()
-            localMediaScanTask?.cancel()
-            edgeRateLimitRetentionTask.cancel()
-            if let localMediaScanTask {
-                await localMediaScanTask.value
-            }
-            await edgeRateLimitRetentionTask.value
+            await runtimeTasks.cancelAndWait()
             try await app.asyncShutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
+            await runtimeTasks.cancelAndWait()
             try? await app.asyncShutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
@@ -250,5 +247,27 @@ private enum TerminationSignal {
             }
             source.resume()
         }
+    }
+}
+
+/// Owns unstructured process tasks that must start before `Application.startup`
+/// can complete. Every normal and exceptional exit cancels and joins the set
+/// before database/event-loop shutdown begins.
+private actor RuntimeTaskSupervisor {
+    private var tasks: [Task<Void, Never>] = []
+    private var isShuttingDown = false
+
+    func start(_ operation: @escaping @Sendable () async -> Void) {
+        guard !isShuttingDown else { return }
+        tasks.append(Task { await operation() })
+    }
+
+    func cancelAndWait() async {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        let ownedTasks = tasks
+        tasks.removeAll(keepingCapacity: false)
+        for task in ownedTasks { task.cancel() }
+        for task in ownedTasks { await task.value }
     }
 }

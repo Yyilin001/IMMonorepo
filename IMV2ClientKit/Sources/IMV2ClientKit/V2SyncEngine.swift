@@ -13,6 +13,7 @@ public actor V2SyncEngine: V2SyncDriving {
     private let store: any V2LocalSyncStore
     private let maxRecords: Int
     private let capabilityProfile: String
+    private var retiredSnapshotCleanupTask: Task<Void, Never>?
 
     public init(
         transport: any V2ClientSyncTransport,
@@ -25,6 +26,10 @@ public actor V2SyncEngine: V2SyncDriving {
         self.store = store
         self.capabilityProfile = capabilityProfile
         self.maxRecords = maxRecords
+    }
+
+    deinit {
+        retiredSnapshotCleanupTask?.cancel()
     }
 
     public func synchronizeOnce() async throws -> V2SyncCycleResult {
@@ -130,8 +135,14 @@ public actor V2SyncEngine: V2SyncDriving {
         try await store.activateAcknowledgedSnapshot(manifest)
         // Reclaiming the old b-trees can touch every retired page. It is safe
         // to run after the cursor fence is visible and must never extend the
-        // acknowledged-snapshot activation transaction.
-        Task { try? await store.cleanupRetiredSnapshotTables() }
+        // acknowledged-snapshot activation transaction. The engine owns this
+        // best-effort task so replacement/deinitialization can cancel it; it
+        // is not an orphaned task that silently outlives the sync lifecycle.
+        retiredSnapshotCleanupTask?.cancel()
+        retiredSnapshotCleanupTask = Task { [store] in
+            guard !Task.isCancelled else { return }
+            try? await store.cleanupRetiredSnapshotTables()
+        }
     }
 
     private func cancelResetIfRejected(

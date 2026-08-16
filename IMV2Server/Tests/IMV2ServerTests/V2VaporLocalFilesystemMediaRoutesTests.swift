@@ -29,6 +29,7 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
         )
 
         try await withApp { app in
+            V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
@@ -54,6 +55,50 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
                 #expect(response.headers.first(name: .cacheControl) == "no-store")
                 #expect(Data(buffer: response.body) == payload)
             }
+
+            let staging = root.appendingPathComponent(".upload-staging", isDirectory: true)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+        }
+    }
+
+    @Test("the streaming upload rejects a declared body above its edge budget before staging bytes")
+    func oversizedUploadIsRejectedBeforeStaging() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("im-v2-local-media-route-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = try V2LocalFilesystemMediaProvider(
+            rootDirectory: root,
+            targetBaseURL: try #require(URL(string: "https://localhost:8443")),
+            signingKey: Data(repeating: 5, count: 32)
+        )
+        let mediaID = try MediaID(UUID().uuidString)
+        let upload = try await provider.issueUploadTarget(
+            mediaID: mediaID,
+            contentType: "application/octet-stream",
+            byteCount: 2_048,
+            expiresAt: Date().addingTimeInterval(30)
+        )
+
+        try await withApp { app in
+            V2RedactedHTTPMiddlewareConfiguration.install(on: app)
+            try V2VaporLocalFilesystemMediaRoutes(
+                provider: provider,
+                publicBaseURL: try #require(URL(string: "https://localhost:8443")),
+                maximumUploadBytes: 1_024
+            ).register(on: app)
+            let tester = try app.testing()
+            try await tester.test(
+                .PUT,
+                requestPath(for: upload.url),
+                headers: [
+                    "Content-Type": "application/octet-stream",
+                ],
+                body: byteBuffer(Data(repeating: 0x41, count: 2_048))
+            ) { response async in
+                #expect(response.status == .payloadTooLarge)
+            }
+            let staging = root.appendingPathComponent(".upload-staging", isDirectory: true)
+            #expect(!FileManager.default.fileExists(atPath: staging.path))
         }
     }
 
@@ -68,6 +113,7 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             signingKey: Data(repeating: 4, count: 32)
         )
         try await withApp { app in
+            V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),

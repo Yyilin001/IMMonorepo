@@ -12,14 +12,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public typealias OutboundOut = ByteBuffer
 
     private let stream: V2GatewayByteStream
-    private let maximumQueuedInboundBytes: Int
-    private let maximumQueuedInboundChunks: Int
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
     private let transportMetrics: (any V2GatewayTransportMetricsRecorder)?
-    private var pending: [Data] = []
-    private var pendingHead = 0
-    private var queuedInboundBytes = 0
+    private var pending: V2GatewayInboundQueue
     private var processing = false
     /// Exactly one request task belongs to the channel. EOF, timeout,
     /// revocation, and every explicit close path cancel it before dropping
@@ -56,8 +52,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             idleTimeoutMilliseconds > 0
         )
         self.stream = stream
-        self.maximumQueuedInboundBytes = maximumQueuedInboundBytes
-        self.maximumQueuedInboundChunks = maximumQueuedInboundChunks
+        self.pending = .init(
+            maximumBytes: maximumQueuedInboundBytes,
+            maximumChunks: maximumQueuedInboundChunks
+        )
         self.authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
         self.idleTimeoutMilliseconds = idleTimeoutMilliseconds
         self.transportMetrics = transportMetrics
@@ -123,19 +121,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         lastInboundAt = .now()
         let buffer = unwrapInboundIn(data)
         let bytes = Data(buffer.readableBytesView)
-        guard queuedInboundBytes <= maximumQueuedInboundBytes - bytes.count else {
+        guard pending.append(bytes) else {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
-        guard pending.count - pendingHead < maximumQueuedInboundChunks else {
-            close(context: context, reason: .inboundQueueLimit)
-            return
-        }
-        pending.append(bytes)
-        queuedInboundBytes += bytes.count
         if let transportMetrics {
-            let queuedBytes = queuedInboundBytes
-            transportMetrics.observeQueuedInboundBytes(queuedBytes)
+            transportMetrics.observeQueuedInboundBytes(pending.queuedBytes)
         }
         processNext(context: context)
     }
@@ -146,9 +137,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         idleCheck = nil
         authenticationDeadline?.cancel()
         authenticationDeadline = nil
-        pending.removeAll(keepingCapacity: false)
-        pendingHead = 0
-        queuedInboundBytes = 0
+        pending.removeAll()
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         processingTask?.cancel()
         processingTask = nil
@@ -173,16 +162,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private func processNext(context: ChannelHandlerContext) {
         guard callbacksReady, !closed, !processing,
               context.channel.isWritable,
-              pendingHead < pending.count
+              !pending.isEmpty
         else { return }
         processing = true
-        let inbound = pending[pendingHead]
-        pendingHead += 1
-        if pendingHead >= 64, pendingHead * 2 >= pending.count {
-            pending.removeFirst(pendingHead)
-            pendingHead = 0
+        guard let inbound = pending.popFirst() else {
+            processing = false
+            return
         }
-        queuedInboundBytes -= inbound.count
         let stream = stream
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
@@ -249,9 +235,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         idleCheck = nil
         authenticationDeadline?.cancel()
         authenticationDeadline = nil
-        pending.removeAll(keepingCapacity: false)
-        pendingHead = 0
-        queuedInboundBytes = 0
+        pending.removeAll()
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         processingTask?.cancel()
         processingTask = nil
@@ -339,6 +323,47 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         } else {
             scheduleIdleCheck(context: context)
         }
+    }
+}
+
+/// Event-loop-confined, two-dimensional admission queue. `CircularBuffer`
+/// keeps append/pop amortized O(1), so draining a full fragmented connection
+/// never shifts thousands of retained `Data` values on the shared event loop.
+struct V2GatewayInboundQueue {
+    private let maximumBytes: Int
+    private let maximumChunks: Int
+    private var chunks: CircularBuffer<Data>
+    private(set) var queuedBytes = 0
+
+    init(maximumBytes: Int, maximumChunks: Int) {
+        precondition(maximumBytes > 0 && maximumChunks > 0)
+        self.maximumBytes = maximumBytes
+        self.maximumChunks = maximumChunks
+        self.chunks = .init(initialCapacity: min(maximumChunks, 16))
+    }
+
+    var isEmpty: Bool { chunks.isEmpty }
+    var count: Int { chunks.count }
+
+    mutating func append(_ bytes: Data) -> Bool {
+        guard chunks.count < maximumChunks,
+              bytes.count <= maximumBytes,
+              queuedBytes <= maximumBytes - bytes.count
+        else { return false }
+        chunks.append(bytes)
+        queuedBytes += bytes.count
+        return true
+    }
+
+    mutating func popFirst() -> Data? {
+        guard let bytes = chunks.popFirst() else { return nil }
+        queuedBytes -= bytes.count
+        return bytes
+    }
+
+    mutating func removeAll() {
+        chunks.removeAll(keepingCapacity: false)
+        queuedBytes = 0
     }
 }
 

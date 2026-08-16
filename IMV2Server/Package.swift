@@ -42,8 +42,7 @@ let package = Package(
             dependencies: [
                 "IMV2Server",
                 .product(name: "Vapor", package: "vapor"),
-                .product(name: "Fluent", package: "fluent"),
-                .product(name: "SQLKit", package: "sql-kit"),
+                .product(name: "_NIOFileSystem", package: "swift-nio"),
             ]
         ),
         .executableTarget(

@@ -39,6 +39,57 @@ struct V2DeviceSessionsStoreTests {
         #expect(store.sessions.isEmpty)
         #expect(store.feedback == "该设备已退出。")
     }
+
+    @Test("a page that finishes after refresh cannot overwrite the refreshed snapshot")
+    func stalePageCannotOverwriteRefresh() async throws {
+        let initial = try device("00000000-0000-0000-0000-000000000621", name: "Initial")
+        let stale = try device("00000000-0000-0000-0000-000000000622", name: "Stale")
+        let refreshed = try device("00000000-0000-0000-0000-000000000623", name: "Refreshed")
+        let manager = RacingDeviceSessionStoreManager(
+            initial: .init(sessions: [initial], nextCursor: "old-cursor"),
+            refreshed: .init(sessions: [refreshed], nextCursor: "new-cursor"),
+            stalePage: .init(sessions: [stale], nextCursor: "stale-next")
+        )
+        let store = V2DeviceSessionsStore(manager: manager)
+
+        await store.refresh()
+        let staleLoad = Task { await store.loadMore() }
+        await manager.waitUntilStalePageIsRequested()
+        await store.refresh()
+        await manager.finishStalePage()
+        await staleLoad.value
+
+        #expect(store.sessions.map(\.deviceID) == [refreshed.deviceID])
+        #expect(store.nextCursor == "new-cursor")
+        #expect(!store.isLoadingMore)
+    }
+
+    @Test("pagination deduplicates identities within the returned page")
+    func pageIdentityIsStable() async throws {
+        let initial = try device("00000000-0000-0000-0000-000000000631", name: "Initial")
+        let next = try device("00000000-0000-0000-0000-000000000632", name: "Next")
+        let manager = PagedDeviceSessionStoreManager(
+            first: .init(sessions: [initial], nextCursor: "next"),
+            next: .init(sessions: [next, next], nextCursor: nil)
+        )
+        let store = V2DeviceSessionsStore(manager: manager)
+
+        await store.refresh()
+        await store.loadMore()
+
+        #expect(store.sessions.map(\.deviceID) == [initial.deviceID, next.deviceID])
+    }
+
+    private func device(_ id: String, name: String) throws -> V2ClientDeviceSession {
+        .init(
+            deviceID: try DeviceID(id),
+            deviceName: name,
+            platform: "iOS",
+            createdAt: .distantPast,
+            lastActiveAt: .distantPast,
+            isCurrentDevice: false
+        )
+    }
 }
 
 private actor DeviceSessionStoreManager: V2ClientDeviceSessionManaging {
@@ -58,4 +109,66 @@ private actor DeviceSessionStoreManager: V2ClientDeviceSessionManaging {
     }
     func revokeOtherDevices(operationID _: UUID) {}
     func revokeCall() -> RevokeCall? { recorded }
+}
+
+private actor PagedDeviceSessionStoreManager: V2ClientDeviceSessionManaging {
+    let first: V2ClientDeviceSessionPage
+    let next: V2ClientDeviceSessionPage
+
+    init(first: V2ClientDeviceSessionPage, next: V2ClientDeviceSessionPage) {
+        self.first = first
+        self.next = next
+    }
+
+    func list(cursor: String?, pageSize _: Int) -> V2ClientDeviceSessionPage {
+        cursor == nil ? first : next
+    }
+
+    func revoke(deviceID _: DeviceID, operationID _: UUID) {}
+    func revokeOtherDevices(operationID _: UUID) {}
+}
+
+private actor RacingDeviceSessionStoreManager: V2ClientDeviceSessionManaging {
+    let initial: V2ClientDeviceSessionPage
+    let refreshed: V2ClientDeviceSessionPage
+    let stalePage: V2ClientDeviceSessionPage
+    private var firstPageCount = 0
+    private var stalePageContinuation: CheckedContinuation<V2ClientDeviceSessionPage, Never>?
+    private var staleRequestWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(
+        initial: V2ClientDeviceSessionPage,
+        refreshed: V2ClientDeviceSessionPage,
+        stalePage: V2ClientDeviceSessionPage
+    ) {
+        self.initial = initial
+        self.refreshed = refreshed
+        self.stalePage = stalePage
+    }
+
+    func list(cursor: String?, pageSize _: Int) async -> V2ClientDeviceSessionPage {
+        if cursor == nil {
+            firstPageCount += 1
+            return firstPageCount == 1 ? initial : refreshed
+        }
+        return await withCheckedContinuation { continuation in
+            stalePageContinuation = continuation
+            let waiters = staleRequestWaiters
+            staleRequestWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func waitUntilStalePageIsRequested() async {
+        guard stalePageContinuation == nil else { return }
+        await withCheckedContinuation { staleRequestWaiters.append($0) }
+    }
+
+    func finishStalePage() {
+        stalePageContinuation?.resume(returning: stalePage)
+        stalePageContinuation = nil
+    }
+
+    func revoke(deviceID _: DeviceID, operationID _: UUID) {}
+    func revokeOtherDevices(operationID _: UUID) {}
 }

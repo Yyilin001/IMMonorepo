@@ -27,6 +27,7 @@ enum IMV2OperatorServerApp {
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
+        V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         do {
             app.databases.use(
                 try postgresDatabaseConfiguration(

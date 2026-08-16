@@ -17,6 +17,7 @@ final class V2DeviceSessionsStore {
     private(set) var isLoadingMore = false
     private(set) var nextCursor: String?
     private var refreshGeneration = 0
+    private var loadMoreGeneration = 0
     private let pageSize = 50
 
     init(manager: any V2ClientDeviceSessionManaging, makeUUID: @escaping @Sendable () -> UUID = { UUID() }) {
@@ -27,6 +28,10 @@ final class V2DeviceSessionsStore {
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
+        // Invalidate an older page request immediately. Its cancellation may
+        // not stop a transport that has already received a response.
+        loadMoreGeneration &+= 1
+        isLoadingMore = false
         state = .loading
         do {
             let page = try await manager.list(cursor: nil, pageSize: pageSize)
@@ -46,13 +51,26 @@ final class V2DeviceSessionsStore {
 
     func loadMore() async {
         guard let cursor = nextCursor, !isLoadingMore, state == .loaded else { return }
+        let refreshGeneration = self.refreshGeneration
+        loadMoreGeneration &+= 1
+        let loadMoreGeneration = self.loadMoreGeneration
         isLoadingMore = true
-        defer { isLoadingMore = false }
+        defer {
+            if loadMoreGeneration == self.loadMoreGeneration {
+                isLoadingMore = false
+            }
+        }
         do {
             let page = try await manager.list(cursor: cursor, pageSize: pageSize)
             try Task.checkCancellation()
-            let existing = Set(sessions.map(\.deviceID))
-            sessions.append(contentsOf: page.sessions.filter { !existing.contains($0.deviceID) })
+            guard refreshGeneration == self.refreshGeneration,
+                  loadMoreGeneration == self.loadMoreGeneration,
+                  cursor == nextCursor
+            else { return }
+            var existing = Set(sessions.map(\.deviceID))
+            sessions.append(contentsOf: page.sessions.filter {
+                existing.insert($0.deviceID).inserted
+            })
             nextCursor = page.nextCursor
         } catch is CancellationError {
         } catch {

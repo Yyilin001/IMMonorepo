@@ -92,7 +92,7 @@ struct V2PasswordAccountRoutesTests {
         )
         let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 1, count: 32))
         V2PasswordAccountRoutes(
-            store: .init(database: app.db(.psql)),
+            store: V2PostgresPasswordAccountStore(database: app.db(.psql)),
             assertionIssuer: assertionIssuer,
             dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
             loginAttemptLimiter: BlockedPasswordAttemptLimiter(retryAfterSeconds: 47)
@@ -125,7 +125,7 @@ struct V2PasswordAccountRoutesTests {
         )
         let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 2, count: 32))
         V2PasswordAccountRoutes(
-            store: .init(database: app.db(.psql)),
+            store: V2PostgresPasswordAccountStore(database: app.db(.psql)),
             assertionIssuer: assertionIssuer,
             dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
             loginAttemptLimiter: BlockedPasswordAttemptLimiter(retryAfterSeconds: 1)
@@ -142,6 +142,40 @@ struct V2PasswordAccountRoutesTests {
             #expect(response.status == .badRequest)
         }
     }
+
+    @Test("password transport depends on a store capability and never passes plaintext to persistence")
+    func passwordRegistrationUsesAbstractStoreWithDigest() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let userID = try UserID("00000000-0000-0000-0000-000000000903")
+        let store = PasswordAccountStoreFake(userID: userID)
+        let assertionIssuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 3, count: 32))
+        V2PasswordAccountRoutes(
+            store: store,
+            assertionIssuer: assertionIssuer,
+            dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            loginAttemptLimiter: AllowedPasswordAttemptLimiter()
+        ).register(on: app)
+
+        let plaintext = "a-valid-length-password"
+        let body = V2PasswordAccountHTTPRequest(
+            accountHandle: "new-account",
+            password: plaintext,
+            deviceID: "00000000-0000-0000-0000-000000000904",
+            publicHandle: "new_public_handle",
+            displayName: "New account"
+        )
+        try await app.testing().test(.POST, "v2/account-auth/password/register", beforeRequest: { request in
+            try request.content.encode(body)
+        }) { response async in
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: .cacheControl) == "no-store")
+        }
+
+        let persistedHash = await store.persistedPasswordHash()
+        #expect(persistedHash?.hasPrefix("$2") == true)
+        #expect(persistedHash != plaintext)
+    }
 }
 
 private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
@@ -150,6 +184,36 @@ private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { retryAfterSeconds }
     func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
+}
+
+private struct AllowedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
+    func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { nil }
+    func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
+    func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
+}
+
+private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
+    private let userID: UserID
+    private var passwordHash: String?
+
+    init(userID: UserID) {
+        self.userID = userID
+    }
+
+    func register(
+        accountHandle _: String,
+        passwordHash: String,
+        publicHandle _: String,
+        displayName _: String,
+        deviceID _: DeviceID
+    ) async throws -> UserID {
+        self.passwordHash = passwordHash
+        return userID
+    }
+
+    func passwordCredential(for _: String) async throws -> V2PasswordCredential? { nil }
+
+    func persistedPasswordHash() -> String? { passwordHash }
 }
 
 private struct FixedEdgeClientLimiter: V2AccountEdgeClientRateLimiting {

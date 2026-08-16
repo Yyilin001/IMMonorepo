@@ -1,27 +1,18 @@
 import Fluent
 import Foundation
 import IMV2Core
-import IMV2Server
 import SQLKit
 
-/// Narrow boundary used by the password route.  It keeps rate-limit storage
-/// out of HTTP handlers and makes the route testable without a database.
+/// Narrow capability used by the password transport adapter. Failure
+/// accounting and audit persistence remain one server-side transaction.
 public protocol V2PasswordLoginAttemptLimiting: Sendable {
-    /// Returns the number of whole seconds for which the account handle must
-    /// remain blocked, or `nil` when an attempt may proceed.
     func blockedRetryAfterSeconds(accountHandle: String) async throws -> Int?
-    /// Atomically records a rejected factor result and its rate-limit state.
-    /// `userID` remains nil for unknown handles so the audit trail cannot
-    /// become a second account-discovery index.
     func recordRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws
-    /// Atomically clears a prior failure window and records a successful
-    /// factor result.
     func recordSuccessfulAttempt(accountHandle: String, userID: UserID, deviceID: DeviceID) async throws
 }
 
-/// PostgreSQL-backed limiter.  Failure accounting is serialized per canonical
-/// handle with an advisory transaction lock, so all account-service replicas
-/// observe the same failure window and lockout state.
+/// PostgreSQL-backed limiter. Failure accounting is serialized per canonical
+/// handle so all account-service replicas observe the same window and lockout.
 public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimiting, Sendable {
     private let database: any Database
     private let policy: V2PasswordLoginRateLimitPolicy
@@ -44,14 +35,17 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         return max(1, Int(ceil(blockedUntil.timeIntervalSince(current))))
     }
 
-    public func recordRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws {
+    public func recordRejectedAttempt(
+        accountHandle: String,
+        userID: UserID?,
+        deviceID: DeviceID
+    ) async throws {
         let handle = try canonicalAccountHandle(accountHandle)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2PasswordLoginRateLimitError.unavailable
             }
-            let lockKey = "v2-password-login-rate:" + handle
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
+            try await lockPasswordAttempts(sql, handle: handle)
             let current = try await databaseNow(on: sql)
             let existing = try await sql.raw("SELECT window_started_at, failure_count, blocked_until FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: handle) FOR UPDATE").first(decoding: AttemptRow.self)
 
@@ -59,10 +53,14 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
                 return
             }
 
-            let isCurrentWindow = existing.map { current.timeIntervalSince($0.windowStartedAt) < policy.window } ?? false
+            let isCurrentWindow = existing.map {
+                current.timeIntervalSince($0.windowStartedAt) < policy.window
+            } ?? false
             let nextFailureCount = isCurrentWindow ? (existing!.failureCount + 1) : 1
             let windowStartedAt = isCurrentWindow ? existing!.windowStartedAt : current
-            let blockedUntil = nextFailureCount >= policy.maximumFailures ? current.addingTimeInterval(policy.lockout) : nil
+            let blockedUntil = nextFailureCount >= policy.maximumFailures
+                ? current.addingTimeInterval(policy.lockout)
+                : nil
 
             if existing == nil {
                 try await sql.raw("INSERT INTO im_v2.account_password_login_rate_limits (account_handle, window_started_at, failure_count, blocked_until, updated_at) VALUES (\(bind: handle), \(bind: windowStartedAt), \(bind: nextFailureCount), \(bind: blockedUntil), \(bind: current))").run()
@@ -79,12 +77,17 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         }
     }
 
-    public func recordSuccessfulAttempt(accountHandle: String, userID: UserID, deviceID: DeviceID) async throws {
+    public func recordSuccessfulAttempt(
+        accountHandle: String,
+        userID: UserID,
+        deviceID: DeviceID
+    ) async throws {
         let handle = try canonicalAccountHandle(accountHandle)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2PasswordLoginRateLimitError.unavailable
             }
+            try await lockPasswordAttempts(sql, handle: handle)
             let current = try await databaseNow(on: sql)
             try await sql.raw("DELETE FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: handle)").run()
             try await recordPasswordAuthenticationAudit(
@@ -99,14 +102,17 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
 }
 
 private struct TimestampRow: Decodable { let current: Date }
+
 private struct BlockedUntilRow: Decodable {
     let blockedUntil: Date?
     enum CodingKeys: String, CodingKey { case blockedUntil = "blocked_until" }
 }
+
 private struct AttemptRow: Decodable {
     let windowStartedAt: Date
     let failureCount: Int
     let blockedUntil: Date?
+
     enum CodingKeys: String, CodingKey {
         case windowStartedAt = "window_started_at"
         case failureCount = "failure_count"
@@ -119,4 +125,11 @@ private func databaseNow(on sql: any SQLDatabase) async throws -> Date {
         throw V2PasswordLoginRateLimitError.unavailable
     }
     return row.current
+}
+
+private func lockPasswordAttempts(_ sql: any SQLDatabase, handle: String) async throws {
+    let lockKey = "v2-password-login-rate:" + handle
+    try await sql.raw(
+        "SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))"
+    ).run()
 }

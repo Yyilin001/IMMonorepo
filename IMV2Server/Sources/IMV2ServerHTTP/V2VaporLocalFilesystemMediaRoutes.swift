@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import _NIOFileSystem
 
 /// Development-only object-byte edge for `V2LocalFilesystemMediaProvider`.
 /// The signed target is the capability: this adapter never accepts a raw file
@@ -36,27 +37,53 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
         routes.on(
             .PUT,
             "v2", "local-media", "upload", ":mediaID",
-            body: .collect(maxSize: .init(value: maximumUploadBytes))
+            body: .stream
         ) { request async throws -> Response in
             guard let rawMediaID = request.parameters.get("mediaID"),
                   let mediaID = try? MediaID(rawMediaID),
                   let targetURL = targetURL(for: request),
                   let contentType = request.headers.first(name: .contentType),
-                  let body = request.body.data
+                  let rawContentLength = request.headers.first(name: .contentLength),
+                  let contentLength = Int64(rawContentLength),
+                  contentLength >= 0
             else { throw Abort(.forbidden) }
-            let bytes = Data(buffer: body)
+            guard contentLength <= Int64(maximumUploadBytes) else {
+                throw Abort(.payloadTooLarge)
+            }
+            let upload: V2LocalFilesystemStagedUpload
             do {
-                try await provider.storeUploadedObject(
+                upload = try await provider.beginUploadedObject(
                     mediaID: mediaID,
                     targetURL: targetURL,
                     contentType: contentType,
-                    bytes: bytes
+                    declaredByteCount: contentLength
                 )
             } catch is V2LocalFilesystemMediaProviderError {
                 // A signed target is an opaque capability; do not reveal why
                 // one was rejected or whether its object exists.
                 throw Abort(.forbidden)
             } catch {
+                throw Abort(.serviceUnavailable)
+            }
+            do {
+                let written = try await request.body
+                    .map { Data($0.readableBytesView) }
+                    .write(
+                    toFileAt: .init(upload.fileURL.path),
+                    options: .newFile(replaceExisting: false)
+                )
+                guard written == contentLength else {
+                    throw V2LocalFilesystemMediaProviderError.byteCountMismatch
+                }
+                try await provider.commitUploadedObject(upload, actualByteCount: written)
+            } catch let abort as AbortError {
+                await provider.discardUploadedObject(upload)
+                throw abort
+            } catch is V2LocalFilesystemMediaProviderError {
+                await provider.discardUploadedObject(upload)
+                throw Abort(.forbidden)
+            } catch {
+                await provider.discardUploadedObject(upload)
                 throw Abort(.serviceUnavailable)
             }
             return noStoreResponse(status: .noContent)
@@ -67,9 +94,9 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                   let mediaID = try? MediaID(rawMediaID),
                   let targetURL = targetURL(for: request)
             else { throw Abort(.notFound) }
-            let bytes: Data
+            let object: V2LocalFilesystemDownloadedObject
             do {
-                bytes = try await provider.readDownloadedObject(mediaID: mediaID, targetURL: targetURL)
+                object = try await provider.downloadedObject(mediaID: mediaID, targetURL: targetURL)
             } catch is V2LocalFilesystemMediaProviderError {
                 // Do not distinguish expiration, a malformed capability, and
                 // an absent object from the public object-byte boundary.
@@ -77,10 +104,16 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
             } catch {
                 throw Abort(.serviceUnavailable)
             }
-            var headers = noStoreHeaders()
-            headers.replaceOrAdd(name: .contentType, value: "application/octet-stream")
-            headers.replaceOrAdd(name: .contentLength, value: String(bytes.count))
-            return .init(status: .ok, headers: headers, body: .init(data: bytes))
+            guard object.byteCount <= Int64(Int.max) else { throw Abort(.serviceUnavailable) }
+            let response = try await request.fileio.asyncStreamFile(
+                at: object.fileURL.path,
+                mediaType: .init(type: "application", subType: "octet-stream")
+            )
+            for header in noStoreHeaders() {
+                response.headers.replaceOrAdd(name: header.name, value: header.value)
+            }
+            response.headers.replaceOrAdd(name: .contentType, value: "application/octet-stream")
+            return response
         }
     }
 
