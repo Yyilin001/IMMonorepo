@@ -118,8 +118,9 @@ final class V2PublicIdentitySettingsStore {
     }
 
     /// Loads only a device-local copy obtained from the authenticated media
-    /// edge.  The returned bytes are view state, never durable profile data.
-    func avatarPreviewData() async -> Data? {
+    /// edge, then decodes a bounded thumbnail away from MainActor. The view
+    /// never retains the original compressed file or a full-resolution image.
+    func avatarPreviewImage() async -> UIImage? {
         do {
             let fileURL: URL
             if let stagedAvatar {
@@ -129,9 +130,13 @@ final class V2PublicIdentitySettingsStore {
             } else {
                 return nil
             }
-            return try await Task.detached(priority: .utility) {
-                try Data(contentsOf: fileURL, options: [.mappedIfSafe])
-            }.value
+            try Task.checkCancellation()
+            let preview = await V2LocalMediaThumbnailCache.shared.thumbnail(
+                fileURL: fileURL,
+                maximumPixelSize: 256
+            )?.image
+            try Task.checkCancellation()
+            return preview
         } catch is CancellationError {
             return nil
         } catch {
@@ -156,7 +161,7 @@ struct V2PublicIdentitySettingsView: View {
     @Bindable var store: V2PublicIdentitySettingsStore
     @State private var isImportingAvatar = false
     @State private var saveTask: Task<Void, Never>?
-    @State private var avatarPreviewData: Data?
+    @State private var avatarPreviewImage: UIImage?
 
     var body: some View {
         Form {
@@ -214,7 +219,9 @@ struct V2PublicIdentitySettingsView: View {
         .navigationTitle("我的资料")
         .task { await store.load() }
         .task(id: store.avatarPresentationKey) {
-            avatarPreviewData = await store.avatarPreviewData()
+            let preview = await store.avatarPreviewImage()
+            guard !Task.isCancelled else { return }
+            avatarPreviewImage = preview
         }
         .fileImporter(isPresented: $isImportingAvatar, allowedContentTypes: [.image]) { result in
             guard case .success(let url) = result else { return }
@@ -230,8 +237,8 @@ struct V2PublicIdentitySettingsView: View {
 
     @ViewBuilder
     private var avatarPreview: some View {
-        if let avatarPreviewData, let image = UIImage(data: avatarPreviewData) {
-            Image(uiImage: image)
+        if let avatarPreviewImage {
+            Image(uiImage: avatarPreviewImage)
                 .resizable()
                 .scaledToFill()
                 .frame(width: 56, height: 56)

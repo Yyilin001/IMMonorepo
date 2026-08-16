@@ -80,6 +80,34 @@ struct V2VaporDeviceCredentialRoutesTests {
             #expect(response.status == .unauthorized)
         }
     }
+
+    @Test("device registration budgets return a non-cacheable retry window")
+    func issueRouteReturnsRetryAfterForRegistrationBudget() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let userID = try UserID("00000000-0000-0000-0000-000000000731")
+        let deviceID = try DeviceID("00000000-0000-0000-0000-000000000732")
+        V2VaporDeviceCredentialRoutes(
+            assertionVerifier: RouteAssertionVerifier(userID: userID),
+            issuer: DeviceCredentialRouteIssuer(
+                registration: .rateLimited(retryAfterSeconds: 17),
+                refresh: .terminalRejection
+            )
+        ).register(on: app)
+
+        try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(
+                accountAssertion: "opaque-assertion",
+                deviceID: deviceID.rawValue,
+                operationID: UUID()
+            ))
+        }) { response async in
+            #expect(response.status == .tooManyRequests)
+            #expect(response.headers.first(name: "Retry-After") == "17")
+            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers.first(name: "Pragma") == "no-cache")
+        }
+    }
 }
 
 private struct RouteAssertionVerifier: V2AccountAssertionVerifier {

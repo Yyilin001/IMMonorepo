@@ -144,11 +144,11 @@ private struct V2LocalMediaImagePreview: View {
     }
 }
 
-private struct V2SendableImage: @unchecked Sendable {
+struct V2SendableImage: @unchecked Sendable {
     let image: UIImage
 }
 
-private actor V2LocalMediaThumbnailCache {
+actor V2LocalMediaThumbnailCache {
     static let shared = V2LocalMediaThumbnailCache()
 
     private struct Key: Hashable, Sendable {

@@ -80,7 +80,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
     }
 
-    public func acquireConnection(
+    public func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
@@ -96,16 +96,21 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             // device lock then serializes the narrower limit without a
             // user/device lock-order cycle.
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
+            // `auth_devices.device_id` is globally unique and the lease has a
+            // composite owner foreign key, so this device can only occur under
+            // `user`. Keeping the predicate user-only lets PostgreSQL use the
+            // existing `(user_id, expires_at)` index instead of scanning the
+            // global lease table for an OR branch.
             try await sql.raw("""
                 DELETE FROM im_v2.user_live_presence_leases
                 WHERE expires_at <= \(bind: now)
-                  AND (user_id = \(bind: user) OR device_id = \(bind: device))
+                  AND user_id = \(bind: user)
                 """).run()
             guard let counts = try await sql.raw("""
                 SELECT COUNT(*) FILTER (WHERE device_id = \(bind: device))::integer AS device_count,
                        COUNT(*) FILTER (WHERE user_id = \(bind: user))::integer AS user_count
                 FROM im_v2.user_live_presence_leases
-                WHERE (user_id = \(bind: user) OR device_id = \(bind: device))
+                WHERE user_id = \(bind: user)
                   AND expires_at > \(bind: now)
                   AND connection_id <> \(bind: connectionID)
                 """).first(decoding: LiveActivityConnectionCountRow.self)
@@ -129,6 +134,29 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             else { throw V2LiveActivityStoreError.corruptPersistenceState }
             return .accepted(expiresAt: expiry)
         }
+    }
+
+    public func renewConnection(
+        identity: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now: Date
+    ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
+        guard let sql = database as? any SQLDatabase else {
+            throw V2LiveActivityStoreError.corruptPersistenceState
+        }
+        let user = try liveActivityUUID(identity.userID)
+        let device = try liveActivityUUID(identity.deviceID)
+        let expiry = now.addingTimeInterval(onlineLease)
+        let renewed = try await sql.raw("""
+            UPDATE im_v2.user_live_presence_leases
+            SET expires_at = \(bind: expiry), updated_at = \(bind: now)
+            WHERE connection_id = \(bind: connectionID)
+              AND user_id = \(bind: user)
+              AND device_id = \(bind: device)
+              AND expires_at > \(bind: now)
+            RETURNING connection_id
+            """).first(decoding: LiveActivityConnectionIDRow.self)
+        return renewed == nil ? .rejected : .accepted(expiresAt: expiry)
     }
 
     public func removePresence(

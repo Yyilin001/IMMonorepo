@@ -752,6 +752,10 @@ final class V2ConversationDetailStore {
             sendFeedback = "只能添加普通文件。"
         } catch V2ConversationAttachmentStagingError.invalidByteCount {
             sendFeedback = "无法添加空文件。"
+        } catch V2ConversationAttachmentStagingError.fileTooLarge {
+            sendFeedback = "附件不能超过 50 MB。"
+        } catch V2ConversationAttachmentStagingError.stagingQuotaExceeded {
+            sendFeedback = "设备上的待上传附件过多，请移除部分附件后重试。"
         } catch {
             sendFeedback = "无法准备附件。"
         }

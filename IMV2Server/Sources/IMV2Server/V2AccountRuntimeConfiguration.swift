@@ -57,6 +57,7 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let passwordLoginRateLimit: V2PasswordLoginRateLimitPolicy
     public let edgeClientRateLimit: V2AccountEdgeClientRateLimitPolicy
     public let publicIdentityLookupRateLimit: V2PublicIdentityLookupRateLimitPolicy
+    public let deviceRegistrationPolicy: V2DeviceRegistrationPolicy
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
@@ -110,6 +111,15 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             publicIdentityLookupRateLimit = try .init(maximumQueries: publicIdentityMaximumQueries, window: TimeInterval(publicIdentityWindowSeconds))
         } catch V2PublicIdentityLookupRateLimitError.invalidPolicy {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES/IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS")
+        }
+        do {
+            deviceRegistrationPolicy = try .init(
+                maximumActiveDevices: Self.integer("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT", environment: environment),
+                maximumNewDevicesPerWindow: Self.integer("IM_V2_MAX_NEW_DEVICES_PER_WINDOW", environment: environment),
+                window: TimeInterval(Self.integer("IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS", environment: environment))
+            )
+        } catch V2DeviceCredentialServiceError.invalidConfiguration {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT/IM_V2_MAX_NEW_DEVICES_PER_WINDOW/IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS")
         }
     }
 

@@ -213,6 +213,12 @@ migration_marker() {
     0055_revoked_device_projection_tombstones.sql)
       printf "%s" "SELECT to_regclass('im_v2.revoked_device_projection_tombstones') IS NOT NULL"
       ;;
+    0056_device_registration_budget.sql)
+      printf "%s" "SELECT to_regclass('im_v2.device_registration_rate_limits') IS NOT NULL"
+      ;;
+    0057_read_receipt_sequence_paging.sql)
+      printf "%s" "SELECT to_regclass('im_v2.room_read_receipts_sequence_page_idx') IS NOT NULL AND to_regclass('im_v2.room_read_receipts_detail_lookup_idx') IS NULL"
+      ;;
     *)
       printf 'missing local migration marker for %s; add one before using a retained volume.\n' "$1" >&2
       return 1

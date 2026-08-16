@@ -37,13 +37,22 @@ public protocol V2LiveActivityStore: Sendable {
 /// authorization. Keeping the two protocols separate prevents a socket from
 /// gaining database authorization capabilities.
 public protocol V2LivePresenceLeaseManaging: Sendable {
-    /// Acquires or renews one authenticated connection lease. Renewing an
-    /// unexpired matching row is always safe; a missing or expired row must
-    /// pass the same cross-replica admission limits as a new connection.
-    func acquireConnection(
+    /// Admits a new authenticated connection against the cross-replica
+    /// device/user budgets. This is intentionally separate from renewal so a
+    /// routine heartbeat never repeats the locks and aggregate counts required
+    /// only at the connection boundary.
+    func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
+        now: Date
+    ) async throws -> V2AuthenticatedConnectionLeaseOutcome
+    /// Extends only an existing, unexpired, identity-matching lease. A missing
+    /// or expired row is rejected rather than being resurrected without the
+    /// full admission transaction.
+    func renewConnection(
+        identity: V2AuthenticatedConnection,
+        connectionID: UUID,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome
     /// Returns whether another unexpired connection still keeps the user online.

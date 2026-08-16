@@ -2851,15 +2851,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(UUID(uuidString: rosterCursor) == nil)
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = 1 WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberThreeUUID)").run()
-            await #expect(throws: V2ReadReceiptStoreError.membershipRevisionConflict(currentRevision: 1)) {
-                _ = try await readerStore.readers(
-                    roomID: roomID,
-                    messageID: message.messageID,
-                    actorUserID: senderID,
-                    cursor: readerCursor,
-                    pageSize: 1
-                )
-            }
+            let continuedReaders = try await readerStore.readers(
+                roomID: roomID,
+                messageID: message.messageID,
+                actorUserID: senderID,
+                cursor: readerCursor,
+                pageSize: 1
+            )
+            #expect(continuedReaders.readers.map(\.userID) == [try .init(memberTwoUUID.uuidString)])
+            #expect(continuedReaders.nextCursor == nil)
             let currentReaders = try await readerStore.readers(
                 roomID: roomID,
                 messageID: message.messageID,
@@ -3630,6 +3630,99 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
             try? await app.asyncShutdown(); throw error
+        }
+    }
+
+    @Test("new device issuance enforces active and durable account budgets")
+    func deviceRegistrationBudgetsBoundDurableIdentityGrowth() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2DeviceCredentialServiceError.unavailable
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let tokenKey = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 0x61, count: 32))
+            let replayKey = try V2CredentialReplayEnvelopeKey(rawBytes: Data(repeating: 0x62, count: 32))
+            let policy = try V2DeviceRegistrationPolicy(
+                maximumActiveDevices: 2,
+                maximumNewDevicesPerWindow: 2,
+                window: 60
+            )
+            let issuer = try V2PostgresDeviceCredentialService(
+                database: app.db(.psql), tokenHMACKey: tokenKey,
+                replayEnvelopeKey: replayKey, registrationPolicy: policy, now: { now }
+            )
+            let userID = try UserID("00000000-0000-0000-0000-000000000c01")
+            let firstDevice = try DeviceID("00000000-0000-0000-0000-000000000c02")
+            let secondDevice = try DeviceID("00000000-0000-0000-0000-000000000c03")
+            let thirdDevice = try DeviceID("00000000-0000-0000-0000-000000000c04")
+            let fourthDevice = try DeviceID("00000000-0000-0000-0000-000000000c05")
+            let firstRequest = V2TrustedDeviceRegistration(
+                userID: userID, deviceID: firstDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c11")!
+            )
+            guard case .issued = try await issuer.register(firstRequest),
+                  case .issued = try await issuer.register(.init(
+                    userID: userID, deviceID: secondDevice,
+                    operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c12")!
+                  ))
+            else { Issue.record("expected first two device registrations"); return }
+            guard case .idempotent = try await issuer.register(firstRequest) else {
+                Issue.record("idempotent replay must remain outside the issuance budget"); return
+            }
+            #expect(try await count("im_v2.device_registration_rate_limits WHERE successful_registrations = 2", on: sql) == 1)
+
+            #expect(try await issuer.register(.init(
+                userID: userID, deviceID: thirdDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c13")!
+            )) == .activeDeviceLimitReached)
+
+            let sessions = V2PostgresDeviceSessionService(database: app.db(.psql), now: { now.addingTimeInterval(1) })
+            #expect(try await sessions.revokeDevice(
+                actorUserID: userID,
+                currentDeviceID: firstDevice,
+                targetDeviceID: secondDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c14")!
+            ) == .applied)
+            #expect(try await issuer.register(.init(
+                userID: userID, deviceID: thirdDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c15")!
+            )) == .rateLimited(retryAfterSeconds: 60))
+
+            let nextWindowIssuer = try V2PostgresDeviceCredentialService(
+                database: app.db(.psql), tokenHMACKey: tokenKey,
+                replayEnvelopeKey: replayKey, registrationPolicy: policy,
+                now: { now.addingTimeInterval(61) }
+            )
+            guard case .issued = try await nextWindowIssuer.register(.init(
+                userID: userID, deviceID: thirdDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c16")!
+            )) else { Issue.record("expected the next registration window to reopen"); return }
+            #expect(try await nextWindowIssuer.register(.init(
+                userID: userID, deviceID: fourthDevice,
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c17")!
+            )) == .activeDeviceLimitReached)
+            #expect(try await count("im_v2.auth_devices", on: sql) == 3)
+            #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 2)
+            #expect(try await count("im_v2.device_registration_rate_limits WHERE successful_registrations = 1", on: sql) == 1)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
         }
     }
 
@@ -7419,27 +7512,31 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             let store = PostgresV2LiveActivityStore(database: app.db(.psql), onlineLease: 10)
 
-            #expect(try await store.acquireConnection(
+            #expect(try await store.admitConnection(
                 identity: identity,
                 connectionID: firstConnection,
                 policy: policy,
                 now: now
             ) == .accepted(expiresAt: now.addingTimeInterval(10)))
-            #expect(try await store.acquireConnection(
+            #expect(try await store.renewConnection(
                 identity: identity,
                 connectionID: firstConnection,
-                policy: policy,
                 now: now.addingTimeInterval(1)
             ) == .accepted(expiresAt: now.addingTimeInterval(11)))
 
             let afterExpiry = now.addingTimeInterval(12)
-            #expect(try await store.acquireConnection(
+            #expect(try await store.renewConnection(
+                identity: identity,
+                connectionID: firstConnection,
+                now: afterExpiry
+            ) == .rejected)
+            #expect(try await store.admitConnection(
                 identity: identity,
                 connectionID: replacementConnection,
                 policy: policy,
                 now: afterExpiry
             ) == .accepted(expiresAt: afterExpiry.addingTimeInterval(10)))
-            #expect(try await store.acquireConnection(
+            #expect(try await store.admitConnection(
                 identity: identity,
                 connectionID: firstConnection,
                 policy: policy,

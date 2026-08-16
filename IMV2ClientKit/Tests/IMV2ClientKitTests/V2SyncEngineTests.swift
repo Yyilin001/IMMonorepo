@@ -384,9 +384,9 @@ struct V2SyncEngineTests {
         )
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("hybrid-member-token"), receipt: .init("hybrid-member-receipt"), hasMore: false, capabilityProfile: "base"))
 
-        #expect(try await store.knownHybridGroupRoomIDs() == [try .init(roomID)])
+        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
         try await store.deactivateHybridGroupRoom(roomID: .init(roomID))
-        #expect(try await store.knownHybridGroupRoomIDs().isEmpty)
+        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == nil)
     }
 
@@ -577,7 +577,7 @@ struct V2SyncEngineTests {
 
         _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
 
-        #expect(try await store.knownHybridGroupRoomIDs().isEmpty)
+        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
     }
 
     @Test("background hybrid maintenance is page-bounded and round-robin fair")
@@ -589,11 +589,17 @@ struct V2SyncEngineTests {
         let engine = V2GroupEventSyncEngine(transport: transport, store: store)
 
         let firstPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 3)
-        #expect(firstPass == .init(processedPageCount: 3, appliedEventCount: 0, mayHaveRemainingWork: true))
-        #expect(await transport.requestedRoomIDs() == [first, second, first])
+        #expect(firstPass == .init(processedPageCount: 2, appliedEventCount: 0, mayHaveRemainingWork: true))
+        #expect(await transport.requestedRoomIDs() == [first, second])
 
         let secondPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
         #expect(secondPass == .init(processedPageCount: 1, appliedEventCount: 0, mayHaveRemainingWork: true))
+        #expect(await transport.requestedRoomIDs() == [first, second, first])
+
+        // Scheduling position is owned by the store, so a replacement engine
+        // continues from the next room instead of resetting to the first.
+        let replacementEngine = V2GroupEventSyncEngine(transport: transport, store: store)
+        _ = try await replacementEngine.synchronizeBackgroundKnownRooms(maximumPages: 1)
         #expect(await transport.requestedRoomIDs() == [first, second, first, second])
     }
 
@@ -1640,12 +1646,21 @@ private struct ForbiddenGroupEventTransport: V2ClientGroupEventTransport {
 private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
     private var roomIDs: [RoomID]
     private var cursors: [RoomID: UInt64] = [:]
+    private var backgroundCursor: RoomID?
 
     init(roomIDs: [RoomID]) {
         self.roomIDs = roomIDs
     }
 
-    func knownHybridGroupRoomIDs() -> [RoomID] { roomIDs }
+    func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) -> [RoomID] {
+        let sorted = roomIDs.sorted { $0.rawValue < $1.rawValue }
+        let matching = roomID.map { cursor in
+            sorted.filter { $0.rawValue > cursor.rawValue }
+        } ?? sorted
+        return matching.prefix(limit).map { $0 }
+    }
+    func hybridGroupBackgroundCursor() -> RoomID? { backgroundCursor }
+    func setHybridGroupBackgroundCursor(_ roomID: RoomID?) { backgroundCursor = roomID }
     func isKnownHybridGroupRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
     func deactivateHybridGroupRoom(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
     func groupEventCursor(roomID: RoomID) -> UInt64 { cursors[roomID, default: 0] }

@@ -680,6 +680,36 @@ struct V2ConversationStoreTests {
         #expect(fileManager.fileExists(atPath: outsideFile.path))
     }
 
+    @Test func attachmentStagerEnforcesFileAndDirectoryBudgetsBeforePublishingACopy() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("v2-attachment-budget-" + UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let stagingDirectory = root.appendingPathComponent("staging", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let oversized = root.appendingPathComponent("oversized.bin")
+        try Data(repeating: 1, count: 9).write(to: oversized)
+        let first = root.appendingPathComponent("first.bin")
+        let second = root.appendingPathComponent("second.bin")
+        try Data(repeating: 2, count: 6).write(to: first)
+        try Data(repeating: 3, count: 6).write(to: second)
+        let stager = try V2FileConversationAttachmentStager(
+            directory: stagingDirectory,
+            policy: .init(maximumFileBytes: 8, maximumDirectoryBytes: 10, maximumFileCount: 2)
+        )
+
+        await #expect(throws: V2ConversationAttachmentStagingError.fileTooLarge) {
+            try await stager.stageImportedFile(at: oversized)
+        }
+        let staged = try await stager.stageImportedFile(at: first)
+        await #expect(throws: V2ConversationAttachmentStagingError.stagingQuotaExceeded) {
+            try await stager.stageImportedFile(at: second)
+        }
+
+        #expect(staged.byteCount == 6)
+        #expect(try fileManager.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil).count == 1)
+    }
+
     @Test func foregroundMediaDownloaderUsesFreshAuthorizedTransferAndOpaqueCacheFilename() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory

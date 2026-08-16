@@ -27,7 +27,35 @@ protocol V2ConversationAttachmentUploading: Sendable {
 enum V2ConversationAttachmentStagingError: Error, Equatable, Sendable {
     case notRegularFile
     case invalidByteCount
+    case fileTooLarge
+    case stagingQuotaExceeded
     case fileSystemFailure
+}
+
+struct V2ConversationAttachmentStagingPolicy: Equatable, Sendable {
+    let maximumFileBytes: Int64
+    let maximumDirectoryBytes: Int64
+    let maximumFileCount: Int
+
+    init(maximumFileBytes: Int64, maximumDirectoryBytes: Int64, maximumFileCount: Int) {
+        precondition(
+            maximumFileBytes > 0
+                && maximumDirectoryBytes >= maximumFileBytes
+                && maximumFileCount > 0
+        )
+        self.maximumFileBytes = maximumFileBytes
+        self.maximumDirectoryBytes = maximumDirectoryBytes
+        self.maximumFileCount = maximumFileCount
+    }
+
+    /// This device-local safety bound is deliberately independent of the
+    /// provider's authoritative limit. A provider may reject a smaller file,
+    /// but no configured provider can make the app stage an unbounded file.
+    static let standard = Self(
+        maximumFileBytes: 50 * 1_024 * 1_024,
+        maximumDirectoryBytes: 512 * 1_024 * 1_024,
+        maximumFileCount: 64
+    )
 }
 
 /// Owns temporary importer copies in a dedicated App Support directory. The
@@ -36,14 +64,21 @@ enum V2ConversationAttachmentStagingError: Error, Equatable, Sendable {
 actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     private let directory: URL
     private let fileManager: FileManager
+    private let policy: V2ConversationAttachmentStagingPolicy
     private let makeUUID: @Sendable () -> UUID
 
-    init(directory: URL, fileManager: FileManager = .default, makeUUID: @escaping @Sendable () -> UUID = UUID.init) throws {
+    init(
+        directory: URL,
+        fileManager: FileManager = .default,
+        policy: V2ConversationAttachmentStagingPolicy = .standard,
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init
+    ) throws {
         self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(
             directory,
             fileManager: fileManager
         )
         self.fileManager = fileManager
+        self.policy = policy
         self.makeUUID = makeUUID
     }
 
@@ -60,14 +95,26 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         }
         guard values.isRegularFile == true else { throw V2ConversationAttachmentStagingError.notRegularFile }
         guard let fileSize = values.fileSize, fileSize > 0 else { throw V2ConversationAttachmentStagingError.invalidByteCount }
+        guard Int64(fileSize) <= policy.maximumFileBytes else {
+            throw V2ConversationAttachmentStagingError.fileTooLarge
+        }
+        let usage = try stagingUsage()
+        guard usage.fileCount < policy.maximumFileCount,
+              usage.byteCount <= policy.maximumDirectoryBytes - Int64(fileSize)
+        else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
         let id = makeUUID()
         let destination = directory.appendingPathComponent(id.uuidString, isDirectory: false)
+        var copiedByteCount: Int64 = 0
         do {
-            try fileManager.copyItem(at: sourceURL, to: destination)
-            // A copied document can retain the importer's attributes.  Apply
-            // V2's managed-file policy explicitly before exposing its URL to
-            // the uploader, and remove the copy if that policy cannot hold.
+            copiedByteCount = try copyWithinLimits(
+                sourceURL: sourceURL,
+                destination: destination,
+                maximumDirectoryAddition: policy.maximumDirectoryBytes - usage.byteCount
+            )
             try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
+        } catch let error as V2ConversationAttachmentStagingError {
+            try? fileManager.removeItem(at: destination)
+            throw error
         } catch let error as V2DeviceLocalStorageError {
             try? fileManager.removeItem(at: destination)
             throw error
@@ -84,8 +131,86 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
             fileURL: destination,
             displayName: values.name ?? sourceURL.lastPathComponent,
             contentType: mimeType,
-            byteCount: Int64(fileSize)
+            byteCount: copiedByteCount
         )
+    }
+
+    private func copyWithinLimits(
+        sourceURL: URL,
+        destination: URL,
+        maximumDirectoryAddition: Int64
+    ) throws -> Int64 {
+        guard !fileManager.fileExists(atPath: destination.path),
+              fileManager.createFile(atPath: destination.path, contents: nil)
+        else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+        let source: FileHandle
+        do {
+            source = try FileHandle(forReadingFrom: sourceURL)
+        } catch {
+            throw V2ConversationAttachmentStagingError.fileSystemFailure
+        }
+        defer { try? source.close() }
+        let target: FileHandle
+        do {
+            target = try FileHandle(forWritingTo: destination)
+        } catch {
+            throw V2ConversationAttachmentStagingError.fileSystemFailure
+        }
+        defer {
+            try? target.close()
+        }
+        var total: Int64 = 0
+        do {
+            while let bytes = try source.read(upToCount: 64 * 1_024), !bytes.isEmpty {
+                let count = Int64(bytes.count)
+                guard total <= policy.maximumFileBytes - count else {
+                    throw V2ConversationAttachmentStagingError.fileTooLarge
+                }
+                guard total <= maximumDirectoryAddition - count else {
+                    throw V2ConversationAttachmentStagingError.stagingQuotaExceeded
+                }
+                try target.write(contentsOf: bytes)
+                total += count
+            }
+            try target.synchronize()
+        } catch let error as V2ConversationAttachmentStagingError {
+            throw error
+        } catch {
+            throw V2ConversationAttachmentStagingError.fileSystemFailure
+        }
+        guard total > 0 else { throw V2ConversationAttachmentStagingError.invalidByteCount }
+        return total
+    }
+
+    private func stagingUsage() throws -> (fileCount: Int, byteCount: Int64) {
+        let entries: [URL]
+        do {
+            entries = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: []
+            )
+        } catch {
+            throw V2ConversationAttachmentStagingError.fileSystemFailure
+        }
+        var byteCount: Int64 = 0
+        for entry in entries {
+            let values: URLResourceValues
+            do {
+                values = try entry.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            } catch {
+                throw V2ConversationAttachmentStagingError.fileSystemFailure
+            }
+            guard values.isRegularFile == true, let fileSize = values.fileSize, fileSize >= 0 else {
+                throw V2ConversationAttachmentStagingError.fileSystemFailure
+            }
+            let size = Int64(fileSize)
+            guard byteCount <= Int64.max - size else {
+                throw V2ConversationAttachmentStagingError.stagingQuotaExceeded
+            }
+            byteCount += size
+        }
+        return (entries.count, byteCount)
     }
 
     func discard(_ attachment: V2StagedConversationAttachment) {

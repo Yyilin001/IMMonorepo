@@ -10,11 +10,17 @@ struct V2AccountRuntimeConfigurationTests {
         let expectedRateLimit = try V2PasswordLoginRateLimitPolicy(maximumFailures: 5, window: 900, lockout: 900)
         let expectedIdentityRateLimit = try V2PublicIdentityLookupRateLimitPolicy(maximumQueries: 30, window: 60)
         let expectedEdgeClientRateLimit = try V2AccountEdgeClientRateLimitPolicy(maximumRequests: 60, window: 60)
+        let expectedDeviceRegistrationPolicy = try V2DeviceRegistrationPolicy(
+            maximumActiveDevices: 8,
+            maximumNewDevicesPerWindow: 16,
+            window: 2_592_000
+        )
         #expect(configuration.listener == expectedListener)
         #expect(configuration.accountAssertionKey.count == 32)
         #expect(configuration.passwordLoginRateLimit == expectedRateLimit)
         #expect(configuration.publicIdentityLookupRateLimit == expectedIdentityRateLimit)
         #expect(configuration.edgeClientRateLimit == expectedEdgeClientRateLimit)
+        #expect(configuration.deviceRegistrationPolicy == expectedDeviceRegistrationPolicy)
     }
 
     @Test("account service rejects public binding")
@@ -71,6 +77,15 @@ struct V2AccountRuntimeConfigurationTests {
         }
     }
 
+    @Test("account service rejects an invalid device registration budget")
+    func rejectsInvalidDeviceRegistrationPolicy() {
+        var invalidValues = values
+        invalidValues["IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT"] = "0"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT/IM_V2_MAX_NEW_DEVICES_PER_WINDOW/IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidValues))
+        }
+    }
+
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
@@ -97,6 +112,9 @@ struct V2AccountRuntimeConfigurationTests {
             "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS": "900",
             "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS": "60",
             "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS": "60",
+            "IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT": "8",
+            "IM_V2_MAX_NEW_DEVICES_PER_WINDOW": "16",
+            "IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS": "2592000",
             "IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES": "30",
             "IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS": "60",
         ]

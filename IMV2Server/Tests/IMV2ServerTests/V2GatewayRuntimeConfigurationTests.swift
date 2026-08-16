@@ -192,6 +192,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.idempotencyRetentionSeconds == 3_888_000)
         let expectedMetrics = try V2MetricsListenerConfiguration(host: "127.0.0.1", port: 9464)
         #expect(configuration.metrics == expectedMetrics)
+        #expect(configuration.metricsMinimumRefreshIntervalMilliseconds == 30_000)
         #expect(configuration.metricsRefreshTimeoutMilliseconds == 4_000)
         #expect(configuration.idleTimeoutMilliseconds == 60_000)
         #expect(configuration.gatewayNodeID == "gateway-a")
@@ -207,6 +208,20 @@ struct V2GatewayRuntimeConfigurationTests {
         guard case .durablePollingOnly = configuration.fanoutHint else {
             Issue.record("Expected durable polling without NATS configuration")
             return
+        }
+    }
+
+    @Test("metrics exact-aggregate cadence cannot be shorter than its timeout")
+    func rejectsMetricsRefreshCadenceBelowTimeout() {
+        var values = runtimeValues
+        values["IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS"] = "3999"
+
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_METRICS_REFRESH_TIMEOUT_MS/IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS/IM_V2_DATABASE_STATEMENT_TIMEOUT_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
         }
     }
 
@@ -427,6 +442,7 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_IDEMPOTENCY_RETENTION_SECONDS": "3888000",
             "IM_V2_METRICS_HOST": "127.0.0.1",
             "IM_V2_METRICS_PORT": "9464",
+            "IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS": "30000",
             "IM_V2_METRICS_REFRESH_TIMEOUT_MS": "4000",
             "IM_V2_GATEWAY_NODE_ID": "gateway-a",
             "IM_V2_GATEWAY_REPLICA_COUNT": "1",

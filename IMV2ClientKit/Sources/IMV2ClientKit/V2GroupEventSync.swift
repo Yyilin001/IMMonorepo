@@ -84,7 +84,12 @@ public protocol V2LocalGroupEventStore: Sendable {
     /// Only rooms explicitly created as hybrid are eligible for room-log
     /// synchronization. The mode is a durable room invariant, not a runtime
     /// heuristic based on the current member count.
-    func knownHybridGroupRoomIDs() async throws -> [RoomID]
+    func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) async throws -> [RoomID]
+    /// Durable keyset cursor for fair background scheduling. This cursor is
+    /// only a scheduling hint; per-room event cursors remain the delivery
+    /// authority.
+    func hybridGroupBackgroundCursor() async throws -> RoomID?
+    func setHybridGroupBackgroundCursor(_ roomID: RoomID?) async throws
     func isKnownHybridGroupRoom(roomID: RoomID) async throws -> Bool
     /// Stops room-log pulls after the authoritative server says this device's
     /// user is no longer a member. Historical local projections remain
@@ -117,10 +122,6 @@ public actor V2GroupEventSyncEngine {
     private let transport: any V2ClientGroupEventTransport
     private let store: any V2LocalGroupEventStore
     private let pageSize: Int
-    /// The next room is a scheduling hint only.  Durability is solely owned
-    /// by each room's SQLite cursor, so losing this in-memory hint after a
-    /// process restart can at worst change fairness, never delivery.
-    private var nextBackgroundRoomID: RoomID?
 
     public init(transport: any V2ClientGroupEventTransport, store: any V2LocalGroupEventStore, pageSize: Int = 200) {
         precondition(pageSize > 0 && pageSize <= V2GroupEventLogLimits.maximumPageSize)
@@ -149,18 +150,28 @@ public actor V2GroupEventSyncEngine {
     /// per room before moving to the next, preserving bounded network/SQLite
     /// work while preventing a large backlog from starving quieter rooms.
     public func synchronizeBackgroundKnownRooms(maximumPages: Int) async throws -> V2GroupEventBackgroundSyncProgress {
-        precondition(maximumPages > 0)
-        let roomIDs = try await store.knownHybridGroupRoomIDs().sorted { $0.rawValue < $1.rawValue }
+        precondition(maximumPages > 0 && maximumPages <= 10_000)
+        let cursor = try await store.hybridGroupBackgroundCursor()
+        let probeLimit = maximumPages + 1
+        var roomIDs = try await store.knownHybridGroupRoomIDs(after: cursor, limit: probeLimit)
+        if cursor != nil, roomIDs.count < probeLimit {
+            let wrapped = try await store.knownHybridGroupRoomIDs(after: nil, limit: probeLimit - roomIDs.count)
+            var seen = Set(roomIDs)
+            roomIDs.append(contentsOf: wrapped.filter { seen.insert($0).inserted })
+        }
         guard !roomIDs.isEmpty else {
-            nextBackgroundRoomID = nil
+            try await store.setHybridGroupBackgroundCursor(nil)
             return .init(processedPageCount: 0, appliedEventCount: 0, mayHaveRemainingWork: false)
         }
-        var index = nextBackgroundRoomID.flatMap { roomIDs.firstIndex(of: $0) } ?? 0
+        let hasUnscheduledRoom = roomIDs.count > maximumPages
+        if hasUnscheduledRoom {
+            roomIDs.removeLast(roomIDs.count - maximumPages)
+        }
         var processedPages = 0
         var appliedEvents = 0
-        while processedPages < maximumPages {
+        var roomHasMoreEvents = false
+        for roomID in roomIDs {
             try Task.checkCancellation()
-            let roomID = roomIDs[index]
             // A forbidden response is still one bounded background attempt;
             // otherwise a batch containing only revoked rooms could loop
             // forever while repeatedly deactivating the same stale entry.
@@ -168,17 +179,20 @@ public actor V2GroupEventSyncEngine {
             do {
                 let progress = try await synchronizeOnePage(roomID: roomID)
                 appliedEvents += progress.appliedEventCount
+                roomHasMoreEvents = roomHasMoreEvents || progress.hasMore
             } catch let error as V2RealtimeTransportError {
                 guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
                 try await store.deactivateHybridGroupRoom(roomID: roomID)
             }
-            index = (index + 1) % roomIDs.count
-            nextBackgroundRoomID = roomIDs[index]
+            // Persist after each bounded attempt. A crash can repeat the last
+            // room but cannot reset every restart to the lexicographically
+            // first room and starve the tail of a large room set.
+            try await store.setHybridGroupBackgroundCursor(roomID)
         }
         return .init(
             processedPageCount: processedPages,
             appliedEventCount: appliedEvents,
-            mayHaveRemainingWork: processedPages == maximumPages
+            mayHaveRemainingWork: hasUnscheduledRoom || roomHasMoreEvents
         )
     }
 }

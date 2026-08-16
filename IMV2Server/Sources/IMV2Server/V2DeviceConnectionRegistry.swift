@@ -57,7 +57,7 @@ public actor V2DeviceConnectionRegistry {
         guard let livePresenceLeases else { return true }
         let lease: V2AuthenticatedConnectionLeaseOutcome
         do {
-            lease = try await livePresenceLeases.acquireConnection(
+            lease = try await livePresenceLeases.admitConnection(
                 identity: identity,
                 connectionID: connectionID,
                 policy: connectionAdmissionPolicy,
@@ -277,10 +277,9 @@ public actor V2DeviceConnectionRegistry {
         guard let livePresenceLeases else { return true }
         let lease: V2AuthenticatedConnectionLeaseOutcome
         do {
-            lease = try await livePresenceLeases.acquireConnection(
+            lease = try await livePresenceLeases.renewConnection(
                 identity: identity,
                 connectionID: connectionID,
-                policy: connectionAdmissionPolicy,
                 now: Date()
             )
         } catch {

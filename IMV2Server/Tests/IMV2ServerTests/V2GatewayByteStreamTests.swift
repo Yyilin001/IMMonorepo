@@ -234,19 +234,22 @@ private actor OutboundFrameRecorder {
 
 private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
     private var active: Set<UUID> = []
-    private var acquisitions = 0
 
-    func acquireConnection(
+    func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID: UUID,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
-        acquisitions += 1
-        guard acquisitions == 1 else { return .rejected }
         active.insert(connectionID)
         return .accepted(expiresAt: now.addingTimeInterval(90))
     }
+
+    func renewConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID _: UUID,
+        now _: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome { .rejected }
 
     func removePresence(
         identity _: V2AuthenticatedConnection,

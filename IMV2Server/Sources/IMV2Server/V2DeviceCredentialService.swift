@@ -82,6 +82,8 @@ public enum V2DeviceRegistrationOutcome: Equatable, Sendable {
     case idempotent(V2IssuedDeviceCredentials)
     case idempotencyConflict
     case deviceUnavailable
+    case activeDeviceLimitReached
+    case rateLimited(retryAfterSeconds: Int)
 }
 
 public enum V2DeviceCredentialRefreshOutcome: Equatable, Sendable {
@@ -97,6 +99,46 @@ public enum V2DeviceCredentialServiceError: Error, Equatable, Sendable {
     case invalidConfiguration
     case malformedPersistence
     case unavailable
+}
+
+public struct V2DeviceRegistrationPolicy: Equatable, Sendable {
+    public let maximumActiveDevices: Int
+    public let maximumNewDevicesPerWindow: Int
+    public let window: TimeInterval
+
+    public init(
+        maximumActiveDevices: Int,
+        maximumNewDevicesPerWindow: Int,
+        window: TimeInterval
+    ) throws {
+        guard maximumActiveDevices > 0,
+              maximumActiveDevices <= 1_024,
+              maximumNewDevicesPerWindow > 0,
+              maximumNewDevicesPerWindow <= 100_000,
+              window.isFinite,
+              window >= 60,
+              window <= 366 * 86_400
+        else { throw V2DeviceCredentialServiceError.invalidConfiguration }
+        self.maximumActiveDevices = maximumActiveDevices
+        self.maximumNewDevicesPerWindow = maximumNewDevicesPerWindow
+        self.window = window
+    }
+
+    public static let standard = Self(
+        validatedMaximumActiveDevices: 8,
+        maximumNewDevicesPerWindow: 16,
+        window: 30 * 86_400
+    )
+
+    private init(
+        validatedMaximumActiveDevices: Int,
+        maximumNewDevicesPerWindow: Int,
+        window: TimeInterval
+    ) {
+        maximumActiveDevices = validatedMaximumActiveDevices
+        self.maximumNewDevicesPerWindow = maximumNewDevicesPerWindow
+        self.window = window
+    }
 }
 
 /// Stable boundary used by a separately deployed account-assertion adapter.
@@ -174,6 +216,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     private let accessTokenLifetime: TimeInterval
     private let refreshCredentialLifetime: TimeInterval
     private let replayWindow: TimeInterval
+    private let registrationPolicy: V2DeviceRegistrationPolicy
 
     public init(
         database: any Database,
@@ -183,6 +226,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         accessTokenLifetime: TimeInterval = 15 * 60,
         refreshCredentialLifetime: TimeInterval = 30 * 24 * 60 * 60,
         replayWindow: TimeInterval = 10 * 60,
+        registrationPolicy: V2DeviceRegistrationPolicy = .standard,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         guard accessTokenLifetime > 0, refreshCredentialLifetime > 0, replayWindow > 0,
@@ -195,6 +239,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         self.accessTokenLifetime = accessTokenLifetime
         self.refreshCredentialLifetime = refreshCredentialLifetime
         self.replayWindow = replayWindow
+        self.registrationPolicy = registrationPolicy
         self.now = now
     }
 
@@ -224,19 +269,31 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 return .idempotent(try credentials(from: prior, request: request))
             }
 
+            let isNewDevice: Bool
             if let existing = try await sql.raw("SELECT user_id, revoked_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self) {
                 guard existing.userID == userUUID, existing.revokedAt == nil else { return .deviceUnavailable }
                 guard try await sql.raw("SELECT 1 FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first() == nil else {
                     return .idempotencyConflict
                 }
                 try await sql.raw("UPDATE im_v2.auth_devices SET display_name = \(bind: metadata.displayName), platform = \(bind: metadata.platform), last_active_at = GREATEST(last_active_at, \(bind: issuedAt)) WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)").run()
+                isNewDevice = false
             } else {
+                guard try await activeDeviceCount(sql, userID: userUUID) < registrationPolicy.maximumActiveDevices else {
+                    return .activeDeviceLimitReached
+                }
+                if let retryAfter = try await newDeviceRegistrationRetryAfter(sql, userID: userUUID, now: issuedAt) {
+                    return .rateLimited(retryAfterSeconds: retryAfter)
+                }
                 try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, display_name, platform, last_active_at, created_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: metadata.displayName), \(bind: metadata.platform), \(bind: issuedAt), \(bind: issuedAt))").run()
+                isNewDevice = true
             }
 
             let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, issuedAt: issuedAt)
             try await insertNewSession(sql, credentials: credentials, issuedAt: issuedAt)
             try await insertOperation(sql, kind: "registration", requestRefreshHMAC: nil, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt)
+            if isNewDevice {
+                try await recordSuccessfulNewDeviceRegistration(sql, userID: userUUID, now: issuedAt)
+            }
             return .issued(credentials)
         }
     }
@@ -348,6 +405,53 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         try await sql.raw("SELECT 1 FROM im_v2.special_accounts WHERE account_user_id = \(bind: userID) AND status = 'active'").first() != nil
     }
 
+    private func activeDeviceCount(_ sql: any SQLDatabase, userID: UUID) async throws -> Int {
+        try await sql.raw("SELECT COUNT(*)::integer AS count FROM im_v2.auth_devices WHERE user_id = \(bind: userID) AND revoked_at IS NULL")
+            .first(decoding: DeviceCountRow.self)?.count ?? 0
+    }
+
+    private func newDeviceRegistrationRetryAfter(
+        _ sql: any SQLDatabase,
+        userID: UUID,
+        now: Date
+    ) async throws -> Int? {
+        guard let row = try await sql.raw("SELECT window_started_at, successful_registrations FROM im_v2.device_registration_rate_limits WHERE user_id = \(bind: userID) FOR UPDATE")
+            .first(decoding: DeviceRegistrationRateLimitRow.self)
+        else { return nil }
+        let elapsed = max(0, now.timeIntervalSince(row.windowStartedAt))
+        guard elapsed < registrationPolicy.window,
+              row.successfulRegistrations >= registrationPolicy.maximumNewDevicesPerWindow
+        else { return nil }
+        return max(1, Int(ceil(registrationPolicy.window - elapsed)))
+    }
+
+    private func recordSuccessfulNewDeviceRegistration(
+        _ sql: any SQLDatabase,
+        userID: UUID,
+        now: Date
+    ) async throws {
+        let windowSeconds = Int64(registrationPolicy.window.rounded(.towardZero))
+        try await sql.raw("""
+            INSERT INTO im_v2.device_registration_rate_limits
+                (user_id, window_started_at, successful_registrations, updated_at)
+            VALUES (\(bind: userID), \(bind: now), 1, \(bind: now))
+            ON CONFLICT (user_id) DO UPDATE
+            SET window_started_at = CASE
+                    WHEN im_v2.device_registration_rate_limits.window_started_at
+                           + \(bind: windowSeconds) * INTERVAL '1 second' <= \(bind: now)
+                    THEN EXCLUDED.window_started_at
+                    ELSE im_v2.device_registration_rate_limits.window_started_at
+                END,
+                successful_registrations = CASE
+                    WHEN im_v2.device_registration_rate_limits.window_started_at
+                           + \(bind: windowSeconds) * INTERVAL '1 second' <= \(bind: now)
+                    THEN 1
+                    ELSE im_v2.device_registration_rate_limits.successful_registrations + 1
+                END,
+                updated_at = EXCLUDED.updated_at
+            """).run()
+    }
+
     private func normalizedMetadata(_ metadata: V2DeviceRegistrationMetadata) throws -> (displayName: String, platform: String) {
         func normalize(_ value: String, fallback: String) -> String {
             let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -371,6 +475,17 @@ private struct DeviceRow: Decodable {
     let userID: UUID
     let revokedAt: Date?
     enum CodingKeys: String, CodingKey { case userID = "user_id"; case revokedAt = "revoked_at" }
+}
+
+private struct DeviceCountRow: Decodable { let count: Int }
+
+private struct DeviceRegistrationRateLimitRow: Decodable {
+    let windowStartedAt: Date
+    let successfulRegistrations: Int
+    enum CodingKeys: String, CodingKey {
+        case windowStartedAt = "window_started_at"
+        case successfulRegistrations = "successful_registrations"
+    }
 }
 
 private struct RefreshSessionRow: Decodable {

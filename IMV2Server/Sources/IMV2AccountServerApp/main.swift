@@ -67,7 +67,8 @@ enum IMV2AccountServerApp {
             let credentials = try V2PostgresDeviceCredentialService(
                 database: database,
                 tokenHMACKey: configuration.accessTokenKey,
-                replayEnvelopeKey: configuration.replayEnvelopeKey
+                replayEnvelopeKey: configuration.replayEnvelopeKey,
+                registrationPolicy: configuration.deviceRegistrationPolicy
             )
             let authenticator = V2PostgresGatewayAuthenticator(
                 database: database,

@@ -183,6 +183,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// fence or a delayed client could execute an already-completed command.
     public let idempotencyRetentionSeconds: Int
     public let metrics: V2MetricsListenerConfiguration
+    public let metricsMinimumRefreshIntervalMilliseconds: Int
     public let metricsRefreshTimeoutMilliseconds: Int
     public let gatewayNodeID: String
     /// The explicit deployment topology fence for process-local wake routing.
@@ -309,9 +310,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         metricsRefreshTimeoutMilliseconds = try Self.boundedPositive(
             "IM_V2_METRICS_REFRESH_TIMEOUT_MS", maximum: 60_000, environment: environment
         )
-        guard metricsRefreshTimeoutMilliseconds <= databasePolicy.statementTimeoutMilliseconds else {
+        metricsMinimumRefreshIntervalMilliseconds = try Self.boundedPositive(
+            "IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS", maximum: 3_600_000, environment: environment
+        )
+        guard metricsRefreshTimeoutMilliseconds <= databasePolicy.statementTimeoutMilliseconds,
+              metricsRefreshTimeoutMilliseconds <= metricsMinimumRefreshIntervalMilliseconds
+        else {
             throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_METRICS_REFRESH_TIMEOUT_MS/IM_V2_DATABASE_STATEMENT_TIMEOUT_MS"
+                "IM_V2_METRICS_REFRESH_TIMEOUT_MS/IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS/IM_V2_DATABASE_STATEMENT_TIMEOUT_MS"
             )
         }
         gatewayNodeID = try Self.gatewayNodeID(environment: environment)

@@ -55,7 +55,6 @@ public enum V2ReadReceiptStoreError: Error, Equatable, Sendable {
     case roomNotFound
     case messageNotFound
     case actorNotMember
-    case membershipRevisionConflict(currentRevision: UInt64)
     case roomSequenceNotFound
     case invalidRequest
     case corruptPersistenceState

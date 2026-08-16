@@ -101,6 +101,9 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
             case .issued(let value), .idempotent(let value): credentials = value
             case .idempotencyConflict: throw Abort(.conflict)
             case .deviceUnavailable: throw Abort(.forbidden)
+            case .activeDeviceLimitReached: throw Abort(.conflict)
+            case .rateLimited(let retryAfterSeconds):
+                return noStoreRetryAfterResponse(seconds: retryAfterSeconds)
             }
             return try noStoreJSONResponse(.init(credentials: credentials))
         }
@@ -132,5 +135,13 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         headers.replaceOrAdd(name: "Pragma", value: "no-cache")
         return .init(status: .ok, headers: headers, body: .init(data: data))
+    }
+
+    private func noStoreRetryAfterResponse(seconds: Int) -> Response {
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        headers.replaceOrAdd(name: "Retry-After", value: String(max(1, seconds)))
+        return .init(status: .tooManyRequests, headers: headers)
     }
 }

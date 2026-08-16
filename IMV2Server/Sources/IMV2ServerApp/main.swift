@@ -131,6 +131,9 @@ enum IMV2ServerApp {
                         includesUserShardMetrics: false
                     )
                 ] + userShardMetricsSources),
+                minimumRefreshInterval: TimeInterval(
+                    configuration.metricsMinimumRefreshIntervalMilliseconds
+                ) / 1_000,
                 maximumRefreshDuration: TimeInterval(
                     configuration.metricsRefreshTimeoutMilliseconds
                 ) / 1_000

@@ -13,3 +13,11 @@ for package in IMV2Core IMV2ClientKit IMV2Server; do
   # Xcode's xctest directly loses the selected toolchain's libTesting.dylib.
   swift test --package-path "${repo_root}/${package}"
 done
+
+# Keep generated protocol code, retained-volume migration markers, startup
+# schema coverage and strict deployment examples in the same required gate as
+# the code they describe. A green unit suite must not permit deployment drift.
+bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
+bash "${repo_root}/scripts/check_v2_local_schema_migration_markers.sh"
+bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"
+bash "${repo_root}/scripts/check_v2_runtime_env_examples.sh"

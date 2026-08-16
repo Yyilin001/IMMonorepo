@@ -131,13 +131,22 @@ struct V2AuthenticatedGatewayAdmissionTests {
 private actor HiddenPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
     private var connectionIDs: Set<UUID> = []
 
-    func acquireConnection(
+    func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID: UUID,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
         connectionIDs.insert(connectionID)
+        return .accepted(expiresAt: now.addingTimeInterval(90))
+    }
+
+    func renewConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome {
+        guard connectionIDs.contains(connectionID) else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(90))
     }
 

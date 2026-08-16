@@ -155,18 +155,13 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
             guard membership != nil else { throw V2ReadReceiptStoreError.actorNotMember }
             let cursorValue = try cursor.map(receiptCursor)
             if let cursorValue {
-                guard cursorValue.version == 2,
+                guard cursorValue.version == 3,
                       cursorValue.roomID == room,
                       cursorValue.messageID == message,
                       cursorValue.actorUserID == actor,
                       cursorValue.messageRoomSequence == context.messageRoomSequence,
                       cursorValue.committedMembershipRevision == context.committedMembershipRevision
                 else { throw V2ReadReceiptStoreError.invalidRequest }
-                guard cursorValue.currentMembershipRevision == context.currentMembershipRevision else {
-                    throw V2ReadReceiptStoreError.membershipRevisionConflict(
-                        currentRevision: UInt64(context.currentMembershipRevision)
-                    )
-                }
             }
             let rows: [ReceiptReaderRow]
             if let cursorValue {
@@ -203,7 +198,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
                 messageID: message,
                 actorUserID: actor,
                 context: context,
-                updatedAtMicroseconds: pageRows.last!.updatedAtMicroseconds,
+                readThroughRoomSequence: pageRows.last!.readThroughRoomSequence,
                 userID: pageRows.last!.userID
             ) : nil
             return try .init(
@@ -226,7 +221,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
         if let cursor {
             return try await sql.raw("""
                 SELECT receipt.user_id,
-                       round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds,
+                       receipt.read_through_room_sequence,
                        profile.public_handle,
                        profile.display_name
                 FROM im_v2.room_read_receipts AS receipt
@@ -257,17 +252,16 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
                         AND current.joined_revision <= \(bind: context.currentMembershipRevision)
                         AND (current.left_revision IS NULL OR current.left_revision > \(bind: context.currentMembershipRevision))
                   )
-                  AND (receipt.updated_at, receipt.user_id) < (
-                      TIMESTAMPTZ 'epoch' + \(bind: cursor.updatedAtMicroseconds) * INTERVAL '1 microsecond',
-                      \(bind: cursor.userID)
+                  AND (receipt.read_through_room_sequence, receipt.user_id) < (
+                      \(bind: cursor.readThroughRoomSequence), \(bind: cursor.userID)
                   )
-                ORDER BY receipt.updated_at DESC, receipt.user_id DESC
+                ORDER BY receipt.read_through_room_sequence DESC, receipt.user_id DESC
                 LIMIT \(bind: limit)
                 """).all(decoding: ReceiptReaderRow.self)
         }
         return try await sql.raw("""
             SELECT receipt.user_id,
-                   round(extract(epoch FROM receipt.updated_at) * 1000000)::bigint AS updated_at_microseconds,
+                   receipt.read_through_room_sequence,
                    profile.public_handle,
                    profile.display_name
             FROM im_v2.room_read_receipts AS receipt
@@ -298,7 +292,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptStore {
                     AND current.joined_revision <= \(bind: context.currentMembershipRevision)
                     AND (current.left_revision IS NULL OR current.left_revision > \(bind: context.currentMembershipRevision))
               )
-            ORDER BY receipt.updated_at DESC, receipt.user_id DESC
+            ORDER BY receipt.read_through_room_sequence DESC, receipt.user_id DESC
             LIMIT \(bind: limit)
             """).all(decoding: ReceiptReaderRow.self)
     }
@@ -346,12 +340,12 @@ private struct ReceiptReaderContextRow: Decodable {
 }
 private struct ReceiptReaderRow: Decodable {
     let userID: UUID
-    let updatedAtMicroseconds: Int64
+    let readThroughRoomSequence: Int64
     let publicHandle: String
     let displayName: String
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
-        case updatedAtMicroseconds = "updated_at_microseconds"
+        case readThroughRoomSequence = "read_through_room_sequence"
         case publicHandle = "public_handle"
         case displayName = "display_name"
     }
@@ -363,8 +357,7 @@ private struct ReceiptCursor: Codable {
     let actorUserID: UUID
     let messageRoomSequence: Int64
     let committedMembershipRevision: Int64
-    let currentMembershipRevision: Int64
-    let updatedAtMicroseconds: Int64
+    let readThroughRoomSequence: Int64
     let userID: UUID
 }
 private struct ReceiptProjectionShadowRequest: Sendable {
@@ -400,18 +393,17 @@ private func receiptCursorString(
     messageID: UUID,
     actorUserID: UUID,
     context: ReceiptReaderContextRow,
-    updatedAtMicroseconds: Int64,
+    readThroughRoomSequence: Int64,
     userID: UUID
 ) throws -> String {
     let encoded = try JSONEncoder().encode(ReceiptCursor(
-        version: 2,
+        version: 3,
         roomID: roomID,
         messageID: messageID,
         actorUserID: actorUserID,
         messageRoomSequence: context.messageRoomSequence,
         committedMembershipRevision: context.committedMembershipRevision,
-        currentMembershipRevision: context.currentMembershipRevision,
-        updatedAtMicroseconds: updatedAtMicroseconds,
+        readThroughRoomSequence: readThroughRoomSequence,
         userID: userID
     ))
     return encoded.base64EncodedString()

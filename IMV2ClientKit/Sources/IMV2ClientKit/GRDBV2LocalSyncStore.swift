@@ -211,13 +211,59 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    public func knownHybridGroupRoomIDs() throws -> [RoomID] {
+    public func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) throws -> [RoomID] {
+        precondition(limit > 0 && limit <= 10_001)
+        return try databasePool.read { db in
+            let rawRoomIDs: [String]
+            if let roomID {
+                rawRoomIDs = try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT room_id
+                        FROM v2_room_profile_projections
+                        WHERE delivery_mode = ? AND room_id > ?
+                        ORDER BY room_id
+                        LIMIT ?
+                        """,
+                    arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID.rawValue, limit]
+                )
+            } else {
+                rawRoomIDs = try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT room_id
+                        FROM v2_room_profile_projections
+                        WHERE delivery_mode = ?
+                        ORDER BY room_id
+                        LIMIT ?
+                        """,
+                    arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, limit]
+                )
+            }
+            return try rawRoomIDs.map(RoomID.init)
+        }
+    }
+
+    public func hybridGroupBackgroundCursor() throws -> RoomID? {
         try databasePool.read { db in
-            try String.fetchAll(
+            guard let rawValue = try String.fetchOne(
                 db,
-                sql: "SELECT room_id FROM v2_room_profile_projections WHERE delivery_mode = ? ORDER BY room_id",
-                arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue]
-            ).map(RoomID.init)
+                sql: "SELECT after_room_id FROM v2_hybrid_group_background_state WHERE singleton = 1"
+            ) else { return nil }
+            return try RoomID(rawValue)
+        }
+    }
+
+    public func setHybridGroupBackgroundCursor(_ roomID: RoomID?) throws {
+        try databasePool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO v2_hybrid_group_background_state (singleton, after_room_id)
+                    VALUES (1, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET after_room_id = excluded.after_room_id
+                    """,
+                arguments: [roomID?.rawValue]
+            )
         }
     }
 
@@ -4613,6 +4659,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 BEGIN
                     DELETE FROM v2_contact_profile_search WHERE rowid = OLD.rowid;
                 END;
+            """)
+        }
+        // Keep new migrations at the end. GRDB validates migration ordering
+        // for already-installed databases even when the migration is additive.
+        migrator.registerMigration("addV2HybridGroupBackgroundState") { db in
+            try db.execute(sql: """
+                CREATE TABLE v2_hybrid_group_background_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    after_room_id TEXT NULL
+                );
+                INSERT INTO v2_hybrid_group_background_state (singleton, after_room_id)
+                VALUES (1, NULL);
             """)
         }
         return migrator

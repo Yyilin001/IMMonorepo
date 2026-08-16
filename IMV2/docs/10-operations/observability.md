@@ -54,6 +54,9 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 不保存或输出任意连接 ID、IP、用户、设备或请求 ID。
 
 同一私有 endpoint 还在每次抓取时读取 PostgreSQL 的 durable-work 快照。
+实际精确聚合会在并发抓取之间合并，并按
+`IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS`（示例为 30 秒）缓存；该值必须不小于
+刷新超时，避免高频 scraper 对 durable work 表形成持续扫描负载。
 `im_v2_durable_work_metrics_available` 为 `0` 表示本次数据库快照失败或超过
 `IM_V2_METRICS_REFRESH_TIMEOUT_MS`，但 `/metrics` 本身仍保持可抓取；该值必须被
 单独告警。超时后如存在成功快照，endpoint 返回 last-known-good 数值并设置

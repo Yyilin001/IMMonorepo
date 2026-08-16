@@ -126,7 +126,7 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
     private var refreshResume: CheckedContinuation<Void, Never>?
     private var didStartRefresh = false
 
-    func acquireConnection(
+    func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID: UUID,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
@@ -137,6 +137,15 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
         refreshStarted?.resume()
         refreshStarted = nil
         await withCheckedContinuation { refreshResume = $0 }
+        return .accepted(expiresAt: now.addingTimeInterval(30))
+    }
+
+    func renewConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome {
+        guard active.contains(connectionID) else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
@@ -165,13 +174,22 @@ private actor SuspendedPreferencePresenceLeases: V2LivePresenceLeaseManaging {
     private var lookupResume: CheckedContinuation<Void, Never>?
     private var didStartLookup = false
 
-    func acquireConnection(
+    func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID: UUID,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
         active.insert(connectionID)
+        return .accepted(expiresAt: now.addingTimeInterval(30))
+    }
+
+    func renewConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID: UUID,
+        now: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome {
+        guard active.contains(connectionID) else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
