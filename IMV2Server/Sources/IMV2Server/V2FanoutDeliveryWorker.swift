@@ -54,11 +54,10 @@ public enum V2FanoutDeliveryClaimLane: Sendable, Equatable {
     case expiredLease
 }
 
-/// One stable share of a concurrent claim pass. Generic and recovery delivery
-/// assigns the same target user to one partition so workers do not contend on
-/// that user's monotonic sync-sequence row. The co-located direct fast path may
-/// instead assign both recipients by source event. Durable row/advisory fences
-/// retain correctness if process concurrency or replica count changes later.
+/// One stable share of a concurrent claim pass. Every delivery lane assigns
+/// the same target user to one partition so workers do not contend on that
+/// user's monotonic sync-sequence row. Durable row/advisory fences retain
+/// correctness if process concurrency or replica count changes later.
 public struct V2FanoutDeliveryClaimPartition: Sendable, Equatable {
     public let index: Int
     public let count: Int

@@ -163,7 +163,7 @@ public enum V2SchemaReadiness {
                   ON namespace.oid = index_relation.relnamespace
                 WHERE namespace.nspname = \(bind: schema)
                   AND index_relation.relname IN (
-                      'fanout_deliveries_fresh_direct_source_lane_claim_idx',
+                      'fanout_deliveries_fresh_direct_target_lane_claim_idx',
                       'fanout_deliveries_fresh_generic_target_lane_claim_idx'
                   )
                   AND index_record.indisvalid

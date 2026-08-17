@@ -15,7 +15,7 @@ IM_V2_DIRECT_FANOUT_MODE=preplanned  # 仅 message.accepted 私聊快路径
 ## 启用前门槛
 
 1. 当前 schema readiness 通过，router configuration 恰有一行且 override 无无效 bucket；
-   `fanout_deliveries_fresh_direct_source_lane_claim_idx` 与
+   `fanout_deliveries_fresh_direct_target_lane_claim_idx` 与
    `fanout_deliveries_fresh_generic_target_lane_claim_idx` 已创建且有效；
 2. `room_outbox`、fanout plan/delivery、completion release 无 paused/长期 leased backlog；
 3. 备份可恢复，记录 gateway image digest、配置、数据库参数和基线压测结果；
@@ -82,10 +82,11 @@ scheduled/paused delivery、terminal completion release 与连接池等待。日
 
 `IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` 只是一次 claim pass 的上限；fresh direct 的单事务
 上限仍由 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` 控制（当前最大 128）。压测时不要为了追求
-瞬时 ACK/s 放大单事务，优先通过互不重叠的 source-event lane 并行扩展，并同时观察 lock
-wait、WAL burst 和 p99。source event 映射到固定 8 个数据库 lane，同一私聊事件的两个
-delivery 必须归属同一 lane；禁止修改 SQL hash 常量而不重建对应索引并完成相同数据快照的
-A/B。
+瞬时 ACK/s 放大单事务，优先通过互不重叠的 target-user lane 并行扩展，并同时观察 lock
+wait、WAL burst 和 p99。target user 映射到固定 8 个数据库 lane，同一用户的 fresh delivery
+必须归属同一 lane；跨副本由非阻塞用户 advisory lock 再次仲裁。同一私聊事件的两条 delivery
+可以位于不同 lane，source-event advisory lock 仍保证正文只物化一次。禁止修改 SQL hash
+常量而不重建对应索引并完成相同数据快照的 A/B。
 
 同库 fresh delivery 正常排空后应保持 `retry_count=0`；非零表示它按设计进入了恢复协议：
 

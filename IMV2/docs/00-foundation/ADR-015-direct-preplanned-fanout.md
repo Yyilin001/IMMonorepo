@@ -51,20 +51,22 @@ Planner。
 - 只有该事务创建的两条 direct delivery 写入 `fresh_direct_eligible=true`。快路径直接从这个
   窄、可索引的 durable 分类领取，禁止依赖 `fanout_plans.state` 的瞬时统计量驱动大表 join；
   plan/unit 不变量仍由同事务创建和 completion 计数更新共同校验，异常会整批回滚并进入恢复协议。
-- 同一 source event 的两位接收者归属同一 fresh lane。跨 replica 再以 non-blocking source
-  advisory lock 选出唯一 materializer；未取得锁的事务释放候选行稍后重试，不等待也不争抢
+- fresh direct 与普通 fresh work 一样按 target user 归属固定 lane，避免同一进程的 worker
+  并发更新该用户的单调 Sync Sequence。跨 replica 再以 non-blocking exclusive user advisory
+  lock 仲裁；未取得锁的行保持 pending，避免锁等待形成事务车队。
+- 同一 source event 的两位接收者可以位于不同 lane；non-blocking source advisory lock 仍选出
+  唯一 materializer，未取得锁的事务释放候选行稍后重试，不等待也不争抢
   `(source_event_id,projection_kind)` 唯一键。远端 target 仍在自己的物理 store 建立引用。
 - `(source_event_id,target_user_id,projection_kind)`、inbox 和 immutable state 冲突仍按原
   幂等/等值验证处理，禁止 last-write-wins。
 - shared state 不是可见性授权。增量同步、Snapshot 与媒体下载仍必须先命中该用户的
   delivery/projection reference。
-- fresh direct projection 在持有 delivery row lock 后获取每用户 route advisory share lock，
+- fresh direct projection 在持有 delivery row lock 后尝试每用户 route advisory exclusive lock，
   再重新读取 route/migration；stale route 不得写旧 owner，forwarding/verified migration 不得
   走同库快路径。异常行回落到普通 lease lane，以便 retry policy 最终 pause poison work。
-- fresh claim 按 source event 使用固定 8 个数据库 hash lane；任意较小 worker 数只接管与
-  自身 index 同余的 lane。这样调整进程并发不改变所有权、同一事件的两个 target 不被进程内
-  worker 拆开，同时 PostgreSQL 可使用表达式索引避免重复扫描全部 pending delivery。
-- 非 direct 的 fresh work 仍按 target user 使用固定 8 个 lane，retry/expired work 也始终按
+- 所有 fresh claim 按 target user 使用固定 8 个数据库 hash lane；任意较小 worker 数只接管与
+  自身 index 同余的 lane。这样调整进程并发不改变用户所有权，同时 PostgreSQL 可使用表达式
+  索引避免重复扫描全部 pending delivery。retry/expired work 也始终按
   target user 分区；不能把 source-event 分区扩展到通用投影，否则同一用户的 Sync sequence
   会被多个 worker 并发更新并产生 transaction-id lock wait。
 

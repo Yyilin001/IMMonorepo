@@ -58,10 +58,9 @@ public struct PostgresV2FanoutDeliveryStore:
     }
 
     /// A fixed database lane makes fresh predicates indexable while allowing
-    /// the process to run any smaller worker count. Generic work is assigned
-    /// by target user so sequence writers remain disjoint; only the explicitly
-    /// classified direct fast path is assigned by source event so its two
-    /// recipients share one payload-materialization transaction.
+    /// the process to run any smaller worker count. All fresh work is assigned
+    /// by target user so sequence writers remain disjoint. Direct deliveries
+    /// separately elect one source-event payload materializer below.
     private static let stableFreshLaneCount: Int64 = 8
 
     private static func dynamicTargetPartitionEligibility(
@@ -78,23 +77,20 @@ public struct PostgresV2FanoutDeliveryStore:
     }
 
     private static func stableFreshPartitionEligibility(
-        _ partition: V2FanoutDeliveryClaimPartition?, bySourceEvent: Bool
+        _ partition: V2FanoutDeliveryClaimPartition?
     ) -> SQLQueryString {
         guard let partition else { return "" }
         let lanes = stride(
             from: Int64(partition.index), to: stableFreshLaneCount,
             by: partition.count
         ).map { $0 }
-        let identity = bySourceEvent
-            ? "delivery.source_event_id::text"
-            : "delivery.target_user_id::text"
         if lanes.count == 1, let lane = lanes.first {
             // PostgreSQL does not reliably reduce `= ANY(singleton)` to an
             // equality index condition. The scalar form lets the matching
             // expression index also supply source/target ordering.
             return """
                 AND mod(
-                    hashtextextended(\(unsafeRaw: identity), 0)
+                    hashtextextended(delivery.target_user_id::text, 0)
                         & 9223372036854775807,
                     8
                 ) = \(bind: lane)
@@ -102,7 +98,7 @@ public struct PostgresV2FanoutDeliveryStore:
         }
         return """
             AND mod(
-                hashtextextended(\(unsafeRaw: identity), 0)
+                hashtextextended(delivery.target_user_id::text, 0)
                     & 9223372036854775807,
                 8
             ) = ANY(\(bind: lanes)::bigint[])
@@ -189,13 +185,18 @@ public struct PostgresV2FanoutDeliveryStore:
         } else {
             ""
         }
-        let partitionEligibility = if selectsDirectRecovery {
-            Self.stableFreshPartitionEligibility(partition, bySourceEvent: true)
-        } else if lane == .fresh {
-            Self.stableFreshPartitionEligibility(partition, bySourceEvent: false)
+        let partitionEligibility = if lane == .fresh {
+            Self.stableFreshPartitionEligibility(partition)
         } else {
             Self.dynamicTargetPartitionEligibility(partition)
         }
+        let planJoin: SQLQueryString = selectsDirectRecovery ? "" : """
+            JOIN im_v2.fanout_plans AS plan
+              ON plan.source_event_id = delivery.source_event_id
+            """
+        let plannedEligibility: SQLQueryString = selectsDirectRecovery
+            ? ""
+            : "AND plan.state = 'planned'"
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows: [ClaimedDeliveryRow]
@@ -205,10 +206,9 @@ public struct PostgresV2FanoutDeliveryStore:
                         WITH candidates AS (
                             SELECT delivery.source_event_id, delivery.target_user_id, delivery.projection_kind
                             FROM im_v2.fanout_deliveries AS delivery
-                            JOIN im_v2.fanout_plans AS plan
-                              ON plan.source_event_id = delivery.source_event_id
+                            \(planJoin)
                             WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
-                              AND plan.state = 'planned'
+                              \(plannedEligibility)
                               AND \(eligibility)
                               \(freshClassEligibility)
                               \(partitionEligibility)
@@ -252,10 +252,9 @@ public struct PostgresV2FanoutDeliveryStore:
                     WITH candidates AS (
                         SELECT delivery.source_event_id, delivery.target_user_id, delivery.projection_kind
                         FROM im_v2.fanout_deliveries AS delivery
-                        JOIN im_v2.fanout_plans AS plan
-                          ON plan.source_event_id = delivery.source_event_id
+                        \(planJoin)
                         WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
-                          AND plan.state = 'planned'
+                          \(plannedEligibility)
                           AND \(eligibility)
                           \(freshClassEligibility)
                           \(partitionEligibility)
@@ -278,9 +277,9 @@ public struct PostgresV2FanoutDeliveryStore:
                         WITH candidates AS (
                             SELECT delivery.source_event_id, delivery.target_user_id, delivery.projection_kind
                             FROM im_v2.fanout_deliveries AS delivery
-                            JOIN im_v2.fanout_plans AS plan
-                              ON plan.source_event_id = delivery.source_event_id
-                            WHERE delivery.state = 'pending' AND plan.state = 'planned'
+                            \(planJoin)
+                            WHERE delivery.state = 'pending'
+                              \(plannedEligibility)
                               AND \(eligibility)
                               \(freshClassEligibility)
                               \(partitionEligibility)
@@ -324,9 +323,9 @@ public struct PostgresV2FanoutDeliveryStore:
                     WITH candidates AS (
                         SELECT delivery.source_event_id, delivery.target_user_id, delivery.projection_kind
                         FROM im_v2.fanout_deliveries AS delivery
-                        JOIN im_v2.fanout_plans AS plan
-                          ON plan.source_event_id = delivery.source_event_id
-                        WHERE delivery.state = 'pending' AND plan.state = 'planned'
+                        \(planJoin)
+                        WHERE delivery.state = 'pending'
+                          \(plannedEligibility)
                           AND \(eligibility)
                           \(freshClassEligibility)
                           \(partitionEligibility)
@@ -375,9 +374,7 @@ public struct PostgresV2FanoutDeliveryStore:
         } else {
             ""
         }
-        let partitionEligibility = Self.stableFreshPartitionEligibility(
-            partition, bySourceEvent: true
-        )
+        let partitionEligibility = Self.stableFreshPartitionEligibility(partition)
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -434,15 +431,38 @@ public struct PostgresV2FanoutDeliveryStore:
             candidates.removeAll { !ownedSourceIDs.contains($0.sourceEventID) }
             guard !candidates.isEmpty else { return [] }
 
-            let lockUsers = Array(Set(candidates.map { $0.targetUserID.uuidString.lowercased() }))
+            // Stable target lanes keep users disjoint inside one process. A
+            // second replica may own the same database lane, so elect users
+            // again with the same advisory key used by route migration. The
+            // non-blocking lock avoids turning overlapping batches into a
+            // convoy; unowned rows remain pending for a later pass.
+            // Foundation/V2Identifier canonicalizes UUID-backed IDs to the
+            // uppercase spelling. Preserve it here: advisory keys are lexical
+            // and must exactly match V2PostgresUserShardRouter cutover locks.
+            let lockUsers = Array(Set(candidates.map { $0.targetUserID.uuidString }))
                 .sorted()
             let lockUsersJSON = try batchJSON(lockUsers)
-            try await sql.raw("""
-                SELECT pg_advisory_xact_lock_shared(hashtextextended(lock_user, 0))
-                FROM jsonb_array_elements_text(\(bind: lockUsersJSON)::jsonb)
-                    AS value(lock_user)
+            let userLocks = try await sql.raw("""
+                WITH requested AS MATERIALIZED (
+                    SELECT lock_user
+                    FROM jsonb_array_elements_text(\(bind: lockUsersJSON)::jsonb)
+                        AS value(lock_user)
+                    ORDER BY lock_user
+                )
+                SELECT lock_user,
+                       pg_try_advisory_xact_lock(
+                           hashtextextended(lock_user, 0)
+                       ) AS acquired
+                FROM requested
                 ORDER BY lock_user
-                """).run()
+                """).all(decoding: FreshDirectUserLockRow.self)
+            let ownedUserIDs = Set(
+                userLocks.lazy.filter(\.acquired).map(\.lockUser)
+            )
+            candidates.removeAll {
+                !ownedUserIDs.contains($0.targetUserID.uuidString)
+            }
+            guard !candidates.isEmpty else { return [] }
 
             let routeInput = candidates.enumerated().map {
                 FreshDirectRouteInput(ordinal: $0.offset, userID: $0.element.targetUserID)
@@ -2411,6 +2431,14 @@ private struct BatchReleaseAdmissionRow: Decodable {
 private struct SourceEventRow: Decodable {
     let sourceEventID: UUID
     enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" }
+}
+private struct FreshDirectUserLockRow: Decodable {
+    let lockUser: String
+    let acquired: Bool
+    enum CodingKeys: String, CodingKey {
+        case lockUser = "lock_user"
+        case acquired
+    }
 }
 private struct RoomIDRow: Decodable {
     let roomID: UUID
