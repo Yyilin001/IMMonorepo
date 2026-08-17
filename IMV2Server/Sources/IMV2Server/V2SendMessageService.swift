@@ -111,8 +111,7 @@ public struct V2AcceptanceIDFactory: Sendable {
         try V2AcceptanceIdentifiers(
             messageID: MessageID(makeUUID().uuidString),
             eventID: EventID(makeUUID().uuidString),
-            planID: FanoutPlanID(makeUUID().uuidString),
-            completionUnitID: CompletionUnitID(makeUUID().uuidString)
+            planID: FanoutPlanID(makeUUID().uuidString)
         )
     }
 }

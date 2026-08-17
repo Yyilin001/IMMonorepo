@@ -294,22 +294,11 @@ public struct V2AcceptanceIdentifiers: Equatable, Sendable {
     public let messageID: MessageID
     public let eventID: EventID
     public let planID: FanoutPlanID
-    /// Stable identity for a completion unit that can be materialized by the
-    /// acceptance boundary when the audience is already exact (for example,
-    /// an immutable two-member direct room). Generic fan-out planners remain
-    /// free to allocate additional page-scoped completion units.
-    public let completionUnitID: CompletionUnitID
 
-    public init(
-        messageID: MessageID,
-        eventID: EventID,
-        planID: FanoutPlanID,
-        completionUnitID: CompletionUnitID
-    ) {
+    public init(messageID: MessageID, eventID: EventID, planID: FanoutPlanID) {
         self.messageID = messageID
         self.eventID = eventID
         self.planID = planID
-        self.completionUnitID = completionUnitID
     }
 }
 
