@@ -1357,15 +1357,150 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(repliedPairState.higherCanSend == true)
             let shadowsBeforeEstablishedMessage = await messageShadowRecorder.requestCount()
             let afterReply = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000081"), text: "unlimited-after-reply"))
-            guard case .accepted = afterReply else { Issue.record("expected post-reply message"); return }
+            guard case .accepted(let acceptedAfterReply) = afterReply else { Issue.record("expected post-reply message"); return }
             #expect(await messageShadowRecorder.requestCount() == shadowsBeforeEstablishedMessage)
+            let acceptedMessageUUID = UUID(uuidString: acceptedAfterReply.messageID.rawValue)!
+            let directFastPath = try #require(try await sql.raw("""
+                SELECT plan.state AS plan_state,
+                       plan.target_rule->>'kind' AS target_rule_kind,
+                       plan.target_count,
+                       plan.enumerated_target_count,
+                       (SELECT COUNT(*) FROM im_v2.fanout_completion_units AS unit
+                        WHERE unit.source_event_id = event.event_id) AS completion_count,
+                       (SELECT COUNT(*) FROM im_v2.fanout_deliveries AS delivery
+                        WHERE delivery.source_event_id = event.event_id) AS delivery_count,
+                       (SELECT COUNT(*) FROM im_v2.room_outbox AS outbox
+                        WHERE outbox.source_event_id = event.event_id) AS outbox_count,
+                       (SELECT COUNT(DISTINCT target_shard_bucket) FROM im_v2.fanout_deliveries AS delivery
+                        WHERE delivery.source_event_id = event.event_id) AS distinct_route_count,
+                       (SELECT MIN(observed_router_epoch) FROM im_v2.fanout_deliveries AS delivery
+                        WHERE delivery.source_event_id = event.event_id) AS observed_router_epoch
+                FROM im_v2.messages AS message
+                JOIN im_v2.room_events AS event
+                  ON event.room_id = message.room_id
+                 AND event.room_sequence = message.room_sequence
+                 AND event.event_type = 'message.accepted'
+                JOIN im_v2.fanout_plans AS plan ON plan.source_event_id = event.event_id
+                WHERE message.message_id = \(bind: acceptedMessageUUID)
+                """).first(decoding: DirectFastFanoutAssertionRow.self))
+            #expect(directFastPath == .init(
+                planState: "planned", targetRuleKind: "direct_members",
+                targetCount: 2, enumeratedTargetCount: 2,
+                completionCount: 1, deliveryCount: 2, outboxCount: 0,
+                distinctRouteCount: 1, observedRouterEpoch: 9
+            ))
             let afterReplyReplay = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000081"), text: "unlimited-after-reply"))
             guard case .idempotent = afterReplyReplay else { Issue.record("expected idempotent post-reply message"); return }
             // A replay deliberately retains the lookup-based shadow path so a
             // crash between source commit and forwarding can recover it.
             #expect(await messageShadowRecorder.requestCount() == shadowsBeforeEstablishedMessage + 2)
+            #expect(try await count("im_v2.fanout_plans WHERE target_rule->>'kind' = 'direct_members'", on: sql) == 5)
+            #expect(try await count("im_v2.fanout_completion_units", on: sql) == 5)
+            #expect(try await count("im_v2.fanout_deliveries", on: sql) == 10)
+            #expect(try await count("im_v2.room_outbox", on: sql) == 0)
+            let directDelivery = try await V2FanoutDeliveryWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(1) }
+            ).runOnce(limit: 64)
+            #expect(directDelivery == .init(
+                claimedCount: 10, committedCount: 10, staleCount: 0,
+                staleRouteCount: 0, releasedCount: 0
+            ))
+            let directRelease = try await V2FanoutCompletionReleaseWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(2) }
+            ).runOnce(limit: 64)
+            #expect(directRelease == .init(releasedCount: 5, closedPlanCount: 5))
+            #expect(try await count("im_v2.fanout_plans WHERE state = 'terminal' AND target_rule->>'kind' = 'direct_members'", on: sql) == 5)
+            #expect(try await count("im_v2.fanout_completion_units WHERE state = 'released'", on: sql) == 5)
+            let releasedAdmission = try #require(try await sql.raw("""
+                SELECT admission.outstanding_fanout_units AS room_units,
+                       admission.outstanding_plans AS room_plans,
+                       shard.outstanding_fanout_units AS shard_units,
+                       shard.outstanding_plans AS shard_plans
+                FROM im_v2.room_admission AS admission
+                JOIN im_v2.rooms AS room ON room.room_id = admission.room_id
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = room.room_shard_id
+                 AND shard.capacity_profile_id = room.capacity_profile_id
+                WHERE admission.room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: ReleasedAdmissionAssertionRow.self))
+            #expect(releasedAdmission == .init(roomUnits: 0, roomPlans: 0, shardUnits: 0, shardPlans: 0))
             let window = try #require(try await sql.raw("SELECT message_count FROM im_v2.stranger_message_windows WHERE sender_user_id = \(bind: senderUUID) AND recipient_user_id = \(bind: memberTwoUUID)").first(decoding: StrangerWindowAssertionRow.self))
             #expect(window.messageCount == 3)
+            let roomBeforeMissingRoute = try #require(try await sql.raw("""
+                SELECT room_sequence, timeline_sequence
+                FROM im_v2.rooms
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: RoomSequenceAssertionRow.self))
+            let messageCountBeforeMissingRoute = try await count("im_v2.messages", on: sql)
+            try await sql.raw("DELETE FROM im_v2.user_shard_router_configuration WHERE configuration_key = TRUE").run()
+            let missingRouteClientID = UUID(uuidString: "00000000-0000-0000-0000-000000000088")!
+            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
+                try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try .init(missingRouteClientID.uuidString),
+                    text: "must-roll-back-without-route"
+                ))
+            }
+            #expect(try await count("im_v2.messages", on: sql) == messageCountBeforeMissingRoute)
+            #expect(try await count("im_v2.messages WHERE client_message_id = '\(missingRouteClientID.uuidString)'::uuid", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_plans WHERE state <> 'terminal'", on: sql) == 0)
+            let roomAfterMissingRoute = try #require(try await sql.raw("""
+                SELECT room_sequence, timeline_sequence
+                FROM im_v2.rooms
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: RoomSequenceAssertionRow.self))
+            #expect(roomAfterMissingRoute == roomBeforeMissingRoute)
+            let admissionAfterMissingRoute = try #require(try await sql.raw("""
+                SELECT admission.outstanding_fanout_units AS room_units,
+                       admission.outstanding_plans AS room_plans,
+                       shard.outstanding_fanout_units AS shard_units,
+                       shard.outstanding_plans AS shard_plans
+                FROM im_v2.room_admission AS admission
+                JOIN im_v2.rooms AS room ON room.room_id = admission.room_id
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = room.room_shard_id
+                 AND shard.capacity_profile_id = room.capacity_profile_id
+                WHERE admission.room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: ReleasedAdmissionAssertionRow.self))
+            #expect(admissionAfterMissingRoute == releasedAdmission)
+            try await configureDefaultUserShardRoute(
+                .init(bucket: "test-users", observedRouterEpoch: 10),
+                now: now.addingTimeInterval(3),
+                on: sql
+            )
+            let racedClientID = try ClientMessageID("00000000-0000-0000-0000-000000000089")
+            async let firstRoomRace = messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: senderID,
+                clientMessageID: racedClientID,
+                text: "one-operation-namespace"
+            ))
+            async let secondRoomRace = messages.send(.init(
+                roomID: otherRoom.roomID,
+                actorUserID: senderID,
+                clientMessageID: racedClientID,
+                text: "one-operation-namespace"
+            ))
+            let racedOutcomes = try await [firstRoomRace, secondRoomRace]
+            #expect(racedOutcomes.filter {
+                if case .accepted = $0 { return true }
+                return false
+            }.count == 1)
+            #expect(racedOutcomes.filter { $0 == .idempotencyConflict }.count == 1)
+            let racedClientUUID = UUID(uuidString: racedClientID.rawValue)!
+            let racedPersistence = try #require(try await sql.raw("""
+                SELECT
+                    (SELECT COUNT(*) FROM im_v2.messages
+                     WHERE sender_user_id = \(bind: senderUUID)
+                       AND client_message_id = \(bind: racedClientUUID)) AS accepted_count,
+                    (SELECT COUNT(*) FROM im_v2.direct_message_denials
+                     WHERE sender_user_id = \(bind: senderUUID)
+                       AND client_message_id = \(bind: racedClientUUID)) AS denied_count
+                """).first(decoding: MessageOperationCardinalityAssertionRow.self))
+            #expect(racedPersistence == .init(acceptedCount: 1, deniedCount: 0))
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
@@ -9218,6 +9353,60 @@ private struct DirectPairProjectionStateAssertionRow: Decodable, Equatable {
         case higherProfileVisibleToLower = "higher_profile_visible_to_lower"
         case lowerCanSend = "lower_can_send"
         case higherCanSend = "higher_can_send"
+    }
+}
+private struct DirectFastFanoutAssertionRow: Decodable, Equatable {
+    let planState: String
+    let targetRuleKind: String
+    let targetCount: Int64
+    let enumeratedTargetCount: Int64
+    let completionCount: Int64
+    let deliveryCount: Int64
+    let outboxCount: Int64
+    let distinctRouteCount: Int64
+    let observedRouterEpoch: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case planState = "plan_state"
+        case targetRuleKind = "target_rule_kind"
+        case targetCount = "target_count"
+        case enumeratedTargetCount = "enumerated_target_count"
+        case completionCount = "completion_count"
+        case deliveryCount = "delivery_count"
+        case outboxCount = "outbox_count"
+        case distinctRouteCount = "distinct_route_count"
+        case observedRouterEpoch = "observed_router_epoch"
+    }
+}
+private struct ReleasedAdmissionAssertionRow: Decodable, Equatable {
+    let roomUnits: Int
+    let roomPlans: Int
+    let shardUnits: Int
+    let shardPlans: Int
+
+    enum CodingKeys: String, CodingKey {
+        case roomUnits = "room_units"
+        case roomPlans = "room_plans"
+        case shardUnits = "shard_units"
+        case shardPlans = "shard_plans"
+    }
+}
+private struct RoomSequenceAssertionRow: Decodable, Equatable {
+    let roomSequence: Int64
+    let timelineSequence: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+    }
+}
+private struct MessageOperationCardinalityAssertionRow: Decodable, Equatable {
+    let acceptedCount: Int64
+    let deniedCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case acceptedCount = "accepted_count"
+        case deniedCount = "denied_count"
     }
 }
 

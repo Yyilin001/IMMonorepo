@@ -53,7 +53,8 @@ struct SendMessageAcceptanceTests {
             identifiers: try V2AcceptanceIdentifiers(
                 messageID: MessageID("message-should-not-be-used"),
                 eventID: EventID("event-should-not-be-used"),
-                planID: FanoutPlanID("plan-should-not-be-used")
+                planID: FanoutPlanID("plan-should-not-be-used"),
+                completionUnitID: CompletionUnitID("completion-should-not-be-used")
             ),
             now: Date(timeIntervalSince1970: 2_000)
         )
@@ -184,7 +185,8 @@ struct SendMessageAcceptanceTests {
         try V2AcceptanceIdentifiers(
             messageID: MessageID("message-1"),
             eventID: EventID("event-1"),
-            planID: FanoutPlanID("plan-1")
+            planID: FanoutPlanID("plan-1"),
+            completionUnitID: CompletionUnitID("completion-1")
         )
     }
 }
