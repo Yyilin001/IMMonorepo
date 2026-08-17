@@ -81,6 +81,19 @@ public struct PostgresV2FanoutDeliveryStore:
             from: Int64(partition.index), to: stableFreshLaneCount,
             by: partition.count
         ).map { $0 }
+        if lanes.count == 1, let lane = lanes.first {
+            // PostgreSQL does not reliably reduce `= ANY(singleton)` to an
+            // equality index condition. Emit the scalar form for the common
+            // eight-worker topology so the source-lane expression index also
+            // supplies the requested source/target ordering.
+            return """
+                AND mod(
+                    hashtextextended(delivery.source_event_id::text, 0)
+                        & 9223372036854775807,
+                    8
+                ) = \(bind: lane)
+                """
+        }
         return """
             AND mod(
                 hashtextextended(delivery.source_event_id::text, 0)
