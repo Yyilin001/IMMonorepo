@@ -162,7 +162,7 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
                            ELSE state.payload
                        END::text AS payload_json
                 FROM \(unsafeRaw: table("user_projection_versions")) AS version
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = version.message_state_id
                 WHERE version.user_id = \(bind: claim.userID)
                   AND version.valid_from_sequence <= \(bind: claim.baseSequence)
@@ -184,7 +184,7 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
                        ELSE state.payload
                    END::text AS payload_json
             FROM \(unsafeRaw: table("user_projection_versions")) AS version
-            LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+            LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
               ON state.state_id = version.message_state_id
             WHERE version.user_id = \(bind: claim.userID)
               AND version.valid_from_sequence <= \(bind: claim.baseSequence)

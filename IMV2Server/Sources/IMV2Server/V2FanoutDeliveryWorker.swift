@@ -97,6 +97,34 @@ public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
     ) async throws -> [V2FanoutDeliveryLease]
 }
 
+/// Optional co-located fast path for brand-new direct-message work. The store
+/// locks, projects and terminalizes each selected delivery in one transaction
+/// without first persisting a lease update. Retry/expired rows deliberately
+/// stay on the ordinary claim-token protocol, so fault recovery keeps the
+/// same durable semantics.
+public protocol V2FreshDirectFanoutDeliveryStore: V2FanoutDeliveryStore {
+    func commitFreshDirectPreplanned(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, limit: Int
+    ) async throws -> [V2FreshDirectFanoutDeliveryCommit]
+}
+
+public struct V2FreshDirectFanoutDeliveryCommit: Equatable, Sendable {
+    public let sourceEventID: EventID
+    public let targetUserID: UserID
+    public let userSyncSequence: UInt64
+
+    public init(
+        sourceEventID: EventID, targetUserID: UserID,
+        userSyncSequence: UInt64
+    ) {
+        precondition(userSyncSequence > 0)
+        self.sourceEventID = sourceEventID
+        self.targetUserID = targetUserID
+        self.userSyncSequence = userSyncSequence
+    }
+}
+
 /// Optional topology-specific cap for concurrent claim passes against one
 /// logical bucket. The pipeline's global delivery concurrency is a capacity
 /// ceiling, not permission to create contention within a single physical
@@ -269,8 +297,44 @@ public struct V2FanoutDeliveryWorker: Sendable {
     ) async throws -> V2FanoutDeliveryReport {
         precondition(limit > 0)
         let claimTime = now()
+        let scheduledLanes = await claimScheduler.lanesForNextClaim()
+        var freshDirectError: (any Error)?
         var leases: [V2FanoutDeliveryLease] = []
-        for lane in await claimScheduler.lanesForNextClaim() {
+        for lane in scheduledLanes {
+            if lane == .fresh,
+               let freshDirectStore = store as? any V2FreshDirectFanoutDeliveryStore {
+                do {
+                    let commits = try await freshDirectStore.commitFreshDirectPreplanned(
+                        bucket: bucket, partition: claimPartition,
+                        // Keep the lock/WAL/rollback boundary identical to a
+                        // co-located generic commit batch. The claim limit is
+                        // allowed to be larger because generic work splits it
+                        // below; the one-transaction fast path must not
+                        // silently bypass that deployment safety bound.
+                        now: claimTime, limit: min(limit, commitBatchSize)
+                    )
+                    if !commits.isEmpty {
+                        for commit in commits {
+                            await liveNotifier?.notifySyncAvailable(
+                                userID: commit.targetUserID,
+                                eventID: commit.userSyncSequence,
+                                highWatermark: commit.userSyncSequence
+                            )
+                        }
+                        return .init(
+                            claimedCount: commits.count,
+                            committedCount: commits.count,
+                            staleCount: 0,
+                            releasedCount: 0
+                        )
+                    }
+                } catch {
+                    // Fall through to the lease-fenced path. A deterministic
+                    // bad row then consumes retry policy and eventually pauses
+                    // instead of becoming an unmetered fast-path poison loop.
+                    freshDirectError = error
+                }
+            }
             if let claimPartition,
                let partitionedStore = store as? any V2PartitionedFanoutDeliveryStore {
                 leases = try await partitionedStore.claimPending(
@@ -285,6 +349,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
             }
             if !leases.isEmpty { break }
         }
+        if leases.isEmpty, let freshDirectError { throw freshDirectError }
         var committed = 0
         var stale = 0
         var staleRoute = 0

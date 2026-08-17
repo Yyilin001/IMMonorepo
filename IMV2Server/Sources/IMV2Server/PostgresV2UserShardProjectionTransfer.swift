@@ -441,7 +441,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 LEFT JOIN \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
-                LEFT JOIN \(unsafeRaw: sourceTable("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: sourceTable("message_projection_state_values")) AS state
                   ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)
@@ -480,7 +480,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                        state.origin_event_id, state.state_event_id,
                        state.is_withdrawn, state.payload_schema_version,
                        state.payload::text AS payload_json, state.created_at
-                FROM \(unsafeRaw: sourceTable("message_projection_states")) AS state
+                FROM \(unsafeRaw: sourceTable("message_projection_state_values")) AS state
                 WHERE (
                     EXISTS (
                         SELECT 1
@@ -760,7 +760,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func fingerprintLog(sql: any SQLDatabase, schema: String, userID: UUID, renew: () async throws -> Void, append: (String) -> Void) async throws {
         var after: Int64 = 0
         while true {
-            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json, shared.payload::text AS shared_payload_json, log.payload_storage, shared.message_state_id, log.created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_states", schema: schema)) AS state ON state.state_id = shared.message_state_id WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
+            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json, shared.payload::text AS shared_payload_json, log.payload_storage, shared.message_state_id, log.created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_state_values", schema: schema)) AS state ON state.state_id = shared.message_state_id WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
             guard !rows.isEmpty else { return }; rows.forEach { append($0.line) }; after = rows[rows.count - 1].sequence
             try await renew()
         }
@@ -785,7 +785,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func fingerprintVersions(sql: any SQLDatabase, schema: String, userID: UUID, renew: () async throws -> Void, append: (String) -> Void) async throws {
         var after: ProjectionVersionKey?
         while true {
-            var query: SQLQueryString = "SELECT version.projection_kind, version.entity_key, version.scope_room_id, version.valid_from_sequence, version.valid_to_sequence, version.source_event_id, version.message_state_id, COALESCE(state.payload, version.payload)::text AS payload_json, version.created_at FROM \(unsafeRaw: qualifiedTable("user_projection_versions", schema: schema)) AS version LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_states", schema: schema)) AS state ON state.state_id = version.message_state_id WHERE version.user_id = \(bind: userID)"
+            var query: SQLQueryString = "SELECT version.projection_kind, version.entity_key, version.scope_room_id, version.valid_from_sequence, version.valid_to_sequence, version.source_event_id, version.message_state_id, COALESCE(state.payload, version.payload)::text AS payload_json, version.created_at FROM \(unsafeRaw: qualifiedTable("user_projection_versions", schema: schema)) AS version LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_state_values", schema: schema)) AS state ON state.state_id = version.message_state_id WHERE version.user_id = \(bind: userID)"
             if let after { query += " AND (version.projection_kind, version.entity_key, version.valid_from_sequence) > (\(bind: after.kind), \(bind: after.key), \(bind: after.sequence))" }
             query += " ORDER BY version.projection_kind, version.entity_key, version.valid_from_sequence LIMIT \(bind: payloadPageSize)"
             let rows = try await sql.raw(query).all(decoding: ProjectionVersionRow.self); guard !rows.isEmpty else { return }

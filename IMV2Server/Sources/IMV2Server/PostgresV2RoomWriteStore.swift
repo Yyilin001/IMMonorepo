@@ -310,14 +310,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
 
             let timelineWriteSet = try withTimelineSequence(writeSet, timelineSequence: unsigned(room.timelineSequence + 1))
-            try await persist(
-                timelineWriteSet,
-                command: command,
-                mediaPresentations: mediaPresentations,
-                room: room,
-                directRecipientID: directContext?.recipientID,
-                sql: sql
-            )
             let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
                 mediaPresentations: mediaPresentations,
                 groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
@@ -328,13 +320,19 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 forwardedFromUserID: command.forwardedFrom?.senderUserID
             )
             let messageStateEventID = try uuid(timelineWriteSet.eventID)
-            try await PostgresV2MessageProjectionStateRepository().persist(
-                try .init(
-                    state: acceptedState,
-                    originEventID: messageStateEventID,
-                    stateEventID: messageStateEventID,
-                    createdAt: acceptedMessage.createdAt
-                ),
+            let storedMessageState = try V2StoredMessageProjectionState(
+                state: acceptedState,
+                originEventID: messageStateEventID,
+                stateEventID: messageStateEventID,
+                createdAt: acceptedMessage.createdAt
+            )
+            try await persist(
+                timelineWriteSet,
+                command: command,
+                mediaPresentations: mediaPresentations,
+                messageProjectionState: storedMessageState,
+                room: room,
+                directRecipientID: directContext?.recipientID,
                 sql: sql
             )
             var acceptedDirectProjectionShadows: [DirectProjectionShadowRequest] = []
@@ -934,6 +932,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         _ writeSet: V2MessageAcceptanceTransaction,
         command: V2SendMessageCommand,
         mediaPresentations: [V2MediaPresentation],
+        messageProjectionState: V2StoredMessageProjectionState,
         room: RoomRow,
         directRecipientID: UUID?,
         sql: any SQLDatabase
@@ -1027,6 +1026,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 replyToMessageID: replyToMessageID,
                 forwardedFromMessageID: forwardedFromMessageID,
                 forwardedFromUserID: forwardedFromUserID,
+                messageProjectionState: messageProjectionState,
                 directRecipientID: directRecipientID,
                 sql: sql
             )
@@ -1149,6 +1149,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))").run()
             }
         }
+        try await PostgresV2MessageProjectionStateRepository().persist(
+            messageProjectionState,
+            storage: .roomEvent,
+            sql: sql
+        )
     }
 
     /// The ordinary direct/group send path used to issue one network round
@@ -1178,6 +1183,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         replyToMessageID: String,
         forwardedFromMessageID: UUID?,
         forwardedFromUserID: UUID?,
+        messageProjectionState: V2StoredMessageProjectionState,
         directRecipientID: UUID?,
         sql: any SQLDatabase
     ) async throws {
@@ -1272,7 +1278,41 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                        ),
                        \(bind: room.membershipRevision), \(bind: message.createdAt)
                 FROM message_insert
-                RETURNING event_id, room_id
+                RETURNING event_id, room_id, payload
+            ), message_state_insert AS (
+                INSERT INTO im_v2.message_projection_states
+                    (state_id, message_id, room_id, message_revision, variant_key,
+                     origin_event_id, state_event_id, is_withdrawn,
+                     payload_schema_version, payload, created_at, payload_storage)
+                SELECT \(bind: messageProjectionState.stateID),
+                       \(bind: messageProjectionState.messageID),
+                       event_insert.room_id,
+                       \(bind: messageProjectionState.messageRevision),
+                       \(bind: messageProjectionState.variantKey),
+                       event_insert.event_id,
+                       \(bind: messageProjectionState.stateEventID),
+                       \(bind: messageProjectionState.isWithdrawn),
+                       \(bind: messageProjectionState.payloadSchemaVersion),
+                       NULL,
+                       \(bind: messageProjectionState.createdAt),
+                       'room_event'
+                FROM event_insert
+                WHERE event_insert.payload = \(bind: messageProjectionState.payloadJSON)::jsonb
+                ON CONFLICT DO NOTHING
+                RETURNING 1
+            ), message_state_existing AS MATERIALIZED (
+                SELECT 1
+                FROM im_v2.message_projection_state_values
+                WHERE state_id = \(bind: messageProjectionState.stateID)
+                  AND message_id = \(bind: messageProjectionState.messageID)
+                  AND room_id = \(bind: messageProjectionState.roomID)
+                  AND message_revision = \(bind: messageProjectionState.messageRevision)
+                  AND variant_key = \(bind: messageProjectionState.variantKey)
+                  AND origin_event_id = \(bind: messageProjectionState.originEventID)
+                  AND state_event_id IS NOT DISTINCT FROM \(bind: messageProjectionState.stateEventID)
+                  AND is_withdrawn = \(bind: messageProjectionState.isWithdrawn)
+                  AND payload_schema_version = \(bind: messageProjectionState.payloadSchemaVersion)
+                  AND payload = \(bind: messageProjectionState.payloadJSON)::jsonb
             ), authoritative_direct_targets AS MATERIALIZED (
                 SELECT membership.user_id
                 FROM event_insert
@@ -1386,6 +1426,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    (SELECT count(*) FROM media_insert) AS media_count,
                    (SELECT count(*) FROM mention_insert) AS mention_count,
                    (SELECT count(*) FROM event_insert) AS event_count,
+                   ((SELECT count(*) FROM message_state_insert)
+                    + (SELECT count(*) FROM message_state_existing)) AS message_state_count,
                    (SELECT count(*) FROM plan_insert) AS plan_count,
                    (SELECT count(*) FROM outbox_insert) AS outbox_count,
                    (SELECT target_count FROM direct_shape) AS direct_target_count,
@@ -1401,6 +1443,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               mutation.mediaCount == Int64(message.media.count),
               mutation.mentionCount == Int64(message.mentions.count),
               mutation.eventCount == 1,
+              mutation.messageStateCount == 1,
               mutation.planCount == 1
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -1827,6 +1870,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     let mediaCount: Int64
     let mentionCount: Int64
     let eventCount: Int64
+    let messageStateCount: Int64
     let planCount: Int64
     let outboxCount: Int64
     let directTargetCount: Int64
@@ -1843,6 +1887,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
         case mediaCount = "media_count"
         case mentionCount = "mention_count"
         case eventCount = "event_count"
+        case messageStateCount = "message_state_count"
         case planCount = "plan_count"
         case outboxCount = "outbox_count"
         case directTargetCount = "direct_target_count"

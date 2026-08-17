@@ -99,6 +99,14 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION im_v2.reject_room_event_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'room events are append-only';
+END;
+$$;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -784,17 +792,49 @@ CREATE TABLE im_v2.message_projection_states (
     state_event_id uuid,
     is_withdrawn boolean NOT NULL,
     payload_schema_version smallint NOT NULL,
-    payload jsonb NOT NULL,
+    payload jsonb,
     created_at timestamp with time zone NOT NULL,
+    payload_storage text DEFAULT 'inline'::text NOT NULL,
     CONSTRAINT message_projection_states_message_revision_check CHECK ((message_revision > 0)),
     CONSTRAINT message_projection_states_payload_check CHECK (((payload ->> 'event_type'::text) = 'message.accepted'::text)),
     CONSTRAINT message_projection_states_payload_message_check CHECK ((lower((payload ->> 'message_id'::text)) = (message_id)::text)),
     CONSTRAINT message_projection_states_payload_revision_check CHECK ((((payload ->> 'message_revision'::text))::bigint = message_revision)),
     CONSTRAINT message_projection_states_payload_room_check CHECK ((lower((payload ->> 'room_id'::text)) = (room_id)::text)),
     CONSTRAINT message_projection_states_payload_schema_check CHECK ((payload_schema_version = 1)),
+    CONSTRAINT message_projection_states_payload_storage_check CHECK ((((payload_storage = 'inline'::text) AND (payload IS NOT NULL)) OR ((payload_storage = 'room_event'::text) AND (payload IS NULL) AND (message_revision = 1) AND (variant_key = 0) AND (state_event_id IS NOT NULL) AND (origin_event_id = state_event_id) AND (NOT is_withdrawn)))),
     CONSTRAINT message_projection_states_payload_withdrawn_check CHECK ((COALESCE(((payload ->> 'is_withdrawn'::text))::boolean, false) = is_withdrawn)),
     CONSTRAINT message_projection_states_variant_key_check CHECK ((variant_key >= 0))
 );
+
+CREATE TABLE im_v2.room_events (
+    event_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    room_sequence bigint NOT NULL,
+    event_type text NOT NULL,
+    actor_user_id uuid,
+    payload jsonb NOT NULL,
+    committed_membership_revision bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT room_events_committed_membership_revision_check CHECK ((committed_membership_revision >= 0)),
+    CONSTRAINT room_events_room_sequence_check CHECK ((room_sequence > 0))
+);
+
+CREATE VIEW im_v2.message_projection_state_values AS
+ SELECT state.state_id,
+    state.message_id,
+    state.room_id,
+    state.message_revision,
+    state.variant_key,
+    state.origin_event_id,
+    state.state_event_id,
+    state.is_withdrawn,
+    state.payload_schema_version,
+    COALESCE(state.payload, event.payload) AS payload,
+    state.created_at,
+    state.payload_storage
+   FROM (im_v2.message_projection_states state
+     LEFT JOIN im_v2.room_events event ON (((state.payload_storage = 'room_event'::text) AND (event.event_id = state.state_event_id) AND (event.room_id = state.room_id) AND (event.event_type = 'message.accepted'::text) AND (lower((event.payload ->> 'message_id'::text)) = (state.message_id)::text) AND (lower((event.payload ->> 'room_id'::text)) = (state.room_id)::text) AND (((event.payload ->> 'message_revision'::text))::bigint = state.message_revision))))
+  WHERE ((state.payload_storage = 'inline'::text) OR (event.event_id IS NOT NULL));
 
 CREATE TABLE im_v2.message_reaction_operations (
     actor_user_id uuid NOT NULL,
@@ -1094,19 +1134,6 @@ CREATE TABLE im_v2.room_admission (
     CONSTRAINT room_admission_outstanding_fanout_units_check CHECK ((outstanding_fanout_units >= 0)),
     CONSTRAINT room_admission_outstanding_plans_check CHECK ((outstanding_plans >= 0)),
     CONSTRAINT room_admission_shard_lease_generation_check CHECK ((shard_lease_generation > 0))
-);
-
-CREATE TABLE im_v2.room_events (
-    event_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_type text NOT NULL,
-    actor_user_id uuid,
-    payload jsonb NOT NULL,
-    committed_membership_revision bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT room_events_committed_membership_revision_check CHECK ((committed_membership_revision >= 0)),
-    CONSTRAINT room_events_room_sequence_check CHECK ((room_sequence > 0))
 );
 
 CREATE TABLE im_v2.room_member_mutes (
@@ -2331,6 +2358,8 @@ CREATE UNIQUE INDEX message_mentions_unique_user_idx ON im_v2.message_mentions U
 
 CREATE INDEX message_projection_states_gc_idx ON im_v2.message_projection_states USING btree (created_at, state_id);
 
+CREATE INDEX message_projection_states_inline_accepted_idx ON im_v2.message_projection_states USING btree (state_event_id, state_id) WHERE ((payload_storage = 'inline'::text) AND (message_revision = 1) AND (variant_key = 0) AND (state_event_id IS NOT NULL));
+
 CREATE INDEX message_reaction_operations_cleanup_idx ON im_v2.message_reaction_operations USING btree (created_at);
 
 CREATE INDEX message_withdrawal_operations_cleanup_idx ON im_v2.message_withdrawal_operations USING btree (created_at);
@@ -2484,6 +2513,8 @@ CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx ON im_v2.user_sync_log 
 CREATE INDEX user_sync_retention_claim_idx ON im_v2.user_sync_retention USING btree (updated_at, user_id);
 
 CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
+
+CREATE TRIGGER room_events_immutable BEFORE DELETE OR UPDATE ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_event_mutation();
 
 CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON im_v2.rooms FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_delivery_mode_mutation();
 

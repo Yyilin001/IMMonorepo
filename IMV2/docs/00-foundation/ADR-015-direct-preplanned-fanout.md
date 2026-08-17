@@ -27,8 +27,12 @@ plan 状态更新和索引扫描，并把 ACK 后的投递启动延迟绑定到 
   -> 提交
 ```
 
-Delivery Worker、consumer inbox、user sync sequence/log、lease fencing、重试和 completion
-release 保持原样。群聊和任何非私聊事件继续走 Planner。
+consumer inbox、user sync sequence/log、重试和 completion release 保持原样。若 target user
+store 与控制 schema 已由组合根证明同库，新鲜 direct delivery 在一个事务中直接
+`pending -> terminal`，不先写 claim token/retry count；远端分片、迁移转发、失败重试和过期
+lease 仍走原 claim-token 协议。快路径单事务行数不得超过同库
+`IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE`，不能用更大的 claim limit 隐式扩大锁、回滚和 WAL
+边界。群聊和任何非私聊事件继续走 Planner。
 
 ## 安全与一致性不变量
 
@@ -46,6 +50,9 @@ release 保持原样。群聊和任何非私聊事件继续走 Planner。
   幂等/等值验证处理，禁止 last-write-wins。
 - shared state 不是可见性授权。增量同步、Snapshot 与媒体下载仍必须先命中该用户的
   delivery/projection reference。
+- fresh direct projection 在持有 delivery row lock 后获取每用户 route advisory share lock，
+  再重新读取 route/migration；stale route 不得写旧 owner，forwarding/verified migration 不得
+  走同库快路径。异常行回落到普通 lease lane，以便 retry policy 最终 pause poison work。
 
 ## 回退与兼容
 
@@ -58,8 +65,9 @@ route 缺失的 fallback 行，Delivery Worker 不区分来源，因此可以滚
 
 ## 预期与验证边界
 
-私聊占主导时，预计数据库事务/索引工作下降约 15%–30%，ACK 后 delivery 可见延迟不再等待
-Planner poll。该数字是容量假设，不是承诺；必须用相同连接数、消息大小、数据库参数和空库
+私聊占主导时，预规划预计先降低约 15%–30% 的数据库事务/索引工作；同库 fresh delivery
+再消除每目标一次非 HOT claim UPDATE 和重复 route/migration 往返。ACK 后 delivery 可见延迟
+不再等待 Planner poll。该数字是容量假设，不是承诺；必须用相同连接数、消息大小、数据库参数和同一
 数据分布对比 ACK/s、端到端 p95/p99、WAL bytes/message、DB CPU、lock wait 与 backlog。
 
 正确性门槛包括：两目标 cardinality、零 accepted-message outbox、route 缺失回退、腐坏受众

@@ -11,7 +11,7 @@ public enum V2SchemaReadiness {
     private static let requiredTables = [
         "schema_contract", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
-        "shard_admission_pools", "messages", "message_projection_states", "room_events", "room_outbox", "group_event_wake_outbox", "durable_work_replay_audit",
+        "shard_admission_pools", "messages", "message_projection_states", "message_projection_state_values", "room_events", "room_outbox", "group_event_wake_outbox", "durable_work_replay_audit",
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_permission_operations", "group_role_operations", "message_forward_operations",
         "fanout_plans", "fanout_plan_targets", "fanout_completion_units", "fanout_deliveries", "consumer_inbox",
         "user_sync_sequences", "user_sync_log", "fanout_sync_payloads", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
@@ -85,6 +85,53 @@ public enum V2SchemaReadiness {
             """).first(decoding: ExistsRow.self), fanoutPayloadReferenceContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(
                 "\(schema).fanout_sync_payloads[payload-reference]"
+            )
+        }
+        guard let messageStateStorageContract = try await sql.raw("""
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = \(bind: schema)
+                      AND table_name = 'message_projection_states'
+                      AND column_name = 'payload_storage'
+                      AND is_nullable = 'NO'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = \(bind: schema)
+                      AND table_name = 'message_projection_states'
+                      AND column_name = 'payload'
+                      AND is_nullable = 'YES'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_constraint AS constraint_record
+                    JOIN pg_class AS relation
+                      ON relation.oid = constraint_record.conrelid
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND relation.relname = 'message_projection_states'
+                      AND constraint_record.conname =
+                          'message_projection_states_payload_storage_check'
+                      AND constraint_record.convalidated
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_trigger AS trigger_record
+                    JOIN pg_class AS relation
+                      ON relation.oid = trigger_record.tgrelid
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND relation.relname = 'room_events'
+                      AND trigger_record.tgname = 'room_events_immutable'
+                      AND trigger_record.tgenabled <> 'D'
+                      AND NOT trigger_record.tgisinternal
+                ) AS exists
+            """).first(decoding: ExistsRow.self), messageStateStorageContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable(
+                "\(schema).message_projection_states[room-event-storage]"
             )
         }
     }

@@ -21,7 +21,10 @@ public struct V2ExternalFanoutDeliveryAcknowledgement: Sendable {
 /// the same transaction. Capacity release is deliberately a separate durable
 /// phase: projection transactions never acquire room or shard-admission locks.
 /// A consumer-inbox row makes broker redelivery safe.
-public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V2FanoutCompletionReleaseStore {
+public struct PostgresV2FanoutDeliveryStore:
+    V2PartitionedFanoutDeliveryStore,
+    V2FanoutCompletionReleaseStore
+{
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
     private let batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
@@ -277,6 +280,164 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         }
     }
 
+    /// Commits brand-new, co-located direct deliveries without first turning
+    /// each row into a leased heap version. Selection, route/migration fence,
+    /// inbox effect, Sync Log append, delivery terminalization and completion
+    /// accounting all remain inside one retryable PostgreSQL transaction.
+    /// Rows that have ever failed or been leased are excluded and continue on
+    /// the ordinary claim-token recovery protocol.
+    public func commitFreshDirectPreplanned(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, limit: Int
+    ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
+        guard limit > 0 else { return [] }
+        let bucketEligibility: SQLQueryString = if let bucket {
+            "AND delivery.target_shard_bucket = \(bind: bucket)"
+        } else {
+            ""
+        }
+        let partitionEligibility: SQLQueryString = if let partition {
+            """
+            AND mod(
+                hashtextextended(delivery.target_user_id::text, 0)
+                    & 9223372036854775807,
+                \(bind: Int64(partition.count))
+            ) = \(bind: Int64(partition.index))
+            """
+        } else {
+            ""
+        }
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let candidates = try await sql.raw("""
+                SELECT delivery.source_event_id, delivery.target_user_id,
+                       delivery.projection_kind, delivery.completion_unit_id,
+                       delivery.target_shard_bucket, delivery.observed_router_epoch,
+                       delivery.retry_count, NULL::text AS event_payload_json
+                FROM im_v2.fanout_deliveries AS delivery
+                JOIN im_v2.fanout_plans AS plan
+                  ON plan.source_event_id = delivery.source_event_id
+                JOIN im_v2.fanout_completion_units AS unit
+                  ON unit.source_event_id = delivery.source_event_id
+                 AND unit.completion_unit_id = delivery.completion_unit_id
+                WHERE delivery.state = 'pending'
+                  AND delivery.projection_kind = 'message'
+                  AND delivery.claim_token IS NULL
+                  AND delivery.lease_expires_at IS NULL
+                  AND delivery.next_attempt_at IS NULL
+                  AND delivery.paused_at IS NULL
+                  AND delivery.retry_count = 0
+                  AND plan.state = 'planned'
+                  AND plan.target_rule->>'planning_strategy' = 'direct_preplanned'
+                  AND unit.state = 'pending'
+                  \(bucketEligibility)
+                  \(partitionEligibility)
+                ORDER BY delivery.source_event_id, delivery.target_user_id,
+                         delivery.projection_kind
+                LIMIT \(bind: limit)
+                FOR UPDATE OF delivery SKIP LOCKED
+                """).all(decoding: ClaimedDeliveryRow.self)
+            guard !candidates.isEmpty else { return [] }
+
+            let lockUsers = Array(Set(candidates.map { $0.targetUserID.uuidString.lowercased() }))
+                .sorted()
+            let lockUsersJSON = try batchJSON(lockUsers)
+            try await sql.raw("""
+                SELECT pg_advisory_xact_lock_shared(hashtextextended(lock_user, 0))
+                FROM jsonb_array_elements_text(\(bind: lockUsersJSON)::jsonb)
+                    AS value(lock_user)
+                ORDER BY lock_user
+                """).run()
+
+            let routeInput = candidates.enumerated().map {
+                FreshDirectRouteInput(ordinal: $0.offset, userID: $0.element.targetUserID)
+            }
+            let routeInputJSON = try batchJSON(routeInput)
+            let routes = try await sql.raw("""
+                WITH input AS (
+                    SELECT ordinal, user_id
+                    FROM jsonb_to_recordset(\(bind: routeInputJSON)::jsonb)
+                        AS value(ordinal integer, user_id uuid)
+                )
+                SELECT input.ordinal,
+                       COALESCE(route.write_bucket, config.default_write_bucket)
+                           AS write_bucket,
+                       COALESCE(route.router_epoch, config.router_epoch) AS router_epoch,
+                       EXISTS (
+                           SELECT 1
+                           FROM im_v2.user_shard_migrations AS migration
+                           WHERE migration.user_id = input.user_id
+                             AND migration.phase IN ('forwarding', 'verified')
+                             AND migration.source_bucket = COALESCE(
+                                 route.write_bucket, config.default_write_bucket
+                             )
+                       ) AS requires_forwarding
+                FROM input
+                CROSS JOIN im_v2.user_shard_router_configuration AS config
+                LEFT JOIN im_v2.user_shard_route_overrides AS route
+                  ON route.user_id = input.user_id
+                WHERE config.configuration_key = TRUE
+                ORDER BY input.ordinal
+                """).all(decoding: FreshDirectRouteRow.self)
+            guard routes.count == candidates.count else {
+                throw V2UserShardRouteControlError.missingRouterConfiguration
+            }
+
+            var accepted: [V2FanoutDeliveryLease] = []
+            accepted.reserveCapacity(candidates.count)
+            for (index, candidate) in candidates.enumerated() {
+                let route = routes[index]
+                guard route.ordinal == index else {
+                    throw V2UserShardRouterError.resultCountMismatch
+                }
+                guard !route.requiresForwarding,
+                      route.writeBucket == candidate.targetShardBucket,
+                      route.routerEpoch == candidate.observedRouterEpoch
+                else { continue }
+                accepted.append(.init(
+                    sourceEventID: try .init(candidate.sourceEventID.uuidString),
+                    targetUserID: try .init(candidate.targetUserID.uuidString),
+                    projectionKind: candidate.projectionKind,
+                    completionUnitID: try .init(candidate.completionUnitID.uuidString),
+                    observedRoute: try .init(
+                        bucket: candidate.targetShardBucket,
+                        observedRouterEpoch: candidate.observedRouterEpoch
+                    ),
+                    claimToken: makeUUID(),
+                    attempt: 1
+                ))
+            }
+            guard !accepted.isEmpty else { return [] }
+            let ordered = try accepted.enumerated().map { index, lease in
+                BatchFanoutDeliveryLease(
+                    index: index, lease: lease, key: try deliveryKey(for: lease)
+                )
+            }.sorted { $0.key < $1.key }
+            let prepared = try await projectAndTerminalizeBatch(
+                sql: sql, ordered: ordered, now: now, fence: .freshDirect
+            )
+            guard prepared.count == ordered.count else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let completed = try await completeBatch(sql: sql, prepared: prepared)
+            guard completed.count == accepted.count else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return try completed.sorted { $0.0 < $1.0 }.map { index, commit in
+                guard accepted.indices.contains(index),
+                      case .committed(let sequence, _, _) = commit
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                return .init(
+                    sourceEventID: accepted[index].sourceEventID,
+                    targetUserID: accepted[index].targetUserID,
+                    userSyncSequence: sequence
+                )
+            }
+        }
+    }
+
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -371,7 +532,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                    state.created_at AS state_created_at
             FROM im_v2.fanout_deliveries AS delivery
             JOIN im_v2.room_events AS event ON event.event_id = delivery.source_event_id
-            LEFT JOIN im_v2.message_projection_states AS state
+            LEFT JOIN im_v2.message_projection_state_values AS state
               ON state.state_event_id = event.event_id
              AND state.variant_key = 0
             WHERE delivery.source_event_id = \(bind: sourceEventID)
@@ -439,7 +600,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                        state.created_at AS state_created_at
                 FROM valid
                 JOIN im_v2.room_events AS event ON event.event_id = valid.source_event_id
-                LEFT JOIN im_v2.message_projection_states AS state
+                LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_event_id = event.event_id
                  AND state.variant_key = 0
                 ORDER BY valid.source_event_id, valid.ordinal
@@ -832,7 +993,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                         THEN NULL ELSE event.payload END,
                    state.state_id, \(bind: now)
             FROM im_v2.room_events AS event
-            LEFT JOIN im_v2.message_projection_states AS state
+            LEFT JOIN im_v2.message_projection_state_values AS state
               ON state.state_event_id = event.event_id
              AND state.variant_key = 0
              AND \(bind: lease.projectionKind) = 'message'
@@ -868,7 +1029,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
             JOIN im_v2.fanout_sync_payloads AS shared
               ON shared.source_event_id = event.event_id
              AND shared.projection_kind = \(bind: lease.projectionKind)
-            LEFT JOIN im_v2.message_projection_states AS state
+            LEFT JOIN im_v2.message_projection_state_values AS state
               ON state.state_id = shared.message_state_id
             WHERE event.event_id = \(bind: sourceEventID)
               AND COALESCE(shared.payload, state.payload) = event.payload
@@ -901,7 +1062,8 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
     private func projectAndTerminalizeBatch(
         sql: any SQLDatabase,
         ordered: [BatchFanoutDeliveryLease],
-        now: Date
+        now: Date,
+        fence: BatchProjectionDeliveryFence = .claimed
     ) async throws -> [PreparedFanoutDeliveryCommit] {
         let inputJSON = try batchJSON(try ordered.enumerated().map { offset, item in
             try BatchProjectionInput(ordinal: offset, item: item)
@@ -914,6 +1076,36 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         let hasDistinctTargetUsers = Set(ordered.map(\.lease.targetUserID.rawValue)).count == ordered.count
         let usesDistinctTargetFastPath = hasDistinctTargetUsers
             && batchSequenceReservationStrategy == .automatic
+        let claimedPredicate: SQLQueryString
+        let terminalPredicate: SQLQueryString
+        switch fence {
+        case .claimed:
+            claimedPredicate = "delivery.state = 'pending' AND delivery.claim_token = input.claim_token"
+            terminalPredicate = "delivery.state = 'pending' AND delivery.claim_token = numbered.claim_token"
+        case .freshDirect:
+            claimedPredicate = """
+                delivery.state = 'pending'
+                AND delivery.claim_token IS NULL
+                AND delivery.lease_expires_at IS NULL
+                AND delivery.next_attempt_at IS NULL
+                AND delivery.paused_at IS NULL
+                AND delivery.retry_count = 0
+                AND EXISTS (
+                    SELECT 1 FROM im_v2.fanout_plans AS direct_plan
+                    WHERE direct_plan.source_event_id = delivery.source_event_id
+                      AND direct_plan.state = 'planned'
+                      AND direct_plan.target_rule->>'planning_strategy' = 'direct_preplanned'
+                )
+                """
+            terminalPredicate = """
+                delivery.state = 'pending'
+                AND delivery.claim_token IS NULL
+                AND delivery.lease_expires_at IS NULL
+                AND delivery.next_attempt_at IS NULL
+                AND delivery.paused_at IS NULL
+                AND delivery.retry_count = 0
+                """
+        }
         // Do this as the first statement of the same transaction. A second
         // projection statement can then read its own newly inserted payload
         // plus any concurrently committed one without taking a no-op row
@@ -978,7 +1170,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                   ON delivery.source_event_id = input.source_event_id
                  AND delivery.target_user_id = input.target_user_id
                  AND delivery.projection_kind = input.projection_kind
-                WHERE delivery.state = 'pending' AND delivery.claim_token = input.claim_token
+                WHERE \(claimedPredicate)
                 FOR UPDATE OF delivery
             ), \(unsafeRaw: sequenceReservationCTEs), payload_keys AS MATERIALIZED (
                 -- A batch commonly contains many target users for the same
@@ -1005,7 +1197,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                 JOIN im_v2.fanout_sync_payloads AS shared
                  ON shared.source_event_id = payloads.source_event_id
                  AND shared.projection_kind = payloads.projection_kind
-                LEFT JOIN im_v2.message_projection_states AS state
+                LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_id = shared.message_state_id
                 WHERE COALESCE(shared.payload, state.payload) = payloads.payload
             ), recorded_inbox AS (
@@ -1048,7 +1240,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                 WHERE delivery.source_event_id = numbered.source_event_id
                   AND delivery.target_user_id = numbered.target_user_id
                   AND delivery.projection_kind = numbered.projection_kind
-                  AND delivery.state = 'pending' AND delivery.claim_token = numbered.claim_token
+                  AND \(terminalPredicate)
                 RETURNING numbered.ordinal, numbered.source_event_id, numbered.target_user_id,
                           numbered.projection_kind, numbered.completion_unit_id,
                           numbered.user_sync_sequence
@@ -1123,7 +1315,7 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                    state.state_id, \(bind: now)
             FROM payload_keys
             JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
-            LEFT JOIN im_v2.message_projection_states AS state
+            LEFT JOIN im_v2.message_projection_state_values AS state
               ON state.state_event_id = event.event_id
              AND state.variant_key = 0
              AND payload_keys.projection_kind = 'message'
@@ -1684,6 +1876,11 @@ enum V2FanoutBatchSequenceReservationStrategy: Sendable {
     case forceGeneric
 }
 
+private enum BatchProjectionDeliveryFence: Sendable {
+    case claimed
+    case freshDirect
+}
+
 private extension V2FanoutDeliveryClaimLane {
     func sqlEligibilityPredicate(now: Date) -> SQLQueryString {
         switch self {
@@ -1793,6 +1990,28 @@ private struct RouterFenceRouteRow: Decodable {
         case writeBucket = "write_bucket"
         case routerEpoch = "router_epoch"
         case readFallbackBucket = "read_fallback_bucket"
+    }
+}
+private struct FreshDirectRouteInput: Encodable {
+    let ordinal: Int
+    let userID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case userID = "user_id"
+    }
+}
+private struct FreshDirectRouteRow: Decodable {
+    let ordinal: Int
+    let writeBucket: String
+    let routerEpoch: Int64
+    let requiresForwarding: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case writeBucket = "write_bucket"
+        case routerEpoch = "router_epoch"
+        case requiresForwarding = "requires_forwarding"
     }
 }
 private struct HandoffClaimedRow: Decodable {

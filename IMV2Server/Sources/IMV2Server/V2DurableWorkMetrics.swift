@@ -74,6 +74,9 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let messageProjectionReferenceEstimatedRows: Int
     public let messageProjectionBackfillEstimatedRows: Int
     public let messageProjectionInlinePayloadEstimatedRows: Int
+    /// Accepted revision-1 state bodies that can still be replaced by an
+    /// exact co-located immutable room-event reference.
+    public let messageProjectionStateInlineBodyEstimatedRows: Int
     public let uncompactedProjectedRecords: Int
     public let pendingSyncRecordsAcrossDevices: Int
     public let resetPendingDevices: Int
@@ -138,6 +141,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         messageProjectionReferenceEstimatedRows: Int = 0,
         messageProjectionBackfillEstimatedRows: Int = 0,
         messageProjectionInlinePayloadEstimatedRows: Int = 0,
+        messageProjectionStateInlineBodyEstimatedRows: Int = 0,
         uncompactedProjectedRecords: Int = 0,
         pendingSyncRecordsAcrossDevices: Int = 0,
         resetPendingDevices: Int = 0,
@@ -198,6 +202,9 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.messageProjectionReferenceEstimatedRows = max(0, messageProjectionReferenceEstimatedRows)
         self.messageProjectionBackfillEstimatedRows = max(0, messageProjectionBackfillEstimatedRows)
         self.messageProjectionInlinePayloadEstimatedRows = max(0, messageProjectionInlinePayloadEstimatedRows)
+        self.messageProjectionStateInlineBodyEstimatedRows = max(
+            0, messageProjectionStateInlineBodyEstimatedRows
+        )
         self.uncompactedProjectedRecords = max(0, uncompactedProjectedRecords)
         self.pendingSyncRecordsAcrossDevices = max(0, pendingSyncRecordsAcrossDevices)
         self.resetPendingDevices = max(0, resetPendingDevices)
@@ -903,7 +910,16 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
                       ON namespace.oid = index_stats.relnamespace
                     WHERE namespace.nspname = \(bind: schema)
                       AND index_stats.relname = 'user_projection_versions_message_inline_idx'
-                ), 0)::BIGINT AS message_projection_inline_payload_estimated_rows
+                ), 0)::BIGINT AS message_projection_inline_payload_estimated_rows,
+                COALESCE((
+                    SELECT index_stats.reltuples::BIGINT
+                    FROM pg_class AS index_stats
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_stats.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_stats.relname =
+                          'message_projection_states_inline_accepted_idx'
+                ), 0)::BIGINT AS message_projection_state_inline_body_estimated_rows
             ),
             retention_metrics AS (
                 SELECT COALESCE(SUM(GREATEST(
@@ -938,6 +954,9 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
             messageProjectionReferenceEstimatedRows: v2MetricCount(row.messageProjectionReferenceEstimatedRows),
             messageProjectionBackfillEstimatedRows: v2MetricCount(row.messageProjectionBackfillEstimatedRows),
             messageProjectionInlinePayloadEstimatedRows: v2MetricCount(row.messageProjectionInlinePayloadEstimatedRows),
+            messageProjectionStateInlineBodyEstimatedRows: v2MetricCount(
+                row.messageProjectionStateInlineBodyEstimatedRows
+            ),
             uncompactedProjectedRecords: v2MetricCount(row.uncompactedProjectedRecords),
             pendingSyncRecordsAcrossDevices: v2MetricCount(row.pendingSyncRecordsAcrossDevices),
             resetPendingDevices: v2MetricCount(row.resetPendingDevices)
@@ -1008,6 +1027,9 @@ private func v2AggregateDurableWorkMetrics(
         messageProjectionReferenceEstimatedRows: sum(\.messageProjectionReferenceEstimatedRows),
         messageProjectionBackfillEstimatedRows: sum(\.messageProjectionBackfillEstimatedRows),
         messageProjectionInlinePayloadEstimatedRows: sum(\.messageProjectionInlinePayloadEstimatedRows),
+        messageProjectionStateInlineBodyEstimatedRows: sum(
+            \.messageProjectionStateInlineBodyEstimatedRows
+        ),
         uncompactedProjectedRecords: sum(\.uncompactedProjectedRecords),
         pendingSyncRecordsAcrossDevices: sum(\.pendingSyncRecordsAcrossDevices),
         resetPendingDevices: sum(\.resetPendingDevices),
@@ -1131,6 +1153,9 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_message_projection_inline_payload_estimated_rows Planner estimate of duplicated inline message payloads remaining before contract.",
         "# TYPE im_v2_message_projection_inline_payload_estimated_rows gauge",
         "im_v2_message_projection_inline_payload_estimated_rows \(snapshot.messageProjectionInlinePayloadEstimatedRows)",
+        "# HELP im_v2_message_projection_state_inline_body_estimated_rows Planner estimate of accepted state bodies still eligible for exact room-event compaction.",
+        "# TYPE im_v2_message_projection_state_inline_body_estimated_rows gauge",
+        "im_v2_message_projection_state_inline_body_estimated_rows \(snapshot.messageProjectionStateInlineBodyEstimatedRows)",
         "# HELP im_v2_sync_uncompacted_projected_records Aggregate canonical records above retained floors.",
         "# TYPE im_v2_sync_uncompacted_projected_records gauge",
         "im_v2_sync_uncompacted_projected_records \(snapshot.uncompactedProjectedRecords)",
@@ -1276,6 +1301,7 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
     let messageProjectionReferenceEstimatedRows: Int64
     let messageProjectionBackfillEstimatedRows: Int64
     let messageProjectionInlinePayloadEstimatedRows: Int64
+    let messageProjectionStateInlineBodyEstimatedRows: Int64
     let uncompactedProjectedRecords: Int64
     let pendingSyncRecordsAcrossDevices: Int64
     let resetPendingDevices: Int64
@@ -1298,6 +1324,7 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
         case messageProjectionReferenceEstimatedRows = "message_projection_reference_estimated_rows"
         case messageProjectionBackfillEstimatedRows = "message_projection_backfill_estimated_rows"
         case messageProjectionInlinePayloadEstimatedRows = "message_projection_inline_payload_estimated_rows"
+        case messageProjectionStateInlineBodyEstimatedRows = "message_projection_state_inline_body_estimated_rows"
         case uncompactedProjectedRecords = "uncompacted_projected_records"
         case pendingSyncRecordsAcrossDevices = "pending_sync_records_across_devices"
         case resetPendingDevices = "reset_pending_devices"

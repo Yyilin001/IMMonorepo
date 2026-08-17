@@ -257,7 +257,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
             guard let shared = try await sql.raw("""
                 SELECT 1 AS value
                 FROM \(unsafeRaw: table("fanout_sync_payloads")) AS shared
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = shared.message_state_id
                 WHERE shared.source_event_id = \(bind: sourceEventID)
                   AND shared.projection_kind = \(bind: input.projectionKind)
@@ -383,7 +383,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     is_withdrawn boolean, payload_schema_version smallint,
                     payload_json text, created_at_microseconds bigint
                 )
-                JOIN \(unsafeRaw: table("message_projection_states")) AS stored
+                JOIN \(unsafeRaw: table("message_projection_state_values")) AS stored
                   ON stored.state_id = value.state_id
                  AND stored.message_id = value.message_id
                  AND stored.room_id = value.room_id
@@ -432,7 +432,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                             THEN NULL ELSE payload.event_payload END,
                        payload.message_state_id, \(bind: now)
                 FROM payload_keys AS payload
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = payload.message_state_id
                 ON CONFLICT (source_event_id, projection_kind) DO UPDATE
                 SET message_state_id = COALESCE(
@@ -501,7 +501,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                      ON shared.source_event_id = payload_keys.source_event_id
                      AND shared.projection_kind = payload_keys.projection_kind
                      AND shared.message_state_id IS NOT DISTINCT FROM payload_keys.message_state_id
-                    LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                    LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                       ON state.state_id = shared.message_state_id
                     WHERE COALESCE(shared.payload, state.payload) = payload_keys.event_payload
                 ), pending_inbox AS MATERIALIZED (
@@ -710,7 +710,11 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
 /// materializing the per-user projection in the physical store chosen by the
 /// durable logical route. All lease/retry/handoff operations remain control
 /// store operations; only the user projection crosses stores.
-public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, Sendable {
+public struct V2CrossStoreFanoutDeliveryStore:
+    V2PartitionedFanoutDeliveryStore,
+    V2FreshDirectFanoutDeliveryStore,
+    Sendable
+{
     private let control: PostgresV2FanoutDeliveryStore
     private let registry: any V2UserShardStorageResolving
     private let migrations: PostgresV2UserShardMigrationStore
@@ -832,6 +836,21 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
                 attempt: lease.attempt, eventPayloadJSON: payload
             )
         }
+    }
+
+    public func commitFreshDirectPreplanned(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, limit: Int
+    ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
+        // The optimization is intentionally topology-gated. A remote target
+        // still needs two durable transactions and therefore keeps the
+        // established inbox + control acknowledgement protocol.
+        guard let coLocatedControlBucket,
+              bucket == coLocatedControlBucket
+        else { return [] }
+        return try await control.commitFreshDirectPreplanned(
+            bucket: bucket, partition: partition, now: now, limit: limit
+        )
     }
 
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {

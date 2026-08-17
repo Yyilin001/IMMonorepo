@@ -39,10 +39,26 @@ test "$(current_schema_contract)" = 'f'
 psql < "${schema_file}" >/dev/null
 test "$(current_schema_contract)" = 't'
 
-test "$(scalar "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'")" = '120'
-test "$(scalar "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'")" = '296'
-test "$(scalar "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal")" = '4'
-test "$(scalar "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'")" = '4'
+assert_scalar() {
+  local label="$1"
+  local query="$2"
+  local expected="$3"
+  local actual
+  actual="$(scalar "${query}")"
+  if [[ "${actual}" != "${expected}" ]]; then
+    printf '%s: expected %s, got %s\n' "${label}" "${expected}" "${actual}" >&2
+    exit 1
+  fi
+}
+
+assert_scalar 'im_v2 relation count' \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '121'
+assert_scalar 'im_v2 index count' \
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '297'
+assert_scalar 'im_v2 application trigger count' \
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '5'
+assert_scalar 'im_v2 function count' \
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '5'
 
 normalize_schema() {
   awk '

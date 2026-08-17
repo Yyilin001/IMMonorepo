@@ -23,12 +23,17 @@ store 内的 `message_projection_states`，用户行只保存 `message_state_id`
   由该语义键计算，使控制库、远端 user shard、重试和用户迁移独立收敛。
 - `variant_key=0` 是当前 canonical 值，为未来按接收者生成安全变体保留显式命名空间，
   禁止偷偷按用户改写同一 state。
-- state 保存自包含的 Snapshot V3 消息值；增量 `room_event` 仍是 delta，客户端 wire
-  protocol 和 Snapshot V3 编码不变。
+- 远端 user shard 的 state 保存一份自包含 Snapshot V3 消息值；控制库/同物理 user store
+  对 revision 1 canonical accepted state 可把正文复用为同一不可变 `room_event`，state 只保留
+  identity/revision/variant 元数据。`message_projection_state_values` 统一还原逻辑 payload，
+  客户端 wire protocol 和 Snapshot V3 编码不变。
 - `user_projection_versions` 仍是唯一授权与可见性事实。仅存在 shared state 绝不授权
   snapshot 或媒体下载；读取必须先命中该用户当前/基线时刻有效的 projection reference。
-- state insert 使用 `INSERT ... ON CONFLICT DO NOTHING` 后逐字段/JSONB 等值校验。
-  相同重试幂等，不同正文碰撞必须失败，不允许 last-write-wins。
+- state insert 使用单条 data-modifying CTE 完成 `INSERT ... ON CONFLICT DO NOTHING` 与
+  逐字段/JSONB 等值校验。普通消息主写 CTE 直接创建 room-event-backed state，不增加一次
+  应用/数据库往返；相同重试幂等，不同正文碰撞必须失败，不允许 last-write-wins。极少数并发
+  `DO NOTHING` 冲突会用下一条语句的新 MVCC snapshot 再确认一次，避免把已提交的相同值误判
+  为冲突，同时不使用会制造 heap/WAL 版本的 no-op `DO UPDATE`。
 - 控制写事务先提交 message/event，再在同一事务创建 canonical state。跨 store fan-out
   每个物理目标 shard 复制一次 state，再提交每用户 inbox/sequence/log。
 - 编辑、撤回和审核 redaction 生成新 revision；撤回 state 必须删除正文、附件、提及、
@@ -39,6 +44,10 @@ store 内的 `message_projection_states`，用户行只保存 `message_state_id`
   fingerprint 比较还原后的逻辑 payload 和 state identity。
 - GC 只删除超过 grace、没有 projection/fan-out 引用、且不是控制库当前活跃 message
   revision 的 state；两条 `ON DELETE RESTRICT` FK 是并发竞争的最终保护。
+- `room_events` 是 append-only 事实。数据库 trigger 拒绝 UPDATE/DELETE；逻辑 view 还会核对
+  event ID、room、message、revision 和 event type，不匹配时 fail closed，不返回伪造正文。
+- bounded `FOR UPDATE SKIP LOCKED` worker 只压缩 `payload = room_event.payload` 的 revision 1
+  canonical state。没有同库 room event 的独立 user shard 保留一份 inline 正文，不引入跨库读。
 
 ## 迁移决定
 
@@ -52,6 +61,11 @@ store 内的 `message_projection_states`，用户行只保存 `message_state_id`
    JSONB 等值后才把 inline payload 置空；
 4. inline/backfill 指标为零且稳定后切 `read=shared`；
 5. 回滚窗口结束后才可人工执行 contract SQL。contract 不是 current-2 启动前置。
+
+在上述用户投影 expand 之后，执行
+`2026-08-18-message-projection-room-event-storage-expand.sql`：增加物理存储标记、逻辑 view、
+append-only trigger 和 bounded compaction 索引。先部署能读逻辑 view 的 binary，再允许压缩；
+压缩后不能直接回滚到只读 base-table nullable payload 的旧 binary。
 
 运行步骤、审计 SQL 和回滚边界见
 [message projection sharing runbook](../10-operations/message-projection-sharing-runbook.md)。
@@ -70,7 +84,8 @@ store 内的 `message_projection_states`，用户行只保存 `message_state_id`
 ## 预期与验证边界
 
 以当前直接消息约两位接收者、平均 payload 约 698 B 的样本，正文 heap/TOAST 理论上
-接近减半；连同新增窄引用、state 元数据和索引，预期数据库 CPU、索引与 cache 压力
-下降约 25%–40%。这是容量假设，不是生产承诺；必须用同一数据分布比较 transaction
+接近减半；控制库再复用已存在的 `room_event` 后，revision 1 state 不再保存第二份 canonical
+JSONB。连同新增窄引用、state 元数据和索引，预期数据库 CPU、WAL 与 cache 压力进一步下降，
+但读取多一次主键 join。所有百分比都是容量假设，不是生产承诺；必须用同一数据快照比较 transaction
 rate、WAL bytes、buffer hit、p95/p99、relation/TOAST bytes 和 VACUUM 时间。群成员数越
 大收益越高，但当前 standard fan-out 的其他每用户同步事实仍然线性存在。

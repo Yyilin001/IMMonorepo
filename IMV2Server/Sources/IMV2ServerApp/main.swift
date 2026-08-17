@@ -139,6 +139,8 @@ enum IMV2ServerApp {
             var snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder] = []
             var userProjectionWorkers: [PostgresV2UserProjectionWorker] = []
             var messageProjectionBackfillWorkers: [PostgresV2MessageProjectionBackfillWorker] = []
+            var messageProjectionStateBodyCompactionWorkers:
+                [PostgresV2MessageProjectionStateBodyCompactionWorker] = []
             var fanoutPayloadReferenceBackfillWorkers: [PostgresV2FanoutPayloadReferenceBackfillWorker] = []
             var projectionVersionGCWorkers: [PostgresV2ProjectionVersionGCWorker] = []
             var messageProjectionStateGCWorkers: [PostgresV2MessageProjectionStateGCWorker] = []
@@ -170,6 +172,10 @@ enum IMV2ServerApp {
                     database: maintenanceLocation.database,
                     schema: maintenanceLocation.schema,
                     compactInlinePayloads: configuration.messageProjectionWriteMode == .shared
+                ))
+                messageProjectionStateBodyCompactionWorkers.append(.init(
+                    database: maintenanceLocation.database,
+                    schema: maintenanceLocation.schema
                 ))
                 if configuration.fanoutPayloadWriteMode == .reference {
                     fanoutPayloadReferenceBackfillWorkers.append(.init(
@@ -789,6 +795,39 @@ enum IMV2ServerApp {
                     }
                 }
             }
+            let messageProjectionStateBodyCompactionTasks =
+                messageProjectionStateBodyCompactionWorkers.map { worker in
+                    Task {
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds:
+                                configuration.workerPollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            var didWork = false
+                            do {
+                                let report = try await worker.runOnce(
+                                    limit: cadence.claimLimit(
+                                        configuredLimit: configuration.workerBatchSize
+                                    )
+                                )
+                                didWork = report.didWork
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error(
+                                    "IM V2 message-state body compaction failed; retrying"
+                                )
+                            }
+                            do {
+                                try await Task.sleep(
+                                    for: cadence.delayAfterPass(didWork: didWork)
+                                )
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                }
             let fanoutPayloadReferenceBackfillTasks = fanoutPayloadReferenceBackfillWorkers.map { worker in
                 Task {
                     var cadence = V2AdaptiveWorkerCadence(
@@ -1169,6 +1208,7 @@ enum IMV2ServerApp {
             userProjectionTasks.forEach { $0.cancel() }
             snapshotArtifactTasks.forEach { $0.cancel() }
             messageProjectionBackfillTasks.forEach { $0.cancel() }
+            messageProjectionStateBodyCompactionTasks.forEach { $0.cancel() }
             fanoutPayloadReferenceBackfillTasks.forEach { $0.cancel() }
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
@@ -1183,6 +1223,7 @@ enum IMV2ServerApp {
             for task in userProjectionTasks { await task.value }
             for task in snapshotArtifactTasks { await task.value }
             for task in messageProjectionBackfillTasks { await task.value }
+            for task in messageProjectionStateBodyCompactionTasks { await task.value }
             for task in fanoutPayloadReferenceBackfillTasks { await task.value }
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value

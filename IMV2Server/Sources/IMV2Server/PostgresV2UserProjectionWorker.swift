@@ -94,7 +94,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: checkpoint.userID)
                   AND log.user_sync_sequence > \(bind: checkpoint.projectedSequence)
@@ -269,7 +269,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                        input.message_id, input.entity_key, input.created_at_microseconds,
                        state.room_id, state.origin_event_id, state.payload
                 FROM input
-                JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = input.message_state_id
                  AND state.state_event_id = input.source_event_id
                  AND state.message_id = input.message_id
@@ -763,7 +763,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             SELECT COALESCE(state.payload, version.payload)::text AS payload_json,
                    version.source_event_id
             FROM \(unsafeRaw: table("user_projection_versions")) AS version
-            LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+            LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
               ON state.state_id = version.message_state_id
             WHERE version.user_id = \(bind: userID)
               AND version.projection_kind = \(bind: key.projectionKind)

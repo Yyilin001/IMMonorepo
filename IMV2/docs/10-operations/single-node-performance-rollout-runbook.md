@@ -32,7 +32,9 @@
 
 ## 上线顺序
 
-1. 对既有数据库先执行 `2026-08-17-user-projection-ready-index-expand.sql`；新库直接安装 canonical schema。确认索引存在后再部署 binary。
+1. 对既有数据库先执行 `2026-08-17-user-projection-ready-index-expand.sql`、
+   `2026-08-18-message-projection-room-event-storage-expand.sql`；新库直接安装 canonical
+   schema。确认逻辑 view、validated storage constraint、append-only trigger 和索引存在后再部署 binary。
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
@@ -53,6 +55,17 @@
 - Gateway p50/p95/p99、`SERVER_BUSY`、`UNAVAILABLE`、PostgreSQL CPU、WAL bytes/s、commit latency、lock wait 和连接数。
 
 在 PostgreSQL 启用 `pg_stat_statements` 的环境中，按 total execution time、calls 和 mean time 检查 Top SQL。不要只凭一次 `EXPLAIN` 增加索引；候选索引必须在与生产数据分布相近的副本上用 `EXPLAIN (ANALYZE, BUFFERS, WAL)` 验证，并同时计算写放大和 relation size。
+
+本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段前后：
+
+```bash
+IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh reset
+# 执行固定时长负载
+IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh report /tmp/profile-A
+```
+
+恢复快照会删除 disposable 数据库的 `im_v2` schema，脚本因此同时要求显式
+`IM_V2_PROFILE_DATABASE_IS_DISPOSABLE=1` 且确认没有其他数据库 session；禁止对生产库执行。
 
 ## 每阶段正确性审计
 

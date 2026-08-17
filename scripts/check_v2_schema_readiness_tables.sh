@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # The shared gateway/account/operator startup gate must fail before traffic if
-# any table from the clean V2 schema is absent. Keep this check independent of
+# any required relation from the clean V2 schema is absent. Keep this check independent of
 # a live database so a canonical schema edit cannot silently escape
 # `V2SchemaReadiness.requiredTables`.
 
@@ -15,8 +15,8 @@ command -v rg >/dev/null 2>&1 || {
   exit 1
 }
 
-sql_tables() {
-  sed -nE 's/^[[:space:]]*CREATE TABLE im_v2\.([a-z0-9_]+).*/\1/p' \
+sql_relations() {
+  sed -nE 's/^[[:space:]]*CREATE (TABLE|VIEW) im_v2\.([a-z0-9_]+).*/\2/p' \
     "${sql_dir}/schema.sql" | sort -u
 }
 
@@ -27,17 +27,17 @@ readiness_tables() {
     | sort -u
 }
 
-missing="$(comm -23 <(sql_tables) <(readiness_tables))"
-unexpected="$(comm -13 <(sql_tables) <(readiness_tables))"
+missing="$(comm -23 <(sql_relations) <(readiness_tables))"
+unexpected="$(comm -13 <(sql_relations) <(readiness_tables))"
 
 if [[ -n "${missing}" || -n "${unexpected}" ]]; then
   [[ -z "${missing}" ]] || {
-    printf 'V2 schema tables missing from V2SchemaReadiness:\n%s\n' "${missing}" >&2
+    printf 'V2 schema relations missing from V2SchemaReadiness:\n%s\n' "${missing}" >&2
   }
   [[ -z "${unexpected}" ]] || {
-    printf 'V2SchemaReadiness tables absent from canonical SQL schema:\n%s\n' "${unexpected}" >&2
+    printf 'V2SchemaReadiness relations absent from canonical SQL schema:\n%s\n' "${unexpected}" >&2
   }
   exit 1
 fi
 
-printf 'V2 schema readiness table coverage check passed.\n'
+printf 'V2 schema readiness relation coverage check passed.\n'

@@ -47,6 +47,50 @@ struct V2FanoutDeliveryWorkerTests {
         #expect(await store.claimedBucket() == "users-primary")
     }
 
+    @Test("fresh direct work commits without a durable claim update")
+    func freshDirectCommitBypassesClaim() async throws {
+        let lease = try fixtureLease()
+        let store = FreshDirectDeliveryStore(
+            lease: lease,
+            freshCommits: [.init(
+                sourceEventID: lease.sourceEventID,
+                targetUserID: lease.targetUserID,
+                userSyncSequence: 77
+            )]
+        )
+        let notifier = RecordingNotifier()
+        let worker = V2FanoutDeliveryWorker(
+            store: store, bucket: "users-primary", liveNotifier: notifier,
+            commitBatchSize: 3
+        )
+
+        #expect(try await worker.runOnce(limit: 8) == .init(
+            claimedCount: 1, committedCount: 1, staleCount: 0, releasedCount: 0
+        ))
+        #expect(await store.fastCallCount() == 1)
+        #expect(await store.fastLimits() == [3])
+        #expect(await store.claimCallCount() == 0)
+        #expect(await notifier.hints() == [.init(
+            userID: lease.targetUserID, eventID: 77, highWatermark: 77
+        )])
+    }
+
+    @Test("a failed fresh-direct transaction falls back to retry-fenced delivery")
+    func freshDirectFailureFallsBackToRetryProtocol() async throws {
+        let store = FreshDirectDeliveryStore(
+            lease: try fixtureLease(), freshCommits: [], failFresh: true,
+            failGenericCommit: true
+        )
+        let worker = V2FanoutDeliveryWorker(store: store)
+
+        #expect(try await worker.runOnce(limit: 1) == .init(
+            claimedCount: 1, committedCount: 0, staleCount: 0, releasedCount: 1
+        ))
+        #expect(await store.fastCallCount() == 1)
+        #expect(await store.claimCallCount() == 1)
+        #expect(await store.retryCount() == 1)
+    }
+
     @Test("a stale lease is not retried or live-notified")
     func staleLeaseDoesNotNotify() async throws {
         let store = DeliveryStore(lease: try fixtureLease(), commit: .staleLease)
@@ -256,6 +300,77 @@ private actor BatchDeliveryStore: V2FanoutDeliveryStore {
 
     func batchSizes() -> [Int] { sizes }
     func scheduledTargetUsers() -> [UserID] { scheduled }
+}
+
+private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
+    private let lease: V2FanoutDeliveryLease
+    private let freshCommits: [V2FreshDirectFanoutDeliveryCommit]
+    private let failFresh: Bool
+    private let failGenericCommit: Bool
+    private var didClaim = false
+    private var fastCalls = 0
+    private var limits: [Int] = []
+    private var claimCalls = 0
+    private var retries = 0
+
+    init(
+        lease: V2FanoutDeliveryLease,
+        freshCommits: [V2FreshDirectFanoutDeliveryCommit],
+        failFresh: Bool = false,
+        failGenericCommit: Bool = false
+    ) {
+        self.lease = lease
+        self.freshCommits = freshCommits
+        self.failFresh = failFresh
+        self.failGenericCommit = failGenericCommit
+    }
+
+    func commitFreshDirectPreplanned(
+        bucket _: String?, partition _: V2FanoutDeliveryClaimPartition?,
+        now _: Date, limit: Int
+    ) throws -> [V2FreshDirectFanoutDeliveryCommit] {
+        fastCalls += 1
+        limits.append(limit)
+        if failFresh { throw DeliveryFailure.failed }
+        return freshCommits
+    }
+
+    func claimPending(
+        bucket _: String?, lane _: V2FanoutDeliveryClaimLane,
+        now _: Date, leaseDuration _: TimeInterval, limit _: Int
+    ) -> [V2FanoutDeliveryLease] {
+        claimCalls += 1
+        guard !didClaim else { return [] }
+        didClaim = true
+        return [lease]
+    }
+
+    func commit(_: V2FanoutDeliveryLease, now _: Date) throws
+        -> V2FanoutDeliveryCommit
+    {
+        if failGenericCommit { throw DeliveryFailure.failed }
+        return .committed(
+            userSyncSequence: 1, releasedCompletionUnit: false, closedPlan: false
+        )
+    }
+
+    func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) throws
+        -> [V2FanoutDeliveryCommit]
+    {
+        try leases.map { try commit($0, now: now) }
+    }
+
+    func handoff(_: V2FanoutDeliveryLease, to _: V2UserShardRoute) {}
+    func release(_: V2FanoutDeliveryLease) {}
+    func scheduleRetry(
+        _: V2FanoutDeliveryLease, disposition _: V2DurableRetryDisposition,
+        now _: Date
+    ) { retries += 1 }
+
+    func fastCallCount() -> Int { fastCalls }
+    func fastLimits() -> [Int] { limits }
+    func claimCallCount() -> Int { claimCalls }
+    func retryCount() -> Int { retries }
 }
 
 private actor BatchRouteRecordingRouter: V2UserShardRouter {

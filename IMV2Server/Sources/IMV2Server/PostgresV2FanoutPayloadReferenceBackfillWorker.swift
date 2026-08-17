@@ -44,7 +44,7 @@ public struct PostgresV2FanoutPayloadReferenceBackfillWorker: Sendable {
                     JOIN \(unsafeRaw: table("room_events")) AS event
                       ON event.event_id = shared.source_event_id
                      AND event.event_type = 'message.accepted'
-                    JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                    JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                       ON state.state_event_id = event.event_id
                      AND state.variant_key = 0
                     WHERE shared.projection_kind = 'message'

@@ -56,6 +56,21 @@ WHERE room.room_kind = 'direct'
 scheduled/paused delivery、terminal completion release 与连接池等待。日志和报告只能保存聚合，
 不得记录 room/user/message ID 或正文。
 
+`IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` 只是一次 claim pass 的上限；fresh direct 的单事务
+上限仍由 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` 控制（当前最大 128）。压测时不要为了追求
+瞬时 ACK/s 放大单事务，优先通过互不重叠的 target-user 分区并行扩展，并同时观察 lock wait、
+WAL burst 和 p99。
+
+同库 fresh delivery 正常排空后应保持 `retry_count=0`；非零表示它按设计进入了恢复协议：
+
+```sql
+SELECT COUNT(*) FILTER (WHERE state = 'terminal' AND retry_count = 0) AS fresh_fast,
+       COUNT(*) FILTER (WHERE retry_count > 0) AS lease_recovery
+FROM im_v2.fanout_deliveries AS delivery
+JOIN im_v2.fanout_plans AS plan USING (source_event_id)
+WHERE plan.target_rule->>'planning_strategy' = 'direct_preplanned';
+```
+
 ## 回滚
 
 出现 malformed cardinality、权限异常、持续 fallback、paused delivery、错误率或 p99 超预算时：
@@ -70,7 +85,9 @@ scheduled/paused delivery、terminal completion release 与连接池等待。日
 
 ## 性能验证矩阵
 
-在同一空库快照依次测试 planner 基线与 preplanned：500、1k、2k 在线连接爬坡；随后固定连接
+用 `v2_profile_snapshot.sh capture/restore` 在每组前恢复同一 disposable 数据快照，并用
+`capture_v2_postgres_profile.sh reset/report` 保存 query/WAL/I/O 证据。在同一快照依次测试
+planner 基线与 preplanned：500、1k、2k 在线连接爬坡；随后固定连接
 执行 5 分钟消息阶梯与 30 分钟 soak。每级至少保存 accepted、rejected、timeout、ACK p50/p95/
 p99、端到端投影 p95/p99、DB CPU/IO/WAL、gateway CPU/RSS、表/索引增量和一致性计数。只有错误
 率为 0、审计为 0 且资源曲线可解释，才提高下一级；理论百分比不得代替实测。

@@ -50,7 +50,7 @@ enum V2PostgresMediaVisibilityAuthorization {
                             AND EXISTS (
                                 SELECT 1
                                 FROM im_v2.user_projection_versions AS delivery
-                                LEFT JOIN im_v2.message_projection_states AS state
+                                LEFT JOIN im_v2.message_projection_state_values AS state
                                   ON state.state_id = delivery.message_state_id
                                 WHERE delivery.user_id = \(bind: requesterUserID)
                                   AND delivery.projection_kind = 'message'

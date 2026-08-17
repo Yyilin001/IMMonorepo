@@ -283,6 +283,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(hasMore == false)
             #expect(try await count("im_v2.messages", on: sql) == 1)
             #expect(try await count("im_v2.room_events", on: sql) == 1)
+            #expect(try await count(
+                "im_v2.message_projection_states WHERE payload_storage = 'room_event' AND payload IS NULL",
+                on: sql
+            ) == 1)
+            #expect(try await count(
+                "im_v2.message_projection_state_values AS state JOIN im_v2.room_events AS event ON event.event_id = state.state_event_id WHERE state.payload = event.payload",
+                on: sql
+            ) == 1)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 1)
             #expect(try await count("im_v2.room_outbox", on: sql) == 1)
             #expect(try await count("im_v2.fanout_completion_units", on: sql) == 2)
@@ -301,7 +309,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 JOIN im_v2.fanout_sync_payloads AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
-                LEFT JOIN im_v2.message_projection_states AS state
+                LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_id = shared.message_state_id
                 CROSS JOIN LATERAL (
                     SELECT COALESCE(shared.payload, state.payload) AS payload
@@ -323,7 +331,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 JOIN im_v2.fanout_sync_payloads AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
-                LEFT JOIN im_v2.message_projection_states AS state
+                LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_id = shared.message_state_id
                 CROSS JOIN LATERAL (
                     SELECT COALESCE(shared.payload, state.payload) AS payload
@@ -335,12 +343,47 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(payloadEnvelope.payloadStorage == "fanout_shared")
             #expect(!payloadEnvelope.hasSourceEventID)
             #expect(!payloadEnvelope.hasProjectionKind)
+            // Existing expand-migration rows start inline. Rehydrate this
+            // accepted row to that shape, then prove bounded compaction keeps
+            // the logical payload identical and makes the source event
+            // immutable at the database boundary.
+            try await sql.raw("""
+                UPDATE im_v2.message_projection_states AS state
+                SET payload = event.payload,
+                    payload_storage = 'inline'
+                FROM im_v2.room_events AS event
+                WHERE event.event_id = state.state_event_id
+                """).run()
+            let bodyCompaction = PostgresV2MessageProjectionStateBodyCompactionWorker(
+                database: app.db(.psql)
+            )
+            #expect(try await bodyCompaction.runOnce(limit: 10) == .init(compactedCount: 1))
+            #expect(try await bodyCompaction.runOnce(limit: 10) == .init(compactedCount: 0))
+            #expect(try await count(
+                "im_v2.message_projection_states WHERE payload_storage = 'room_event' AND payload IS NULL",
+                on: sql
+            ) == 1)
+            let logicalStateAfterCompaction = try #require(
+                try await PostgresV2MessageProjectionStateRepository().load(
+                    messageID: UUID(uuidString: message.messageID.rawValue)!,
+                    revision: 1,
+                    sql: sql
+                )
+            )
+            #expect(logicalStateAfterCompaction.payloadJSON.contains("transactional"))
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    UPDATE im_v2.room_events
+                    SET payload = payload || '{"text":"tampered"}'::jsonb
+                    WHERE event_id = \(bind: triggerRow.sourceEventID)
+                    """).run()
+            }
             #expect(try await count(
                 "im_v2.fanout_sync_payloads WHERE projection_kind = 'message' AND payload IS NULL AND message_state_id IS NOT NULL",
                 on: sql
             ) == 1)
             #expect(try await count(
-                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_states AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE shared.projection_kind = 'message' AND COALESCE(shared.payload, state.payload) = event.payload",
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_state_values AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE shared.projection_kind = 'message' AND COALESCE(shared.payload, state.payload) = event.payload",
                 on: sql
             ) == 1)
             let capacity = try #require(try await sql.raw("SELECT command_window_used, fanout_window_used FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)").first(decoding: CapacityRow.self))
@@ -1816,20 +1859,36 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 on: sql
             ) == acceptedEventCount * 2)
 
+            let directDeliveryControl = PostgresV2FanoutDeliveryStore(
+                database: app.db(.psql), payloadWriteMode: .reference
+            )
+            let directDeliveryRegistry = try V2StaticUserShardStorageRegistry(
+                locations: [try .init(
+                    bucket: "test-users", database: app.db(.psql), schema: "im_v2"
+                )]
+            )
             let directDeliveryWorker = V2FanoutDeliveryWorker(
-                store: PostgresV2FanoutDeliveryStore(
-                    database: app.db(.psql),
+                store: V2CrossStoreFanoutDeliveryStore(
+                    control: directDeliveryControl,
+                    registry: directDeliveryRegistry,
+                    migrations: PostgresV2UserShardMigrationStore(database: app.db(.psql)),
+                    coLocatedControlBucket: "test-users",
                     payloadWriteMode: .reference
                 ),
+                bucket: "test-users",
                 now: { now.addingTimeInterval(1) }
             )
             while try await directDeliveryWorker.runOnce(limit: 128).claimedCount > 0 {}
+            #expect(try await count(
+                "im_v2.fanout_deliveries AS delivery JOIN im_v2.room_events AS event ON event.event_id = delivery.source_event_id WHERE event.event_type = 'message.accepted' AND delivery.state = 'terminal' AND delivery.retry_count = 0 AND delivery.claim_token IS NULL AND delivery.lease_expires_at IS NULL",
+                on: sql
+            ) == acceptedEventCount * 2)
             #expect(try await count(
                 "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
                 on: sql
             ) == acceptedEventCount)
             #expect(try await count(
-                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_states AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND COALESCE(shared.payload, state.payload) = event.payload",
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_state_values AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND COALESCE(shared.payload, state.payload) = event.payload",
                 on: sql
             ) == acceptedEventCount)
             // Simulate one body-mode row left by an older process. The
@@ -1840,7 +1899,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     SELECT shared.source_event_id,
                            jsonb_set(state.payload, '{text}', to_jsonb('tampered'::text)) AS payload
                     FROM im_v2.fanout_sync_payloads AS shared
-                    JOIN im_v2.message_projection_states AS state
+                    JOIN im_v2.message_projection_state_values AS state
                       ON state.state_id = shared.message_state_id
                     JOIN im_v2.room_events AS event
                       ON event.event_id = shared.source_event_id
@@ -1864,7 +1923,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("""
                 UPDATE im_v2.fanout_sync_payloads AS shared
                 SET payload = state.payload
-                FROM im_v2.message_projection_states AS state
+                FROM im_v2.message_projection_state_values AS state
                 WHERE state.state_event_id = shared.source_event_id
                   AND state.variant_key = 0
                   AND shared.projection_kind = 'message'
@@ -6437,7 +6496,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 let linkedState = try #require(try await physicalStore.raw("""
                     SELECT COUNT(*) AS value
                     FROM im_v2.fanout_sync_payloads AS payload
-                    JOIN im_v2.message_projection_states AS state
+                    JOIN im_v2.message_projection_state_values AS state
                       ON state.state_id = payload.message_state_id
                     WHERE state.message_id = \(bind: UUID(uuidString: acceptedMessage.messageID.rawValue)!)
                       AND payload.payload IS NULL
@@ -9254,7 +9313,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             SELECT version.entity_key,
                    COALESCE(state.payload, version.payload)::text AS payload_json
             FROM im_v2.user_projection_versions AS version
-            LEFT JOIN im_v2.message_projection_states AS state
+            LEFT JOIN im_v2.message_projection_state_values AS state
               ON state.state_id = version.message_state_id
             WHERE version.user_id = \(bind: userUUID)
               AND version.projection_kind = \(bind: kind)

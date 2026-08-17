@@ -52,7 +52,7 @@ public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
                        version.payload::text AS payload_json, version.created_at,
                        state.payload::text AS state_payload_json
                 FROM \(unsafeRaw: table("user_projection_versions")) AS version
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = version.message_state_id
                 WHERE version.projection_kind = 'message'
                   AND version.payload IS NOT NULL

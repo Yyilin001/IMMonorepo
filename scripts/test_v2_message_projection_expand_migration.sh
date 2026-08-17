@@ -10,6 +10,7 @@ current_schema="${repo_root}/IMV2/sql/schema.sql"
 expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
 fanout_payload_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-fanout-payload-reference-expand.sql"
 projection_ready_index_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-user-projection-ready-index-expand.sql"
+room_event_storage_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-message-projection-room-event-storage-expand.sql"
 expand_sql_relative="IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
 schema_relative="IMV2/sql/schema.sql"
 project_name="imv2-message-projection-expand-regression"
@@ -47,6 +48,7 @@ git -C "${repo_root}" show "${migration_commit}^:${schema_relative}" | psql >/de
 psql < "${expand_sql}" >/dev/null
 psql < "${fanout_payload_expand_sql}" >/dev/null
 psql < "${projection_ready_index_expand_sql}" >/dev/null
+psql < "${room_event_storage_expand_sql}" >/dev/null
 
 normalize_schema() {
   awk '

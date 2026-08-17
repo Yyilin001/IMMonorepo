@@ -116,7 +116,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
-                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
                   ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)

@@ -2,6 +2,11 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+enum V2MessageProjectionStateStorage: String, Sendable {
+    case inline
+    case roomEvent = "room_event"
+}
+
 struct V2StoredMessageProjectionState: Equatable, Sendable {
     let stateID: UUID
     let messageID: UUID
@@ -102,37 +107,96 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
 
     func persist(
         _ value: V2StoredMessageProjectionState,
+        storage: V2MessageProjectionStateStorage = .inline,
         sql: any SQLDatabase
     ) async throws {
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: table("message_projection_states"))
+        // A data-modifying CTE does not expose its inserted row through a
+        // sibling scan of the base table in the same statement snapshot.
+        // Keep the successful insert in `inserted`, and consult the base
+        // table only for the conflict/retry branch. This preserves the strict
+        // immutable equality fence while reducing persist from two database
+        // round trips to one.
+        let verified = try await sql.raw("""
+            WITH validated AS MATERIALIZED (
+                SELECT 1
+                WHERE \(bind: storage.rawValue) = 'inline'
+                   OR (
+                       \(bind: storage.rawValue) = 'room_event'
+                       AND EXISTS (
+                           SELECT 1
+                           FROM \(unsafeRaw: table("room_events")) AS event
+                           WHERE event.event_id = \(bind: value.stateEventID)
+                             AND event.room_id = \(bind: value.roomID)
+                             AND event.event_type = 'message.accepted'
+                             AND lower(event.payload->>'message_id') = \(bind: value.messageID.uuidString.lowercased())
+                             AND lower(event.payload->>'room_id') = \(bind: value.roomID.uuidString.lowercased())
+                             AND (event.payload->>'message_revision')::bigint = \(bind: value.messageRevision)
+                             AND event.payload = \(bind: value.payloadJSON)::jsonb
+                       )
+                   )
+            ), inserted AS (
+                INSERT INTO \(unsafeRaw: table("message_projection_states"))
                 (state_id, message_id, room_id, message_revision, variant_key,
                  origin_event_id, state_event_id, is_withdrawn,
-                 payload_schema_version, payload, created_at)
-            VALUES
-                (\(bind: value.stateID), \(bind: value.messageID), \(bind: value.roomID),
-                 \(bind: value.messageRevision), \(bind: value.variantKey),
-                 \(bind: value.originEventID), \(bind: value.stateEventID),
-                 \(bind: value.isWithdrawn), \(bind: value.payloadSchemaVersion),
-                 \(bind: value.payloadJSON)::jsonb, \(bind: value.createdAt))
-            ON CONFLICT DO NOTHING
-            """).run()
-        guard let verified = try await sql.raw("""
-            SELECT 1 AS value
-            FROM \(unsafeRaw: table("message_projection_states"))
-            WHERE state_id = \(bind: value.stateID)
-              AND message_id = \(bind: value.messageID)
-              AND room_id = \(bind: value.roomID)
-              AND message_revision = \(bind: value.messageRevision)
-              AND variant_key = \(bind: value.variantKey)
-              AND origin_event_id = \(bind: value.originEventID)
-              AND state_event_id IS NOT DISTINCT FROM \(bind: value.stateEventID)
-              AND is_withdrawn = \(bind: value.isWithdrawn)
-              AND payload_schema_version = \(bind: value.payloadSchemaVersion)
-              AND payload = \(bind: value.payloadJSON)::jsonb
-            """).first(decoding: MessageProjectionStateExistsRow.self),
-              verified.value == 1
-        else { throw V2MessageProjectionStatePersistenceError.conflictingState }
+                 payload_schema_version, payload, created_at, payload_storage)
+                SELECT \(bind: value.stateID), \(bind: value.messageID), \(bind: value.roomID),
+                       \(bind: value.messageRevision), \(bind: value.variantKey),
+                       \(bind: value.originEventID), \(bind: value.stateEventID),
+                       \(bind: value.isWithdrawn), \(bind: value.payloadSchemaVersion),
+                       CASE WHEN \(bind: storage.rawValue) = 'inline'
+                            THEN \(bind: value.payloadJSON)::jsonb ELSE NULL END,
+                       \(bind: value.createdAt), \(bind: storage.rawValue)
+                FROM validated
+                ON CONFLICT DO NOTHING
+                RETURNING 1
+            )
+            SELECT CASE
+                WHEN EXISTS (SELECT 1 FROM inserted)
+                  OR EXISTS (
+                    SELECT 1
+                    FROM \(unsafeRaw: table("message_projection_state_values"))
+                    WHERE state_id = \(bind: value.stateID)
+                      AND message_id = \(bind: value.messageID)
+                      AND room_id = \(bind: value.roomID)
+                      AND message_revision = \(bind: value.messageRevision)
+                      AND variant_key = \(bind: value.variantKey)
+                      AND origin_event_id = \(bind: value.originEventID)
+                      AND state_event_id IS NOT DISTINCT FROM \(bind: value.stateEventID)
+                      AND is_withdrawn = \(bind: value.isWithdrawn)
+                      AND payload_schema_version = \(bind: value.payloadSchemaVersion)
+                      AND payload = \(bind: value.payloadJSON)::jsonb
+                  )
+                THEN 1 ELSE 0
+            END AS value
+            """).first(decoding: MessageProjectionStateExistsRow.self)
+        guard verified?.value == 1 else {
+            // `INSERT .. ON CONFLICT DO NOTHING` can observe an uncommitted
+            // conflicting tuple that the statement's earlier MVCC snapshot
+            // cannot see through the base-table branch above. A new statement
+            // gets a fresh READ COMMITTED snapshot after that conflict has
+            // resolved. Keep this second read off the uncontended hot path,
+            // while preserving true concurrent idempotency without issuing a
+            // no-op `DO UPDATE` that would create a new heap/WAL version.
+            guard let concurrentReplay = try await sql.raw("""
+                SELECT 1 AS value
+                FROM \(unsafeRaw: table("message_projection_state_values"))
+                WHERE state_id = \(bind: value.stateID)
+                  AND message_id = \(bind: value.messageID)
+                  AND room_id = \(bind: value.roomID)
+                  AND message_revision = \(bind: value.messageRevision)
+                  AND variant_key = \(bind: value.variantKey)
+                  AND origin_event_id = \(bind: value.originEventID)
+                  AND state_event_id IS NOT DISTINCT FROM \(bind: value.stateEventID)
+                  AND is_withdrawn = \(bind: value.isWithdrawn)
+                  AND payload_schema_version = \(bind: value.payloadSchemaVersion)
+                  AND payload = \(bind: value.payloadJSON)::jsonb
+                """).first(decoding: MessageProjectionStateExistsRow.self),
+                  concurrentReplay.value == 1
+            else {
+                throw V2MessageProjectionStatePersistenceError.conflictingState
+            }
+            return
+        }
     }
 
     func load(
@@ -148,7 +212,7 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             SELECT state_id, message_id, room_id, message_revision, variant_key,
                    origin_event_id, state_event_id, is_withdrawn,
                    payload_schema_version, payload::text AS payload_json, created_at
-            FROM \(unsafeRaw: table("message_projection_states"))
+            FROM \(unsafeRaw: table("message_projection_state_values"))
             WHERE message_id = \(bind: messageID)
               AND message_revision = \(bind: revision)
               AND variant_key = \(bind: variantKey)
@@ -163,7 +227,7 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             SELECT state_id, message_id, room_id, message_revision, variant_key,
                    origin_event_id, state_event_id, is_withdrawn,
                    payload_schema_version, payload::text AS payload_json, created_at
-            FROM \(unsafeRaw: table("message_projection_states"))
+            FROM \(unsafeRaw: table("message_projection_state_values"))
             WHERE state_id = \(bind: stateID)
             """).first(decoding: MessageProjectionStateRow.self)?.value
     }

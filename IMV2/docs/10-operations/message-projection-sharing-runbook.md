@@ -11,6 +11,8 @@
   `IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql`；
 - fan-out accepted-message 窄引用扩展：
   `IMV2/sql/changes/2026-08-17-fanout-payload-reference-expand.sql`；
+- control-store accepted body 复用扩展：
+  `IMV2/sql/changes/2026-08-18-message-projection-room-event-storage-expand.sql`；
 - 最终不可逆 contract：
   `IMV2/sql/changes/2026-08-17-message-projection-sharing-contract.sql`；
 - 所有控制库和每个物理 user-shard `(database, schema)` 必须先完成 expand；任一未完成，
@@ -72,7 +74,7 @@ WHERE projection_kind = 'message' AND message_state_id IS NULL;
 
 SELECT COUNT(*) AS mismatched_dual_payload
 FROM im_v2.user_projection_versions AS version
-JOIN im_v2.message_projection_states AS state
+JOIN im_v2.message_projection_state_values AS state
   ON state.state_id = version.message_state_id
 WHERE version.projection_kind = 'message'
   AND version.payload IS NOT NULL
@@ -80,7 +82,7 @@ WHERE version.projection_kind = 'message'
 
 SELECT COUNT(*) AS broken_reference
 FROM im_v2.user_projection_versions AS version
-LEFT JOIN im_v2.message_projection_states AS state
+LEFT JOIN im_v2.message_projection_state_values AS state
   ON state.state_id = version.message_state_id
 WHERE version.projection_kind = 'message' AND state.state_id IS NULL;
 ```
@@ -125,7 +127,7 @@ WHERE event.event_type = 'message.accepted'
 SELECT COUNT(*) AS accepted_missing_state
 FROM im_v2.fanout_sync_payloads AS shared
 JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id
-LEFT JOIN im_v2.message_projection_states AS state
+LEFT JOIN im_v2.message_projection_state_values AS state
   ON state.state_id = shared.message_state_id
 WHERE event.event_type = 'message.accepted'
   AND shared.projection_kind = 'message' AND state.state_id IS NULL;
@@ -133,12 +135,34 @@ WHERE event.event_type = 'message.accepted'
 SELECT COUNT(*) AS accepted_payload_mismatch
 FROM im_v2.fanout_sync_payloads AS shared
 JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id
-JOIN im_v2.message_projection_states AS state
+JOIN im_v2.message_projection_state_values AS state
   ON state.state_id = shared.message_state_id
 WHERE event.event_type = 'message.accepted'
   AND shared.projection_kind = 'message'
   AND COALESCE(shared.payload, state.payload) <> event.payload;
 ```
+
+控制 schema 的 accepted revision 1 state 还会把重复正文压缩到 room event。先确认 view 逻辑
+值与事件完全相等，再观察 bounded worker 把以下第一项收敛为 0；独立 user shard 没有同库
+room event，保留 inline 属正常情况：
+
+```sql
+SELECT COUNT(*) AS compactable_inline
+FROM im_v2.message_projection_states AS state
+JOIN im_v2.room_events AS event ON event.event_id = state.state_event_id
+WHERE state.payload_storage = 'inline'
+  AND state.message_revision = 1 AND state.variant_key = 0
+  AND state.payload = event.payload;
+
+SELECT COUNT(*) AS broken_room_event_reference
+FROM im_v2.message_projection_states AS state
+LEFT JOIN im_v2.message_projection_state_values AS value
+  ON value.state_id = state.state_id
+WHERE state.payload_storage = 'room_event' AND value.state_id IS NULL;
+```
+
+第二项必须始终为 0。压缩产生 dead tuples，沿用 autovacuum/repack 边界，禁止在线
+`VACUUM FULL`。
 
 ## Phase 3：strict shared read 与 contract
 
