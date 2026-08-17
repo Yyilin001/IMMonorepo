@@ -57,11 +57,9 @@ services:
     environment:
       # A delivery pass holds one PostgreSQL connection while it leases rows,
       # then performs commit-sized projection transactions. The generic 100k
-      # profile allows eight concurrent 2,000-row claims, but that burst can
-      # monopolize a 32-connection pool on this single 8-vCPU host and reject
-      # foreground sends before PostgreSQL itself is saturated. Eight bounded
-      # claim lanes preserve the measured 2,048-delivery budget per pass. The
-      # server partitions those lanes by target user, so they no longer fight
+      # profile permits much larger claims, but that burst can monopolize this
+      # single 8-vCPU host before PostgreSQL itself is saturated. Eight lanes
+      # of 256 rows retain a bounded 2,048-delivery budget per worker pass.
       # Four event loops expose a 64-connection Gateway ceiling. The role
       # values below are retained for controlled isolation A/B runs, but the
       # default shared topology lets a hot class borrow idle capacity. The
