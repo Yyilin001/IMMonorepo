@@ -29,6 +29,15 @@ services:
       # but prevent it from turning a transport/database benchmark into a
       # policy-limit benchmark after the third message for a pair.
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 100000
+      # Every test connection intentionally starts without a saved Sync
+      # cursor and can therefore drain a large historical log while sending
+      # messages. Keep the production command buckets in the base file, but
+      # prevent that synthetic pull/ack burst from becoming the benchmarked
+      # limiter before PostgreSQL is saturated.
+      IM_V2_DEVICE_COMMANDS_PER_SECOND: 256
+      IM_V2_DEVICE_COMMAND_BURST: 512
+      IM_V2_USER_COMMANDS_PER_SECOND: 512
+      IM_V2_USER_COMMAND_BURST: 1024
       # The benchmark deliberately releases as many as 1,000 idempotent
       # open-direct-room commands in one second after connection ramp-up. Keep
       # the server override's foreground/Sync in-flight limits (32/16), but
