@@ -202,6 +202,15 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             guard let lease = nextShard.lease, room.roomSequence < Int64.max, message.contentRevision < Int64.max else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomSequence = room.roomSequence + 1; let messageRevision = message.contentRevision + 1
             let eventUUID = try moderationUUID(eventID); let planUUID = try moderationUUID(planID)
+            let previousProjectionState = try await PostgresV2MessageProjectionStateRepository()
+                .loadCurrentOrMaterialize(
+                    messageID: messageID,
+                    revision: message.contentRevision,
+                    sql: sql
+                )
+            let redactedProjectionState = try previousProjectionState.state.applyingRemoval(
+                revision: moderationUnsigned(messageRevision)
+            )
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.messages SET content_revision = \(bind: messageRevision), withdrawn_at = \(bind: now), withdrawn_by_user_id = \(bind: actorID) WHERE message_id = \(bind: messageID)").run()
             // Existing grants fail through message withdrawal.  This explicit
@@ -219,6 +228,15 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), 'message.redacted', \(bind: actorID),
                         jsonb_build_object('event_type', 'message.redacted', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'message_id', \(bind: messageID.uuidString), 'message_revision', \(bind: messageRevision), 'actor_user_id', \(bind: actorID.uuidString), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000)), 'is_withdrawn', true), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
+            try await PostgresV2MessageProjectionStateRepository().persist(
+                try .init(
+                    state: redactedProjectionState,
+                    originEventID: previousProjectionState.originEventID,
+                    stateEventID: eventUUID,
+                    createdAt: now
+                ),
+                sql: sql
+            )
             try await V2RoomEventDeliveryMode.persistPlan(
                 deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID,
                 roomSequence: roomSequence, committedMembershipRevision: room.membershipRevision,

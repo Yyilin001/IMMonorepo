@@ -68,6 +68,12 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let failedSnapshotArtifacts: Int
     public let oldestBuildingSnapshotAgeSeconds: Int
     public let projectionVersionGCBacklogEstimatedRows: Int
+    /// Planner estimates are used so a scrape never scans the largest table.
+    public let messageProjectionStatesEstimatedRows: Int
+    public let messageProjectionStatesRelationBytes: Int
+    public let messageProjectionReferenceEstimatedRows: Int
+    public let messageProjectionBackfillEstimatedRows: Int
+    public let messageProjectionInlinePayloadEstimatedRows: Int
     public let uncompactedProjectedRecords: Int
     public let pendingSyncRecordsAcrossDevices: Int
     public let resetPendingDevices: Int
@@ -127,6 +133,11 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         failedSnapshotArtifacts: Int = 0,
         oldestBuildingSnapshotAgeSeconds: Int = 0,
         projectionVersionGCBacklogEstimatedRows: Int = 0,
+        messageProjectionStatesEstimatedRows: Int = 0,
+        messageProjectionStatesRelationBytes: Int = 0,
+        messageProjectionReferenceEstimatedRows: Int = 0,
+        messageProjectionBackfillEstimatedRows: Int = 0,
+        messageProjectionInlinePayloadEstimatedRows: Int = 0,
         uncompactedProjectedRecords: Int = 0,
         pendingSyncRecordsAcrossDevices: Int = 0,
         resetPendingDevices: Int = 0,
@@ -182,6 +193,11 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.failedSnapshotArtifacts = max(0, failedSnapshotArtifacts)
         self.oldestBuildingSnapshotAgeSeconds = max(0, oldestBuildingSnapshotAgeSeconds)
         self.projectionVersionGCBacklogEstimatedRows = max(0, projectionVersionGCBacklogEstimatedRows)
+        self.messageProjectionStatesEstimatedRows = max(0, messageProjectionStatesEstimatedRows)
+        self.messageProjectionStatesRelationBytes = max(0, messageProjectionStatesRelationBytes)
+        self.messageProjectionReferenceEstimatedRows = max(0, messageProjectionReferenceEstimatedRows)
+        self.messageProjectionBackfillEstimatedRows = max(0, messageProjectionBackfillEstimatedRows)
+        self.messageProjectionInlinePayloadEstimatedRows = max(0, messageProjectionInlinePayloadEstimatedRows)
         self.uncompactedProjectedRecords = max(0, uncompactedProjectedRecords)
         self.pendingSyncRecordsAcrossDevices = max(0, pendingSyncRecordsAcrossDevices)
         self.resetPendingDevices = max(0, resetPendingDevices)
@@ -812,7 +828,14 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
                         AS user_projection_effects_estimated_rows,
                     pg_total_relation_size(
                         \(bind: "\(schema).user_projection_effects")::regclass
-                    )::BIGINT AS user_projection_effects_relation_bytes
+                    )::BIGINT AS user_projection_effects_relation_bytes,
+                    COALESCE((SELECT n_live_tup::BIGINT FROM pg_stat_user_tables
+                              WHERE schemaname = \(bind: schema)
+                                AND relname = 'message_projection_states'), 0)::BIGINT
+                        AS message_projection_states_estimated_rows,
+                    pg_total_relation_size(
+                        \(bind: "\(schema).message_projection_states")::regclass
+                    )::BIGINT AS message_projection_states_relation_bytes
             ),
             projection_metrics AS (
                 SELECT
@@ -856,7 +879,31 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
                       ON namespace.oid = index_stats.relnamespace
                     WHERE namespace.nspname = \(bind: schema)
                       AND index_stats.relname = 'user_projection_versions_gc_idx'
-                ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows
+                ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows,
+                COALESCE((
+                    SELECT index_stats.reltuples::BIGINT
+                    FROM pg_class AS index_stats
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_stats.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_stats.relname = 'user_projection_versions_message_state_idx'
+                ), 0)::BIGINT AS message_projection_reference_estimated_rows,
+                COALESCE((
+                    SELECT index_stats.reltuples::BIGINT
+                    FROM pg_class AS index_stats
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_stats.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_stats.relname = 'user_projection_versions_message_backfill_idx'
+                ), 0)::BIGINT AS message_projection_backfill_estimated_rows,
+                COALESCE((
+                    SELECT index_stats.reltuples::BIGINT
+                    FROM pg_class AS index_stats
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_stats.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_stats.relname = 'user_projection_versions_message_inline_idx'
+                ), 0)::BIGINT AS message_projection_inline_payload_estimated_rows
             ),
             retention_metrics AS (
                 SELECT COALESCE(SUM(GREATEST(
@@ -886,6 +933,11 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
             failedSnapshotArtifacts: v2MetricCount(row.failedSnapshotArtifacts),
             oldestBuildingSnapshotAgeSeconds: v2MetricCount(row.oldestBuildingSnapshotAgeSeconds),
             projectionVersionGCBacklogEstimatedRows: v2MetricCount(row.projectionVersionGCBacklogEstimatedRows),
+            messageProjectionStatesEstimatedRows: v2MetricCount(row.messageProjectionStatesEstimatedRows),
+            messageProjectionStatesRelationBytes: v2MetricCount(row.messageProjectionStatesRelationBytes),
+            messageProjectionReferenceEstimatedRows: v2MetricCount(row.messageProjectionReferenceEstimatedRows),
+            messageProjectionBackfillEstimatedRows: v2MetricCount(row.messageProjectionBackfillEstimatedRows),
+            messageProjectionInlinePayloadEstimatedRows: v2MetricCount(row.messageProjectionInlinePayloadEstimatedRows),
             uncompactedProjectedRecords: v2MetricCount(row.uncompactedProjectedRecords),
             pendingSyncRecordsAcrossDevices: v2MetricCount(row.pendingSyncRecordsAcrossDevices),
             resetPendingDevices: v2MetricCount(row.resetPendingDevices)
@@ -951,6 +1003,11 @@ private func v2AggregateDurableWorkMetrics(
         failedSnapshotArtifacts: sum(\.failedSnapshotArtifacts),
         oldestBuildingSnapshotAgeSeconds: maximum(\.oldestBuildingSnapshotAgeSeconds),
         projectionVersionGCBacklogEstimatedRows: sum(\.projectionVersionGCBacklogEstimatedRows),
+        messageProjectionStatesEstimatedRows: sum(\.messageProjectionStatesEstimatedRows),
+        messageProjectionStatesRelationBytes: sum(\.messageProjectionStatesRelationBytes),
+        messageProjectionReferenceEstimatedRows: sum(\.messageProjectionReferenceEstimatedRows),
+        messageProjectionBackfillEstimatedRows: sum(\.messageProjectionBackfillEstimatedRows),
+        messageProjectionInlinePayloadEstimatedRows: sum(\.messageProjectionInlinePayloadEstimatedRows),
         uncompactedProjectedRecords: sum(\.uncompactedProjectedRecords),
         pendingSyncRecordsAcrossDevices: sum(\.pendingSyncRecordsAcrossDevices),
         resetPendingDevices: sum(\.resetPendingDevices),
@@ -1059,6 +1116,21 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_projection_version_gc_backlog_estimated_rows Planner estimate from the closed-version partial index.",
         "# TYPE im_v2_projection_version_gc_backlog_estimated_rows gauge",
         "im_v2_projection_version_gc_backlog_estimated_rows \(snapshot.projectionVersionGCBacklogEstimatedRows)",
+        "# HELP im_v2_message_projection_states_estimated_rows PostgreSQL planner estimate of immutable shared message states.",
+        "# TYPE im_v2_message_projection_states_estimated_rows gauge",
+        "im_v2_message_projection_states_estimated_rows \(snapshot.messageProjectionStatesEstimatedRows)",
+        "# HELP im_v2_message_projection_states_relation_bytes Heap, indexes, and TOAST bytes retained by immutable shared message states.",
+        "# TYPE im_v2_message_projection_states_relation_bytes gauge",
+        "im_v2_message_projection_states_relation_bytes \(snapshot.messageProjectionStatesRelationBytes)",
+        "# HELP im_v2_message_projection_references_estimated_rows Planner estimate of user message versions linked to shared state.",
+        "# TYPE im_v2_message_projection_references_estimated_rows gauge",
+        "im_v2_message_projection_references_estimated_rows \(snapshot.messageProjectionReferenceEstimatedRows)",
+        "# HELP im_v2_message_projection_backfill_estimated_rows Planner estimate of legacy message versions still missing a shared-state reference.",
+        "# TYPE im_v2_message_projection_backfill_estimated_rows gauge",
+        "im_v2_message_projection_backfill_estimated_rows \(snapshot.messageProjectionBackfillEstimatedRows)",
+        "# HELP im_v2_message_projection_inline_payload_estimated_rows Planner estimate of duplicated inline message payloads remaining before contract.",
+        "# TYPE im_v2_message_projection_inline_payload_estimated_rows gauge",
+        "im_v2_message_projection_inline_payload_estimated_rows \(snapshot.messageProjectionInlinePayloadEstimatedRows)",
         "# HELP im_v2_sync_uncompacted_projected_records Aggregate canonical records above retained floors.",
         "# TYPE im_v2_sync_uncompacted_projected_records gauge",
         "im_v2_sync_uncompacted_projected_records \(snapshot.uncompactedProjectedRecords)",
@@ -1199,6 +1271,11 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
     let failedSnapshotArtifacts: Int64
     let oldestBuildingSnapshotAgeSeconds: Int64
     let projectionVersionGCBacklogEstimatedRows: Int64
+    let messageProjectionStatesEstimatedRows: Int64
+    let messageProjectionStatesRelationBytes: Int64
+    let messageProjectionReferenceEstimatedRows: Int64
+    let messageProjectionBackfillEstimatedRows: Int64
+    let messageProjectionInlinePayloadEstimatedRows: Int64
     let uncompactedProjectedRecords: Int64
     let pendingSyncRecordsAcrossDevices: Int64
     let resetPendingDevices: Int64
@@ -1216,6 +1293,11 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
         case failedSnapshotArtifacts = "failed_snapshot_artifacts"
         case oldestBuildingSnapshotAgeSeconds = "oldest_building_snapshot_age_seconds"
         case projectionVersionGCBacklogEstimatedRows = "projection_version_gc_backlog_estimated_rows"
+        case messageProjectionStatesEstimatedRows = "message_projection_states_estimated_rows"
+        case messageProjectionStatesRelationBytes = "message_projection_states_relation_bytes"
+        case messageProjectionReferenceEstimatedRows = "message_projection_reference_estimated_rows"
+        case messageProjectionBackfillEstimatedRows = "message_projection_backfill_estimated_rows"
+        case messageProjectionInlinePayloadEstimatedRows = "message_projection_inline_payload_estimated_rows"
         case uncompactedProjectedRecords = "uncompacted_projected_records"
         case pendingSyncRecordsAcrossDevices = "pending_sync_records_across_devices"
         case resetPendingDevices = "reset_pending_devices"

@@ -61,6 +61,12 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
 
         try await copySequenceAndCheckpoint(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyInbox(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
+        // Shared states are immutable shard-local dependencies. Copy them
+        // before either fan-out payloads or per-user projection references so
+        // both foreign keys stay valid throughout the transfer.
+        try await copyReferencedMessageStates(
+            sourceSQL: sourceSQL, userID: userID, token: record.migrationID
+        )
         try await copySyncLog(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyProjectionEffects(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
         try await copyProjectionVersions(sourceSQL: sourceSQL, userID: userID, token: record.migrationID)
@@ -427,12 +433,16 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         while true {
             let rows = try await sourceSQL.raw("""
                 SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
-                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json,
-                       log.payload_storage, log.created_at
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload
+                            ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json,
+                       shared.payload::text AS shared_payload_json,
+                       log.payload_storage, shared.message_state_id, log.created_at
                 FROM \(unsafeRaw: sourceTable("user_sync_log")) AS log
                 LEFT JOIN \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
+                LEFT JOIN \(unsafeRaw: sourceTable("message_projection_states")) AS state
+                  ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)
                 """).all(decoding: ProjectionSyncLogRow.self)
@@ -441,9 +451,9 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 let shared = rows.filter { $0.payloadStorage == "fanout_shared" }
                 if !shared.isEmpty {
-                    var query: SQLQueryString = "INSERT INTO \(unsafeRaw: targetTable("fanout_sync_payloads")) (source_event_id, projection_kind, payload, created_at) VALUES "
-                    query += shared.map { "(\(bind: $0.sourceEventID), \(bind: $0.projectionKind), \(bind: $0.payloadJSON)::jsonb, \(bind: $0.createdAt))" }.joined(separator: ",")
-                    query += " ON CONFLICT DO NOTHING"
+                    var query: SQLQueryString = "INSERT INTO \(unsafeRaw: targetTable("fanout_sync_payloads")) (source_event_id, projection_kind, payload, message_state_id, created_at) VALUES "
+                    query += shared.map { "(\(bind: $0.sourceEventID), \(bind: $0.projectionKind), \(bind: $0.sharedPayloadJSON)::jsonb, \(bind: $0.messageStateID), \(bind: $0.createdAt))" }.joined(separator: ",")
+                    query += " ON CONFLICT (source_event_id, projection_kind) DO UPDATE SET message_state_id = COALESCE(\(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id, EXCLUDED.message_state_id) WHERE \(unsafeRaw: targetTable("fanout_sync_payloads")).payload IS NOT DISTINCT FROM EXCLUDED.payload AND (\(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id IS NULL OR \(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id)"
                     try await sql.raw(query).run()
                 }
                 var query: SQLQueryString = "INSERT INTO \(unsafeRaw: targetTable("user_sync_log")) (user_id, user_sync_sequence, source_event_id, projection_kind, payload, payload_storage, created_at) VALUES "
@@ -452,6 +462,60 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 try await sql.raw(query).run()
             }
             after = rows[rows.count - 1].sequence
+            try await renewFences(userID: userID, token: token)
+        }
+    }
+
+    private func copyReferencedMessageStates(
+        sourceSQL: any SQLDatabase,
+        userID: UUID,
+        token: UUID
+    ) async throws {
+        var after: UUID?
+        let targetRepository = PostgresV2MessageProjectionStateRepository(schema: targetSchema)
+        while true {
+            var query: SQLQueryString = """
+                SELECT state.state_id, state.message_id, state.room_id,
+                       state.message_revision, state.variant_key,
+                       state.origin_event_id, state.state_event_id,
+                       state.is_withdrawn, state.payload_schema_version,
+                       state.payload::text AS payload_json, state.created_at
+                FROM \(unsafeRaw: sourceTable("message_projection_states")) AS state
+                WHERE (
+                    EXISTS (
+                        SELECT 1
+                        FROM \(unsafeRaw: sourceTable("user_projection_versions")) AS version
+                        WHERE version.user_id = \(bind: userID)
+                          AND version.message_state_id = state.state_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
+                        JOIN \(unsafeRaw: sourceTable("user_sync_log")) AS log
+                          ON log.source_event_id = shared.source_event_id
+                         AND log.projection_kind = shared.projection_kind
+                        WHERE log.user_id = \(bind: userID)
+                          AND shared.message_state_id = state.state_id
+                    )
+                )
+                """
+            if let after { query += " AND state.state_id > \(bind: after)" }
+            query += " ORDER BY state.state_id LIMIT \(bind: payloadPageSize)"
+            let rows = try await sourceSQL.raw(query)
+                .all(decoding: ProjectionMessageStateRow.self)
+            guard !rows.isEmpty else { return }
+            try await target.transaction { database in
+                guard let sql = database as? any SQLDatabase else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                for row in rows {
+                    // `persist` is intentionally insert-and-verify: an
+                    // interrupted migration can retry, while an immutable
+                    // state collision stops the cutover.
+                    try await targetRepository.persist(row.value, sql: sql)
+                }
+            }
+            after = rows.last?.stateID
             try await renewFences(userID: userID, token: token)
         }
     }
@@ -481,17 +545,17 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func copyProjectionVersions(sourceSQL: any SQLDatabase, userID: UUID, token: UUID) async throws {
         var after: ProjectionVersionKey?
         while true {
-            var query: SQLQueryString = "SELECT projection_kind, entity_key, scope_room_id, valid_from_sequence, valid_to_sequence, source_event_id, payload::text AS payload_json, created_at FROM \(unsafeRaw: sourceTable("user_projection_versions")) WHERE user_id = \(bind: userID)"
+            var query: SQLQueryString = "SELECT projection_kind, entity_key, scope_room_id, valid_from_sequence, valid_to_sequence, source_event_id, message_state_id, payload::text AS payload_json, created_at FROM \(unsafeRaw: sourceTable("user_projection_versions")) WHERE user_id = \(bind: userID)"
             if let after { query += " AND (projection_kind, entity_key, valid_from_sequence) > (\(bind: after.kind), \(bind: after.key), \(bind: after.sequence))" }
             query += " ORDER BY projection_kind, entity_key, valid_from_sequence LIMIT \(bind: payloadPageSize)"
             let rows = try await sourceSQL.raw(query).all(decoding: ProjectionVersionRow.self)
             guard !rows.isEmpty else { return }
             try await insert(rows) { row in
-                "(\(bind: userID), \(bind: row.kind), \(bind: row.key), \(bind: row.roomID), \(bind: row.validFrom), \(bind: row.validTo), \(bind: row.sourceEventID), \(bind: row.payloadJSON)::jsonb, \(bind: row.createdAt))"
+                "(\(bind: userID), \(bind: row.kind), \(bind: row.key), \(bind: row.roomID), \(bind: row.validFrom), \(bind: row.validTo), \(bind: row.sourceEventID), \(bind: row.messageStateID), \(bind: row.payloadJSON)::jsonb, \(bind: row.createdAt))"
             } prefix: {
-                "INSERT INTO \(unsafeRaw: targetTable("user_projection_versions")) (user_id, projection_kind, entity_key, scope_room_id, valid_from_sequence, valid_to_sequence, source_event_id, payload, created_at) VALUES "
+                "INSERT INTO \(unsafeRaw: targetTable("user_projection_versions")) (user_id, projection_kind, entity_key, scope_room_id, valid_from_sequence, valid_to_sequence, source_event_id, message_state_id, payload, created_at) VALUES "
             } suffix: {
-                " ON CONFLICT (user_id, projection_kind, entity_key, valid_from_sequence) DO UPDATE SET scope_room_id = EXCLUDED.scope_room_id, valid_to_sequence = EXCLUDED.valid_to_sequence, source_event_id = EXCLUDED.source_event_id, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at"
+                " ON CONFLICT (user_id, projection_kind, entity_key, valid_from_sequence) DO UPDATE SET scope_room_id = EXCLUDED.scope_room_id, valid_to_sequence = EXCLUDED.valid_to_sequence, source_event_id = EXCLUDED.source_event_id, message_state_id = EXCLUDED.message_state_id, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at"
             }
             after = rows.last.map { .init(kind: $0.kind, key: $0.key, sequence: $0.validFrom) }
             try await renewFences(userID: userID, token: token)
@@ -696,7 +760,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func fingerprintLog(sql: any SQLDatabase, schema: String, userID: UUID, renew: () async throws -> Void, append: (String) -> Void) async throws {
         var after: Int64 = 0
         while true {
-            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json, log.payload_storage, log.created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
+            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json, shared.payload::text AS shared_payload_json, log.payload_storage, shared.message_state_id, log.created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_states", schema: schema)) AS state ON state.state_id = shared.message_state_id WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
             guard !rows.isEmpty else { return }; rows.forEach { append($0.line) }; after = rows[rows.count - 1].sequence
             try await renew()
         }
@@ -721,9 +785,9 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func fingerprintVersions(sql: any SQLDatabase, schema: String, userID: UUID, renew: () async throws -> Void, append: (String) -> Void) async throws {
         var after: ProjectionVersionKey?
         while true {
-            var query: SQLQueryString = "SELECT projection_kind, entity_key, scope_room_id, valid_from_sequence, valid_to_sequence, source_event_id, payload::text AS payload_json, created_at FROM \(unsafeRaw: qualifiedTable("user_projection_versions", schema: schema)) WHERE user_id = \(bind: userID)"
-            if let after { query += " AND (projection_kind, entity_key, valid_from_sequence) > (\(bind: after.kind), \(bind: after.key), \(bind: after.sequence))" }
-            query += " ORDER BY projection_kind, entity_key, valid_from_sequence LIMIT \(bind: payloadPageSize)"
+            var query: SQLQueryString = "SELECT version.projection_kind, version.entity_key, version.scope_room_id, version.valid_from_sequence, version.valid_to_sequence, version.source_event_id, version.message_state_id, COALESCE(state.payload, version.payload)::text AS payload_json, version.created_at FROM \(unsafeRaw: qualifiedTable("user_projection_versions", schema: schema)) AS version LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_states", schema: schema)) AS state ON state.state_id = version.message_state_id WHERE version.user_id = \(bind: userID)"
+            if let after { query += " AND (version.projection_kind, version.entity_key, version.valid_from_sequence) > (\(bind: after.kind), \(bind: after.key), \(bind: after.sequence))" }
+            query += " ORDER BY version.projection_kind, version.entity_key, version.valid_from_sequence LIMIT \(bind: payloadPageSize)"
             let rows = try await sql.raw(query).all(decoding: ProjectionVersionRow.self); guard !rows.isEmpty else { return }
             rows.forEach { append($0.line) }; after = rows.last.map { .init(kind: $0.kind, key: $0.key, sequence: $0.validFrom) }
             try await renew()
@@ -901,11 +965,78 @@ private struct ProjectionCheckpointRow: Decodable {
 }
 private struct ProjectionInboxKey { let consumerName: String; let sourceEventID: UUID; let projectionKind: String }
 private struct ProjectionInboxRow: ProjectionFingerprintRow { let consumerName: String; let sourceEventID: UUID; let targetUserID: UUID; let projectionKind: String; let committedAt: Date; let userSyncSequence: Int64?; enum CodingKeys: String, CodingKey { case consumerName = "consumer_name", sourceEventID = "source_event_id", targetUserID = "target_user_id", projectionKind = "projection_kind", committedAt = "committed_at", userSyncSequence = "user_sync_sequence" }; var line: String { "inbox|\(consumerName)|\(sourceEventID)|\(targetUserID)|\(projectionKind)|\(projectionOptional(userSyncSequence))" } }
-private struct ProjectionSyncLogRow: ProjectionFingerprintRow { let sequence: Int64; let sourceEventID: UUID; let projectionKind: String; let payloadJSON: String; let payloadStorage: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", sourceEventID = "source_event_id", projectionKind = "projection_kind", payloadJSON = "payload_json", payloadStorage = "payload_storage", createdAt = "created_at" }; var line: String { "log|\(sequence)|\(sourceEventID)|\(projectionKind)|\(payloadJSON)" } }
+private struct ProjectionSyncLogRow: ProjectionFingerprintRow {
+    let sequence: Int64
+    let sourceEventID: UUID
+    let projectionKind: String
+    let payloadJSON: String
+    let sharedPayloadJSON: String?
+    let payloadStorage: String
+    let messageStateID: UUID?
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey {
+        case sequence = "user_sync_sequence", sourceEventID = "source_event_id"
+        case projectionKind = "projection_kind", payloadJSON = "payload_json"
+        case sharedPayloadJSON = "shared_payload_json"
+        case payloadStorage = "payload_storage", messageStateID = "message_state_id"
+        case createdAt = "created_at"
+    }
+    var line: String {
+        "log|\(sequence)|\(sourceEventID)|\(projectionKind)|\(projectionOptional(messageStateID))|\(payloadJSON)"
+    }
+}
 private struct ProjectionEffectKey { let sourceEventID: UUID; let projectionKind: String }
 private struct ProjectionEffectRow: ProjectionFingerprintRow { let sourceEventID: UUID; let projectionKind: String; let sequence: Int64; let payloadJSON: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", projectionKind = "projection_kind", sequence = "user_sync_sequence", payloadJSON = "payload_json", createdAt = "created_at" }; var line: String { "effect|\(sourceEventID)|\(projectionKind)|\(sequence)|\(payloadJSON)" } }
 private struct ProjectionVersionKey { let kind: String; let key: String; let sequence: Int64 }
-private struct ProjectionVersionRow: ProjectionFingerprintRow { let kind: String; let key: String; let roomID: UUID?; let validFrom: Int64; let validTo: Int64?; let sourceEventID: UUID; let payloadJSON: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case kind = "projection_kind", key = "entity_key", roomID = "scope_room_id", validFrom = "valid_from_sequence", validTo = "valid_to_sequence", sourceEventID = "source_event_id", payloadJSON = "payload_json", createdAt = "created_at" }; var line: String { "version|\(kind)|\(key)|\(projectionOptional(roomID))|\(validFrom)|\(projectionOptional(validTo))|\(sourceEventID)|\(payloadJSON)|\(projectionDate(createdAt))" } }
+private struct ProjectionVersionRow: ProjectionFingerprintRow {
+    let kind: String
+    let key: String
+    let roomID: UUID?
+    let validFrom: Int64
+    let validTo: Int64?
+    let sourceEventID: UUID
+    let messageStateID: UUID?
+    let payloadJSON: String?
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey {
+        case kind = "projection_kind", key = "entity_key", roomID = "scope_room_id"
+        case validFrom = "valid_from_sequence", validTo = "valid_to_sequence"
+        case sourceEventID = "source_event_id", messageStateID = "message_state_id"
+        case payloadJSON = "payload_json", createdAt = "created_at"
+    }
+    var line: String {
+        "version|\(kind)|\(key)|\(projectionOptional(roomID))|\(validFrom)|\(projectionOptional(validTo))|\(sourceEventID)|\(projectionOptional(messageStateID))|\(projectionOptional(payloadJSON))|\(projectionDate(createdAt))"
+    }
+}
+private struct ProjectionMessageStateRow: Decodable {
+    let stateID: UUID
+    let messageID: UUID
+    let roomID: UUID
+    let messageRevision: Int64
+    let variantKey: Int16
+    let originEventID: UUID
+    let stateEventID: UUID?
+    let isWithdrawn: Bool
+    let payloadSchemaVersion: Int16
+    let payloadJSON: String
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey {
+        case stateID = "state_id", messageID = "message_id", roomID = "room_id"
+        case messageRevision = "message_revision", variantKey = "variant_key"
+        case originEventID = "origin_event_id", stateEventID = "state_event_id"
+        case isWithdrawn = "is_withdrawn", payloadSchemaVersion = "payload_schema_version"
+        case payloadJSON = "payload_json", createdAt = "created_at"
+    }
+    var value: V2StoredMessageProjectionState {
+        .init(
+            stateID: stateID, messageID: messageID, roomID: roomID,
+            messageRevision: messageRevision, variantKey: variantKey,
+            originEventID: originEventID, stateEventID: stateEventID,
+            isWithdrawn: isWithdrawn, payloadSchemaVersion: payloadSchemaVersion,
+            payloadJSON: payloadJSON, createdAt: createdAt
+        )
+    }
+}
 private struct ProjectionArtifactRow: ProjectionFingerprintRow { let snapshotID: UUID; let userID: UUID; let baseSequence: Int64; let projectedSequence: Int64; let schemaVersion: Int32; let capabilityProfile: String; let state: String; let afterKind: String?; let afterKey: String?; let nextPageIndex: Int; let rollingDigest: String; let rootDigest: String?; let pageCount: Int?; let itemCount: Int64; let totalBytes: Int64; let expiresAt: Date; let failureCode: String?; let createdAt: Date; let publishedAt: Date?; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", userID = "user_id", baseSequence = "base_user_sync_sequence", projectedSequence = "source_projected_sequence", schemaVersion = "schema_version", capabilityProfile = "capability_profile", state, afterKind = "after_projection_kind", afterKey = "after_entity_key", nextPageIndex = "next_page_index", rollingDigest = "rolling_digest", rootDigest = "root_digest", pageCount = "page_count", itemCount = "item_count", totalBytes = "total_bytes", expiresAt = "expires_at", failureCode = "failure_code", createdAt = "created_at", publishedAt = "published_at" }; var line: String { "artifact|\(snapshotID)|\(userID)|\(baseSequence)|\(projectedSequence)|\(schemaVersion)|\(capabilityProfile)|\(state)|\(projectionOptional(afterKind))|\(projectionOptional(afterKey))|\(nextPageIndex)|\(rollingDigest)|\(projectionOptional(rootDigest))|\(projectionOptional(pageCount))|\(itemCount)|\(totalBytes)|\(projectionDate(expiresAt))|\(projectionOptional(failureCode))|\(projectionDate(createdAt))|\(projectionOptionalDate(publishedAt))" } }
 private struct ProjectionPageKey { let snapshotID: UUID; let index: Int }
 private struct ProjectionPageRow: ProjectionFingerprintRow { let snapshotID: UUID; let index: Int; let firstKind: String; let firstKey: String; let lastKind: String; let lastKey: String; let itemCount: Int; let digest: String; let payload: Data; let byteCount: Int; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", index = "page_index", firstKind = "first_projection_kind", firstKey = "first_entity_key", lastKind = "last_projection_kind", lastKey = "last_entity_key", itemCount = "item_count", digest = "page_digest", payload, byteCount = "byte_count" }; var line: String { "page|\(snapshotID)|\(index)|\(firstKind)|\(firstKey)|\(lastKind)|\(lastKey)|\(itemCount)|\(digest)|\(payload.base64EncodedString())|\(byteCount)" } }

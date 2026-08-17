@@ -528,6 +528,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             let bytes = Data(unwrapInboundIn(data).readableBytesView)
             for frame in try decoder.append(bytes) { try receive(frame, context: context) }
         } catch {
+            if authenticationCompleted {
+                FileHandle.standardError.write(
+                    Data("post-auth protocol failure: \(error)\n".utf8)
+                )
+            }
             failAuthentication(error, context: context)
         }
     }
@@ -614,11 +619,21 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
 
             case .syncPull(let sent):
-                guard case .syncBatch(let batch)? = envelope.body,
-                      batch.generation > 0,
-                      !batch.nextSyncToken.isEmpty,
-                      !batch.syncReceipt.isEmpty
-                else { throw LoadError.unexpectedResponse }
+                guard case .syncBatch(let batch)? = envelope.body else {
+                    if case .resetRequired? = envelope.body {
+                        throw LoadError.unexpectedSyncResponse("reset_required")
+                    }
+                    throw LoadError.unexpectedSyncResponse("non_sync_batch")
+                }
+                guard batch.generation > 0 else {
+                    throw LoadError.unexpectedSyncResponse("zero_generation")
+                }
+                guard !batch.nextSyncToken.isEmpty else {
+                    throw LoadError.unexpectedSyncResponse("missing_next_token")
+                }
+                guard !batch.syncReceipt.isEmpty else {
+                    throw LoadError.unexpectedSyncResponse("missing_receipt")
+                }
                 nextSyncToken = batch.nextSyncToken
                 statistics.recordSyncBatch(
                     milliseconds: (NIODeadline.now() - sent).millisecondsDouble,
@@ -958,6 +973,7 @@ private enum LoadError: Error, CustomStringConvertible {
     case invalidCredentialFile
     case insufficientCredentials(required: Int, available: Int)
     case unexpectedResponse
+    case unexpectedSyncResponse(String)
     case connectionClosed
     case memoryGuardTriggered(megabytes: Int)
     case failureGuardTriggered(failed: Int, attempted: Int)
@@ -971,6 +987,8 @@ private enum LoadError: Error, CustomStringConvertible {
         case .invalidCredentialFile: return "credential file is empty, duplicated, or malformed"
         case .insufficientCredentials(let required, let available): return "insufficient credentials: required \(required), available \(available)"
         case .unexpectedResponse: return "gateway returned an unexpected protocol response"
+        case .unexpectedSyncResponse(let reason):
+            return "gateway returned an unexpected sync response: \(reason)"
         case .connectionClosed: return "gateway connection closed before authentication"
         case .memoryGuardTriggered(let megabytes): return "local memory guard triggered at \(megabytes) MB"
         case .failureGuardTriggered(let failed, let attempted): return "connection failure guard triggered: \(failed)/\(attempted)"

@@ -111,6 +111,11 @@ poison-paused 用户；snapshot 指标区分正在构建与失败 artifact，并
 使用 closed-version partial index 的 planner estimate，不为 scrape 扫描 MVCC 全表；
 uncompacted records 表示 canonical checkpoint 与 retained floor 的聚合距离。它们共同定位
 增长来自 projector、builder、GC 还是 compactor，不再只能看到最终 relation size。
+消息 projection 去重另外暴露 shared-state estimated rows/relation bytes、reference、
+missing-reference backfill 和 inline-payload planner estimates。backfill 在 dual 和 shared
+阶段都应收敛到 0；inline 只在 shared 收缩完成后要求为 0。切换前必须先 `ANALYZE` 并
+执行精确审计，不能把 planner estimate 当作数据完整性证明。完整阶段与 SQL 见
+[`message-projection-sharing-runbook.md`](message-projection-sharing-runbook.md)。
 `user_projection_effects` 是控制投影的稳定幂等结果，和 operation ledger 同类，不属于可仅按
 retained floor 删除的增量历史。独立 housekeeping 只在首方重试窗口结束、projector 已物化、
 原 sync-log 行已压缩且 migration fence 失效后按物理 store 分批删除；普通 operation ledger
@@ -153,6 +158,7 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2SnapshotBuildStalled` | 最老 building artifact 超过 15 分钟，5 分钟 | critical | 检查 builder lease、checkpoint fence 和页尺寸失败 |
 | `IMV2SnapshotBuildFailures` | failed artifact 大于 `0`，5 分钟 | warning | 按 failure code 调查尺寸/编码/存储，再确认过期清理 |
 | `IMV2ProjectionGCBacklog` | closed-version estimate 超过 1,000,000，30 分钟 | warning | 检查活跃 building baseline、migration fence 和 GC cadence |
+| `IMV2MessageProjectionBackfillStalled` | missing-reference estimate 大于 0，30 分钟 | warning | 停止 shared 切换，按 message projection sharing runbook 检查坏 payload、state collision、migration fence 和 worker 错误 |
 | `IMV2SyncCompactionBacklog` | projected-retained 差值超过 10,000,000，30 分钟 | warning | 检查未过期 capability、低 cursor reset 与 compactor cadence |
 | `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
 | `IMV2RevokedDeviceProjectionCleanupBacklog` | 集群分片清理未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 检查 route fence、当前/fallback user store 与 tombstone 写入；不得手工推进 cursor |

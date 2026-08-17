@@ -178,7 +178,8 @@ extension PostgresV2RoomWriteStore {
             database: database,
             strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
             shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: .enabled
+            contentReviewMode: .enabled,
+            directFanoutMode: .planner
         )
     }
 
@@ -187,7 +188,8 @@ extension PostgresV2RoomWriteStore {
             database: database,
             strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
             shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: contentReviewMode
+            contentReviewMode: contentReviewMode,
+            directFanoutMode: .planner
         )
     }
 
@@ -196,7 +198,18 @@ extension PostgresV2RoomWriteStore {
             database: database,
             strangerMessagePolicy: strangerMessagePolicy,
             shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: .enabled
+            contentReviewMode: .enabled,
+            directFanoutMode: .planner
+        )
+    }
+
+    init(database: any Database, directFanoutMode: V2DirectFanoutMode) {
+        self.init(
+            database: database,
+            strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
+            shadowForwarder: V2DiscardingUserShardProjectionShadower(),
+            contentReviewMode: .enabled,
+            directFanoutMode: directFanoutMode
         )
     }
 }

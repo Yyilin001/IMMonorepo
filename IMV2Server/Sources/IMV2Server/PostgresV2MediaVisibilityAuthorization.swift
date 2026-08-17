@@ -4,11 +4,9 @@ import SQLKit
 
 /// The media edge may issue a transfer target only for a message projection
 /// that was durably assigned to the requester, or for an avatar whose profile
-/// is currently visible to that requester. Fan-out projections retain their
-/// immutable payload once per source event, while control projections keep an
-/// inline payload. Keeping both cases in one place prevents a new payload
-/// representation from weakening (or accidentally denying) media
-/// authorization at either the grant or claim fence.
+/// is currently visible to that requester. A shared message state never grants
+/// access by itself: the requester must still hold a live user projection
+/// reference. During migration, shared and inline payloads are both readable.
 enum V2PostgresMediaVisibilityAuthorization {
     static func isAuthorized(
         mediaID: UUID,
@@ -52,13 +50,19 @@ enum V2PostgresMediaVisibilityAuthorization {
                             AND EXISTS (
                                 SELECT 1
                                 FROM im_v2.user_projection_versions AS delivery
+                                LEFT JOIN im_v2.message_projection_states AS state
+                                  ON state.state_id = delivery.message_state_id
                                 WHERE delivery.user_id = \(bind: requesterUserID)
                                   AND delivery.projection_kind = 'message'
                                   AND delivery.entity_key = message.message_id::text
                                   AND delivery.valid_to_sequence IS NULL
-                                  AND delivery.payload->>'event_type' = 'message.accepted'
-                                  AND COALESCE((delivery.payload->>'is_withdrawn')::boolean, FALSE) = FALSE
-                                  AND delivery.payload->'media_ids' @> jsonb_build_array(media.media_id::text)
+                                  AND COALESCE(state.payload, delivery.payload)->>'event_type' = 'message.accepted'
+                                  AND COALESCE(
+                                      (COALESCE(state.payload, delivery.payload)->>'is_withdrawn')::boolean,
+                                      FALSE
+                                  ) = FALSE
+                                  AND COALESCE(state.payload, delivery.payload)->'media_ids'
+                                      @> jsonb_build_array(media.media_id::text)
                             )
                       )
                       OR EXISTS (

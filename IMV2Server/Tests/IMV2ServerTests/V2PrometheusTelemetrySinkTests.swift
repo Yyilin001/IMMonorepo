@@ -145,6 +145,11 @@ struct V2PrometheusTelemetrySinkTests {
             failedSnapshotArtifacts: 41,
             oldestBuildingSnapshotAgeSeconds: 42,
             projectionVersionGCBacklogEstimatedRows: 43,
+            messageProjectionStatesEstimatedRows: 45,
+            messageProjectionStatesRelationBytes: 46,
+            messageProjectionReferenceEstimatedRows: 47,
+            messageProjectionBackfillEstimatedRows: 48,
+            messageProjectionInlinePayloadEstimatedRows: 49,
             uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
@@ -192,6 +197,11 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_snapshot_artifacts{state=\"building\"} 40"))
         #expect(rendered.contains("im_v2_snapshot_oldest_building_age_seconds 42"))
         #expect(rendered.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
+        #expect(rendered.contains("im_v2_message_projection_states_estimated_rows 45"))
+        #expect(rendered.contains("im_v2_message_projection_states_relation_bytes 46"))
+        #expect(rendered.contains("im_v2_message_projection_references_estimated_rows 47"))
+        #expect(rendered.contains("im_v2_message_projection_backfill_estimated_rows 48"))
+        #expect(rendered.contains("im_v2_message_projection_inline_payload_estimated_rows 49"))
         #expect(rendered.contains("im_v2_sync_uncompacted_projected_records 44"))
         #expect(rendered.contains("im_v2_sync_pending_records_across_devices 10"))
         #expect(rendered.contains("im_v2_sync_reset_pending_devices 11"))

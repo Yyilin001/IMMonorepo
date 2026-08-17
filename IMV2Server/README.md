@@ -162,6 +162,26 @@ evidence remains local-stack coverage, not a production deployment approval.
   application-owned heartbeats; background clients rely on reconnect and sync.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the
   bounded durable path from room outbox to fan-out plan to user sync log.
+- Message Snapshot payloads use an expand/contract rollout controlled by
+  `IM_V2_MESSAGE_PROJECTION_WRITE_MODE` (`inline`, `dual`, `shared`) and
+  `IM_V2_MESSAGE_PROJECTION_READ_MODE` (`inline`, `prefer_shared`, `shared`).
+  The safe initial pair is `dual/prefer_shared`; do not select strict shared
+  read before the backfill audit is zero. Unreferenced immutable revisions use
+  `IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS` (default seven days).
+  Existing databases must apply the current-2 expand SQL to the control store
+  and every physical user store before this binary can pass readiness. The
+  staged commands, metrics, rollback limits and optional final contract are in
+  [the projection-sharing runbook](../IMV2/docs/10-operations/message-projection-sharing-runbook.md).
+- `IM_V2_DIRECT_FANOUT_MODE=preplanned` derives a direct message's fixed
+  two-user audience from the locked pair and revision-fenced memberships, then
+  creates the completion unit and two durable deliveries in the source
+  transaction. `planner` is the rolling-deployment fallback; neither mode
+  accepts a client-supplied delivery audience. Rollout, audit and rollback are
+  defined in [the direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md).
+- `IM_V2_FANOUT_PAYLOAD_WRITE_MODE=reference` stores an accepted-message sync
+  body as a reference when its immutable message state is semantically equal.
+  Edit and withdrawal deltas remain inline. Apply the nullable-payload expand
+  and deploy reference-capable readers before switching from `body`.
 - `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` groups 1...128 co-located target
   projections into one atomic PostgreSQL transaction (baseline: 128). A batch
   failure rolls back all its inbox, sequence, sync-log and completion updates.

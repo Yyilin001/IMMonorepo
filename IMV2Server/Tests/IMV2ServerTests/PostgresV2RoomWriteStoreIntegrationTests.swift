@@ -196,18 +196,28 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 pageSize: 2,
                 now: { Date(timeIntervalSince1970: 1_750_000_001) }
             ).plan(.init(sourceEventID: try .init(triggerRow.sourceEventID.uuidString), planID: try .init(triggerRow.planID.uuidString)))
-            let deliveryWorker = V2FanoutDeliveryWorker(
+            // First commit with the compatibility writer, then continue with
+            // the reference writer. The second recipient must compact the
+            // already-created shared row without changing its wire payload.
+            let firstDelivery = try await V2FanoutDeliveryWorker(
                 store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
                 now: { Date(timeIntervalSince1970: 1_750_000_002) }
-            )
-            let firstDelivery = try await deliveryWorker.runOnce(limit: 1)
+            ).runOnce(limit: 1)
             let outboxBeforeFinalDelivery = try #require(try await sql.raw("""
                 SELECT state FROM im_v2.room_outbox
                 WHERE source_event_id = \(bind: triggerRow.sourceEventID)
                 """).first(decoding: PushStateRow.self))
+            let referenceDeliveryStore = PostgresV2FanoutDeliveryStore(
+                database: app.db(.psql),
+                payloadWriteMode: .reference
+            )
+            let deliveryWorker = V2FanoutDeliveryWorker(
+                store: referenceDeliveryStore,
+                now: { Date(timeIntervalSince1970: 1_750_000_002) }
+            )
             let delivery = try await deliveryWorker.runOnce(limit: 8)
             let completionRelease = try await V2FanoutCompletionReleaseWorker(
-                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                store: referenceDeliveryStore,
                 now: { Date(timeIntervalSince1970: 1_750_000_002) }
             ).runOnce(limit: 8)
             let terminalOutbox = try #require(try await sql.raw("""
@@ -276,13 +286,20 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(syncedRecord.sourceEventID.rawValue == triggerRow.sourceEventID.uuidString)
             #expect(syncedRecord.projectionKind == "message")
             let syncedMessage = try #require(try await sql.raw("""
-                SELECT shared.payload->>'room_id' AS room_id, shared.payload->>'message_id' AS message_id,
-                       shared.payload->>'sender_user_id' AS sender_user_id, shared.payload->>'text' AS text,
-                       shared.payload->>'event_type' AS event_type
+                SELECT effective.payload->>'room_id' AS room_id,
+                       effective.payload->>'message_id' AS message_id,
+                       effective.payload->>'sender_user_id' AS sender_user_id,
+                       effective.payload->>'text' AS text,
+                       effective.payload->>'event_type' AS event_type
                 FROM im_v2.user_sync_log AS log
                 JOIN im_v2.fanout_sync_payloads AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
+                LEFT JOIN im_v2.message_projection_states AS state
+                  ON state.state_id = shared.message_state_id
+                CROSS JOIN LATERAL (
+                    SELECT COALESCE(shared.payload, state.payload) AS payload
+                ) AS effective
                 WHERE log.projection_kind = 'message'
                 LIMIT 1
                 """).first(decoding: SyncedMessagePayloadRow.self))
@@ -294,12 +311,17 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let payloadEnvelope = try #require(try await sql.raw("""
                 SELECT log.payload IS NULL AS has_null_log_payload,
                        log.payload_storage AS payload_storage,
-                       shared.payload ? 'source_event_id' AS has_source_event_id,
-                       shared.payload ? 'projection_kind' AS has_projection_kind
+                       effective.payload ? 'source_event_id' AS has_source_event_id,
+                       effective.payload ? 'projection_kind' AS has_projection_kind
                 FROM im_v2.user_sync_log AS log
                 JOIN im_v2.fanout_sync_payloads AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
+                LEFT JOIN im_v2.message_projection_states AS state
+                  ON state.state_id = shared.message_state_id
+                CROSS JOIN LATERAL (
+                    SELECT COALESCE(shared.payload, state.payload) AS payload
+                ) AS effective
                 WHERE log.projection_kind = 'message'
                 LIMIT 1
                 """).first(decoding: SyncPayloadEnvelopeRow.self))
@@ -307,6 +329,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(payloadEnvelope.payloadStorage == "fanout_shared")
             #expect(!payloadEnvelope.hasSourceEventID)
             #expect(!payloadEnvelope.hasProjectionKind)
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads WHERE projection_kind = 'message' AND payload IS NULL AND message_state_id IS NOT NULL",
+                on: sql
+            ) == 1)
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_states AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE shared.projection_kind = 'message' AND COALESCE(shared.payload, state.payload) = event.payload",
+                on: sql
+            ) == 1)
             let capacity = try #require(try await sql.raw("SELECT command_window_used, fanout_window_used FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)").first(decoding: CapacityRow.self))
             #expect(capacity.commandWindowUsed == 1)
             #expect(capacity.fanoutWindowUsed == 3)
@@ -1318,11 +1348,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             #expect(replayResult.outcome == .requeued)
             let messageShadowRecorder = RecordingProjectionShadowForwarder()
+            try await V2PostgresUserShardRouter(database: app.db(.psql)).bootstrap(
+                defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9)
+            )
             let writer = PostgresV2RoomWriteStore(
                 database: app.db(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 shadowForwarder: messageShadowRecorder,
-                contentReviewMode: .enabled
+                contentReviewMode: .enabled,
+                directFanoutMode: .preplanned
             )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
@@ -1434,6 +1468,184 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                        AND client_message_id = \(bind: racedClientUUID)) AS denied_count
                 """).first(decoding: MessageOperationCardinalityAssertionRow.self))
             #expect(racedPersistence == .init(acceptedCount: 1, deniedCount: 0))
+            let acceptedEventCount = try await count(
+                "im_v2.room_events WHERE event_type = 'message.accepted'",
+                on: sql
+            )
+            #expect(acceptedEventCount > 0)
+            #expect(try await count(
+                "im_v2.fanout_plans WHERE target_rule->>'planning_strategy' = 'direct_preplanned' AND state = 'planned' AND enumerated_target_count = 2",
+                on: sql
+            ) == acceptedEventCount)
+            #expect(try await count(
+                "im_v2.room_outbox AS outbox JOIN im_v2.room_events AS event ON event.event_id = outbox.source_event_id WHERE event.event_type = 'message.accepted'",
+                on: sql
+            ) == 0)
+            #expect(try await count(
+                "im_v2.fanout_completion_units AS unit JOIN im_v2.room_events AS event ON event.event_id = unit.source_event_id WHERE event.event_type = 'message.accepted' AND unit.target_count = 2",
+                on: sql
+            ) == acceptedEventCount)
+            #expect(try await count(
+                "im_v2.fanout_deliveries AS delivery JOIN im_v2.room_events AS event ON event.event_id = delivery.source_event_id WHERE event.event_type = 'message.accepted'",
+                on: sql
+            ) == acceptedEventCount * 2)
+
+            let directDeliveryWorker = V2FanoutDeliveryWorker(
+                store: PostgresV2FanoutDeliveryStore(
+                    database: app.db(.psql),
+                    payloadWriteMode: .reference
+                ),
+                now: { now.addingTimeInterval(1) }
+            )
+            while try await directDeliveryWorker.runOnce(limit: 128).claimedCount > 0 {}
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
+                on: sql
+            ) == acceptedEventCount)
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.message_projection_states AS state ON state.state_id = shared.message_state_id JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND COALESCE(shared.payload, state.payload) = event.payload",
+                on: sql
+            ) == acceptedEventCount)
+            // Simulate one body-mode row left by an older process. The
+            // bounded online backfill must link and compact only an exact
+            // accepted-message match.
+            try await sql.raw("""
+                WITH legacy AS (
+                    SELECT shared.source_event_id,
+                           jsonb_set(state.payload, '{text}', to_jsonb('tampered'::text)) AS payload
+                    FROM im_v2.fanout_sync_payloads AS shared
+                    JOIN im_v2.message_projection_states AS state
+                      ON state.state_id = shared.message_state_id
+                    JOIN im_v2.room_events AS event
+                      ON event.event_id = shared.source_event_id
+                     AND event.event_type = 'message.accepted'
+                    ORDER BY shared.source_event_id
+                    LIMIT 1
+                )
+                UPDATE im_v2.fanout_sync_payloads AS shared
+                SET payload = legacy.payload, message_state_id = NULL
+                FROM legacy
+                WHERE shared.source_event_id = legacy.source_event_id
+                  AND shared.projection_kind = 'message'
+                """).run()
+            #expect(try await PostgresV2FanoutPayloadReferenceBackfillWorker(
+                database: app.db(.psql)
+            ).runOnce(limit: 128) == .init(linkedRowCount: 0, compactedRowCount: 0))
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NOT NULL AND shared.message_state_id IS NULL",
+                on: sql
+            ) == 1)
+            try await sql.raw("""
+                UPDATE im_v2.fanout_sync_payloads AS shared
+                SET payload = state.payload
+                FROM im_v2.message_projection_states AS state
+                WHERE state.state_event_id = shared.source_event_id
+                  AND state.variant_key = 0
+                  AND shared.projection_kind = 'message'
+                  AND shared.message_state_id IS NULL
+                """).run()
+            #expect(try await PostgresV2FanoutPayloadReferenceBackfillWorker(
+                database: app.db(.psql)
+            ).runOnce(limit: 1) == .init(linkedRowCount: 1, compactedRowCount: 1))
+            #expect(try await count(
+                "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
+                on: sql
+            ) == acceptedEventCount)
+            let directRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql),
+                now: { now.addingTimeInterval(2) }
+            )
+            #expect(directRelease.releasedCount == Int(acceptedEventCount))
+            #expect(try await count(
+                "im_v2.fanout_plans WHERE target_rule->>'planning_strategy' = 'direct_preplanned' AND state = 'terminal'",
+                on: sql
+            ) == acceptedEventCount)
+
+            // Route configuration is operational state, not authorization.
+            // If it is briefly unavailable, acceptance must use the old
+            // durable planner lane with no partial direct deliveries.
+            try await sql.raw("DELETE FROM im_v2.user_shard_router_configuration").run()
+            let fallbackOutcome = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-000000000091"),
+                text: "route-fallback"
+            ))
+            guard case .accepted(let fallbackMessage) = fallbackOutcome else {
+                Issue.record("expected planner fallback acceptance")
+                return
+            }
+            let fallbackTrigger = try #require(try await sql.raw("""
+                SELECT outbox.source_event_id, outbox.plan_id
+                FROM im_v2.room_outbox AS outbox
+                JOIN im_v2.room_events AS event
+                  ON event.event_id = outbox.source_event_id
+                WHERE event.payload->>'message_id' = \(bind: fallbackMessage.messageID.rawValue)
+                """).first(decoding: TriggerRow.self))
+            #expect(try #require(try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM im_v2.fanout_completion_units
+                WHERE source_event_id = \(bind: fallbackTrigger.sourceEventID)
+                """).first(decoding: CountRow.self)).value == 0)
+            #expect(try #require(try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM im_v2.fanout_deliveries
+                WHERE source_event_id = \(bind: fallbackTrigger.sourceEventID)
+                """).first(decoding: CountRow.self)).value == 0)
+            try await configureDefaultUserShardRoute(
+                .init(bucket: "test-users", observedRouterEpoch: 9),
+                now: now.addingTimeInterval(3),
+                on: sql
+            )
+            let fallbackPlanning = try await V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
+                pageSize: 10,
+                now: { now.addingTimeInterval(4) }
+            ).plan(.init(
+                sourceEventID: try .init(fallbackTrigger.sourceEventID.uuidString),
+                planID: try .init(fallbackTrigger.planID.uuidString)
+            ))
+            #expect(fallbackPlanning.createdDeliveries == 2)
+            #expect(fallbackPlanning.createdCompletionUnits == 1)
+            let fallbackDeliveryWorker = V2FanoutDeliveryWorker(
+                store: PostgresV2FanoutDeliveryStore(
+                    database: app.db(.psql),
+                    payloadWriteMode: .reference
+                ),
+                now: { now.addingTimeInterval(5) }
+            )
+            while try await fallbackDeliveryWorker.runOnce(limit: 16).claimedCount > 0 {}
+            let fallbackRelease = try await drainFanoutCompletionReleases(
+                database: app.db(.psql),
+                now: { now.addingTimeInterval(6) }
+            )
+            #expect(fallbackRelease.releasedCount == 1)
+
+            // A corrupt direct audience must fail closed. The authoritative
+            // pair still names two users, but the revision-fenced membership
+            // set below contains one. Verify that the surrounding transaction
+            // leaves no accepted message or partial fan-out artifacts.
+            try await sql.raw("""
+                UPDATE im_v2.rooms
+                SET membership_revision = 1
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).run()
+            try await sql.raw("""
+                UPDATE im_v2.room_memberships
+                SET left_revision = 1
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                  AND user_id = \(bind: memberTwoUUID)
+                """).run()
+            let beforeCorruptWrite = try await directWriteArtifactCounts(sql: sql)
+            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
+                try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try .init("00000000-0000-0000-0000-000000000092"),
+                    text: "must-rollback"
+                ))
+            }
+            #expect(try await directWriteArtifactCounts(sql: sql) == beforeCorruptWrite)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
@@ -3400,6 +3612,24 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 now: { now.addingTimeInterval(5) }
             ).runOnce(limit: 8)
             try await drainV3Projection(database: app.db(.psql))
+            let compaction = try await PostgresV2MessageProjectionBackfillWorker(
+                database: app.db(.psql),
+                compactInlinePayloads: true
+            ).runOnce(now: now.addingTimeInterval(5), limit: 8)
+            #expect(compaction.compactedRowCount == 3)
+            let compactedDeliveryCount = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM im_v2.user_projection_versions
+                WHERE projection_kind = 'message'
+                  AND entity_key = \(bind: message.messageID.rawValue)
+                  AND message_state_id IS NOT NULL
+                  AND payload IS NULL
+                """).first(decoding: CountRow.self))
+            #expect(compactedDeliveryCount.value == 3)
+
+            // Media authorization must follow the requester's narrow live
+            // reference after inline JSON compaction; the shared state alone
+            // must never become a capability.
             let download = try await mediaStore.requestDownload(
                 requesterUserID: senderID,
                 deviceID: deviceID,
@@ -5800,7 +6030,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2RoomWriteStore(database: app.db(.psql)),
                 capacityProfile: .init(id: "standard", limits: profile), limits: .init(maxUTF8Bytes: 64), now: { now }
             ).send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "remote"))
-            guard case .accepted = message else {
+            guard case .accepted(let acceptedMessage) = message else {
                 Issue.record("expected accepted message")
                 return
             }
@@ -5828,12 +6058,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try .init(bucket: "users-remote", database: app.db(secondaryID), schema: "im_v2"),
             ])
             let crossStore = V2CrossStoreFanoutDeliveryStore(
-                control: control, registry: registry, migrations: migrations
+                control: control, registry: registry, migrations: migrations,
+                payloadWriteMode: .reference
             )
             #expect(crossStore.maximumConcurrentClaimsPerBucket == 1)
             let coLocatedCrossStore = V2CrossStoreFanoutDeliveryStore(
                 control: control, registry: registry, migrations: migrations,
-                coLocatedControlBucket: "users-source"
+                coLocatedControlBucket: "users-source",
+                payloadWriteMode: .reference
             )
             #expect(coLocatedCrossStore.maximumConcurrentClaimsPerBucket == 8)
             let payloadLease = try #require(try await crossStore.claimPending(
@@ -5854,7 +6086,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let input = try #require(try await control.projectionInput(for: abandoned))
             let location = try registry.location(for: "users-source")
             _ = try await PostgresV2UserShardFanoutProjector(
-                database: location.database, schema: location.schema
+                database: location.database, schema: location.schema,
+                payloadWriteMode: .reference
             ).project(input, now: now.addingTimeInterval(2))
             try await control.release(abandoned)
 
@@ -5872,6 +6105,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await scopedCount("im_v2", "consumer_inbox", user: senderUUID, on: secondarySQL) == 1)
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 1)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 3)
+            #expect(try await count("im_v2.message_projection_states", on: sql) == 1)
+            #expect(try await count("im_v2.message_projection_states", on: secondarySQL) == 1)
+            for physicalStore in [sql, secondarySQL] {
+                let linkedState = try #require(try await physicalStore.raw("""
+                    SELECT COUNT(*) AS value
+                    FROM im_v2.fanout_sync_payloads AS payload
+                    JOIN im_v2.message_projection_states AS state
+                      ON state.state_id = payload.message_state_id
+                    WHERE state.message_id = \(bind: UUID(uuidString: acceptedMessage.messageID.rawValue)!)
+                      AND payload.payload IS NULL
+                    """).first(decoding: CountRow.self))
+                #expect(linkedState.value == 1)
+            }
             let transfer = try PostgresV2UserShardProjectionTransfer(
                 source: app.db(.psql), target: app.db(secondaryID),
                 sourceBucket: "users-source", targetBucket: "users-remote",
@@ -8443,6 +8689,179 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("message projection backfill deduplicates recipients and compacts only after verification")
+    func messageProjectionBackfillAndGC() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self)?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let originEventID = UUID(uuidString: "00000000-0000-0000-0000-000000000f01")!
+            let roomID = try RoomID("00000000-0000-0000-0000-000000000f02")
+            let messageID = try MessageID("00000000-0000-0000-0000-000000000f03")
+            let userA = UUID(uuidString: "00000000-0000-0000-0000-000000000f04")!
+            let userB = UUID(uuidString: "00000000-0000-0000-0000-000000000f05")!
+            let accepted = V2AcceptedMessage(
+                messageID: messageID,
+                roomID: roomID,
+                roomSequence: 1,
+                senderUserID: try .init(userA.uuidString),
+                clientMessageID: try .init("00000000-0000-0000-0000-000000000f06"),
+                text: "hello shared state",
+                mediaPresentations: [],
+                createdAt: now
+            )
+            let state = try V2MessageProjectionState(
+                accepted: accepted,
+                forwardedFromMessageID: nil,
+                forwardedFromUserID: nil
+            )
+            let payloadJSON = try state.encodedPayloadJSON()
+            let messageUUID = UUID(uuidString: messageID.rawValue)!
+            let roomUUID = UUID(uuidString: roomID.rawValue)!
+            try await sql.raw("""
+                INSERT INTO im_v2.user_projection_versions
+                    (user_id, projection_kind, entity_key, scope_room_id,
+                     valid_from_sequence, source_event_id, payload, created_at)
+                VALUES
+                    (\(bind: userA), 'message', \(bind: messageID.rawValue),
+                     \(bind: roomUUID), 1, \(bind: originEventID),
+                     \(bind: payloadJSON)::jsonb, \(bind: now)),
+                    (\(bind: userB), 'message', \(bind: messageID.rawValue),
+                     \(bind: roomUUID), 1, \(bind: originEventID),
+                     \(bind: payloadJSON)::jsonb, \(bind: now))
+                """).run()
+
+            let dual = PostgresV2MessageProjectionBackfillWorker(
+                database: app.db(.psql), compactInlinePayloads: false
+            )
+            #expect(try await dual.runOnce(now: now, limit: 10) == .init(
+                linkedRowCount: 2, compactedRowCount: 0
+            ))
+            #expect(try await count("im_v2.message_projection_states", on: sql) == 1)
+            let referenceCount = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM im_v2.user_projection_versions
+                WHERE message_state_id IS NOT NULL AND payload IS NOT NULL
+                """).first(decoding: CountRow.self))
+            #expect(referenceCount.value == 2)
+
+            let stored = try #require(
+                try await PostgresV2MessageProjectionStateRepository()
+                    .load(messageID: messageUUID, revision: 1, sql: sql)
+            )
+            let conflict = V2StoredMessageProjectionState(
+                stateID: stored.stateID,
+                messageID: stored.messageID,
+                roomID: stored.roomID,
+                messageRevision: stored.messageRevision,
+                variantKey: stored.variantKey,
+                originEventID: stored.originEventID,
+                stateEventID: stored.stateEventID,
+                isWithdrawn: stored.isWithdrawn,
+                payloadSchemaVersion: stored.payloadSchemaVersion,
+                payloadJSON: stored.payloadJSON.replacingOccurrences(
+                    of: "hello shared state", with: "tampered state"
+                ),
+                createdAt: stored.createdAt
+            )
+            await #expect(throws: V2MessageProjectionStatePersistenceError.conflictingState) {
+                try await PostgresV2MessageProjectionStateRepository()
+                    .persist(conflict, sql: sql)
+            }
+
+            let shared = PostgresV2MessageProjectionBackfillWorker(
+                database: app.db(.psql), compactInlinePayloads: true
+            )
+            #expect(try await shared.runOnce(now: now, limit: 10) == .init(
+                linkedRowCount: 0, compactedRowCount: 2
+            ))
+            let narrowCount = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM im_v2.user_projection_versions
+                WHERE message_state_id = \(bind: stored.stateID) AND payload IS NULL
+                """).first(decoding: CountRow.self))
+            #expect(narrowCount.value == 2)
+
+            // Strict shared reads must emit the identical wire payload even
+            // after the per-user JSON has been removed.
+            let snapshotID = UUID(uuidString: "00000000-0000-0000-0000-000000000f07")!
+            let capabilityProfile = "shared-state-test"
+            let initialDigest = V2SnapshotV3Digest.initial(
+                baseSequence: 1,
+                capabilityProfile: capabilityProfile
+            )
+            try await sql.raw("""
+                INSERT INTO im_v2.user_projection_checkpoints
+                    (user_id, projected_sequence, updated_at)
+                VALUES (\(bind: userA), 1, \(bind: now))
+                ON CONFLICT (user_id) DO UPDATE
+                SET projected_sequence = EXCLUDED.projected_sequence,
+                    updated_at = EXCLUDED.updated_at
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.sync_snapshot_artifacts
+                    (snapshot_id, user_id, base_user_sync_sequence,
+                     source_projected_sequence, schema_version,
+                     capability_profile, state, rolling_digest,
+                     expires_at, created_at)
+                VALUES
+                    (\(bind: snapshotID), \(bind: userA), 1, 1, 31,
+                     \(bind: capabilityProfile), 'building', \(bind: initialDigest),
+                     \(bind: now.addingTimeInterval(600)), \(bind: now))
+                """).run()
+            let builder = PostgresV2SnapshotArtifactBuilder(
+                database: app.db(.psql),
+                messageReadMode: .shared
+            )
+            #expect(try await builder.runOnce(now: now) == .init(
+                claimed: true, published: false, pageCount: 1, itemCount: 1
+            ))
+            #expect(try await builder.runOnce(now: now) == .init(
+                claimed: true, published: true, pageCount: 1, itemCount: 1
+            ))
+            let snapshotPayload = try #require(try await sql.raw("""
+                SELECT payload
+                FROM im_v2.sync_snapshot_pages
+                WHERE snapshot_id = \(bind: snapshotID) AND page_index = 0
+                """).first(decoding: MessageProjectionSnapshotPageRow.self))
+            let snapshotPage = try V2SnapshotProjectionV3Codec.decode(snapshotPayload.payload)
+            #expect(snapshotPage.items.first?.payload == Data(stored.payloadJSON.utf8))
+
+            let gc = PostgresV2MessageProjectionStateGCWorker(
+                database: app.db(.psql), retention: 1
+            )
+            #expect(try await gc.runOnce(now: now.addingTimeInterval(2), limit: 10) == 0)
+            try await sql.raw("DELETE FROM im_v2.user_projection_versions").run()
+            #expect(try await gc.runOnce(now: now.addingTimeInterval(2), limit: 10) == 1)
+            #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     private func installSchema(on sql: any SQLDatabase, schema: String = "im_v2") async throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
@@ -8506,12 +8925,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return try await sql.raw("""
-            SELECT entity_key, payload::text AS payload_json
-            FROM im_v2.user_projection_versions
-            WHERE user_id = \(bind: userUUID)
-              AND projection_kind = \(bind: kind)
-              AND valid_to_sequence IS NULL
-            ORDER BY entity_key
+            SELECT version.entity_key,
+                   COALESCE(state.payload, version.payload)::text AS payload_json
+            FROM im_v2.user_projection_versions AS version
+            LEFT JOIN im_v2.message_projection_states AS state
+              ON state.state_id = version.message_state_id
+            WHERE version.user_id = \(bind: userUUID)
+              AND version.projection_kind = \(bind: kind)
+              AND version.valid_to_sequence IS NULL
+            ORDER BY version.entity_key
             """).all(decoding: CurrentV3ProjectionAssertionRow.self)
     }
 
@@ -8653,6 +9075,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
     private func count(_ table: String, on sql: any SQLDatabase) async throws -> Int64 {
         try #require(try await sql.raw("SELECT COUNT(*) AS value FROM \(unsafeRaw: table)").first(decoding: CountRow.self)).value
+    }
+
+    private func directWriteArtifactCounts(
+        sql: any SQLDatabase
+    ) async throws -> DirectWriteArtifactCounts {
+        try #require(try await sql.raw("""
+            SELECT
+                (SELECT COUNT(*)::bigint FROM im_v2.messages) AS messages,
+                (SELECT COUNT(*)::bigint FROM im_v2.room_events) AS events,
+                (SELECT COUNT(*)::bigint FROM im_v2.message_projection_states) AS message_states,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_plans) AS plans,
+                (SELECT COUNT(*)::bigint FROM im_v2.room_outbox) AS outbox_rows,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_completion_units) AS completion_units,
+                (SELECT COUNT(*)::bigint FROM im_v2.fanout_deliveries) AS deliveries
+            """).first(decoding: DirectWriteArtifactCounts.self))
     }
 }
 
@@ -9348,6 +9785,23 @@ private struct EdgeClientRateLimitKeyRow: Decodable {
     enum CodingKeys: String, CodingKey { case clientKey = "client_key" }
 }
 private struct CountRow: Decodable { let value: Int64 }
+private struct DirectWriteArtifactCounts: Decodable, Equatable {
+    let messages: Int64
+    let events: Int64
+    let messageStates: Int64
+    let plans: Int64
+    let outboxRows: Int64
+    let completionUnits: Int64
+    let deliveries: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case messages, events, plans, deliveries
+        case messageStates = "message_states"
+        case outboxRows = "outbox_rows"
+        case completionUnits = "completion_units"
+    }
+}
+private struct MessageProjectionSnapshotPageRow: Decodable { let payload: Data }
 private struct DirectPairProjectionStateAssertionRow: Decodable, Equatable {
     let lowerProfileVisibleToHigher: Bool
     let higherProfileVisibleToLower: Bool

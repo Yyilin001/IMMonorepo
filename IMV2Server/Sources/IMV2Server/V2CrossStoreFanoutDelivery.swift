@@ -11,12 +11,95 @@ public struct V2FanoutProjectionInput: Sendable {
     public let targetUserID: UserID
     public let projectionKind: String
     public let eventPayloadJSON: String
+    public let messageState: V2FanoutMessageProjectionState?
 
-    public init(sourceEventID: EventID, targetUserID: UserID, projectionKind: String, eventPayloadJSON: String) {
+    public init(
+        sourceEventID: EventID,
+        targetUserID: UserID,
+        projectionKind: String,
+        eventPayloadJSON: String,
+        messageState: V2FanoutMessageProjectionState? = nil
+    ) {
         self.sourceEventID = sourceEventID
         self.targetUserID = targetUserID
         self.projectionKind = projectionKind
         self.eventPayloadJSON = eventPayloadJSON
+        self.messageState = messageState
+    }
+}
+
+/// Immutable cross-store transport for one canonical message state. It has no
+/// bucket or connection information and uses the globally stable state ID, so
+/// a target-shard retry can verify or reuse it without remapping identifiers.
+public struct V2FanoutMessageProjectionState: Equatable, Sendable {
+    public let stateID: UUID
+    public let messageID: UUID
+    public let roomID: UUID
+    public let messageRevision: Int64
+    public let variantKey: Int16
+    public let originEventID: UUID
+    public let stateEventID: UUID?
+    public let isWithdrawn: Bool
+    public let payloadSchemaVersion: Int16
+    public let payloadJSON: String
+    public let createdAt: Date
+
+    public init(
+        stateID: UUID,
+        messageID: UUID,
+        roomID: UUID,
+        messageRevision: Int64,
+        variantKey: Int16,
+        originEventID: UUID,
+        stateEventID: UUID?,
+        isWithdrawn: Bool,
+        payloadSchemaVersion: Int16,
+        payloadJSON: String,
+        createdAt: Date
+    ) {
+        self.stateID = stateID
+        self.messageID = messageID
+        self.roomID = roomID
+        self.messageRevision = messageRevision
+        self.variantKey = variantKey
+        self.originEventID = originEventID
+        self.stateEventID = stateEventID
+        self.isWithdrawn = isWithdrawn
+        self.payloadSchemaVersion = payloadSchemaVersion
+        self.payloadJSON = payloadJSON
+        self.createdAt = createdAt
+    }
+
+    init(_ value: V2StoredMessageProjectionState) {
+        self.init(
+            stateID: value.stateID,
+            messageID: value.messageID,
+            roomID: value.roomID,
+            messageRevision: value.messageRevision,
+            variantKey: value.variantKey,
+            originEventID: value.originEventID,
+            stateEventID: value.stateEventID,
+            isWithdrawn: value.isWithdrawn,
+            payloadSchemaVersion: value.payloadSchemaVersion,
+            payloadJSON: value.payloadJSON,
+            createdAt: value.createdAt
+        )
+    }
+
+    var stored: V2StoredMessageProjectionState {
+        .init(
+            stateID: stateID,
+            messageID: messageID,
+            roomID: roomID,
+            messageRevision: messageRevision,
+            variantKey: variantKey,
+            originEventID: originEventID,
+            stateEventID: stateEventID,
+            isWithdrawn: isWithdrawn,
+            payloadSchemaVersion: payloadSchemaVersion,
+            payloadJSON: payloadJSON,
+            createdAt: createdAt
+        )
     }
 }
 
@@ -82,13 +165,19 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
     private let database: any Database
     private let schema: String
     private let consumerName = "v2-fanout-delivery"
+    private let payloadWriteMode: V2FanoutPayloadWriteMode
 
-    public init(database: any Database, schema: String) throws {
+    public init(
+        database: any Database,
+        schema: String,
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
+    ) throws {
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
             throw V2UserShardStorageRegistryError.invalidLocation
         }
         self.database = database
         self.schema = schema
+        self.payloadWriteMode = payloadWriteMode
     }
 
     public func project(_ input: V2FanoutProjectionInput, now: Date) async throws -> UInt64 {
@@ -125,18 +214,55 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 RETURNING next_sequence AS user_sync_sequence
                 """).first(decoding: CrossStoreSequenceRow.self)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            if let messageState = input.messageState {
+                guard input.projectionKind == "message" else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                try await PostgresV2MessageProjectionStateRepository(schema: schema)
+                    .persist(messageState.stored, sql: sql)
+            }
             try await sql.raw("""
                 INSERT INTO \(unsafeRaw: table("fanout_sync_payloads"))
-                    (source_event_id, projection_kind, payload, created_at)
-                VALUES (\(bind: sourceEventID), \(bind: input.projectionKind), \(bind: input.eventPayloadJSON)::jsonb, \(bind: now))
-                ON CONFLICT DO NOTHING
+                    (source_event_id, projection_kind, payload, message_state_id, created_at)
+                VALUES (\(bind: sourceEventID), \(bind: input.projectionKind),
+                        CASE
+                            WHEN \(bind: payloadWriteMode == .reference)
+                             AND \(bind: input.messageState?.payloadJSON)::jsonb =
+                                 \(bind: input.eventPayloadJSON)::jsonb
+                            THEN NULL
+                            ELSE \(bind: input.eventPayloadJSON)::jsonb
+                        END,
+                        \(bind: input.messageState?.stateID), \(bind: now))
+                ON CONFLICT (source_event_id, projection_kind) DO UPDATE
+                SET message_state_id = COALESCE(
+                    \(unsafeRaw: table("fanout_sync_payloads")).message_state_id,
+                    EXCLUDED.message_state_id
+                ),
+                    payload = CASE
+                        WHEN EXCLUDED.payload IS NULL
+                         AND \(unsafeRaw: table("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id
+                        THEN NULL
+                        ELSE \(unsafeRaw: table("fanout_sync_payloads")).payload
+                    END
+                WHERE EXCLUDED.message_state_id IS NOT NULL
+                  AND (
+                      \(unsafeRaw: table("fanout_sync_payloads")).message_state_id IS NULL
+                      OR (
+                          EXCLUDED.payload IS NULL
+                          AND \(unsafeRaw: table("fanout_sync_payloads")).payload IS NOT NULL
+                          AND \(unsafeRaw: table("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id
+                      )
+                  )
                 """).run()
             guard let shared = try await sql.raw("""
                 SELECT 1 AS value
-                FROM \(unsafeRaw: table("fanout_sync_payloads"))
-                WHERE source_event_id = \(bind: sourceEventID)
-                  AND projection_kind = \(bind: input.projectionKind)
-                  AND payload = \(bind: input.eventPayloadJSON)::jsonb
+                FROM \(unsafeRaw: table("fanout_sync_payloads")) AS shared
+                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                  ON state.state_id = shared.message_state_id
+                WHERE shared.source_event_id = \(bind: sourceEventID)
+                  AND shared.projection_kind = \(bind: input.projectionKind)
+                  AND COALESCE(shared.payload, state.payload) = \(bind: input.eventPayloadJSON)::jsonb
+                  AND shared.message_state_id IS NOT DISTINCT FROM \(bind: input.messageState?.stateID)
                 """).first(decoding: CrossStoreExistsRow.self), shared.value == 1 else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -174,6 +300,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         guard !inputs.isEmpty else { return [] }
         var payloadIndexes: [String: Int] = [:]
         var uniquePayloads: [String] = []
+        var messageStatesByID: [UUID: V2FanoutMessageProjectionState] = [:]
         let encoded = try inputs.enumerated().map { index, input in
             guard let sourceEventID = UUID(uuidString: input.sourceEventID.rawValue),
                   let targetUserID = UUID(uuidString: input.targetUserID.rawValue)
@@ -186,9 +313,19 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 uniquePayloads.append(input.eventPayloadJSON)
                 payloadIndexes[input.eventPayloadJSON] = payloadIndex
             }
+            if let messageState = input.messageState {
+                guard input.projectionKind == "message" else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                if let existing = messageStatesByID[messageState.stateID], existing != messageState {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                messageStatesByID[messageState.stateID] = messageState
+            }
             return CrossStoreBatchProjectionInput(
                 ordinal: index, sourceEventID: sourceEventID, targetUserID: targetUserID,
-                projectionKind: input.projectionKind, payloadIndex: payloadIndex
+                projectionKind: input.projectionKind, payloadIndex: payloadIndex,
+                messageStateID: input.messageState?.stateID
             )
         }
         let identities = encoded.map {
@@ -197,10 +334,75 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         guard Set(identities).count == encoded.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        var sharedIdentities: [String: (payloadIndex: Int, stateID: UUID?)] = [:]
+        for item in encoded {
+            let key = "\(item.sourceEventID.uuidString)|\(item.projectionKind)"
+            if let existing = sharedIdentities[key] {
+                guard existing.payloadIndex == item.payloadIndex,
+                      existing.stateID == item.messageStateID
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            } else {
+                sharedIdentities[key] = (item.payloadIndex, item.messageStateID)
+            }
+        }
         let inputJSON = try crossStoreBatchJSON(encoded)
         let payloadJSON = try crossStoreBatchJSON(uniquePayloads)
+        let messageStateJSON = try crossStoreBatchJSON(
+            messageStatesByID.values.sorted { $0.stateID.uuidString < $1.stateID.uuidString }
+                .map { try CrossStoreMessageStateInput($0) }
+        )
+        let expectedMessageStateCount = Int64(messageStatesByID.count)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: table("message_projection_states"))
+                    (state_id, message_id, room_id, message_revision, variant_key,
+                     origin_event_id, state_event_id, is_withdrawn,
+                     payload_schema_version, payload, created_at)
+                SELECT state_id, message_id, room_id, message_revision, variant_key,
+                       origin_event_id, state_event_id, is_withdrawn,
+                       payload_schema_version, payload_json::jsonb,
+                       to_timestamp((created_at_microseconds / 1000000)::double precision)
+                         + (created_at_microseconds % 1000000)
+                           * INTERVAL '1 microsecond'
+                FROM jsonb_to_recordset(\(bind: messageStateJSON)::jsonb) AS value(
+                    state_id uuid, message_id uuid, room_id uuid,
+                    message_revision bigint, variant_key smallint,
+                    origin_event_id uuid, state_event_id uuid,
+                    is_withdrawn boolean, payload_schema_version smallint,
+                    payload_json text, created_at_microseconds bigint
+                )
+                ON CONFLICT DO NOTHING
+                """).run()
+            guard let stateVerification = try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM jsonb_to_recordset(\(bind: messageStateJSON)::jsonb) AS value(
+                    state_id uuid, message_id uuid, room_id uuid,
+                    message_revision bigint, variant_key smallint,
+                    origin_event_id uuid, state_event_id uuid,
+                    is_withdrawn boolean, payload_schema_version smallint,
+                    payload_json text, created_at_microseconds bigint
+                )
+                JOIN \(unsafeRaw: table("message_projection_states")) AS stored
+                  ON stored.state_id = value.state_id
+                 AND stored.message_id = value.message_id
+                 AND stored.room_id = value.room_id
+                 AND stored.message_revision = value.message_revision
+                 AND stored.variant_key = value.variant_key
+                 AND stored.origin_event_id = value.origin_event_id
+                 AND stored.state_event_id IS NOT DISTINCT FROM value.state_event_id
+                 AND stored.is_withdrawn = value.is_withdrawn
+                 AND stored.payload_schema_version = value.payload_schema_version
+                 AND stored.payload = value.payload_json::jsonb
+                 AND stored.created_at =
+                     to_timestamp(
+                         (value.created_at_microseconds / 1000000)::double precision
+                     )
+                     + (value.created_at_microseconds % 1000000)
+                       * INTERVAL '1 microsecond'
+                """).first(decoding: CrossStoreCountRow.self),
+                  stateVerification.value == expectedMessageStateCount
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
             // Persist first, then validate from the next statement's snapshot.
             // This avoids both sibling-CTE visibility gaps and no-op UPDATE
             // locks when batches for the same event run concurrently.
@@ -211,20 +413,47 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     FROM jsonb_array_elements_text(\(bind: payloadJSON)::jsonb)
                          WITH ORDINALITY AS payload(value, ordinality)
                 ), input AS (
-                    SELECT value.source_event_id, value.projection_kind, payload.event_payload
+                    SELECT value.source_event_id, value.projection_kind,
+                           value.message_state_id, payload.event_payload
                     FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
                         ordinal integer, source_event_id uuid, target_user_id uuid,
-                        projection_kind text, payload_index integer
+                        projection_kind text, payload_index integer, message_state_id uuid
                     )
                     JOIN payloads AS payload ON payload.payload_index = value.payload_index
                 ), payload_keys AS MATERIALIZED (
-                    SELECT DISTINCT source_event_id, projection_kind, event_payload FROM input
+                    SELECT DISTINCT source_event_id, projection_kind,
+                                    message_state_id, event_payload FROM input
                 )
                 INSERT INTO \(unsafeRaw: table("fanout_sync_payloads"))
-                    (source_event_id, projection_kind, payload, created_at)
-                SELECT source_event_id, projection_kind, event_payload, \(bind: now)
-                FROM payload_keys
-                ON CONFLICT DO NOTHING
+                    (source_event_id, projection_kind, payload, message_state_id, created_at)
+                SELECT payload.source_event_id, payload.projection_kind,
+                       CASE WHEN \(bind: payloadWriteMode == .reference)
+                                      AND state.payload = payload.event_payload
+                            THEN NULL ELSE payload.event_payload END,
+                       payload.message_state_id, \(bind: now)
+                FROM payload_keys AS payload
+                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                  ON state.state_id = payload.message_state_id
+                ON CONFLICT (source_event_id, projection_kind) DO UPDATE
+                SET message_state_id = COALESCE(
+                    \(unsafeRaw: table("fanout_sync_payloads")).message_state_id,
+                    EXCLUDED.message_state_id
+                ),
+                    payload = CASE
+                        WHEN EXCLUDED.payload IS NULL
+                         AND \(unsafeRaw: table("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id
+                        THEN NULL
+                        ELSE \(unsafeRaw: table("fanout_sync_payloads")).payload
+                    END
+                WHERE EXCLUDED.message_state_id IS NOT NULL
+                  AND (
+                      \(unsafeRaw: table("fanout_sync_payloads")).message_state_id IS NULL
+                      OR (
+                          EXCLUDED.payload IS NULL
+                          AND \(unsafeRaw: table("fanout_sync_payloads")).payload IS NOT NULL
+                          AND \(unsafeRaw: table("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id
+                      )
+                  )
                 """).run()
             // As on the colocated path, make inbox fences visible to the next
             // statement before allocating sequences. A data-modifying CTE
@@ -254,22 +483,27 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                          WITH ORDINALITY AS payload(value, ordinality)
                 ), input AS (
                     SELECT value.ordinal, value.source_event_id, value.target_user_id,
-                           value.projection_kind, payload.event_payload
+                           value.projection_kind, value.message_state_id,
+                           payload.event_payload
                     FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
                         ordinal integer, source_event_id uuid, target_user_id uuid,
-                        projection_kind text, payload_index integer
+                        projection_kind text, payload_index integer, message_state_id uuid
                     )
                     JOIN payloads AS payload ON payload.payload_index = value.payload_index
                 ), payload_keys AS MATERIALIZED (
-                    SELECT DISTINCT source_event_id, projection_kind, event_payload
+                    SELECT DISTINCT source_event_id, projection_kind,
+                                    message_state_id, event_payload
                     FROM input
                 ), verified_payloads AS MATERIALIZED (
                     SELECT payload_keys.source_event_id, payload_keys.projection_kind
                     FROM payload_keys
                     JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
-                      ON shared.source_event_id = payload_keys.source_event_id
+                     ON shared.source_event_id = payload_keys.source_event_id
                      AND shared.projection_kind = payload_keys.projection_kind
-                     AND shared.payload = payload_keys.event_payload
+                     AND shared.message_state_id IS NOT DISTINCT FROM payload_keys.message_state_id
+                    LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                      ON state.state_id = shared.message_state_id
+                    WHERE COALESCE(shared.payload, state.payload) = payload_keys.event_payload
                 ), pending_inbox AS MATERIALIZED (
                     SELECT inbox.source_event_id, inbox.target_user_id,
                            inbox.projection_kind
@@ -490,6 +724,7 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
     /// large immutable room event from becoming a member-count-scaled control
     /// response, without adding a second control-store read.
     private let maximumInlineClaimPayloadBytes: Int
+    private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let timingRecorder: (any V2CrossStoreFanoutDeliveryTimingRecording)?
 
     /// A remote user shard's target transaction and control completion are
@@ -509,6 +744,7 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
         migrations: PostgresV2UserShardMigrationStore,
         coLocatedControlBucket: String? = nil,
         maximumInlineClaimPayloadBytes: Int = 1_024,
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body,
         timingRecorder: (any V2CrossStoreFanoutDeliveryTimingRecording)? = nil
     ) {
         precondition(maximumInlineClaimPayloadBytes > 0)
@@ -517,6 +753,7 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
         self.migrations = migrations
         self.coLocatedControlBucket = coLocatedControlBucket
         self.maximumInlineClaimPayloadBytes = maximumInlineClaimPayloadBytes
+        self.payloadWriteMode = payloadWriteMode
         self.timingRecorder = timingRecorder
     }
 
@@ -599,7 +836,10 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
 
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {
         let input: V2FanoutProjectionInput
-        if let payload = lease.eventPayloadJSON {
+        if lease.projectionKind == "message" {
+            guard let fencedInput = try await control.projectionInput(for: lease) else { return .staleLease }
+            input = fencedInput
+        } else if let payload = lease.eventPayloadJSON {
             input = .init(
                 sourceEventID: lease.sourceEventID, targetUserID: lease.targetUserID,
                 projectionKind: lease.projectionKind, eventPayloadJSON: payload
@@ -610,14 +850,16 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
         }
         let location = try registry.location(for: lease.observedRoute.bucket)
         let sequence = try await PostgresV2UserShardFanoutProjector(
-            database: location.database, schema: location.schema
+            database: location.database, schema: location.schema,
+            payloadWriteMode: payloadWriteMode
         ).project(input, now: now)
         let migration = try await migrations.load(userID: lease.targetUserID)
         if requiresForwardingShadow(for: lease, migration: migration) {
             guard let migration else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let shadow = try registry.location(for: migration.targetBucket)
             _ = try await PostgresV2UserShardFanoutProjector(
-                database: shadow.database, schema: shadow.schema
+                database: shadow.database, schema: shadow.schema,
+                payloadWriteMode: payloadWriteMode
             ).project(input, now: now)
         }
         return try await control.completeExternal(lease, userSyncSequence: sequence, now: now)
@@ -655,7 +897,10 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
                 }
                 candidates.append((index, lease))
             }
-            for candidate in candidates where candidate.lease.eventPayloadJSON != nil {
+            for candidate in candidates
+                where candidate.lease.projectionKind != "message"
+                    && candidate.lease.eventPayloadJSON != nil
+            {
                 guard let payload = candidate.lease.eventPayloadJSON else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
@@ -667,7 +912,9 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
                     )
                 ))
             }
-            let payloadReadCandidates = candidates.filter { $0.lease.eventPayloadJSON == nil }
+            let payloadReadCandidates = candidates.filter {
+                $0.lease.projectionKind == "message" || $0.lease.eventPayloadJSON == nil
+            }
             if !payloadReadCandidates.isEmpty {
                 let inputs = try await control.projectionInputs(for: payloadReadCandidates.map(\.lease))
                 guard inputs.count == payloadReadCandidates.count else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -681,7 +928,8 @@ public struct V2CrossStoreFanoutDeliveryStore: V2PartitionedFanoutDeliveryStore,
             }
             if !batch.isEmpty {
                 let projector = try PostgresV2UserShardFanoutProjector(
-                    database: location.database, schema: location.schema
+                    database: location.database, schema: location.schema,
+                    payloadWriteMode: payloadWriteMode
                 )
                 let targetProjectionStartedAt = Date()
                 let sequences = try await projector.projectBatch(batch.map(\.input), now: now)
@@ -752,6 +1000,7 @@ private struct CrossStoreBatchProjectionInput: Encodable {
     let targetUserID: UUID
     let projectionKind: String
     let payloadIndex: Int
+    let messageStateID: UUID?
 
     enum CodingKeys: String, CodingKey {
         case ordinal
@@ -759,6 +1008,53 @@ private struct CrossStoreBatchProjectionInput: Encodable {
         case targetUserID = "target_user_id"
         case projectionKind = "projection_kind"
         case payloadIndex = "payload_index"
+        case messageStateID = "message_state_id"
+    }
+}
+private struct CrossStoreMessageStateInput: Encodable {
+    let stateID: UUID
+    let messageID: UUID
+    let roomID: UUID
+    let messageRevision: Int64
+    let variantKey: Int16
+    let originEventID: UUID
+    let stateEventID: UUID?
+    let isWithdrawn: Bool
+    let payloadSchemaVersion: Int16
+    let payloadJSON: String
+    let createdAtMicroseconds: Int64
+
+    init(_ value: V2FanoutMessageProjectionState) throws {
+        let microseconds = (value.createdAt.timeIntervalSince1970 * 1_000_000).rounded(.down)
+        guard microseconds.isFinite,
+              microseconds >= Double(Int64.min),
+              microseconds <= Double(Int64.max)
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        stateID = value.stateID
+        messageID = value.messageID
+        roomID = value.roomID
+        messageRevision = value.messageRevision
+        variantKey = value.variantKey
+        originEventID = value.originEventID
+        stateEventID = value.stateEventID
+        isWithdrawn = value.isWithdrawn
+        payloadSchemaVersion = value.payloadSchemaVersion
+        payloadJSON = value.payloadJSON
+        createdAtMicroseconds = Int64(microseconds)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case stateID = "state_id"
+        case messageID = "message_id"
+        case roomID = "room_id"
+        case messageRevision = "message_revision"
+        case variantKey = "variant_key"
+        case originEventID = "origin_event_id"
+        case stateEventID = "state_event_id"
+        case isWithdrawn = "is_withdrawn"
+        case payloadSchemaVersion = "payload_schema_version"
+        case payloadJSON = "payload_json"
+        case createdAtMicroseconds = "created_at_microseconds"
     }
 }
 private struct CrossStoreBatchProjectionOutcomeRow: Decodable {
@@ -771,6 +1067,7 @@ private struct CrossStoreBatchProjectionOutcomeRow: Decodable {
 }
 private struct CrossStoreInboxInsertRow: Decodable { let sourceEventID: UUID; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" } }
 private struct CrossStoreExistsRow: Decodable { let value: Int }
+private struct CrossStoreCountRow: Decodable { let value: Int64 }
 private struct CrossStoreSequenceRow: Decodable { let userSyncSequence: Int64; enum CodingKeys: String, CodingKey { case userSyncSequence = "user_sync_sequence" } }
 private struct CrossStoreMirroredRecordRow: Decodable { let userSyncSequence: Int64; let payloadJSON: String; enum CodingKeys: String, CodingKey { case userSyncSequence = "user_sync_sequence", payloadJSON = "payload_json" } }
 private struct CrossStoreSequenceOccupantRow: Decodable { let sourceEventID: UUID; let projectionKind: String; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", projectionKind = "projection_kind" } }

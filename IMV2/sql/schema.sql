@@ -462,8 +462,11 @@ CREATE TABLE im_v2.fanout_plans (
 CREATE TABLE im_v2.fanout_sync_payloads (
     source_event_id uuid NOT NULL,
     projection_kind text NOT NULL,
-    payload jsonb NOT NULL,
-    created_at timestamp with time zone NOT NULL
+    payload jsonb,
+    created_at timestamp with time zone NOT NULL,
+    message_state_id uuid,
+    CONSTRAINT fanout_sync_payloads_message_state_kind_check CHECK (((message_state_id IS NULL) OR (projection_kind = 'message'::text))),
+    CONSTRAINT fanout_sync_payloads_payload_reference_check CHECK (((payload IS NOT NULL) OR (message_state_id IS NOT NULL)))
 );
 
 CREATE TABLE im_v2.gateway_worker_cursors (
@@ -769,6 +772,28 @@ CREATE TABLE im_v2.message_mentions (
     CONSTRAINT message_mentions_check CHECK ((((mention_kind = 'user'::text) AND (mentioned_user_id IS NOT NULL)) OR ((mention_kind = 'everyone'::text) AND (mentioned_user_id IS NULL)))),
     CONSTRAINT message_mentions_mention_kind_check CHECK ((mention_kind = ANY (ARRAY['user'::text, 'everyone'::text]))),
     CONSTRAINT message_mentions_ordinal_check CHECK ((ordinal >= 0))
+);
+
+CREATE TABLE im_v2.message_projection_states (
+    state_id uuid NOT NULL,
+    message_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    message_revision bigint NOT NULL,
+    variant_key smallint DEFAULT 0 NOT NULL,
+    origin_event_id uuid NOT NULL,
+    state_event_id uuid,
+    is_withdrawn boolean NOT NULL,
+    payload_schema_version smallint NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT message_projection_states_message_revision_check CHECK ((message_revision > 0)),
+    CONSTRAINT message_projection_states_payload_check CHECK (((payload ->> 'event_type'::text) = 'message.accepted'::text)),
+    CONSTRAINT message_projection_states_payload_message_check CHECK ((lower((payload ->> 'message_id'::text)) = (message_id)::text)),
+    CONSTRAINT message_projection_states_payload_revision_check CHECK ((((payload ->> 'message_revision'::text))::bigint = message_revision)),
+    CONSTRAINT message_projection_states_payload_room_check CHECK ((lower((payload ->> 'room_id'::text)) = (room_id)::text)),
+    CONSTRAINT message_projection_states_payload_schema_check CHECK ((payload_schema_version = 1)),
+    CONSTRAINT message_projection_states_payload_withdrawn_check CHECK ((COALESCE(((payload ->> 'is_withdrawn'::text))::boolean, false) = is_withdrawn)),
+    CONSTRAINT message_projection_states_variant_key_check CHECK ((variant_key >= 0))
 );
 
 CREATE TABLE im_v2.message_reaction_operations (
@@ -1226,8 +1251,8 @@ CREATE TABLE im_v2.rooms (
 );
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-1'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-1'::text))
+    schema_id text DEFAULT 'im-v2-current-2'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-2'::text))
 );
 
 CREATE TABLE im_v2.shard_admission_pools (
@@ -1544,11 +1569,13 @@ CREATE TABLE im_v2.user_projection_versions (
     valid_from_sequence bigint NOT NULL,
     valid_to_sequence bigint,
     source_event_id uuid NOT NULL,
-    payload jsonb NOT NULL,
+    payload jsonb,
     created_at timestamp with time zone NOT NULL,
+    message_state_id uuid,
     CONSTRAINT user_projection_versions_check CHECK (((valid_to_sequence IS NULL) OR (valid_to_sequence > valid_from_sequence))),
-    CONSTRAINT user_projection_versions_check1 CHECK (((scope_room_id IS NULL) OR (lower((payload ->> 'room_id'::text)) = (scope_room_id)::text))),
+    CONSTRAINT user_projection_versions_check1 CHECK (((scope_room_id IS NULL) OR ((payload IS NOT NULL) AND (lower((payload ->> 'room_id'::text)) = (scope_room_id)::text)) OR ((projection_kind = 'message'::text) AND (message_state_id IS NOT NULL)))),
     CONSTRAINT user_projection_versions_entity_key_check CHECK (((length(entity_key) >= 1) AND (length(entity_key) <= 512))),
+    CONSTRAINT user_projection_versions_payload_storage_check CHECK (((payload IS NOT NULL) OR ((projection_kind = 'message'::text) AND (message_state_id IS NOT NULL)))),
     CONSTRAINT user_projection_versions_projection_kind_check CHECK (((length(projection_kind) >= 1) AND (length(projection_kind) <= 64))),
     CONSTRAINT user_projection_versions_valid_from_sequence_check CHECK ((valid_from_sequence > 0))
 );
@@ -1911,6 +1938,18 @@ ALTER TABLE ONLY im_v2.message_media_references
 ALTER TABLE ONLY im_v2.message_mentions
     ADD CONSTRAINT message_mentions_pkey PRIMARY KEY (message_id, ordinal);
 
+ALTER TABLE ONLY im_v2.message_projection_states
+    ADD CONSTRAINT message_projection_states_message_revision_key UNIQUE (message_id, message_revision, variant_key);
+
+ALTER TABLE ONLY im_v2.message_projection_states
+    ADD CONSTRAINT message_projection_states_pkey PRIMARY KEY (state_id);
+
+ALTER TABLE ONLY im_v2.message_projection_states
+    ADD CONSTRAINT message_projection_states_state_event_key UNIQUE (state_event_id, variant_key);
+
+ALTER TABLE ONLY im_v2.message_projection_states
+    ADD CONSTRAINT message_projection_states_state_room_key UNIQUE (state_id, room_id);
+
 ALTER TABLE ONLY im_v2.message_reaction_operations
     ADD CONSTRAINT message_reaction_operations_event_id_key UNIQUE (event_id);
 
@@ -2246,6 +2285,8 @@ CREATE INDEX fanout_plans_pending_idx ON im_v2.fanout_plans USING btree (state, 
 
 CREATE INDEX fanout_plans_terminal_cleanup_idx ON im_v2.fanout_plans USING btree (terminal_at, source_event_id) WHERE (state = 'terminal'::text);
 
+CREATE INDEX fanout_sync_payloads_message_state_idx ON im_v2.fanout_sync_payloads USING btree (message_state_id) WHERE (message_state_id IS NOT NULL);
+
 CREATE INDEX group_announcement_operations_cleanup_idx ON im_v2.group_announcement_operations USING btree (created_at);
 
 CREATE INDEX group_event_wake_outbox_claim_idx ON im_v2.group_event_wake_outbox USING btree (next_attempt_at, updated_at) WHERE (state = 'pending'::text);
@@ -2287,6 +2328,8 @@ CREATE INDEX message_forward_operations_cleanup_idx ON im_v2.message_forward_ope
 CREATE UNIQUE INDEX message_mentions_one_everyone_idx ON im_v2.message_mentions USING btree (message_id) WHERE (mention_kind = 'everyone'::text);
 
 CREATE UNIQUE INDEX message_mentions_unique_user_idx ON im_v2.message_mentions USING btree (message_id, mentioned_user_id) WHERE (mentioned_user_id IS NOT NULL);
+
+CREATE INDEX message_projection_states_gc_idx ON im_v2.message_projection_states USING btree (created_at, state_id);
 
 CREATE INDEX message_reaction_operations_cleanup_idx ON im_v2.message_reaction_operations USING btree (created_at);
 
@@ -2412,6 +2455,12 @@ CREATE INDEX user_projection_versions_current_room_idx ON im_v2.user_projection_
 
 CREATE INDEX user_projection_versions_gc_idx ON im_v2.user_projection_versions USING btree (valid_to_sequence, user_id) WHERE (valid_to_sequence IS NOT NULL);
 
+CREATE INDEX user_projection_versions_message_backfill_idx ON im_v2.user_projection_versions USING btree (user_id, entity_key, valid_from_sequence) WHERE ((projection_kind = 'message'::text) AND (message_state_id IS NULL) AND (payload IS NOT NULL));
+
+CREATE INDEX user_projection_versions_message_inline_idx ON im_v2.user_projection_versions USING btree (user_id, entity_key, valid_from_sequence) WHERE ((projection_kind = 'message'::text) AND (payload IS NOT NULL));
+
+CREATE INDEX user_projection_versions_message_state_idx ON im_v2.user_projection_versions USING btree (message_state_id) WHERE (message_state_id IS NOT NULL);
+
 CREATE INDEX user_projection_versions_snapshot_scan_idx ON im_v2.user_projection_versions USING btree (user_id, projection_kind, entity_key, valid_from_sequence, valid_to_sequence);
 
 CREATE INDEX user_relationship_operations_cleanup_idx ON im_v2.user_relationship_operations USING btree (updated_at);
@@ -2496,6 +2545,9 @@ ALTER TABLE ONLY im_v2.fanout_plans
 
 ALTER TABLE ONLY im_v2.fanout_plans
     ADD CONSTRAINT fanout_plans_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
+
+ALTER TABLE ONLY im_v2.fanout_sync_payloads
+    ADD CONSTRAINT fanout_sync_payloads_message_state_id_fkey FOREIGN KEY (message_state_id) REFERENCES im_v2.message_projection_states(state_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.group_announcement_operations
     ADD CONSTRAINT group_announcement_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -2733,6 +2785,9 @@ ALTER TABLE ONLY im_v2.user_message_favorites
 
 ALTER TABLE ONLY im_v2.user_message_favorites
     ADD CONSTRAINT user_message_favorites_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY im_v2.user_projection_versions
+    ADD CONSTRAINT user_projection_versions_message_state_room_fkey FOREIGN KEY (message_state_id, scope_room_id) REFERENCES im_v2.message_projection_states(state_id, room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.user_room_preference_operations
     ADD CONSTRAINT user_room_preference_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;

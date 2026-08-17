@@ -29,12 +29,24 @@ flowchart LR
 
 客户端先把用户命令写入本机 SQLite outbox；gateway 只在 PostgreSQL 原子事务成功后接受命令。房间事件、room outbox、冻结的受众或 fan-out plan 同事务落库。planner 与 delivery worker 使用可恢复的 lease、checkpoint、唯一 inbox key 和有界重试推进投影。任何实时提示只是提示：用户可见状态只从已持久化的 sync log 拉取并 ACK。
 
+消息 Snapshot 投影把同一 message revision 的完整正文保存在物理 user store 的
+`message_projection_states` 一次；`user_projection_versions` 只保留用户授权/MVCC 事实和
+稳定 state reference。跨 store fan-out 与用户 shard migration 都先复制 immutable
+state 再写引用。Snapshot 和媒体授权通过用户引用 join state，shared state 本身不授予
+可见性。current-2 仍保留 dual/prefer-shared 灰度模式，生产 contract 尚需按
+[runbook](../IMV2/docs/10-operations/message-projection-sharing-runbook.md) 完成。
+
 达到重试预算的 room outbox 或 delivery 进入 `paused`，而不是跳过。单条 paused work 只能由独立、loopback-only 的 operator 服务在修复根因后受控 replay。
 
 ## 群聊、私聊与接收策略
 
 - 群创建将初始成员、房间和操作结果作为一项幂等写入；成员变更由 owner 授权，移除允许 owner/admin（不得移除 owner），均携带 membership revision。
 - 每条需 fan-out 的事件在提交时固定受众规则：普通群事件按提交时成员资格枚举；成员移除等需要精确历史受众的事件保存冻结目标。随后成员变化不能扩大已经提交事件的可见范围。
+- 私聊 `message.accepted` 可从锁定的 direct pair 与提交 revision 上有效的两条 membership
+  直接创建一个 completion unit 和两个 durable delivery，不再等待 Planner 枚举。受众不是
+  客户端参数；目标数不等于 2 时整笔回滚，route 配置暂不可用时互斥回退原
+  `room_outbox -> Planner` 路径。两种路径共用 Inbox、同步、重试与 admission release；
+  灰度与审计见 [direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md)。
 - 群成员目录不是 fan-out payload；客户端只在打开成员管理时做认证后的 seek-pagination 查询。
 - 每个群成员目录条目都只携带公开 `@handle` 与显示名，并由 active-member 授权；App
   不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync

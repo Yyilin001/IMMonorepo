@@ -91,6 +91,15 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
             let nextMessageRevision = message.contentRevision + 1
             let eventUUID = try withdrawalUUID(eventID)
             let planUUID = try withdrawalUUID(planID)
+            let previousProjectionState = try await PostgresV2MessageProjectionStateRepository()
+                .loadCurrentOrMaterialize(
+                    messageID: messageID,
+                    revision: message.contentRevision,
+                    sql: sql
+                )
+            let removedProjectionState = try previousProjectionState.state.applyingRemoval(
+                revision: withdrawalUnsigned(nextMessageRevision)
+            )
 
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextRoomSequence) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("""
@@ -124,6 +133,15 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
                                            'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000)),
                                            'is_withdrawn', true), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
+            try await PostgresV2MessageProjectionStateRepository().persist(
+                try .init(
+                    state: removedProjectionState,
+                    originEventID: previousProjectionState.originEventID,
+                    stateEventID: eventUUID,
+                    createdAt: now
+                ),
+                sql: sql
+            )
             try await V2RoomEventDeliveryMode.persistPlan(deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID, roomSequence: nextRoomSequence, committedMembershipRevision: room.membershipRevision, standardTargetRuleJSON: "{\"kind\":\"eligible_member_count\"}", standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql)
             try await sql.raw("""
                 INSERT INTO im_v2.message_withdrawal_operations

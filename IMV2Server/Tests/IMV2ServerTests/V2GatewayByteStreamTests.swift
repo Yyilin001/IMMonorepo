@@ -99,6 +99,7 @@ struct V2GatewayByteStreamTests {
     @Test("declared frame limits are classified separately from generic request failures")
     func classifiesFrameLimitClosures() {
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.declaredPayloadTooLarge(4_097)) == .frameLimitViolation)
+        #expect(v2GatewayClosureReason(for: V2FrameCodecError.payloadTooLarge(4_097)) == .frameLimitViolation)
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.tooManyFramesInBatch(257)) == .frameLimitViolation)
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.invalidMagic) == .requestFailure)
     }

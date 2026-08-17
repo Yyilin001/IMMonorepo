@@ -20,6 +20,38 @@ public enum V2ContentReviewMode: String, Equatable, Sendable {
     var enqueuesJobs: Bool { self == .enabled }
 }
 
+public enum V2MessageProjectionWriteMode: String, Equatable, Sendable {
+    case inline
+    case dual
+    case shared
+}
+
+public enum V2MessageProjectionReadMode: String, Equatable, Sendable {
+    case inline
+    case preferShared = "prefer_shared"
+    case shared
+}
+
+/// Selects how the fixed two-user audience of a direct message becomes
+/// durable delivery work. `preplanned` still uses the ordinary Delivery,
+/// Inbox and completion fences; it only removes the redundant outbox and
+/// membership-enumeration phases. This is deployment policy, never client
+/// input, so a rollout can be reversed without changing the wire protocol.
+public enum V2DirectFanoutMode: String, Equatable, Sendable {
+    case planner
+    case preplanned
+}
+
+/// Controls whether an accepted-message incremental sync body is retained in
+/// the fan-out payload table or represented by its immutable message-state
+/// reference. Readers always support both forms so this can be rolled out
+/// after every binary has the reference join and rolled back without data
+/// loss before compaction.
+public enum V2FanoutPayloadWriteMode: String, Equatable, Sendable {
+    case body
+    case reference
+}
+
 /// Metrics are intentionally bound to a loopback-only listener. A collector
 /// must run in the same host or pod namespace; exposing these operational
 /// details through the public realtime or media listeners is forbidden.
@@ -186,6 +218,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// Deployment may retain them longer, but never shorten this protocol
     /// fence or a delayed client could execute an already-completed command.
     public let idempotencyRetentionSeconds: Int
+    public let messageProjectionWriteMode: V2MessageProjectionWriteMode
+    public let messageProjectionReadMode: V2MessageProjectionReadMode
+    public let directFanoutMode: V2DirectFanoutMode
+    public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
+    /// Unreferenced immutable revisions remain recoverable for this grace.
+    /// The default is seven days; deployments may lengthen it independently
+    /// of user projection MVCC retention.
+    public let messageProjectionStateRetentionSeconds: Int
     public let metrics: V2MetricsListenerConfiguration
     public let metricsMinimumRefreshIntervalMilliseconds: Int
     public let metricsRefreshTimeoutMilliseconds: Int
@@ -277,6 +317,50 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         idleTimeoutMilliseconds = try Self.positive("IM_V2_IDLE_TIMEOUT_MS", environment: environment)
         workerBatchSize = try Self.positive("IM_V2_WORKER_BATCH_SIZE", environment: environment)
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
+        let rawProjectionWriteMode = Self.optional(
+            "IM_V2_MESSAGE_PROJECTION_WRITE_MODE", environment: environment
+        )?.lowercased() ?? V2MessageProjectionWriteMode.dual.rawValue
+        let rawProjectionReadMode = Self.optional(
+            "IM_V2_MESSAGE_PROJECTION_READ_MODE", environment: environment
+        )?.lowercased() ?? V2MessageProjectionReadMode.preferShared.rawValue
+        guard let projectionWriteMode = V2MessageProjectionWriteMode(rawValue: rawProjectionWriteMode),
+              let projectionReadMode = V2MessageProjectionReadMode(rawValue: rawProjectionReadMode),
+              !(projectionWriteMode == .shared && projectionReadMode == .inline)
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_MESSAGE_PROJECTION_WRITE_MODE/IM_V2_MESSAGE_PROJECTION_READ_MODE"
+            )
+        }
+        messageProjectionWriteMode = projectionWriteMode
+        messageProjectionReadMode = projectionReadMode
+        let rawDirectFanoutMode = Self.optional(
+            "IM_V2_DIRECT_FANOUT_MODE", environment: environment
+        )?.lowercased() ?? V2DirectFanoutMode.planner.rawValue
+        guard let parsedDirectFanoutMode = V2DirectFanoutMode(rawValue: rawDirectFanoutMode) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")
+        }
+        directFanoutMode = parsedDirectFanoutMode
+        let rawFanoutPayloadWriteMode = Self.optional(
+            "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment
+        )?.lowercased() ?? V2FanoutPayloadWriteMode.body.rawValue
+        guard let parsedFanoutPayloadWriteMode = V2FanoutPayloadWriteMode(
+            rawValue: rawFanoutPayloadWriteMode
+        ) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_PAYLOAD_WRITE_MODE")
+        }
+        fanoutPayloadWriteMode = parsedFanoutPayloadWriteMode
+        let rawProjectionStateRetention = Self.optional(
+            "IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS",
+            environment: environment
+        ) ?? "604800"
+        guard let projectionStateRetention = Int(rawProjectionStateRetention),
+              (86_400 ... 365 * 86_400).contains(projectionStateRetention)
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"
+            )
+        }
+        messageProjectionStateRetentionSeconds = projectionStateRetention
         fanoutDeliveryCommitBatchSize = try Self.deliveryCommitBatchSize(environment: environment)
         crossStoreFanoutDeliveryCommitBatchSize = try Self.crossStoreDeliveryCommitBatchSize(environment: environment)
         crossStoreFanoutDeliveryCommitConcurrency = try Self.crossStoreDeliveryCommitConcurrency(environment: environment)

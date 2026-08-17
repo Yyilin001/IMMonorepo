@@ -15,17 +15,20 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let strangerMessagePolicy: V2StrangerMessagePolicy
     private let shadowForwarder: any V2UserShardProjectionShadowing
     private let contentReviewMode: V2ContentReviewMode
+    private let directFanoutMode: V2DirectFanoutMode
 
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
         shadowForwarder: any V2UserShardProjectionShadowing,
-        contentReviewMode: V2ContentReviewMode
+        contentReviewMode: V2ContentReviewMode,
+        directFanoutMode: V2DirectFanoutMode = .planner
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
         self.shadowForwarder = shadowForwarder
         self.contentReviewMode = contentReviewMode
+        self.directFanoutMode = directFanoutMode
     }
 
     public func accept(
@@ -312,19 +315,38 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 command: command,
                 mediaPresentations: mediaPresentations,
                 room: room,
+                directRecipientID: directContext?.recipientID,
+                sql: sql
+            )
+            let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
+                mediaPresentations: mediaPresentations,
+                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+            )
+            let acceptedState = try V2MessageProjectionState(
+                accepted: acceptedMessage,
+                forwardedFromMessageID: command.forwardedFrom?.messageID,
+                forwardedFromUserID: command.forwardedFrom?.senderUserID
+            )
+            let messageStateEventID = try uuid(timelineWriteSet.eventID)
+            try await PostgresV2MessageProjectionStateRepository().persist(
+                try .init(
+                    state: acceptedState,
+                    originEventID: messageStateEventID,
+                    stateEventID: messageStateEventID,
+                    createdAt: acceptedMessage.createdAt
+                ),
                 sql: sql
             )
             var acceptedDirectProjectionShadows: [DirectProjectionShadowRequest] = []
             if let directContext {
                 let recipientID = directContext.recipientID
-                let sourceEventID = try uuid(timelineWriteSet.eventID)
                 let projectionChanges = try await appendDirectPostAcceptanceProjections(
                     roomID: roomID,
                     senderID: senderID,
                     recipientID: recipientID,
                     senderProfileVisibleToRecipient: directContext.senderProfileVisibleToRecipient,
                     senderCanSend: directContext.senderCanSend,
-                    sourceEventID: sourceEventID,
+                    sourceEventID: messageStateEventID,
                     createdAt: timelineWriteSet.acceptedMessage.createdAt,
                     sql: sql
                 )
@@ -364,16 +386,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 now: now,
                 sql: sql
             )
-            let message = timelineWriteSet.acceptedMessage
-            // The room row is locked for this transaction, so this metadata
-            // is exactly the immutable mode that committed the event.  It is
-            // used only to avoid emitting foreground-group hints for direct
-            // rooms after the source transaction succeeds.
             return .init(
-                outcome: .accepted(message.materialized(
-                    mediaPresentations: mediaPresentations,
-                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
-                )),
+                outcome: .accepted(acceptedMessage),
                 acceptedDirectProjectionShadows: acceptedDirectProjectionShadows
             )
             }
@@ -921,6 +935,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         command: V2SendMessageCommand,
         mediaPresentations: [V2MediaPresentation],
         room: RoomRow,
+        directRecipientID: UUID?,
         sql: any SQLDatabase
     ) async throws {
         let message = writeSet.acceptedMessage
@@ -1012,6 +1027,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 replyToMessageID: replyToMessageID,
                 forwardedFromMessageID: forwardedFromMessageID,
                 forwardedFromUserID: forwardedFromUserID,
+                directRecipientID: directRecipientID,
                 sql: sql
             )
             return
@@ -1162,12 +1178,17 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         replyToMessageID: String,
         forwardedFromMessageID: UUID?,
         forwardedFromUserID: UUID?,
+        directRecipientID: UUID?,
         sql: any SQLDatabase
     ) async throws {
         let message = writeSet.acceptedMessage
         let admission = writeSet.nextRoomState.admission
         let targetCount = writeSet.fanoutPlan.reservation.cost.targetCount
         let targetRule = targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule)
+        let usesDirectPreplannedFanout = directFanoutMode == .preplanned && directRecipientID != nil
+        if usesDirectPreplannedFanout && targetCount != 2 {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         guard let mutation = try await sql.raw("""
             WITH room_update AS (
                 UPDATE im_v2.rooms
@@ -1252,22 +1273,110 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                        \(bind: room.membershipRevision), \(bind: message.createdAt)
                 FROM message_insert
                 RETURNING event_id, room_id
+            ), authoritative_direct_targets AS MATERIALIZED (
+                SELECT membership.user_id
+                FROM event_insert
+                JOIN im_v2.direct_room_pairs AS pair
+                  ON pair.room_id = event_insert.room_id
+                 AND (
+                     (pair.lower_user_id = \(bind: senderID)
+                      AND pair.higher_user_id = \(bind: directRecipientID))
+                     OR
+                     (pair.higher_user_id = \(bind: senderID)
+                      AND pair.lower_user_id = \(bind: directRecipientID))
+                 )
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.room_id = pair.room_id
+                 AND membership.user_id IN (pair.lower_user_id, pair.higher_user_id)
+                 AND membership.joined_revision <= \(bind: room.membershipRevision)
+                 AND (membership.left_revision IS NULL
+                      OR membership.left_revision > \(bind: room.membershipRevision))
+                WHERE \(bind: usesDirectPreplannedFanout)
+            ), direct_routed_targets AS MATERIALIZED (
+                SELECT target.user_id,
+                       COALESCE(route_override.write_bucket, config.default_write_bucket)
+                           AS target_shard_bucket,
+                       COALESCE(route_override.router_epoch, config.router_epoch)
+                           AS observed_router_epoch
+                FROM authoritative_direct_targets AS target
+                CROSS JOIN im_v2.user_shard_router_configuration AS config
+                LEFT JOIN im_v2.user_shard_route_overrides AS route_override
+                  ON route_override.user_id = target.user_id
+                WHERE config.configuration_key = TRUE
+            ), direct_shape AS MATERIALIZED (
+                SELECT COUNT(target.user_id)::bigint AS target_count,
+                       COUNT(route.user_id)::bigint AS routed_count,
+                       MIN(target.user_id::text)::uuid AS first_user_id,
+                       MAX(target.user_id::text)::uuid AS last_user_id
+                FROM authoritative_direct_targets AS target
+                LEFT JOIN direct_routed_targets AS route USING (user_id)
             ), plan_insert AS (
                 INSERT INTO im_v2.fanout_plans
                     (plan_id, source_event_id, room_id, source_room_sequence,
                      committed_membership_revision, target_rule, enumeration_checkpoint,
-                     target_count, reserved_fanout_cost, state, created_at)
+                     target_count, reserved_fanout_cost, state, created_at,
+                     enumerated_target_count)
                 SELECT \(bind: planID), event_insert.event_id, event_insert.room_id,
                        \(bind: roomSequence), \(bind: room.membershipRevision),
-                       \(bind: targetRule)::jsonb, jsonb_build_object('after_user_id', NULL),
-                       \(bind: targetCount), \(bind: targetCount), 'planning',
-                       \(bind: message.createdAt)
+                       CASE WHEN \(bind: usesDirectPreplannedFanout)
+                                      AND direct_shape.target_count = 2
+                                      AND direct_shape.routed_count = 2
+                            THEN \(bind: targetRule)::jsonb ||
+                                 jsonb_build_object('planning_strategy', 'direct_preplanned')
+                            ELSE \(bind: targetRule)::jsonb
+                       END,
+                       CASE WHEN \(bind: usesDirectPreplannedFanout)
+                                      AND direct_shape.target_count = 2
+                                      AND direct_shape.routed_count = 2
+                            THEN jsonb_build_object('after_user_id', direct_shape.last_user_id::text)
+                            ELSE jsonb_build_object('after_user_id', NULL)
+                       END,
+                       \(bind: targetCount), \(bind: targetCount),
+                       CASE WHEN \(bind: usesDirectPreplannedFanout)
+                                      AND direct_shape.target_count = 2
+                                      AND direct_shape.routed_count = 2
+                            THEN 'planned' ELSE 'planning'
+                       END,
+                       \(bind: message.createdAt),
+                       CASE WHEN \(bind: usesDirectPreplannedFanout)
+                                      AND direct_shape.target_count = 2
+                                      AND direct_shape.routed_count = 2
+                            THEN \(bind: targetCount) ELSE 0
+                       END
                 FROM event_insert
-                RETURNING plan_id, source_event_id
+                CROSS JOIN direct_shape
+                RETURNING plan_id, source_event_id, state
+            ), direct_completion_insert AS (
+                INSERT INTO im_v2.fanout_completion_units
+                    (source_event_id, completion_unit_id, target_boundary,
+                     target_count, state)
+                SELECT plan.source_event_id, plan.plan_id,
+                       jsonb_build_object(
+                           'first_user_id', direct_shape.first_user_id::text,
+                           'last_user_id', direct_shape.last_user_id::text,
+                           'membership_revision', \(bind: room.membershipRevision),
+                           'audience_kind', 'direct_preplanned'
+                       ),
+                       direct_shape.target_count, 'pending'
+                FROM plan_insert AS plan
+                CROSS JOIN direct_shape
+                WHERE plan.state = 'planned'
+                RETURNING source_event_id, completion_unit_id
+            ), direct_delivery_insert AS (
+                INSERT INTO im_v2.fanout_deliveries
+                    (source_event_id, target_user_id, projection_kind,
+                     completion_unit_id, target_shard_bucket, observed_router_epoch)
+                SELECT completion.source_event_id, route.user_id, 'message',
+                       completion.completion_unit_id, route.target_shard_bucket,
+                       route.observed_router_epoch
+                FROM direct_completion_insert AS completion
+                CROSS JOIN direct_routed_targets AS route
+                RETURNING source_event_id, target_user_id
             ), outbox_insert AS (
                 INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
                 SELECT source_event_id, plan_id, 'pending', \(bind: message.createdAt)
                 FROM plan_insert
+                WHERE state = 'planning'
                 RETURNING source_event_id
             )
             SELECT (SELECT count(*) FROM room_update) AS room_count,
@@ -1278,7 +1387,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    (SELECT count(*) FROM mention_insert) AS mention_count,
                    (SELECT count(*) FROM event_insert) AS event_count,
                    (SELECT count(*) FROM plan_insert) AS plan_count,
-                   (SELECT count(*) FROM outbox_insert) AS outbox_count
+                   (SELECT count(*) FROM outbox_insert) AS outbox_count,
+                   (SELECT target_count FROM direct_shape) AS direct_target_count,
+                   (SELECT routed_count FROM direct_shape) AS direct_routed_count,
+                   (SELECT count(*) FROM direct_completion_insert) AS completion_count,
+                   (SELECT count(*) FROM direct_delivery_insert) AS delivery_count,
+                   (SELECT count(*) FROM plan_insert WHERE state = 'planned') AS preplanned_plan_count
             """).first(decoding: SetBasedRoomWriteMutationRow.self),
               mutation.roomCount == 1,
               mutation.admissionCount == 1,
@@ -1287,10 +1401,39 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               mutation.mediaCount == Int64(message.media.count),
               mutation.mentionCount == Int64(message.mentions.count),
               mutation.eventCount == 1,
-              mutation.planCount == 1,
-              mutation.outboxCount == 1
+              mutation.planCount == 1
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        if usesDirectPreplannedFanout {
+            guard mutation.directTargetCount == 2 else {
+                // The target set is derived only from the locked immutable
+                // pair and revision-fenced memberships. Never let a corrupt
+                // direct audience silently degrade into a different target.
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            if mutation.directRoutedCount == 2 {
+                guard mutation.preplannedPlanCount == 1,
+                      mutation.completionCount == 1,
+                      mutation.deliveryCount == 2,
+                      mutation.outboxCount == 0
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            } else {
+                // A missing route configuration preserves the established
+                // durable planner recovery path. The mutually exclusive CTEs
+                // guarantee that this branch has no partial direct work.
+                guard mutation.preplannedPlanCount == 0,
+                      mutation.completionCount == 0,
+                      mutation.deliveryCount == 0,
+                      mutation.outboxCount == 1
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            }
+        } else {
+            guard mutation.preplannedPlanCount == 0,
+                  mutation.completionCount == 0,
+                  mutation.deliveryCount == 0,
+                  mutation.outboxCount == 1
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
         }
     }
 
@@ -1686,6 +1829,11 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     let eventCount: Int64
     let planCount: Int64
     let outboxCount: Int64
+    let directTargetCount: Int64
+    let directRoutedCount: Int64
+    let completionCount: Int64
+    let deliveryCount: Int64
+    let preplannedPlanCount: Int64
 
     enum CodingKeys: String, CodingKey {
         case roomCount = "room_count"
@@ -1697,6 +1845,11 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
         case eventCount = "event_count"
         case planCount = "plan_count"
         case outboxCount = "outbox_count"
+        case directTargetCount = "direct_target_count"
+        case directRoutedCount = "direct_routed_count"
+        case completionCount = "completion_count"
+        case deliveryCount = "delivery_count"
+        case preplannedPlanCount = "preplanned_plan_count"
     }
 }
 

@@ -378,7 +378,7 @@ private extension V2GatewayByteStream {
 func v2GatewayClosureReason(for error: Error) -> V2GatewayConnectionClosure {
     if let frameError = error as? V2FrameCodecError {
         switch frameError {
-        case .declaredPayloadTooLarge, .tooManyFramesInBatch:
+        case .declaredPayloadTooLarge, .payloadTooLarge, .tooManyFramesInBatch:
             return .frameLimitViolation
         default:
             break

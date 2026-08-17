@@ -46,6 +46,17 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore {
             guard let lease = nextShard.lease, room.roomSequence < Int64.max, message.contentRevision < Int64.max else { throw V2MessageEditStoreError.corruptPersistenceState }
             let nextSequence = room.roomSequence + 1, nextRevision = message.contentRevision + 1
             let eventUUID = try editUUID(eventID), planUUID = try editUUID(planID)
+            let previousProjectionState = try await PostgresV2MessageProjectionStateRepository()
+                .loadCurrentOrMaterialize(
+                    messageID: messageID,
+                    revision: message.contentRevision,
+                    sql: sql
+                )
+            let editedProjectionState = try previousProjectionState.state.applyingEdit(
+                revision: editUnsigned(nextRevision),
+                text: command.text,
+                entities: []
+            )
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextSequence) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.messages SET text_body = \(bind: command.text), rich_entities = '[]'::jsonb, content_revision = \(bind: nextRevision) WHERE message_id = \(bind: messageID)").run()
             if contentReviewMode.enqueuesJobs {
@@ -66,6 +77,15 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore {
             try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), fanout_window_used = \(bind: nextRoom.fanoutWindow.used), outstanding_fanout_units = \(bind: nextRoom.outstandingFanoutUnits), outstanding_plans = \(bind: nextRoom.outstandingPlans), shard_lease_id = \(bind: try editUUID(lease.id)), shard_lease_generation = \(bind: try editSigned(lease.generation)) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used), fanout_window_used = \(bind: lease.fanoutWindow.used), outstanding_fanout_units = \(bind: nextShard.outstandingFanoutUnits), outstanding_plans = \(bind: nextShard.outstandingPlans) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try editUUID(lease.id)) AND generation = \(bind: try editSigned(lease.generation))").run()
             try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: nextSequence), 'message.edited', \(bind: actorID), jsonb_build_object('event_type', 'message.edited', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: nextSequence), 'message_id', \(bind: messageID.uuidString), 'message_revision', \(bind: nextRevision), 'text', \(bind: command.text), 'entities', '[]'::jsonb, 'actor_user_id', \(bind: actorID.uuidString), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: room.membershipRevision), \(bind: now))").run()
+            try await PostgresV2MessageProjectionStateRepository().persist(
+                try .init(
+                    state: editedProjectionState,
+                    originEventID: previousProjectionState.originEventID,
+                    stateEventID: eventUUID,
+                    createdAt: now
+                ),
+                sql: sql
+            )
             try await V2RoomEventDeliveryMode.persistPlan(deliveryMode: room.deliveryMode, planID: planUUID, eventID: eventUUID, roomID: roomID, roomSequence: nextSequence, committedMembershipRevision: room.membershipRevision, standardTargetRuleJSON: "{\"kind\":\"eligible_member_count\"}", standardTargetCount: admission.eligibleMemberCount, now: now, sql: sql)
             try await sql.raw("INSERT INTO im_v2.message_edit_operations (actor_user_id, operation_id, room_id, message_id, expected_message_revision, text_body, resulting_message_revision, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: messageID), \(bind: try editSigned(command.expectedMessageRevision)), \(bind: command.text), \(bind: nextRevision), \(bind: nextSequence), \(bind: eventUUID), \(bind: planUUID), \(bind: now))").run()
             return .edited(try .init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: editUnsigned(nextRevision), roomSequence: editUnsigned(nextSequence), eventID: eventID, fanoutPlanID: planID, createdAt: now))

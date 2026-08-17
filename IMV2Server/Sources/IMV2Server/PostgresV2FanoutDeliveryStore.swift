@@ -25,11 +25,17 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
     private let batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
+    private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let consumerName = "v2-fanout-delivery"
 
-    public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
+    public init(
+        database: any Database,
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
+    ) {
         self.database = database
         self.makeUUID = makeUUID
+        self.payloadWriteMode = payloadWriteMode
         batchSequenceReservationStrategy = .automatic
     }
 
@@ -39,11 +45,13 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
     init(
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
-        batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
+        batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy,
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
     ) {
         self.database = database
         self.makeUUID = makeUUID
         self.batchSequenceReservationStrategy = batchSequenceReservationStrategy
+        self.payloadWriteMode = payloadWriteMode
     }
 
     public func claimPending(bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease] {
@@ -354,9 +362,18 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         let sourceEventID = try uuid(lease.sourceEventID)
         let targetUserID = try uuid(lease.targetUserID)
         let row = try await sql.raw("""
-            SELECT event.payload::text AS event_payload_json
+            SELECT event.payload::text AS event_payload_json,
+                   state.state_id, state.message_id, state.room_id,
+                   state.message_revision, state.variant_key,
+                   state.origin_event_id, state.state_event_id,
+                   state.is_withdrawn, state.payload_schema_version,
+                   state.payload::text AS state_payload_json,
+                   state.created_at AS state_created_at
             FROM im_v2.fanout_deliveries AS delivery
             JOIN im_v2.room_events AS event ON event.event_id = delivery.source_event_id
+            LEFT JOIN im_v2.message_projection_states AS state
+              ON state.state_event_id = event.event_id
+             AND state.variant_key = 0
             WHERE delivery.source_event_id = \(bind: sourceEventID)
               AND delivery.target_user_id = \(bind: targetUserID)
               AND delivery.projection_kind = \(bind: lease.projectionKind)
@@ -365,7 +382,9 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         guard let row else { return nil }
         return .init(
             sourceEventID: lease.sourceEventID, targetUserID: lease.targetUserID,
-            projectionKind: lease.projectionKind, eventPayloadJSON: row.eventPayloadJSON
+            projectionKind: lease.projectionKind,
+            eventPayloadJSON: row.eventPayloadJSON,
+            messageState: try row.messageState(projectionKind: lease.projectionKind)
         )
     }
 
@@ -411,23 +430,37 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
             ), first_payload_rows AS MATERIALIZED (
                 SELECT DISTINCT ON (valid.source_event_id)
                        valid.source_event_id, valid.ordinal,
-                       event.payload::text AS event_payload_json
+                       event.payload::text AS event_payload_json,
+                       state.state_id, state.message_id, state.room_id,
+                       state.message_revision, state.variant_key,
+                       state.origin_event_id, state.state_event_id,
+                       state.is_withdrawn, state.payload_schema_version,
+                       state.payload::text AS state_payload_json,
+                       state.created_at AS state_created_at
                 FROM valid
                 JOIN im_v2.room_events AS event ON event.event_id = valid.source_event_id
+                LEFT JOIN im_v2.message_projection_states AS state
+                  ON state.state_event_id = event.event_id
+                 AND state.variant_key = 0
                 ORDER BY valid.source_event_id, valid.ordinal
             )
-            SELECT valid.ordinal, valid.source_event_id, payload.event_payload_json
+            SELECT valid.ordinal, valid.source_event_id, payload.event_payload_json,
+                   payload.state_id, payload.message_id, payload.room_id,
+                   payload.message_revision, payload.variant_key,
+                   payload.origin_event_id, payload.state_event_id,
+                   payload.is_withdrawn, payload.payload_schema_version,
+                   payload.state_payload_json, payload.state_created_at
             FROM valid
             LEFT JOIN first_payload_rows AS payload ON payload.ordinal = valid.ordinal
             ORDER BY valid.ordinal
             """).all(decoding: LeasedProjectionInputRow.self)
-        var payloadsBySourceEvent: [UUID: String] = [:]
+        var payloadsBySourceEvent: [UUID: LeasedProjectionInputRow] = [:]
         for row in rows {
-            guard let payload = row.eventPayloadJSON else { continue }
+            guard row.eventPayloadJSON != nil else { continue }
             guard payloadsBySourceEvent[row.sourceEventID] == nil else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            payloadsBySourceEvent[row.sourceEventID] = payload
+            payloadsBySourceEvent[row.sourceEventID] = row
         }
         var results = Array<V2FanoutProjectionInput?>(repeating: nil, count: leases.count)
         for row in rows {
@@ -436,11 +469,14 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
             }
             let lease = leases[row.ordinal]
             guard try uuid(lease.sourceEventID) == row.sourceEventID,
-                  let payload = payloadsBySourceEvent[row.sourceEventID]
+                  let source = payloadsBySourceEvent[row.sourceEventID],
+                  let payload = source.eventPayloadJSON
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             results[row.ordinal] = .init(
                 sourceEventID: lease.sourceEventID, targetUserID: lease.targetUserID,
-                projectionKind: lease.projectionKind, eventPayloadJSON: payload
+                projectionKind: lease.projectionKind,
+                eventPayloadJSON: payload,
+                messageState: try source.messageState(projectionKind: lease.projectionKind)
             )
         }
         return results
@@ -789,10 +825,38 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
             INSERT INTO im_v2.fanout_sync_payloads
-                (source_event_id, projection_kind, payload, created_at)
-            SELECT event.event_id, \(bind: lease.projectionKind), event.payload, \(bind: now)
-            FROM im_v2.room_events AS event WHERE event.event_id = \(bind: sourceEventID)
-            ON CONFLICT DO NOTHING
+                (source_event_id, projection_kind, payload, message_state_id, created_at)
+            SELECT event.event_id, \(bind: lease.projectionKind),
+                   CASE WHEN \(bind: payloadWriteMode == .reference)
+                                  AND state.payload = event.payload
+                        THEN NULL ELSE event.payload END,
+                   state.state_id, \(bind: now)
+            FROM im_v2.room_events AS event
+            LEFT JOIN im_v2.message_projection_states AS state
+              ON state.state_event_id = event.event_id
+             AND state.variant_key = 0
+             AND \(bind: lease.projectionKind) = 'message'
+            WHERE event.event_id = \(bind: sourceEventID)
+            ON CONFLICT (source_event_id, projection_kind) DO UPDATE
+            SET message_state_id = COALESCE(
+                    im_v2.fanout_sync_payloads.message_state_id,
+                    EXCLUDED.message_state_id
+                ),
+                payload = CASE
+                    WHEN EXCLUDED.payload IS NULL
+                     AND im_v2.fanout_sync_payloads.message_state_id = EXCLUDED.message_state_id
+                    THEN NULL
+                    ELSE im_v2.fanout_sync_payloads.payload
+                END
+            WHERE EXCLUDED.message_state_id IS NOT NULL
+              AND (
+                  im_v2.fanout_sync_payloads.message_state_id IS NULL
+                  OR (
+                      EXCLUDED.payload IS NULL
+                      AND im_v2.fanout_sync_payloads.payload IS NOT NULL
+                      AND im_v2.fanout_sync_payloads.message_state_id = EXCLUDED.message_state_id
+                  )
+              )
             """).run()
         guard try await sql.raw("""
             INSERT INTO im_v2.user_sync_log
@@ -804,8 +868,10 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
             JOIN im_v2.fanout_sync_payloads AS shared
               ON shared.source_event_id = event.event_id
              AND shared.projection_kind = \(bind: lease.projectionKind)
-             AND shared.payload = event.payload
+            LEFT JOIN im_v2.message_projection_states AS state
+              ON state.state_id = shared.message_state_id
             WHERE event.event_id = \(bind: sourceEventID)
+              AND COALESCE(shared.payload, state.payload) = event.payload
             RETURNING user_sync_sequence
             """).first(decoding: UserSyncSequenceRow.self) != nil else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -939,7 +1005,9 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                 JOIN im_v2.fanout_sync_payloads AS shared
                  ON shared.source_event_id = payloads.source_event_id
                  AND shared.projection_kind = payloads.projection_kind
-                 AND shared.payload = payloads.payload
+                LEFT JOIN im_v2.message_projection_states AS state
+                  ON state.state_id = shared.message_state_id
+                WHERE COALESCE(shared.payload, state.payload) = payloads.payload
             ), recorded_inbox AS (
                 INSERT INTO im_v2.consumer_inbox
                     (consumer_name, source_event_id, target_user_id,
@@ -1047,12 +1115,39 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                 SELECT DISTINCT source_event_id, projection_kind FROM input
             )
             INSERT INTO im_v2.fanout_sync_payloads
-                (source_event_id, projection_kind, payload, created_at)
-            SELECT payload_keys.source_event_id, payload_keys.projection_kind, event.payload, \(bind: now)
+                (source_event_id, projection_kind, payload, message_state_id, created_at)
+            SELECT payload_keys.source_event_id, payload_keys.projection_kind,
+                   CASE WHEN \(bind: payloadWriteMode == .reference)
+                                  AND state.payload = event.payload
+                        THEN NULL ELSE event.payload END,
+                   state.state_id, \(bind: now)
             FROM payload_keys
             JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
+            LEFT JOIN im_v2.message_projection_states AS state
+              ON state.state_event_id = event.event_id
+             AND state.variant_key = 0
+             AND payload_keys.projection_kind = 'message'
             ORDER BY payload_keys.source_event_id, payload_keys.projection_kind
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (source_event_id, projection_kind) DO UPDATE
+            SET message_state_id = COALESCE(
+                    im_v2.fanout_sync_payloads.message_state_id,
+                    EXCLUDED.message_state_id
+                ),
+                payload = CASE
+                    WHEN EXCLUDED.payload IS NULL
+                     AND im_v2.fanout_sync_payloads.message_state_id = EXCLUDED.message_state_id
+                    THEN NULL
+                    ELSE im_v2.fanout_sync_payloads.payload
+                END
+            WHERE EXCLUDED.message_state_id IS NOT NULL
+              AND (
+                  im_v2.fanout_sync_payloads.message_state_id IS NULL
+                  OR (
+                      EXCLUDED.payload IS NULL
+                      AND im_v2.fanout_sync_payloads.payload IS NOT NULL
+                      AND im_v2.fanout_sync_payloads.message_state_id = EXCLUDED.message_state_id
+                  )
+              )
             """).run()
     }
 
@@ -1780,7 +1875,49 @@ private struct UpdatedCompletionUnitRow: Decodable {
 }
 private struct ProjectionInputRow: Decodable {
     let eventPayloadJSON: String
-    enum CodingKeys: String, CodingKey { case eventPayloadJSON = "event_payload_json" }
+    let stateID: UUID?
+    let messageID: UUID?
+    let roomID: UUID?
+    let messageRevision: Int64?
+    let variantKey: Int16?
+    let originEventID: UUID?
+    let stateEventID: UUID?
+    let isWithdrawn: Bool?
+    let payloadSchemaVersion: Int16?
+    let statePayloadJSON: String?
+    let stateCreatedAt: Date?
+
+    func messageState(projectionKind: String) throws -> V2FanoutMessageProjectionState? {
+        try fanoutMessageState(
+            projectionKind: projectionKind,
+            stateID: stateID,
+            messageID: messageID,
+            roomID: roomID,
+            messageRevision: messageRevision,
+            variantKey: variantKey,
+            originEventID: originEventID,
+            stateEventID: stateEventID,
+            isWithdrawn: isWithdrawn,
+            payloadSchemaVersion: payloadSchemaVersion,
+            statePayloadJSON: statePayloadJSON,
+            stateCreatedAt: stateCreatedAt
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case eventPayloadJSON = "event_payload_json"
+        case stateID = "state_id"
+        case messageID = "message_id"
+        case roomID = "room_id"
+        case messageRevision = "message_revision"
+        case variantKey = "variant_key"
+        case originEventID = "origin_event_id"
+        case stateEventID = "state_event_id"
+        case isWithdrawn = "is_withdrawn"
+        case payloadSchemaVersion = "payload_schema_version"
+        case statePayloadJSON = "state_payload_json"
+        case stateCreatedAt = "state_created_at"
+    }
 }
 private struct LeasedProjectionInput: Encodable {
     let ordinal: Int
@@ -1801,12 +1938,93 @@ private struct LeasedProjectionInputRow: Decodable {
     let ordinal: Int
     let sourceEventID: UUID
     let eventPayloadJSON: String?
+    let stateID: UUID?
+    let messageID: UUID?
+    let roomID: UUID?
+    let messageRevision: Int64?
+    let variantKey: Int16?
+    let originEventID: UUID?
+    let stateEventID: UUID?
+    let isWithdrawn: Bool?
+    let payloadSchemaVersion: Int16?
+    let statePayloadJSON: String?
+    let stateCreatedAt: Date?
+
+    func messageState(projectionKind: String) throws -> V2FanoutMessageProjectionState? {
+        try fanoutMessageState(
+            projectionKind: projectionKind,
+            stateID: stateID,
+            messageID: messageID,
+            roomID: roomID,
+            messageRevision: messageRevision,
+            variantKey: variantKey,
+            originEventID: originEventID,
+            stateEventID: stateEventID,
+            isWithdrawn: isWithdrawn,
+            payloadSchemaVersion: payloadSchemaVersion,
+            statePayloadJSON: statePayloadJSON,
+            stateCreatedAt: stateCreatedAt
+        )
+    }
 
     enum CodingKeys: String, CodingKey {
         case ordinal
         case sourceEventID = "source_event_id"
         case eventPayloadJSON = "event_payload_json"
+        case stateID = "state_id"
+        case messageID = "message_id"
+        case roomID = "room_id"
+        case messageRevision = "message_revision"
+        case variantKey = "variant_key"
+        case originEventID = "origin_event_id"
+        case stateEventID = "state_event_id"
+        case isWithdrawn = "is_withdrawn"
+        case payloadSchemaVersion = "payload_schema_version"
+        case statePayloadJSON = "state_payload_json"
+        case stateCreatedAt = "state_created_at"
     }
+}
+
+private func fanoutMessageState(
+    projectionKind: String,
+    stateID: UUID?,
+    messageID: UUID?,
+    roomID: UUID?,
+    messageRevision: Int64?,
+    variantKey: Int16?,
+    originEventID: UUID?,
+    stateEventID: UUID?,
+    isWithdrawn: Bool?,
+    payloadSchemaVersion: Int16?,
+    statePayloadJSON: String?,
+    stateCreatedAt: Date?
+) throws -> V2FanoutMessageProjectionState? {
+    let values: [Any?] = [
+        stateID, messageID, roomID, messageRevision, variantKey,
+        originEventID, isWithdrawn, payloadSchemaVersion,
+        statePayloadJSON, stateCreatedAt,
+    ]
+    if values.allSatisfy({ $0 == nil }) {
+        return nil
+    }
+    guard projectionKind == "message",
+          let stateID, let messageID, let roomID, let messageRevision,
+          let variantKey, let originEventID, let isWithdrawn,
+          let payloadSchemaVersion, let statePayloadJSON, let stateCreatedAt
+    else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    return .init(
+        stateID: stateID,
+        messageID: messageID,
+        roomID: roomID,
+        messageRevision: messageRevision,
+        variantKey: variantKey,
+        originEventID: originEventID,
+        stateEventID: stateEventID,
+        isWithdrawn: isWithdrawn,
+        payloadSchemaVersion: payloadSchemaVersion,
+        payloadJSON: statePayloadJSON,
+        createdAt: stateCreatedAt
+    )
 }
 private struct InboxInsertRow: Decodable { let sourceEventID: UUID; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" } }
 private struct SyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }

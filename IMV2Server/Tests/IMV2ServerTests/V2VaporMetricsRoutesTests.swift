@@ -116,6 +116,11 @@ struct V2VaporMetricsRoutesTests {
             failedSnapshotArtifacts: 41,
             oldestBuildingSnapshotAgeSeconds: 42,
             projectionVersionGCBacklogEstimatedRows: 43,
+            messageProjectionStatesEstimatedRows: 45,
+            messageProjectionStatesRelationBytes: 46,
+            messageProjectionReferenceEstimatedRows: 47,
+            messageProjectionBackfillEstimatedRows: 48,
+            messageProjectionInlinePayloadEstimatedRows: 49,
             uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
@@ -145,6 +150,11 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_user_projection_maximum_lag_records 39"))
             #expect(body.contains("im_v2_snapshot_artifacts{state=\"failed\"} 41"))
             #expect(body.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
+            #expect(body.contains("im_v2_message_projection_states_estimated_rows 45"))
+            #expect(body.contains("im_v2_message_projection_states_relation_bytes 46"))
+            #expect(body.contains("im_v2_message_projection_references_estimated_rows 47"))
+            #expect(body.contains("im_v2_message_projection_backfill_estimated_rows 48"))
+            #expect(body.contains("im_v2_message_projection_inline_payload_estimated_rows 49"))
             #expect(body.contains("im_v2_sync_uncompacted_projected_records 44"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 5"))
             #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))

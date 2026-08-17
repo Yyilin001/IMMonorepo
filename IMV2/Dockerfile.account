@@ -24,7 +24,20 @@ COPY IMV2Server ./IMV2Server
 # now. Running `swift run` in a container would
 # otherwise compile the selected executable after the listener port is already
 # published, producing a misleading short-lived 502/connection-refused state.
-RUN swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
+# Only `/runtime` is consumed by the final stage, so delete checkout/object
+# caches before the legacy builder snapshots this layer. This prevents a build
+# from needing several extra gigabytes merely to commit disposable products.
+RUN set -eu; \
+    resolve_attempt=1; \
+    until swift package --package-path IMV2Server resolve; do \
+        if [ "${resolve_attempt}" -ge 3 ]; then \
+            exit 1; \
+        fi; \
+        resolve_attempt=$((resolve_attempt + 1)); \
+        rm -rf /workspace/IMV2Server/.build/repositories; \
+        sleep 2; \
+    done; \
+    swift build -c release --package-path IMV2Server --product IMV2AccountServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2ServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2OperatorServerApp \
     && swift build -c release --package-path IMV2Server --product IMV2LocalGatewayProbe \
@@ -33,7 +46,8 @@ RUN swift build -c release --package-path IMV2Server --product IMV2AccountServer
           /workspace/IMV2Server/.build/release/IMV2ServerApp \
           /workspace/IMV2Server/.build/release/IMV2OperatorServerApp \
           /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe \
-          /runtime/IMV2Server/.build/release/
+          /runtime/IMV2Server/.build/release/ \
+    && rm -rf /workspace/IMV2Server/.build /root/.cache/org.swift.swiftpm
 
 FROM swift:6.3-jammy
 

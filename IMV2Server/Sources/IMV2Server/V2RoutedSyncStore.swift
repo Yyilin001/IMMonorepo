@@ -17,15 +17,18 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
         routeFence: any V2UserShardRouteFencing,
         coLocatedControlBuckets: Set<String> = [],
         capabilityProfile: String = "base",
+        maximumEncodedRecordsBytes: Int = 48 * 1_024,
         makeStore: (@Sendable (V2UserShardStorageLocation) -> any V2SyncStore)? = nil
     ) {
+        precondition(maximumEncodedRecordsBytes > 0)
         self.registry = registry
         self.routeFence = routeFence
         self.coLocatedControlBuckets = coLocatedControlBuckets
         self.makeStore = makeStore ?? {
             PostgresV2SyncStore(
                 database: $0.database, schema: $0.schema,
-                capabilityProfile: capabilityProfile
+                capabilityProfile: capabilityProfile,
+                maximumEncodedRecordsBytes: maximumEncodedRecordsBytes
             )
         }
     }

@@ -83,19 +83,43 @@ enum IMV2ServerApp {
             var seenSyncStores: Set<String> = []
             var snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder] = []
             var userProjectionWorkers: [PostgresV2UserProjectionWorker] = []
+            var messageProjectionBackfillWorkers: [PostgresV2MessageProjectionBackfillWorker] = []
+            var fanoutPayloadReferenceBackfillWorkers: [PostgresV2FanoutPayloadReferenceBackfillWorker] = []
             var projectionVersionGCWorkers: [PostgresV2ProjectionVersionGCWorker] = []
+            var messageProjectionStateGCWorkers: [PostgresV2MessageProjectionStateGCWorker] = []
             var syncLogCompactionWorkers: [PostgresV2UserSyncLogCompactionWorker] = []
             var userShardMetricsSources: [any V2DurableWorkMetricsSource] = []
             let syncHousekeepingWorkers: [V2SyncHousekeepingWorker] = zip(configuration.userShardStorage, shardLocations).compactMap { storage, location in
                 let key = storage.databaseURL + "\u{0}" + storage.schema
                 guard seenSyncStores.insert(key).inserted else { return nil }
-                snapshotArtifactBuilders.append(.init(database: location.database, schema: location.schema))
+                snapshotArtifactBuilders.append(.init(
+                    database: location.database,
+                    schema: location.schema,
+                    messageReadMode: configuration.messageProjectionReadMode
+                ))
                 userProjectionWorkers.append(.init(
                     database: location.database, schema: location.schema,
                     batchSize: configuration.workerBatchSize,
-                    retryPolicy: configuration.durableRetryPolicy
+                    retryPolicy: configuration.durableRetryPolicy,
+                    messageWriteMode: configuration.messageProjectionWriteMode
                 ))
+                messageProjectionBackfillWorkers.append(.init(
+                    database: location.database,
+                    schema: location.schema,
+                    compactInlinePayloads: configuration.messageProjectionWriteMode == .shared
+                ))
+                if configuration.fanoutPayloadWriteMode == .reference {
+                    fanoutPayloadReferenceBackfillWorkers.append(.init(
+                        database: location.database,
+                        schema: location.schema
+                    ))
+                }
                 projectionVersionGCWorkers.append(.init(database: location.database, schema: location.schema))
+                messageProjectionStateGCWorkers.append(.init(
+                    database: location.database,
+                    schema: location.schema,
+                    retention: TimeInterval(configuration.messageProjectionStateRetentionSeconds)
+                ))
                 syncLogCompactionWorkers.append(.init(
                     database: location.database, schema: location.schema
                 ))
@@ -163,7 +187,8 @@ enum IMV2ServerApp {
                     database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
-                    contentReviewMode: configuration.contentReviewMode
+                    contentReviewMode: configuration.contentReviewMode,
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -289,7 +314,8 @@ enum IMV2ServerApp {
                     database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
-                    contentReviewMode: configuration.contentReviewMode
+                    contentReviewMode: configuration.contentReviewMode,
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -319,11 +345,21 @@ enum IMV2ServerApp {
                 sync: .init(store: V2RoutedSyncStore(
                     registry: userShardStorage, routeFence: userShardRouter,
                     coLocatedControlBuckets: coLocatedControlBuckets,
-                    capabilityProfile: configuration.capabilityProfile
+                    capabilityProfile: configuration.capabilityProfile,
+                    // Reserve bounded space for the envelope, opaque token,
+                    // receipt, generation, capability profile, and protobuf
+                    // length prefixes. Record sizing itself is exact.
+                    maximumEncodedRecordsBytes: max(
+                        1,
+                        configuration.frameLimits.maximumPayloadBytes - 4_096
+                    )
                 )),
                 telemetry: telemetry
             )
-            let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(database: database)
+            let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(
+                database: database,
+                payloadWriteMode: configuration.fanoutPayloadWriteMode
+            )
             let fanoutCompletionReleaseWorker = V2FanoutCompletionReleaseWorker(
                 store: fanoutDeliveryControlStore
             )
@@ -357,7 +393,8 @@ enum IMV2ServerApp {
                             store: V2CrossStoreFanoutDeliveryStore(
                                 control: fanoutDeliveryControlStore, registry: userShardStorage,
                                 migrations: userShardMigrations,
-                                coLocatedControlBucket: isCoLocated ? bucket : nil
+                                coLocatedControlBucket: isCoLocated ? bucket : nil,
+                                payloadWriteMode: configuration.fanoutPayloadWriteMode
                             ),
                             bucket: bucket,
                             liveNotifier: connectionRegistry,
@@ -521,6 +558,63 @@ enum IMV2ServerApp {
                             break
                         } catch {
                             logger.error("IM V2 snapshot artifact build failed; retrying")
+                        }
+                        do {
+                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        } catch {
+                            break
+                        }
+                    }
+                }
+            }
+            // Historical conversion is isolated from latency-sensitive user
+            // projection. Busy batches drain continuously; an empty shard
+            // backs off to a cheap bounded poll.
+            let messageProjectionBackfillTasks = messageProjectionBackfillWorkers.map { worker in
+                Task {
+                    var cadence = V2AdaptiveWorkerCadence(
+                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                    )
+                    while !Task.isCancelled {
+                        var didWork = false
+                        do {
+                            let report = try await worker.runOnce(
+                                limit: cadence.claimLimit(
+                                    configuredLimit: configuration.workerBatchSize
+                                )
+                            )
+                            didWork = report.didWork
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 message projection backfill failed; retrying")
+                        }
+                        do {
+                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        } catch {
+                            break
+                        }
+                    }
+                }
+            }
+            let fanoutPayloadReferenceBackfillTasks = fanoutPayloadReferenceBackfillWorkers.map { worker in
+                Task {
+                    var cadence = V2AdaptiveWorkerCadence(
+                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                    )
+                    while !Task.isCancelled {
+                        var didWork = false
+                        do {
+                            let report = try await worker.runOnce(
+                                limit: cadence.claimLimit(
+                                    configuredLimit: configuration.workerBatchSize
+                                )
+                            )
+                            didWork = report.didWork
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 fan-out payload reference backfill failed; retrying")
                         }
                         do {
                             try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
@@ -833,6 +927,15 @@ enum IMV2ServerApp {
                                 logger.error("IM V2 snapshot projection history cleanup failed; retrying")
                             }
                         }
+                        for worker in messageProjectionStateGCWorkers {
+                            do {
+                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 shared message-state cleanup failed; retrying")
+                            }
+                        }
                         for worker in syncLogCompactionWorkers {
                             do {
                                 _ = try await worker.runOnce(
@@ -868,6 +971,8 @@ enum IMV2ServerApp {
             }
             await TerminationSignal.wait()
             userProjectionTasks.forEach { $0.cancel() }
+            messageProjectionBackfillTasks.forEach { $0.cancel() }
+            fanoutPayloadReferenceBackfillTasks.forEach { $0.cancel() }
             fanoutPlanningTask.cancel()
             fanoutDeliveryTask.cancel()
             fanoutCompletionReleaseTask.cancel()
@@ -878,6 +983,8 @@ enum IMV2ServerApp {
             foregroundGroupEventHintTask.cancel()
             await foregroundGroupEventHints.finish()
             for task in userProjectionTasks { await task.value }
+            for task in messageProjectionBackfillTasks { await task.value }
+            for task in fanoutPayloadReferenceBackfillTasks { await task.value }
             await fanoutPlanningTask.value
             await fanoutDeliveryTask.value
             await fanoutCompletionReleaseTask.value

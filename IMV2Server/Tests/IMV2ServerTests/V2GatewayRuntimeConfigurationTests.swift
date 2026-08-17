@@ -11,6 +11,78 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("message projection rollout modes are validated as one compatibility fence")
+    func validatesMessageProjectionRolloutModes() throws {
+        let defaults = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(defaults.messageProjectionWriteMode == .dual)
+        #expect(defaults.messageProjectionReadMode == .preferShared)
+        #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
+        #expect(defaults.directFanoutMode == .planner)
+        #expect(defaults.fanoutPayloadWriteMode == .body)
+
+        var shared = runtimeValues
+        shared["IM_V2_MESSAGE_PROJECTION_WRITE_MODE"] = "shared"
+        shared["IM_V2_MESSAGE_PROJECTION_READ_MODE"] = "shared"
+        shared["IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"] = "86400"
+        let sharedConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(shared)
+        )
+        #expect(sharedConfiguration.messageProjectionWriteMode == .shared)
+        #expect(sharedConfiguration.messageProjectionReadMode == .shared)
+        #expect(sharedConfiguration.messageProjectionStateRetentionSeconds == 86_400)
+
+        var preplanned = runtimeValues
+        preplanned["IM_V2_DIRECT_FANOUT_MODE"] = "preplanned"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(preplanned)
+        ).directFanoutMode == .preplanned)
+
+        var referencePayload = runtimeValues
+        referencePayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "reference"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(referencePayload)
+        ).fanoutPayloadWriteMode == .reference)
+
+        var invalidDirectFanout = runtimeValues
+        invalidDirectFanout["IM_V2_DIRECT_FANOUT_MODE"] = "client_selected"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidDirectFanout)
+            )
+        }
+
+        var invalidFanoutPayload = runtimeValues
+        invalidFanoutPayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "client_selected"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_PAYLOAD_WRITE_MODE")) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidFanoutPayload)
+            )
+        }
+
+        var unsafe = runtimeValues
+        unsafe["IM_V2_MESSAGE_PROJECTION_WRITE_MODE"] = "shared"
+        unsafe["IM_V2_MESSAGE_PROJECTION_READ_MODE"] = "inline"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_MESSAGE_PROJECTION_WRITE_MODE/IM_V2_MESSAGE_PROJECTION_READ_MODE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(unsafe)
+            )
+        }
+
+        var shortRetention = runtimeValues
+        shortRetention["IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"] = "86399"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(shortRetention)
+            )
+        }
+    }
+
     @Test("runtime requires an explicit protobuf nesting limit")
     func rejectsMissingProtobufNestingLimit() {
         var values = runtimeValues

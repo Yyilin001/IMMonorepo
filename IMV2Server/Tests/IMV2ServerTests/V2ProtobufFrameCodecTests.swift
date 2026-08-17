@@ -1,9 +1,29 @@
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+import SwiftProtobuf
 import Testing
 
 struct V2ProtobufFrameCodecTests {
+    @Test("sync record byte budgeting matches the protobuf repeated field")
+    func sizesSyncBatchRecordExactly() throws {
+        let record = V2SyncRecord(
+            sequence: 16_384,
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000123"),
+            projectionKind: "message",
+            payloadJSON: String(repeating: "x", count: 700)
+        )
+        var protobuf = IMV2SyncRecord()
+        protobuf.userSyncSequence = record.sequence
+        protobuf.sourceEventID = record.sourceEventID.rawValue
+        protobuf.projectionKind = record.projectionKind
+        protobuf.payload = Data(record.payloadJSON.utf8)
+        let encodedRecordBytes = try protobuf.serializedData().count
+        let repeatedFieldBytes = 1 + protobufVarintBytes(encodedRecordBytes) + encodedRecordBytes
+
+        #expect(v2EncodedSyncBatchRecordFieldBytes(record) == repeatedFieldBytes)
+    }
+
     @Test("server protobuf codec rejects a mismatched command header")
     func rejectsMismatch() throws {
         var envelope = IMV2Envelope()
@@ -57,4 +77,14 @@ struct V2ProtobufFrameCodecTests {
         envelope.syncBatch.records = [.init()]
         return try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 1)
     }
+}
+
+private func protobufVarintBytes(_ value: Int) -> Int {
+    var remaining = value
+    var count = 1
+    while remaining >= 0x80 {
+        remaining >>= 7
+        count += 1
+    }
+    return count
 }

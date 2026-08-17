@@ -11,21 +11,31 @@ public struct PostgresV2SyncStore: V2SyncStore {
     private let makeUUID: @Sendable () -> UUID
     private let capabilityLifetime: TimeInterval
     private let capabilityProfile: String
+    /// Budget for the encoded repeated `records` fields inside one sync batch.
+    /// The gateway reserves the remaining frame bytes for the envelope, token,
+    /// receipt, generation, and capability metadata.
+    private let maximumEncodedRecordsBytes: Int
 
     public init(
         database: any Database,
         schema: String = "im_v2",
         capabilityProfile: String = "base",
+        maximumEncodedRecordsBytes: Int = 48 * 1_024,
         makeUUID: @escaping @Sendable () -> UUID = { UUID() },
         capabilityLifetime: TimeInterval = 86_400
     ) {
-        precondition(capabilityLifetime > 0 && !capabilityProfile.isEmpty)
+        precondition(
+            capabilityLifetime > 0 &&
+            !capabilityProfile.isEmpty &&
+            maximumEncodedRecordsBytes > 0
+        )
         precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
         self.database = database
         self.schema = schema
         self.makeUUID = makeUUID
         self.capabilityLifetime = capabilityLifetime
         self.capabilityProfile = capabilityProfile
+        self.maximumEncodedRecordsBytes = maximumEncodedRecordsBytes
     }
 
     public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, now: Date) async throws -> V2SyncPullResult {
@@ -100,11 +110,14 @@ public struct PostgresV2SyncStore: V2SyncStore {
             }
             let rows = try await sql.raw("""
                 SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
-                       CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE shared.payload END::text AS payload_json
+                       CASE WHEN log.payload_storage = 'inline' THEN log.payload
+                            ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json
                 FROM \(unsafeRaw: table("user_sync_log")) AS log
                 LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
                  AND shared.projection_kind = log.projection_kind
+                LEFT JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                  ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
                 """).all(decoding: SyncLogRow.self)
@@ -113,10 +126,24 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 // not an empty page. Never mint a token that skips the gap.
                 throw V2SyncStoreError.syncLogSequenceGap
             }
-            let hasMore = rows.count > maxRecords
-            let records = try rows.prefix(maxRecords).map {
+            let candidates = try rows.prefix(maxRecords).map {
                 V2SyncRecord(sequence: try unsigned($0.sequence), sourceEventID: try EventID($0.sourceEventID.uuidString), projectionKind: $0.projectionKind, payloadJSON: $0.payloadJSON)
             }
+            var records: [V2SyncRecord] = []
+            records.reserveCapacity(candidates.count)
+            var encodedRecordsBytes = 0
+            for candidate in candidates {
+                let candidateBytes = v2EncodedSyncBatchRecordFieldBytes(candidate)
+                guard candidateBytes <= maximumEncodedRecordsBytes else {
+                    throw V2SyncStoreError.syncRecordTooLarge
+                }
+                guard encodedRecordsBytes <= maximumEncodedRecordsBytes - candidateBytes else {
+                    break
+                }
+                records.append(candidate)
+                encodedRecordsBytes += candidateBytes
+            }
+            let hasMore = rows.count > records.count
             let lastSequence = try records.last.map { try signed($0.sequence) } ?? startSequence
             let firstSequence = try records.first.map { try signed($0.sequence) } ?? startSequence
             let expiresAt = now.addingTimeInterval(capabilityLifetime)
@@ -386,7 +413,34 @@ public enum V2SyncStoreError: Error, Equatable, Sendable {
     case snapshotExpiredOrInvalid
     case snapshotCheckpointUnavailable
     case syncLogSequenceGap
+    case syncRecordTooLarge
     case deviceRevoked
+}
+
+/// Exact protobuf wire size of one `IMV2SyncBatch.records` repeated field.
+/// Keeping this estimator beside cursor advancement prevents a minted token
+/// from skipping records that were trimmed later at the transport boundary.
+func v2EncodedSyncBatchRecordFieldBytes(_ record: V2SyncRecord) -> Int {
+    let sequenceBytes = 1 + v2ProtobufVarintBytes(record.sequence)
+    let sourceEventBytes = v2ProtobufLengthDelimitedBytes(record.sourceEventID.rawValue.utf8.count)
+    let projectionKindBytes = v2ProtobufLengthDelimitedBytes(record.projectionKind.utf8.count)
+    let payloadBytes = v2ProtobufLengthDelimitedBytes(record.payloadJSON.utf8.count)
+    let recordBytes = sequenceBytes + sourceEventBytes + projectionKindBytes + payloadBytes
+    return 1 + v2ProtobufVarintBytes(UInt64(recordBytes)) + recordBytes
+}
+
+private func v2ProtobufLengthDelimitedBytes(_ payloadBytes: Int) -> Int {
+    1 + v2ProtobufVarintBytes(UInt64(payloadBytes)) + payloadBytes
+}
+
+private func v2ProtobufVarintBytes(_ value: UInt64) -> Int {
+    var remaining = value
+    var count = 1
+    while remaining >= 0x80 {
+        remaining >>= 7
+        count += 1
+    }
+    return count
 }
 
 private struct DeviceCursorRow: Decodable {

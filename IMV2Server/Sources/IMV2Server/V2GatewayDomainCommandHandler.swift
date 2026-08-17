@@ -423,6 +423,11 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "RESET_REQUIRED", retryable: false)
         } catch V2SyncStoreError.acknowledgementBeyondWatermark {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2SyncStoreError.syncRecordTooLarge {
+            // Persisted state must never force a transport-level disconnect.
+            // The non-retryable code also prevents an oversized head record
+            // from becoming an infinite client retry loop.
+            return errorEnvelope(code: "SYNC_RECORD_TOO_LARGE", retryable: false)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error where v2PostgresFailureDisposition(error) != .other {

@@ -1,0 +1,9 @@
+# Explicit post-backfill/clean-bootstrap rollout overlay. Do not apply this to
+# a legacy database until the projection-sharing runbook audits are zero.
+services:
+  gateway:
+    environment:
+      IM_V2_MESSAGE_PROJECTION_WRITE_MODE: shared
+      IM_V2_MESSAGE_PROJECTION_READ_MODE: shared
+      IM_V2_DIRECT_FANOUT_MODE: preplanned
+      IM_V2_FANOUT_PAYLOAD_WRITE_MODE: reference

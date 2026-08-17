@@ -20,6 +20,9 @@ body 中携带数据库 URL、SQL、批量 user 范围或事件内容。
 4. 目标 store 必须已通过 schema readiness，且复制窗口内没有未处置的 target
    数据库故障。仓库已覆盖双 PostgreSQL 连通与崩溃恢复；目标部署的权限、分区、
    容量和备份恢复仍需单独验收。
+5. current-2 message projection state 使用稳定 UUID。copy 会先搬运该用户 sync-log/
+   projection 引用到的 immutable state，再搬用户行并比较还原后的 fingerprint；不得
+   绕过 adapter 只复制 `user_projection_versions`，否则外键失败或 Snapshot 缺正文。
 
 示例中的 bearer 仅由 secret manager 注入，不应回显、写 shell history 或贴到
 incident 公共字段。网络重试一律重用相同 operation/migration UUID。
