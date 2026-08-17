@@ -29,16 +29,19 @@ public struct PostgresV2FanoutDeliveryStore:
     private let makeUUID: @Sendable () -> UUID
     private let batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
     private let payloadWriteMode: V2FanoutPayloadWriteMode
+    private let freshDirectPayloadsArePreseeded: Bool
     private let consumerName = "v2-fanout-delivery"
 
     public init(
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
-        payloadWriteMode: V2FanoutPayloadWriteMode = .body
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body,
+        freshDirectPayloadsArePreseeded: Bool = false
     ) {
         self.database = database
         self.makeUUID = makeUUID
         self.payloadWriteMode = payloadWriteMode
+        self.freshDirectPayloadsArePreseeded = freshDirectPayloadsArePreseeded
         batchSequenceReservationStrategy = .automatic
     }
 
@@ -49,12 +52,47 @@ public struct PostgresV2FanoutDeliveryStore:
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
         batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy,
-        payloadWriteMode: V2FanoutPayloadWriteMode = .body
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body,
+        freshDirectPayloadsArePreseeded: Bool = false
     ) {
         self.database = database
         self.makeUUID = makeUUID
         self.batchSequenceReservationStrategy = batchSequenceReservationStrategy
         self.payloadWriteMode = payloadWriteMode
+        self.freshDirectPayloadsArePreseeded = freshDirectPayloadsArePreseeded
+    }
+
+    /// A fixed database lane makes the partition predicate indexable while
+    /// allowing the process to run any smaller worker count. Each worker owns
+    /// every stable lane congruent to its process-local partition index, so
+    /// ownership remains disjoint and complete when concurrency changes.
+    private static let stableFreshLaneCount: Int64 = 8
+
+    private static func partitionEligibility(
+        _ partition: V2FanoutDeliveryClaimPartition?,
+        usesStableFreshLanes: Bool
+    ) -> SQLQueryString {
+        guard let partition else { return "" }
+        guard usesStableFreshLanes else {
+            return """
+                AND mod(
+                    hashtextextended(delivery.target_user_id::text, 0)
+                        & 9223372036854775807,
+                    \(bind: Int64(partition.count))
+                ) = \(bind: Int64(partition.index))
+                """
+        }
+        let lanes = stride(
+            from: Int64(partition.index), to: stableFreshLaneCount,
+            by: partition.count
+        ).map { $0 }
+        return """
+            AND mod(
+                hashtextextended(delivery.target_user_id::text, 0)
+                    & 9223372036854775807,
+                8
+            ) = ANY(\(bind: lanes)::bigint[])
+            """
     }
 
     public func claimPending(bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease] {
@@ -109,18 +147,9 @@ public struct PostgresV2FanoutDeliveryStore:
         let expiry = now.addingTimeInterval(leaseDuration)
         let eligibility = lane.sqlEligibilityPredicate(now: now)
         let ordering = lane.sqlOrdering
-        let partitionEligibility: SQLQueryString
-        if let partition {
-            partitionEligibility = """
-                AND mod(
-                    hashtextextended(delivery.target_user_id::text, 0)
-                        & 9223372036854775807,
-                    \(bind: Int64(partition.count))
-                ) = \(bind: Int64(partition.index))
-                """
-        } else {
-            partitionEligibility = ""
-        }
+        let partitionEligibility = Self.partitionEligibility(
+            partition, usesStableFreshLanes: lane == .fresh
+        )
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows: [ClaimedDeliveryRow]
@@ -296,17 +325,9 @@ public struct PostgresV2FanoutDeliveryStore:
         } else {
             ""
         }
-        let partitionEligibility: SQLQueryString = if let partition {
-            """
-            AND mod(
-                hashtextextended(delivery.target_user_id::text, 0)
-                    & 9223372036854775807,
-                \(bind: Int64(partition.count))
-            ) = \(bind: Int64(partition.index))
-            """
-        } else {
-            ""
-        }
+        let partitionEligibility = Self.partitionEligibility(
+            partition, usesStableFreshLanes: true
+        )
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -416,7 +437,8 @@ public struct PostgresV2FanoutDeliveryStore:
                 )
             }.sorted { $0.key < $1.key }
             let prepared = try await projectAndTerminalizeBatch(
-                sql: sql, ordered: ordered, now: now, fence: .freshDirect
+                sql: sql, ordered: ordered, now: now, fence: .freshDirect,
+                prepareSharedPayloads: !freshDirectPayloadsArePreseeded
             )
             guard prepared.count == ordered.count else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -1063,7 +1085,8 @@ public struct PostgresV2FanoutDeliveryStore:
         sql: any SQLDatabase,
         ordered: [BatchFanoutDeliveryLease],
         now: Date,
-        fence: BatchProjectionDeliveryFence = .claimed
+        fence: BatchProjectionDeliveryFence = .claimed,
+        prepareSharedPayloads: Bool = true
     ) async throws -> [PreparedFanoutDeliveryCommit] {
         let inputJSON = try batchJSON(try ordered.enumerated().map { offset, item in
             try BatchProjectionInput(ordinal: offset, item: item)
@@ -1110,7 +1133,9 @@ public struct PostgresV2FanoutDeliveryStore:
         // projection statement can then read its own newly inserted payload
         // plus any concurrently committed one without taking a no-op row
         // update lock on the common source event.
-        try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
+        if prepareSharedPayloads {
+            try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
+        }
         let sequenceReservationCTEs = usesDistinctTargetFastPath
             ? """
             reserved_sequence AS (

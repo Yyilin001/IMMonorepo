@@ -22,6 +22,7 @@ plan 状态更新和索引扫描，并把 ACK 后的投递启动延迟绑定到 
 锁定 room / admission / direct pair / revision-fenced memberships
   -> 写 message + room_event + immutable message state
   -> 创建 state=planned、enumerated_target_count=2 的 fanout plan
+  -> 若至少一个 target 与控制 schema 同库，写一次 shared payload/reference
   -> 创建一个 target_count=2 的 completion unit
   -> 为两位权威成员各创建一个 routed delivery
   -> 提交
@@ -32,7 +33,9 @@ store 与控制 schema 已由组合根证明同库，新鲜 direct delivery 在�
 `pending -> terminal`，不先写 claim token/retry count；远端分片、迁移转发、失败重试和过期
 lease 仍走原 claim-token 协议。快路径单事务行数不得超过同库
 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE`，不能用更大的 claim limit 隐式扩大锁、回滚和 WAL
-边界。群聊和任何非私聊事件继续走 Planner。
+边界。同库 worker 只在 source 事务已预写 shared payload 时跳过 delivery 阶段的 payload
+materialization；若预写缺失或不等价，整笔 fresh 事务回滚并自动回到普通 lease lane。群聊和
+任何非私聊事件继续走 Planner。
 
 ## 安全与一致性不变量
 
@@ -46,6 +49,8 @@ lease 仍走原 claim-token 协议。快路径单事务行数不得超过同库
   只能创建互斥的 `planning + room_outbox`，不得同时存在 partial direct work。
 - plan、completion unit、两个 delivery 与消息同事务提交；宕机不存在“消息已接受但可靠
   投递记录尚未创建”的窗口。
+- 同库 shared payload 只按 `(source_event_id, projection_kind)` 写一次。两位接收者的 worker
+  不再并发执行同一唯一键的 UPSERT；远端 target 仍在自己的物理 store 建立该引用。
 - `(source_event_id,target_user_id,projection_kind)`、inbox 和 immutable state 冲突仍按原
   幂等/等值验证处理，禁止 last-write-wins。
 - shared state 不是可见性授权。增量同步、Snapshot 与媒体下载仍必须先命中该用户的
@@ -53,6 +58,9 @@ lease 仍走原 claim-token 协议。快路径单事务行数不得超过同库
 - fresh direct projection 在持有 delivery row lock 后获取每用户 route advisory share lock，
   再重新读取 route/migration；stale route 不得写旧 owner，forwarding/verified migration 不得
   走同库快路径。异常行回落到普通 lease lane，以便 retry policy 最终 pause poison work。
+- fresh claim 使用固定 8 个数据库 hash lane；任意较小 worker 数只接管与自身 index 同余的
+  lane。这样调整进程并发不改变所有权，同时 PostgreSQL 可使用分区表达式索引，避免每个
+  worker 重复扫描全部 pending delivery。
 
 ## 回退与兼容
 

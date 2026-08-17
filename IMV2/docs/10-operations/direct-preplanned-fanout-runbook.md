@@ -15,6 +15,7 @@ IM_V2_DIRECT_FANOUT_MODE=preplanned  # 仅 message.accepted 私聊快路径
 ## 启用前门槛
 
 1. 当前 schema readiness 通过，router configuration 恰有一行且 override 无无效 bucket；
+   `fanout_deliveries_fresh_partition_claim_idx` 已创建且有效；
 2. `room_outbox`、fanout plan/delivery、completion release 无 paused/长期 leased backlog；
 3. 备份可恢复，记录 gateway image digest、配置、数据库参数和基线压测结果；
 4. 集成测试已覆盖 exact-two、route fallback、corrupt audience rollback、重试与 payload 等价；
@@ -52,6 +53,22 @@ WHERE room.room_kind = 'direct'
   AND plan.created_at >= now() - interval '15 minutes';
 ```
 
+单库配置下，每个新的 preplanned event 还必须在消息事务内生成一个 shared reference：
+
+```sql
+SELECT COUNT(*) AS missing_preseeded_payload
+FROM im_v2.fanout_plans AS plan
+LEFT JOIN im_v2.fanout_sync_payloads AS payload
+  ON payload.source_event_id = plan.source_event_id
+ AND payload.projection_kind = 'message'
+WHERE plan.target_rule->>'planning_strategy' = 'direct_preplanned'
+  AND plan.created_at >= now() - interval '15 minutes'
+  AND payload.source_event_id IS NULL;
+```
+
+必须为 0。非零行不会丢失：fresh 事务会失败关闭并回到 lease-fenced materialization；但持续
+非零表示 writer/delivery 配置或滚动版本不一致，会增加事务和唯一键等待，必须先修复。
+
 同时观察 ACK/s、端到端 p95/p99、DB CPU、WAL、transaction rate、lock wait、ready/leased/
 scheduled/paused delivery、terminal completion release 与连接池等待。日志和报告只能保存聚合，
 不得记录 room/user/message ID 或正文。
@@ -59,7 +76,8 @@ scheduled/paused delivery、terminal completion release 与连接池等待。日
 `IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` 只是一次 claim pass 的上限；fresh direct 的单事务
 上限仍由 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` 控制（当前最大 128）。压测时不要为了追求
 瞬时 ACK/s 放大单事务，优先通过互不重叠的 target-user 分区并行扩展，并同时观察 lock wait、
-WAL burst 和 p99。
+WAL burst 和 p99。target-user 分区映射到固定 8 个数据库 lane；禁止修改 SQL hash 常量而不
+重建对应索引并完成相同数据快照的 A/B。
 
 同库 fresh delivery 正常排空后应保持 `retry_count=0`；非零表示它按设计进入了恢复协议：
 

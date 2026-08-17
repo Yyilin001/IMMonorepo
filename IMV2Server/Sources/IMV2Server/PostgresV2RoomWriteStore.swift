@@ -16,19 +16,25 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let shadowForwarder: any V2UserShardProjectionShadowing
     private let contentReviewMode: V2ContentReviewMode
     private let directFanoutMode: V2DirectFanoutMode
+    private let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
+    private let coLocatedControlBuckets: Set<String>
 
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
         shadowForwarder: any V2UserShardProjectionShadowing,
         contentReviewMode: V2ContentReviewMode,
-        directFanoutMode: V2DirectFanoutMode = .planner
+        directFanoutMode: V2DirectFanoutMode = .planner,
+        fanoutPayloadWriteMode: V2FanoutPayloadWriteMode = .body,
+        coLocatedControlBuckets: Set<String> = []
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
         self.shadowForwarder = shadowForwarder
         self.contentReviewMode = contentReviewMode
         self.directFanoutMode = directFanoutMode
+        self.fanoutPayloadWriteMode = fanoutPayloadWriteMode
+        self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
     public func accept(
@@ -1192,6 +1198,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         let targetCount = writeSet.fanoutPlan.reservation.cost.targetCount
         let targetRule = targetRuleJSON(writeSet.fanoutPlan.reservation.cost, commandRule: command.targetRule)
         let usesDirectPreplannedFanout = directFanoutMode == .preplanned && directRecipientID != nil
+        let coLocatedControlBucketsJSON = try roomWriteJSON(
+            coLocatedControlBuckets.sorted()
+        )
         if usesDirectPreplannedFanout && targetCount != 2 {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
@@ -1343,9 +1352,19 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 LEFT JOIN im_v2.user_shard_route_overrides AS route_override
                   ON route_override.user_id = target.user_id
                 WHERE config.configuration_key = TRUE
+            ), co_located_control_buckets AS MATERIALIZED (
+                SELECT value AS bucket
+                FROM jsonb_array_elements_text(
+                    \(bind: coLocatedControlBucketsJSON)::jsonb
+                ) AS value
             ), direct_shape AS MATERIALIZED (
                 SELECT COUNT(target.user_id)::bigint AS target_count,
                        COUNT(route.user_id)::bigint AS routed_count,
+                       COUNT(route.user_id) FILTER (
+                           WHERE route.target_shard_bucket IN (
+                               SELECT bucket FROM co_located_control_buckets
+                           )
+                       )::bigint AS co_located_target_count,
                        MIN(target.user_id::text)::uuid AS first_user_id,
                        MAX(target.user_id::text)::uuid AS last_user_id
                 FROM authoritative_direct_targets AS target
@@ -1386,6 +1405,27 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 FROM event_insert
                 CROSS JOIN direct_shape
                 RETURNING plan_id, source_event_id, state
+            ), direct_shared_payload_insert AS (
+                -- A co-located direct event has one immutable shared payload
+                -- for both recipients. Persist it at the source boundary so
+                -- target-user-partitioned delivery workers never race on the
+                -- same unique key. Remote-only routes retain target-store
+                -- materialization in the established delivery protocol.
+                INSERT INTO im_v2.fanout_sync_payloads
+                    (source_event_id, projection_kind, payload,
+                     message_state_id, created_at)
+                SELECT event.event_id, 'message',
+                       CASE WHEN \(bind: fanoutPayloadWriteMode == .reference)
+                            THEN NULL ELSE event.payload END,
+                       \(bind: messageProjectionState.stateID),
+                       \(bind: message.createdAt)
+                FROM event_insert AS event
+                JOIN plan_insert AS plan
+                  ON plan.source_event_id = event.event_id
+                CROSS JOIN direct_shape
+                WHERE plan.state = 'planned'
+                  AND direct_shape.co_located_target_count > 0
+                RETURNING source_event_id
             ), direct_completion_insert AS (
                 INSERT INTO im_v2.fanout_completion_units
                     (source_event_id, completion_unit_id, target_boundary,
@@ -1432,6 +1472,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    (SELECT count(*) FROM outbox_insert) AS outbox_count,
                    (SELECT target_count FROM direct_shape) AS direct_target_count,
                    (SELECT routed_count FROM direct_shape) AS direct_routed_count,
+                   (SELECT co_located_target_count FROM direct_shape)
+                       AS direct_co_located_target_count,
+                   (SELECT count(*) FROM direct_shared_payload_insert)
+                       AS direct_shared_payload_count,
                    (SELECT count(*) FROM direct_completion_insert) AS completion_count,
                    (SELECT count(*) FROM direct_delivery_insert) AS delivery_count,
                    (SELECT count(*) FROM plan_insert WHERE state = 'planned') AS preplanned_plan_count
@@ -1459,6 +1503,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 guard mutation.preplannedPlanCount == 1,
                       mutation.completionCount == 1,
                       mutation.deliveryCount == 2,
+                      mutation.directSharedPayloadCount == (
+                          mutation.directCoLocatedTargetCount > 0 ? 1 : 0
+                      ),
                       mutation.outboxCount == 0
                 else { throw V2RoomWriteStoreError.corruptPersistenceState }
             } else {
@@ -1468,6 +1515,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 guard mutation.preplannedPlanCount == 0,
                       mutation.completionCount == 0,
                       mutation.deliveryCount == 0,
+                      mutation.directSharedPayloadCount == 0,
                       mutation.outboxCount == 1
                 else { throw V2RoomWriteStoreError.corruptPersistenceState }
             }
@@ -1475,6 +1523,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             guard mutation.preplannedPlanCount == 0,
                   mutation.completionCount == 0,
                   mutation.deliveryCount == 0,
+                  mutation.directSharedPayloadCount == 0,
                   mutation.outboxCount == 1
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
         }
@@ -1875,6 +1924,8 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     let outboxCount: Int64
     let directTargetCount: Int64
     let directRoutedCount: Int64
+    let directCoLocatedTargetCount: Int64
+    let directSharedPayloadCount: Int64
     let completionCount: Int64
     let deliveryCount: Int64
     let preplannedPlanCount: Int64
@@ -1892,6 +1943,8 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
         case outboxCount = "outbox_count"
         case directTargetCount = "direct_target_count"
         case directRoutedCount = "direct_routed_count"
+        case directCoLocatedTargetCount = "direct_co_located_target_count"
+        case directSharedPayloadCount = "direct_shared_payload_count"
         case completionCount = "completion_count"
         case deliveryCount = "delivery_count"
         case preplannedPlanCount = "preplanned_plan_count"
