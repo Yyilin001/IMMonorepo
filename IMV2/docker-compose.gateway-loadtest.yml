@@ -29,5 +29,18 @@ services:
       # but prevent it from turning a transport/database benchmark into a
       # policy-limit benchmark after the third message for a pair.
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 100000
+      # The benchmark deliberately releases as many as 1,000 idempotent
+      # open-direct-room commands in one second after connection ramp-up. Keep
+      # the server override's foreground/Sync in-flight limits (32/16), but
+      # give that bounded burst a larger queue and deadline so the benchmark measures steady-state
+      # database capacity instead of the normal 200 ms overload policy.
+      IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED: 1536
+      IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED: 512
+      IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS: 5000
+      # Measure the single-node throughput ceiling with one shared 64-slot
+      # pool. Admission, worker concurrency, batching and bounded queues remain
+      # enabled; only hard per-role connection reservations are bypassed so an
+      # idle worker class cannot strand capacity during a benchmark phase.
+      IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "false"
     ports:
       - "0.0.0.0:443:7443"

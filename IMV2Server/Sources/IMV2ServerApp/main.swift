@@ -29,54 +29,109 @@ enum IMV2ServerApp {
         var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         do {
-            app.databases.use(
-                try postgresDatabaseConfiguration(
-                    url: configuration.databaseURL,
-                    policy: configuration.databasePolicy
-                ),
-                as: .psql
-            )
-            let database = app.db(.psql)
-            // The control plane remains authoritative even when every user
-            // bucket is routed to a different physical database. Verify its
-            // session policy and schema independently of the shard loop.
-            try await V2PostgresSessionReadiness.verify(
-                database: database,
-                policy: configuration.databasePolicy
-            )
-            try await V2SchemaReadiness.verify(database: database)
-            var shardDatabasesByURL: [String: any Database] = [
-                configuration.databaseURL: database
-            ]
-            var shardLocations: [V2UserShardStorageLocation] = []
-            for storage in configuration.userShardStorage {
-                let shardDatabase: any Database
-                if let existing = shardDatabasesByURL[storage.databaseURL] {
-                    shardDatabase = existing
-                } else {
-                    // One physical URL owns one Fluent pool even when several
-                    // logical buckets use distinct schemas in that database.
-                    // This keeps actual pool multiplication identical to the
-                    // startup resource-budget calculation.
-                    let identifier = DatabaseID(string: "user-shard-pool-\(shardDatabasesByURL.count)")
+            let databaseEventLoops = Array(applicationEventLoops.makeIterator())
+            guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let physicalDatabaseURLs = Array(Set(
+                [configuration.databaseURL] + configuration.userShardStorage.map(\.databaseURL)
+            )).sorted()
+            var databasesByRole: [
+                V2PostgresWorkloadPoolBudget.Role: [String: any Database]
+            ] = [:]
+            let databaseRoles: [V2PostgresWorkloadPoolBudget.Role] =
+                configuration.databaseWorkloadPoolIsolationEnabled
+                    ? V2PostgresWorkloadPoolBudget.Role.allCases
+                    : [.foreground]
+            for (urlIndex, url) in physicalDatabaseURLs.enumerated() {
+                for role in databaseRoles {
+                    let identifier: DatabaseID = role == .foreground && url == configuration.databaseURL
+                        ? .psql
+                        : DatabaseID(string: "gateway-\(role.rawValue)-pool-\(urlIndex)")
                     app.databases.use(
                         try postgresDatabaseConfiguration(
-                            url: storage.databaseURL,
-                            policy: configuration.databasePolicy
+                            url: url,
+                            policy: configuration.databasePolicy,
+                            maximumConnectionsPerEventLoop:
+                                configuration.databaseWorkloadPoolIsolationEnabled
+                                    ? configuration.databaseWorkloadPoolBudget
+                                        .connectionsPerEventLoop(for: role)
+                                    : configuration.databasePolicy
+                                        .maximumConnectionsPerEventLoop
                         ),
                         as: identifier
                     )
-                    shardDatabase = app.db(identifier)
-                    shardDatabasesByURL[storage.databaseURL] = shardDatabase
+                    let eventLoopPool = try V2ApplicationEventLoopDatabasePool(
+                        application: app,
+                        identifier: identifier,
+                        eventLoops: databaseEventLoops
+                    )
+                    // Prove session GUCs on every EventLoop-owned pool. A
+                    // single long-lived `app.db(identifier)` handle would bind
+                    // all Stores to only one pool and make the configured
+                    // per-EventLoop connection multiplication fictitious.
+                    for eventLoopDatabase in eventLoopPool.eventLoopDatabases {
+                        try await V2PostgresSessionReadiness.verify(
+                            database: eventLoopDatabase,
+                            policy: configuration.databasePolicy
+                        )
+                    }
+                    databasesByRole[role, default: [:]][url] = eventLoopPool.database
                 }
-                try await V2PostgresSessionReadiness.verify(
-                    database: shardDatabase,
-                    policy: configuration.databasePolicy
-                )
-                try await V2SchemaReadiness.verify(database: shardDatabase, schema: storage.schema)
-                shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
-            let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
+            func databaseForRole(
+                for role: V2PostgresWorkloadPoolBudget.Role,
+                url: String
+            ) -> (any Database)? {
+                databasesByRole[role]?[url] ?? databasesByRole[.foreground]?[url]
+            }
+            guard let database = databaseForRole(for: .foreground, url: configuration.databaseURL),
+                  let syncControlDatabase = databaseForRole(for: .sync, url: configuration.databaseURL),
+                  let deliveryDatabase = databaseForRole(for: .delivery, url: configuration.databaseURL),
+                  let maintenanceDatabase = databaseForRole(for: .maintenance, url: configuration.databaseURL)
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+            // Schema readiness is topology state rather than work-class
+            // state. Verify each configured schema once through its foreground
+            // pool after every role pool has proven its session GUCs.
+            try await V2SchemaReadiness.verify(database: database)
+            for storage in configuration.userShardStorage {
+                guard let shardDatabase = databaseForRole(for: .foreground, url: storage.databaseURL)
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                try await V2SchemaReadiness.verify(
+                    database: shardDatabase, schema: storage.schema
+                )
+            }
+            func shardLocations(
+                for role: V2PostgresWorkloadPoolBudget.Role
+            ) throws -> [V2UserShardStorageLocation] {
+                try configuration.userShardStorage.map { storage in
+                    guard let shardDatabase = databaseForRole(for: role, url: storage.databaseURL)
+                    else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    return try .init(
+                        bucket: storage.bucket,
+                        database: shardDatabase,
+                        schema: storage.schema
+                    )
+                }
+            }
+            let foregroundShardLocations = try shardLocations(for: .foreground)
+            let syncShardLocations = try shardLocations(for: .sync)
+            let deliveryShardLocations = try shardLocations(for: .delivery)
+            let projectionShardLocations = try shardLocations(for: .projection)
+            let maintenanceShardLocations = try shardLocations(for: .maintenance)
+            let userShardStorage = try V2StaticUserShardStorageRegistry(
+                locations: foregroundShardLocations
+            )
+            let syncUserShardStorage = try V2StaticUserShardStorageRegistry(
+                locations: syncShardLocations
+            )
+            let deliveryUserShardStorage = try V2StaticUserShardStorageRegistry(
+                locations: deliveryShardLocations
+            )
+            let maintenanceUserShardStorage = try V2StaticUserShardStorageRegistry(
+                locations: maintenanceShardLocations
+            )
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
                 storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
             })
@@ -89,47 +144,61 @@ enum IMV2ServerApp {
             var messageProjectionStateGCWorkers: [PostgresV2MessageProjectionStateGCWorker] = []
             var syncLogCompactionWorkers: [PostgresV2UserSyncLogCompactionWorker] = []
             var userShardMetricsSources: [any V2DurableWorkMetricsSource] = []
-            let syncHousekeepingWorkers: [V2SyncHousekeepingWorker] = zip(configuration.userShardStorage, shardLocations).compactMap { storage, location in
+            let syncHousekeepingWorkers: [V2SyncHousekeepingWorker] = zip(
+                configuration.userShardStorage,
+                maintenanceShardLocations
+            ).compactMap { storage, maintenanceLocation in
                 let key = storage.databaseURL + "\u{0}" + storage.schema
                 guard seenSyncStores.insert(key).inserted else { return nil }
+                guard let projectionLocation = projectionShardLocations.first(where: {
+                    $0.bucket == storage.bucket
+                }) else { return nil }
                 snapshotArtifactBuilders.append(.init(
-                    database: location.database,
-                    schema: location.schema,
+                    database: projectionLocation.database,
+                    schema: projectionLocation.schema,
                     messageReadMode: configuration.messageProjectionReadMode
                 ))
                 userProjectionWorkers.append(.init(
-                    database: location.database, schema: location.schema,
+                    database: projectionLocation.database, schema: projectionLocation.schema,
                     batchSize: configuration.workerBatchSize,
                     retryPolicy: configuration.durableRetryPolicy,
-                    messageWriteMode: configuration.messageProjectionWriteMode
+                    messageWriteMode: configuration.messageProjectionWriteMode,
+                    acceptedMessageBatchEnabled:
+                        configuration.acceptedMessageProjectionBatchEnabled
                 ))
                 messageProjectionBackfillWorkers.append(.init(
-                    database: location.database,
-                    schema: location.schema,
+                    database: maintenanceLocation.database,
+                    schema: maintenanceLocation.schema,
                     compactInlinePayloads: configuration.messageProjectionWriteMode == .shared
                 ))
                 if configuration.fanoutPayloadWriteMode == .reference {
                     fanoutPayloadReferenceBackfillWorkers.append(.init(
-                        database: location.database,
-                        schema: location.schema
+                        database: maintenanceLocation.database,
+                        schema: maintenanceLocation.schema
                     ))
                 }
-                projectionVersionGCWorkers.append(.init(database: location.database, schema: location.schema))
+                projectionVersionGCWorkers.append(.init(
+                    database: maintenanceLocation.database,
+                    schema: maintenanceLocation.schema
+                ))
                 messageProjectionStateGCWorkers.append(.init(
-                    database: location.database,
-                    schema: location.schema,
+                    database: maintenanceLocation.database,
+                    schema: maintenanceLocation.schema,
                     retention: TimeInterval(configuration.messageProjectionStateRetentionSeconds)
                 ))
                 syncLogCompactionWorkers.append(.init(
-                    database: location.database, schema: location.schema
+                    database: maintenanceLocation.database, schema: maintenanceLocation.schema
                 ))
                 userShardMetricsSources.append(
                     PostgresV2UserShardDurableWorkMetricsSource(
-                        database: location.database, schema: location.schema
+                        database: maintenanceLocation.database, schema: maintenanceLocation.schema
                     )
                 )
                 return V2SyncHousekeepingWorker(
-                    store: PostgresV2SyncHousekeepingStore(database: location.database, schema: location.schema),
+                    store: PostgresV2SyncHousekeepingStore(
+                        database: maintenanceLocation.database,
+                        schema: maintenanceLocation.schema
+                    ),
                     projectionEffectRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
                 )
             }
@@ -146,12 +215,60 @@ enum IMV2ServerApp {
             let connectionRegistry = V2DeviceConnectionRegistry(
                 connectionAdmissionPolicy: configuration.authenticatedConnectionAdmissionPolicy
             )
+            let syncWakeCoalescer = V2SyncWakeCoalescer(
+                downstream: connectionRegistry,
+                interval: .milliseconds(configuration.syncWakeCoalescingMilliseconds),
+                maximumPendingUsers: configuration.syncWakeMaximumPendingUsers,
+                maximumConcurrentDeliveries:
+                    configuration.syncWakeDeliveryConcurrency
+            )
+            let liveSyncNotifier: any V2LiveSyncNotifier =
+                configuration.syncWakeCoalescingEnabled
+                    ? syncWakeCoalescer
+                    : connectionRegistry
+            let databaseWorkAdmission = V2DatabaseWorkAdmissionController(
+                policy: .init(
+                    maximumForegroundInFlight: configuration.foregroundDatabaseWorkLimit,
+                    maximumSyncInFlight: configuration.syncDatabaseWorkLimit,
+                    maximumForegroundQueued:
+                        configuration.foregroundDatabaseWorkMaximumQueued,
+                    maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
+                    timeout: .milliseconds(
+                        configuration.databaseWorkAdmissionTimeoutMilliseconds
+                    )
+                )
+            )
+            let databasePoolTopology: V2DatabasePoolTopologySnapshot
+            let configuredHandleCount = configuration.databasePolicy.eventLoopThreads *
+                physicalDatabaseURLs.count
+            if configuration.databaseWorkloadPoolIsolationEnabled {
+                databasePoolTopology = .init(
+                    pools: V2PostgresWorkloadPoolBudget.Role.allCases.map { role in
+                        .init(
+                            poolClass: databasePoolMetricClass(for: role),
+                            eventLoopHandles: configuredHandleCount,
+                            connectionCeiling: configuredHandleCount *
+                                configuration.databaseWorkloadPoolBudget
+                                    .connectionsPerEventLoop(for: role)
+                        )
+                    }
+                )
+            } else {
+                databasePoolTopology = .init(pools: [
+                    .init(
+                        poolClass: .shared,
+                        eventLoopHandles: configuredHandleCount,
+                        connectionCeiling: configuredHandleCount *
+                            configuration.databasePolicy.maximumConnectionsPerEventLoop
+                    )
+                ])
+            }
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
                 source: V2AggregateDurableWorkMetricsSource(sources: [
                     PostgresV2DurableWorkMetricsSource(
-                        database: database,
+                        database: maintenanceDatabase,
                         gatewayNodeID: configuration.gatewayNodeID,
                         includesUserShardMetrics: false
                     )
@@ -168,20 +285,43 @@ enum IMV2ServerApp {
                 telemetry: prometheusTelemetry,
                 connectionMetrics: connectionRegistry,
                 transportMetrics: transportMetrics,
-                durableWorkMetrics: durableWorkMetrics
+                durableWorkMetrics: durableWorkMetrics,
+                runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
+                    databaseWorkAdmission: databaseWorkAdmission,
+                    databasePools: databasePoolTopology,
+                    syncWakeCoalescer: syncWakeCoalescer
+                )
             )
             let telemetry = V2CompositeTelemetrySink([
-                V2ApplicationTelemetrySink(logger: app.logger),
+                V2ApplicationTelemetrySink(
+                    logger: app.logger,
+                    successSamplePermille: configuration.commandSuccessLogSamplePermille,
+                    slowCommandThresholdMilliseconds:
+                        configuration.commandSlowLogThresholdMilliseconds
+                ),
                 prometheusTelemetry,
             ])
             let userShardRouter = V2PostgresUserShardRouter(database: database)
             try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
-            let userShardMigrations = PostgresV2UserShardMigrationStore(database: database)
+            let syncUserShardRouter = V2PostgresUserShardRouter(database: syncControlDatabase)
+            let deliveryUserShardRouter = V2PostgresUserShardRouter(database: deliveryDatabase)
+            let maintenanceUserShardRouter = V2PostgresUserShardRouter(
+                database: maintenanceDatabase
+            )
+            let userShardMigrations = PostgresV2UserShardMigrationStore(
+                database: deliveryDatabase
+            )
             let userShardShadowForwarder = V2PostgresUserShardProjectionShadowForwarder(
                 registry: userShardStorage,
                 routeFence: userShardRouter,
                 coLocatedControlBuckets: coLocatedControlBuckets
             )
+            let maintenanceUserShardShadowForwarder =
+                V2PostgresUserShardProjectionShadowForwarder(
+                    registry: maintenanceUserShardStorage,
+                    routeFence: maintenanceUserShardRouter,
+                    coLocatedControlBuckets: coLocatedControlBuckets
+                )
             let sendMessage = V2SendMessageService(
                 store: PostgresV2RoomWriteStore(
                     database: database,
@@ -224,6 +364,15 @@ enum IMV2ServerApp {
             let groupAudienceImports = V2GroupAudienceImportService(
                 store: PostgresV2GroupAudienceImportStore(database: database),
                 groupMessaging: groupMessaging
+            )
+            let maintenanceGroupMessaging = try V2GroupMessagingService(
+                store: PostgresV2GroupMessagingStore(database: maintenanceDatabase),
+                capacityProfile: configuration.capacityProfile,
+                roomShardID: configuration.groupRoomShardID
+            )
+            let maintenanceGroupAudienceImports = V2GroupAudienceImportService(
+                store: PostgresV2GroupAudienceImportStore(database: maintenanceDatabase),
+                groupMessaging: maintenanceGroupMessaging
             )
             let groupEventLog = V2GroupEventLogService(
                 store: PostgresV2GroupEventLogStore(database: database)
@@ -286,13 +435,13 @@ enum IMV2ServerApp {
             if configuration.contentReviewMode == .enabled,
                let safetyActor = configuration.contentReviewSafetyActorUserID {
                 contentReviewWorker = try V2ContentReviewWorker(
-                    store: PostgresV2ContentReviewStore(database: database),
+                    store: PostgresV2ContentReviewStore(database: maintenanceDatabase),
                     reviewer: V2ConfiguredContentReviewer(
                         violatingTerms: configuration.contentReviewViolationTerms,
                         reviewTerms: configuration.contentReviewEscalationTerms
                     ),
                     moderation: .init(
-                        store: PostgresV2ModerationStore(database: database),
+                        store: PostgresV2ModerationStore(database: maintenanceDatabase),
                         safetyActorUserID: safetyActor,
                         capacityProfile: configuration.capacityProfile
                     ),
@@ -343,7 +492,7 @@ enum IMV2ServerApp {
                 groupCapabilities: groupCapabilities,
                 forwardMessages: forwardMessages,
                 sync: .init(store: V2RoutedSyncStore(
-                    registry: userShardStorage, routeFence: userShardRouter,
+                    registry: syncUserShardStorage, routeFence: syncUserShardRouter,
                     coLocatedControlBuckets: coLocatedControlBuckets,
                     capabilityProfile: configuration.capabilityProfile,
                     // Reserve bounded space for the envelope, opaque token,
@@ -354,10 +503,13 @@ enum IMV2ServerApp {
                         configuration.frameLimits.maximumPayloadBytes - 4_096
                     )
                 )),
-                telemetry: telemetry
+                telemetry: telemetry,
+                databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
+                    ? databaseWorkAdmission
+                    : nil
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(
-                database: database,
+                database: deliveryDatabase,
                 payloadWriteMode: configuration.fanoutPayloadWriteMode
             )
             let fanoutCompletionReleaseWorker = V2FanoutCompletionReleaseWorker(
@@ -365,7 +517,7 @@ enum IMV2ServerApp {
             )
             let durableFanoutPublisher = V2LocalFanoutPlanPublisher(
                 planner: .init(
-                    store: PostgresV2FanoutPlanStore(database: database),
+                    store: PostgresV2FanoutPlanStore(database: deliveryDatabase),
                     pageSize: configuration.capacityProfile.limits.maxEnumerationPageSize
                 )
             )
@@ -380,7 +532,7 @@ enum IMV2ServerApp {
             }
             let fanoutPipeline = V2FanoutPipeline(
                 relay: .init(
-                    store: PostgresV2RoomOutboxStore(database: database),
+                    store: PostgresV2RoomOutboxStore(database: deliveryDatabase),
                     publisher: fanoutPublisher,
                     retryPolicy: configuration.durableRetryPolicy
                 ),
@@ -391,14 +543,15 @@ enum IMV2ServerApp {
                         let isCoLocated = coLocatedControlBuckets.contains(bucket)
                         return V2FanoutDeliveryWorker(
                             store: V2CrossStoreFanoutDeliveryStore(
-                                control: fanoutDeliveryControlStore, registry: userShardStorage,
+                                control: fanoutDeliveryControlStore,
+                                registry: deliveryUserShardStorage,
                                 migrations: userShardMigrations,
                                 coLocatedControlBucket: isCoLocated ? bucket : nil,
                                 payloadWriteMode: configuration.fanoutPayloadWriteMode
                             ),
                             bucket: bucket,
-                            liveNotifier: connectionRegistry,
-                            router: userShardRouter,
+                            liveNotifier: liveSyncNotifier,
+                            router: deliveryUserShardRouter,
                             retryPolicy: configuration.durableRetryPolicy,
                             claimScheduler: .init(freshBurstPasses: configuration.fanoutFreshBurstPasses),
                             commitBatchSize: isCoLocated
@@ -415,48 +568,50 @@ enum IMV2ServerApp {
             // duplicated publication only changes foreground latency because
             // Hybrid clients always cursor-pull the room event log.
             let groupEventWakeRelay = V2GroupEventWakeRelay(
-                store: PostgresV2GroupEventWakeStore(database: database),
+                store: PostgresV2GroupEventWakeStore(database: deliveryDatabase),
                 publisher: groupEventWakePublisher
             )
             let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
-                database: database,
-                shadowForwarder: userShardShadowForwarder,
-                liveNotifier: connectionRegistry
+                database: maintenanceDatabase,
+                shadowForwarder: maintenanceUserShardShadowForwarder,
+                liveNotifier: liveSyncNotifier
             )
             let readReceiptPreferencePropagationWorker = V2ReadReceiptPreferencePropagationWorker(
-                database: database,
-                shadowForwarder: userShardShadowForwarder,
-                liveNotifier: connectionRegistry
+                database: maintenanceDatabase,
+                shadowForwarder: maintenanceUserShardShadowForwarder,
+                liveNotifier: liveSyncNotifier
             )
             let deviceRevocationWorker = V2DeviceRevocationWorker(
-                store: V2PostgresDeviceRevocationEventStore(database: database),
+                store: V2PostgresDeviceRevocationEventStore(database: maintenanceDatabase),
                 registry: connectionRegistry,
                 nodeID: configuration.gatewayNodeID
             )
             let revokedDeviceProjectionCleanupWorker = V2RevokedDeviceProjectionCleanupWorker(
                 store: V2PostgresDeviceRevocationEventStore.projectionCleanup(
-                    database: database
+                    database: maintenanceDatabase
                 ),
                 cleaner: V2RoutedRevokedDeviceProjectionCleaner(
-                    routeFence: V2PostgresUserShardRouter(database: database),
-                    registry: userShardStorage,
+                    routeFence: maintenanceUserShardRouter,
+                    registry: maintenanceUserShardStorage,
                     coLocatedControlBuckets: coLocatedControlBuckets
                 )
             )
             let moderationAuditRetentionWorker = V2ModerationAuditRetentionWorker(
-                store: PostgresV2ModerationAuditRetentionStore(database: database)
+                store: PostgresV2ModerationAuditRetentionStore(database: maintenanceDatabase)
             )
             let mediaRetentionWorker = try V2MediaRetentionWorker(
-                store: PostgresV2MediaRetentionStore(database: database),
+                store: PostgresV2MediaRetentionStore(database: maintenanceDatabase),
                 withdrawnRetention: TimeInterval(configuration.mediaWithdrawnRetentionSeconds)
             )
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
-                store: PostgresV2ControlPlaneHousekeepingStore(database: database),
+                store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
                 idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
             )
             let userShardMigrationRetentionWorker = V2UserShardMigrationRetentionWorker(
-                store: PostgresV2UserShardMigrationStore(database: database),
-                cleaner: V2UserShardProjectionSourceCleaner(registry: userShardStorage)
+                store: PostgresV2UserShardMigrationStore(database: maintenanceDatabase),
+                cleaner: V2UserShardProjectionSourceCleaner(
+                    registry: maintenanceUserShardStorage
+                )
             )
             let pushWakeWorker: V2PushWakeWorker?
             switch configuration.push {
@@ -470,7 +625,7 @@ enum IMV2ServerApp {
                 )
                 let provider = try V2APNSPushWakeProvider(
                     endpointStore: PostgresV2PushDeviceEndpointStore(
-                        database: database,
+                        database: maintenanceDatabase,
                         envelopeKey: pushConfiguration.endpointEnvelopeKey
                     ),
                     httpClient: V2URLSessionPushHTTPClient(),
@@ -478,7 +633,7 @@ enum IMV2ServerApp {
                     topic: pushConfiguration.topic
                 )
                 pushWakeWorker = .init(
-                    store: PostgresV2PushWakeStore(database: database),
+                    store: PostgresV2PushWakeStore(database: maintenanceDatabase),
                     provider: provider
                 )
             }
@@ -530,13 +685,59 @@ enum IMV2ServerApp {
             let foregroundGroupEventHintTask = Task {
                 await foregroundGroupEventHints.run()
             }
-            // Each physical user store owns an independent projection loop.
-            // A slow/unavailable shard therefore consumes only its configured
-            // pool budget and cannot delay another shard or fan-out planning.
-            let userProjectionTasks = zip(
-                userProjectionWorkers,
-                snapshotArtifactBuilders
-            ).map { worker, builder in
+            let syncWakeCoalescerTask = Task {
+                if configuration.syncWakeCoalescingEnabled {
+                    await syncWakeCoalescer.run()
+                }
+            }
+            // `SKIP LOCKED` checkpoint claims allow several bounded workers
+            // per physical store while preserving strict sequence for one
+            // user. Snapshot publication keeps one loop per store because it
+            // is a heavier, separately fenced artifact build.
+            let userProjectionTasks = userProjectionWorkers.flatMap { worker in
+                (0 ..< configuration.userProjectionConcurrency).map { workerIndex in
+                    Task {
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds:
+                                configuration.workerPollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            // One reserved projector always guarantees durable
+                            // convergence. Additional lanes are opportunistic:
+                            // they yield while foreground or Sync is already
+                            // waiting at the database admission boundary.
+                            if workerIndex > 0,
+                               configuration.databaseWorkAdmissionEnabled,
+                               await databaseWorkAdmission.snapshot().queued > 0 {
+                                do {
+                                    try await Task.sleep(for: .milliseconds(
+                                        configuration.workerPollIntervalMilliseconds
+                                    ))
+                                } catch {
+                                    break
+                                }
+                                continue
+                            }
+                            var didWork = false
+                            do {
+                                didWork = try await worker.runOnce().claimed
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 user snapshot projection failed; retrying")
+                            }
+                            do {
+                                try await Task.sleep(
+                                    for: cadence.delayAfterPass(didWork: didWork)
+                                )
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            let snapshotArtifactTasks = snapshotArtifactBuilders.map { builder in
                 Task {
                     var cadence = V2AdaptiveWorkerCadence(
                         minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
@@ -544,16 +745,7 @@ enum IMV2ServerApp {
                     while !Task.isCancelled {
                         var didWork = false
                         do {
-                            let report = try await worker.runOnce()
-                            didWork = report.claimed
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 user snapshot projection failed; retrying")
-                        }
-                        do {
-                            let report = try await builder.runOnce()
-                            didWork = didWork || report.claimed
+                            didWork = try await builder.runOnce().claimed
                         } catch is CancellationError {
                             break
                         } catch {
@@ -877,14 +1069,18 @@ enum IMV2ServerApp {
                             // bounded maintenance cadence as other retention
                             // work; cancellation and actor-local admission
                             // also perform immediate targeted cleanup.
-                            _ = try await groupAudienceImports.purgeExpired(limit: configuration.workerBatchSize)
+                            _ = try await maintenanceGroupAudienceImports.purgeExpired(
+                                limit: configuration.workerBatchSize
+                            )
                         } catch is CancellationError {
                             return
                         } catch {
                             logger.error("IM V2 group creation draft cleanup failed; retrying")
                         }
                         do {
-                            let report = try await groupAudienceImports.recoverFinalizing(limit: configuration.workerBatchSize)
+                            let report = try await maintenanceGroupAudienceImports.recoverFinalizing(
+                                limit: configuration.workerBatchSize
+                            )
                             if report.failedCount > 0 {
                                 logger.warning("IM V2 group creation finalization recovery left retryable drafts")
                             }
@@ -971,6 +1167,7 @@ enum IMV2ServerApp {
             }
             await TerminationSignal.wait()
             userProjectionTasks.forEach { $0.cancel() }
+            snapshotArtifactTasks.forEach { $0.cancel() }
             messageProjectionBackfillTasks.forEach { $0.cancel() }
             fanoutPayloadReferenceBackfillTasks.forEach { $0.cancel() }
             fanoutPlanningTask.cancel()
@@ -981,8 +1178,10 @@ enum IMV2ServerApp {
             revokedDeviceProjectionCleanupTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
+            syncWakeCoalescerTask.cancel()
             await foregroundGroupEventHints.finish()
             for task in userProjectionTasks { await task.value }
+            for task in snapshotArtifactTasks { await task.value }
             for task in messageProjectionBackfillTasks { await task.value }
             for task in fanoutPayloadReferenceBackfillTasks { await task.value }
             await fanoutPlanningTask.value
@@ -993,6 +1192,7 @@ enum IMV2ServerApp {
             await revokedDeviceProjectionCleanupTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
+            await syncWakeCoalescerTask.value
             await connectionRegistry.detachForegroundGroupInterestManager()
             await connectionRegistry.detachLiveActivityBroker()
             await natsLiveActivityBroker?.shutdown()
@@ -1012,7 +1212,8 @@ enum IMV2ServerApp {
 
 private func postgresDatabaseConfiguration(
     url: String,
-    policy: V2PostgresRuntimePolicy
+    policy: V2PostgresRuntimePolicy,
+    maximumConnectionsPerEventLoop: Int
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
@@ -1023,9 +1224,21 @@ private func postgresDatabaseConfiguration(
     )
     return .postgres(
         configuration: configuration,
-        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        maxConnectionsPerEventLoop: maximumConnectionsPerEventLoop,
         connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
     )
+}
+
+private func databasePoolMetricClass(
+    for role: V2PostgresWorkloadPoolBudget.Role
+) -> V2DatabasePoolMetricClass {
+    switch role {
+    case .foreground: .foreground
+    case .sync: .sync
+    case .delivery: .delivery
+    case .projection: .projection
+    case .maintenance: .maintenance
+    }
 }
 
 private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
@@ -1037,10 +1250,17 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
 /// not include room/user/message IDs, payloads, URLs, tokens or credentials.
 private struct V2ApplicationTelemetrySink: V2TelemetrySink {
     let logger: Logger
+    let successSamplePermille: Int
+    let slowCommandThresholdMilliseconds: Int
 
     func record(_ event: V2TelemetryEvent) async {
         switch event {
         case .gatewayCommand(let traceID, let command, let outcome, let rejection, let elapsedMilliseconds):
+            guard shouldLogGatewayCommand(
+                traceID: traceID,
+                outcome: outcome,
+                elapsedMilliseconds: elapsedMilliseconds
+            ) else { return }
             logger.info("im_v2.gateway.command", metadata: [
                 "trace_id": "\(traceID.uuidString)",
                 "command": "\(command.rawValue)",
@@ -1072,6 +1292,27 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
                 "elapsed_ms": "\(elapsedMilliseconds)",
             ])
         }
+    }
+
+    private func shouldLogGatewayCommand(
+        traceID: UUID,
+        outcome: V2GatewayTelemetryOutcome,
+        elapsedMilliseconds: UInt64
+    ) -> Bool {
+        guard outcome == .accepted,
+              elapsedMilliseconds < UInt64(slowCommandThresholdMilliseconds)
+        else { return true }
+        guard successSamplePermille > 0 else { return false }
+        guard successSamplePermille < 1_000 else { return true }
+        // Swift's `Hasher` is intentionally randomized per process. FNV over
+        // this already-random trace ID gives deterministic sampling without
+        // making identity or payload data part of the decision.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in traceID.uuidString.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash % 1_000 < UInt64(successSamplePermille)
     }
 }
 

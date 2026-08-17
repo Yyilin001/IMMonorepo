@@ -17,6 +17,7 @@
 | sync projection checkpoint、日志保留与 compaction | [ADR-013](00-foundation/ADR-013-sync-checkpoint-and-log-retention.md) | 已接受并实施 | Snapshot V3、连续 MVCC checkpoint、有界 artifact builder、ACK-before-activate、retained floor、低游标 reset、inbox/effect 稳定结果、shared-payload GC、有界 compactor 及分片 copy/fingerprint 已实施；R-006 已关闭，生产 replay window/阈值仍需容量校准 |
 | 消息投影正文单写与用户窄引用 | [ADR-014](00-foundation/ADR-014-shared-message-projection-state.md) | 已接受并实施 expand 阶段 | immutable shared state、双读写、bounded backfill、跨 shard copy、Snapshot/media join、GC/指标与在线 schema 变更已实现；生产灰度、真实数据审计和收益压测待执行 |
 | 私聊权威受众直达投递 | [ADR-015](00-foundation/ADR-015-direct-preplanned-fanout.md) | 已接受并实施，可配置灰度 | exact-two 权威受众、同事务 plan/unit/deliveries、route 缺失回退与腐坏受众回滚已集成验证；空库真实负载与长稳态证据待执行 |
+| 单节点数据库工作负载隔离与投影批处理 | [ADR-016](09-capacity/ADR-016-single-node-runtime-workload-isolation.md) | 已接受并实施，可独立回滚 | 五类 pool 预算、foreground/Sync 短队列、Projection 并行与 accepted 批量 SQL、Sync hint 合并、Sync 往返压缩和运行压力指标已实现；真实环境对照压测待执行 |
 | 移动前后台与 Push wake | [ADR-008](00-foundation/ADR-008-mobile-lifecycle-and-push.md) | 待批准 | durable wake/预算、APNs provider、加密端点与 iOS 明确开关已实现；资格/活动策略与真实 APNs 发布证据待定 |
 | Auth、设备撤销、本地存储、媒体授权、日志脱敏 | [ADR-009](00-foundation/ADR-009-auth-local-storage-and-redaction.md) | 部分待批准 | auth/keychain 已实现；媒体授权待 ADR-002 |
 | 容量、fenced admission、Push 预算、PITR/DR | [ADR-010](09-capacity/ADR-010-capacity-and-disaster-recovery.md) | 待批准 | admission lease 基元存在；目标、演练和报告缺失 |

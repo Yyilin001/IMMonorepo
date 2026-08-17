@@ -214,3 +214,55 @@ groups:
         annotations:
           summary: IM V2 durable fan-out failures are continuing
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+  - name: im-v2-runtime-pressure
+    rules:
+      # A non-empty short queue is allowed during a brief burst. Remaining
+      # non-empty for one minute means work is reaching the process-local
+      # database admission fence before it reaches Fluent's pool timeout.
+      - alert: IMV2DatabaseWorkQueueSustained
+        expr: sum by (job, instance, class) (im_v2_database_work_queued) > 0
+        for: 1m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 database work admission queue is continuously occupied
+          runbook: IMV2/docs/10-operations/single-node-performance-rollout-runbook.md
+
+      - alert: IMV2DatabaseWorkRejectionRatioHigh
+        expr: sum by (job, instance) (rate(im_v2_database_work_rejections_total[5m])) / clamp_min(sum by (job, instance) (rate(im_v2_gateway_commands_total[5m])), 0.001) > 0.005
+        for: 5m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 is rejecting more than 0.5 percent of commands before database pool wait
+          runbook: IMV2/docs/10-operations/single-node-performance-rollout-runbook.md
+
+      # Hints are best-effort and cursor Pull remains authoritative, but a
+      # continuing drop rate means the configured coalescer capacity or flush
+      # latency no longer matches the live audience.
+      - alert: IMV2SyncWakeDropsContinuing
+        expr: sum by (job, instance) (increase(im_v2_sync_wake_dropped_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 is continuously dropping bounded best-effort Sync hints
+          runbook: IMV2/docs/10-operations/single-node-performance-rollout-runbook.md
+
+      - alert: IMV2SyncWakeDeliveryStalled
+        expr: max by (job, instance) (im_v2_sync_wake_in_flight_users) > 0 and on (job, instance) sum by (job, instance) (rate(im_v2_sync_wake_delivered_total[2m])) == 0
+        for: 2m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 Sync hint delivery is in flight without downstream progress
+          runbook: IMV2/docs/10-operations/single-node-performance-rollout-runbook.md

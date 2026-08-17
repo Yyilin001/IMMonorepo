@@ -117,6 +117,7 @@ func makeGatewayDomainCommandHandler(
     forwardMessages: V2ForwardMessagesService? = nil,
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
+    databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
     now: @escaping @Sendable () -> Date = Date.init
 ) -> V2GatewayDomainCommandHandler {
     let unsupported = V2UnsupportedGatewayTestDependency()
@@ -140,6 +141,7 @@ func makeGatewayDomainCommandHandler(
         forwardMessagesHandler: forwardMessages.map { $0 as any V2GatewayForwardMessagesHandling } ?? unsupported,
         sync: sync,
         telemetry: telemetry,
+        databaseWorkAdmission: databaseWorkAdmission,
         now: now
     )
 }

@@ -40,7 +40,7 @@ psql < "${schema_file}" >/dev/null
 test "$(current_schema_contract)" = 't'
 
 test "$(scalar "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'")" = '120'
-test "$(scalar "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'")" = '295'
+test "$(scalar "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'")" = '296'
 test "$(scalar "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal")" = '4'
 test "$(scalar "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'")" = '4'
 

@@ -9,6 +9,9 @@ compose_file="${repo_root}/IMV2/docker-compose.isolated-tests.yml"
 current_schema="${repo_root}/IMV2/sql/schema.sql"
 expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
 fanout_payload_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-fanout-payload-reference-expand.sql"
+projection_ready_index_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-user-projection-ready-index-expand.sql"
+expand_sql_relative="IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
+schema_relative="IMV2/sql/schema.sql"
 project_name="imv2-message-projection-expand-regression"
 
 command -v docker >/dev/null 2>&1 || {
@@ -29,9 +32,21 @@ psql() {
     psql -v ON_ERROR_STOP=1 -U im_v2_test -d im_v2_test "$@"
 }
 
-git -C "${repo_root}" show HEAD:IMV2/sql/schema.sql | psql >/dev/null
+migration_commit="$(
+  git -C "${repo_root}" log --diff-filter=A --format=%H -1 -- "${expand_sql_relative}"
+)"
+test -n "${migration_commit}" || {
+  printf 'cannot locate the commit that introduced %s\n' "${expand_sql_relative}" >&2
+  exit 1
+}
+
+# The migration and canonical schema intentionally land in the same commit.
+# Use the parent of that commit as the stable pre-expand fixture; using HEAD
+# would reapply CREATE TABLE statements to an already-expanded schema.
+git -C "${repo_root}" show "${migration_commit}^:${schema_relative}" | psql >/dev/null
 psql < "${expand_sql}" >/dev/null
 psql < "${fanout_payload_expand_sql}" >/dev/null
+psql < "${projection_ready_index_expand_sql}" >/dev/null
 
 normalize_schema() {
   awk '

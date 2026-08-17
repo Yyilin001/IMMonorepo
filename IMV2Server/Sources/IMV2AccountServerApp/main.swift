@@ -40,11 +40,22 @@ enum IMV2AccountServerApp {
                 ),
                 as: .psql
             )
-            let database = app.db(.psql)
-            try await V2PostgresSessionReadiness.verify(
-                database: database,
-                policy: configuration.databasePolicy
+            let databaseEventLoops = Array(applicationEventLoops.makeIterator())
+            guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let databasePool = try V2ApplicationEventLoopDatabasePool(
+                application: app,
+                identifier: .psql,
+                eventLoops: databaseEventLoops
             )
+            for eventLoopDatabase in databasePool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(
+                    database: eventLoopDatabase,
+                    policy: configuration.databasePolicy
+                )
+            }
+            let database: any Database = databasePool.database
             try await V2SchemaReadiness.verify(database: database)
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port

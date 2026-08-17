@@ -155,6 +155,8 @@ public struct V2APNSRuntimeConfiguration: Sendable {
 public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databaseURL: String
     public let databasePolicy: V2PostgresRuntimePolicy
+    public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
+    public let databaseWorkloadPoolIsolationEnabled: Bool
     /// Fluent defaults to a single PostgreSQL connection per event loop. The
     /// gateway runs foreground commands and durable fan-out in the same
     /// process, so deployment must size this explicitly rather than allowing a
@@ -185,6 +187,31 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let capabilityProfile: String
     public let workerBatchSize: Int
     public let workerPollIntervalMilliseconds: Int
+    /// Independent projection claim loops per unique user schema. Multiple
+    /// schemas may share one physical database pool; the startup connection
+    /// budget accounts for every schema's workers plus its snapshot builder.
+    /// The checkpoint `SKIP LOCKED` fence preserves one ordered stream per user.
+    public let userProjectionConcurrency: Int
+    /// Process-local database admission bounds reject overload before a
+    /// request spends the much longer Fluent pool timeout waiting for a slot.
+    public let foregroundDatabaseWorkLimit: Int
+    public let syncDatabaseWorkLimit: Int
+    public let foregroundDatabaseWorkMaximumQueued: Int
+    public let syncDatabaseWorkMaximumQueued: Int
+    public let databaseWorkAdmissionTimeoutMilliseconds: Int
+    public let databaseWorkAdmissionEnabled: Bool
+    /// Best-effort sync hints are coalesced by user; cursor pull remains the
+    /// authoritative recovery mechanism.
+    public let syncWakeCoalescingMilliseconds: Int
+    public let syncWakeMaximumPendingUsers: Int
+    public let syncWakeDeliveryConcurrency: Int
+    public let syncWakeCoalescingEnabled: Bool
+    public let acceptedMessageProjectionBatchEnabled: Bool
+    /// Successful command logs are sampled independently from complete
+    /// Prometheus accounting. Rejections, failures and slow commands remain
+    /// unsampled.
+    public let commandSuccessLogSamplePermille: Int
+    public let commandSlowLogThresholdMilliseconds: Int
     /// Maximum number of co-located target projections committed in one
     /// database transaction. Keeping this small bounds rollback work, lock
     /// hold time and WAL burst size.
@@ -251,6 +278,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
+        databaseWorkloadPoolBudget = try .init(environment: environment)
+        databaseWorkloadPoolIsolationEnabled = try Self.explicitBoolean(
+            "IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED", environment: environment
+        )
         tls = try .init(
             host: try Self.required("IM_V2_TLS_HOST", environment: environment),
             port: try Self.integer("IM_V2_TLS_PORT", environment: environment),
@@ -317,6 +348,59 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         idleTimeoutMilliseconds = try Self.positive("IM_V2_IDLE_TIMEOUT_MS", environment: environment)
         workerBatchSize = try Self.positive("IM_V2_WORKER_BATCH_SIZE", environment: environment)
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
+        userProjectionConcurrency = try Self.boundedPositive(
+            "IM_V2_USER_PROJECTION_CONCURRENCY", maximum: 16, environment: environment
+        )
+        foregroundDatabaseWorkLimit = try Self.boundedPositive(
+            "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
+        )
+        syncDatabaseWorkLimit = try Self.boundedPositive(
+            "IM_V2_SYNC_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
+        )
+        foregroundDatabaseWorkMaximumQueued = try Self.boundedPositive(
+            "IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED",
+            maximum: 1_000_000,
+            environment: environment
+        )
+        syncDatabaseWorkMaximumQueued = try Self.boundedPositive(
+            "IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED",
+            maximum: 1_000_000,
+            environment: environment
+        )
+        databaseWorkAdmissionTimeoutMilliseconds = try Self.boundedPositive(
+            "IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS", maximum: 5_000, environment: environment
+        )
+        databaseWorkAdmissionEnabled = try Self.explicitBoolean(
+            "IM_V2_DATABASE_WORK_ADMISSION_ENABLED", environment: environment
+        )
+        syncWakeCoalescingMilliseconds = try Self.boundedPositive(
+            "IM_V2_SYNC_WAKE_COALESCING_MS", maximum: 1_000, environment: environment
+        )
+        syncWakeMaximumPendingUsers = try Self.boundedPositive(
+            "IM_V2_SYNC_WAKE_MAX_PENDING_USERS", maximum: 1_000_000, environment: environment
+        )
+        syncWakeDeliveryConcurrency = try Self.boundedPositive(
+            "IM_V2_SYNC_WAKE_DELIVERY_CONCURRENCY",
+            maximum: 1_024,
+            environment: environment
+        )
+        syncWakeCoalescingEnabled = try Self.explicitBoolean(
+            "IM_V2_SYNC_WAKE_COALESCING_ENABLED", environment: environment
+        )
+        acceptedMessageProjectionBatchEnabled = try Self.explicitBoolean(
+            "IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED", environment: environment
+        )
+        commandSuccessLogSamplePermille = try Self.integer(
+            "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE", environment: environment
+        )
+        guard (0 ... 1_000).contains(commandSuccessLogSamplePermille) else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE"
+            )
+        }
+        commandSlowLogThresholdMilliseconds = try Self.boundedPositive(
+            "IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS", maximum: 300_000, environment: environment
+        )
         let rawProjectionWriteMode = Self.optional(
             "IM_V2_MESSAGE_PROJECTION_WRITE_MODE", environment: environment
         )?.lowercased() ?? V2MessageProjectionWriteMode.dual.rawValue
@@ -420,9 +504,75 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             localBucket: userShardRoute.bucket,
             localDatabaseURL: databaseURL
         )
+        guard databaseWorkloadPoolBudget.totalConnectionsPerEventLoop <=
+                databasePolicy.maximumConnectionsPerEventLoop
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DATABASE_WORKLOAD_POOL_BUDGET"
+            )
+        }
+        guard userShardStorage.count <= databasePolicy.maximumUserShardStores else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_USER_SHARD_STORES")
+        }
+        let foregroundPoolCapacity = databasePolicy.eventLoopThreads * (
+            databaseWorkloadPoolIsolationEnabled
+                ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
+                : databasePolicy.maximumConnectionsPerEventLoop
+        )
+        let syncPoolCapacity = databasePolicy.eventLoopThreads * (
+            databaseWorkloadPoolIsolationEnabled
+                ? databaseWorkloadPoolBudget.syncConnectionsPerEventLoop
+                : databasePolicy.maximumConnectionsPerEventLoop
+        )
+        if databaseWorkloadPoolIsolationEnabled {
+            guard foregroundDatabaseWorkLimit <= foregroundPoolCapacity,
+                  syncDatabaseWorkLimit <= syncPoolCapacity
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                )
+            }
+            let projectionPoolCapacity = databasePolicy.eventLoopThreads *
+                databaseWorkloadPoolBudget.projectionConnectionsPerEventLoop
+            let projectionStoreCountsByURL = Dictionary(
+                grouping: userShardStorage,
+                by: \.databaseURL
+            ).mapValues { stores in
+                Set(stores.map(\.schema)).count
+            }
+            let configuredUserProjectionConcurrency = userProjectionConcurrency
+            let maximumProjectionLanesPerPhysicalStore =
+                projectionStoreCountsByURL.values.map {
+                    $0 * (configuredUserProjectionConcurrency + 1)
+                }.max() ?? 0
+            guard projectionPoolCapacity > 1,
+                  maximumProjectionLanesPerPhysicalStore <= projectionPoolCapacity
+            else {
+                // Every unique schema owns its own projector lanes and one
+                // snapshot-artifact builder. They share the physical pool
+                // when several logical stores use the same database URL.
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_USER_PROJECTION_CONCURRENCY/IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP"
+                )
+            }
+        } else {
+            // Admission must end before Fluent's pool wait. Keep the two
+            // admitted lanes within the one shared physical pool; the
+            // remaining connections stay available to durable workers.
+            guard foregroundDatabaseWorkLimit + syncDatabaseWorkLimit <=
+                    foregroundPoolCapacity
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                )
+            }
+        }
         try databasePolicy.validate(
-            primaryDatabaseURL: databaseURL,
-            userShardStorage: userShardStorage
+            databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL),
+            connectionsPerEventLoopPerPhysicalStore:
+                databaseWorkloadPoolIsolationEnabled
+                    ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
+                    : databasePolicy.maximumConnectionsPerEventLoop
         )
         directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
         groupRoomShardID = try Self.required("IM_V2_GROUP_ROOM_SHARD_ID", environment: environment)
@@ -593,6 +743,17 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let result = try integer(key, environment: environment)
         guard (0...100).contains(result) else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return Double(result) / 100
+    }
+
+    private static func explicitBoolean(
+        _ key: String,
+        environment: any V2RuntimeEnvironment
+    ) throws -> Bool {
+        switch try required(key, environment: environment).lowercased() {
+        case "true", "1": return true
+        case "false", "0": return false
+        default: throw V2GatewayRuntimeConfigurationError.invalid(key)
+        }
     }
 
     private static func userShardStorage(

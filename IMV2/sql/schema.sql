@@ -2441,6 +2441,8 @@ CREATE INDEX user_message_favorites_room_idx ON im_v2.user_message_favorites USI
 
 CREATE INDEX user_projection_checkpoints_claim_idx ON im_v2.user_projection_checkpoints USING btree (next_attempt_at, updated_at, user_id) WHERE (state = 'ready'::text);
 
+CREATE INDEX user_projection_checkpoints_ready_order_idx ON im_v2.user_projection_checkpoints USING btree (updated_at, user_id) WHERE (state = 'ready'::text);
+
 CREATE INDEX user_projection_effects_cleanup_idx ON im_v2.user_projection_effects USING btree (created_at, user_id, user_sync_sequence, source_event_id);
 
 CREATE INDEX user_projection_effects_direct_capability_idx ON im_v2.user_projection_effects USING btree (user_id, ((payload ->> 'room_id'::text))) WHERE (projection_kind = 'direct_sending_capability'::text);

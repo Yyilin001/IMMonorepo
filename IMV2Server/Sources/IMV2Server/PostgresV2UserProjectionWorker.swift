@@ -31,13 +31,15 @@ public struct PostgresV2UserProjectionWorker: Sendable {
     private let batchSize: Int
     private let retryPolicy: V2DurableRetryPolicy
     private let messageWriteMode: V2MessageProjectionWriteMode
+    private let acceptedMessageBatchEnabled: Bool
 
     public init(
         database: any Database,
         schema: String = "im_v2",
         batchSize: Int = 100,
         retryPolicy: V2DurableRetryPolicy = .standard,
-        messageWriteMode: V2MessageProjectionWriteMode = .dual
+        messageWriteMode: V2MessageProjectionWriteMode = .dual,
+        acceptedMessageBatchEnabled: Bool = true
     ) {
         precondition(batchSize > 0)
         precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
@@ -46,6 +48,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         self.batchSize = batchSize
         self.retryPolicy = retryPolicy
         self.messageWriteMode = messageWriteMode
+        self.acceptedMessageBatchEnabled = acceptedMessageBatchEnabled
     }
 
     public func runOnce(now: Date = Date()) async throws -> V2UserProjectionWorkerReport {
@@ -76,6 +79,16 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                        CASE WHEN log.payload_storage = 'inline' THEN log.payload
                             ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json,
                        CASE WHEN log.payload_storage = 'inline' THEN NULL ELSE shared.message_state_id END AS message_state_id,
+                       state.message_id AS state_message_id,
+                       state.room_id AS state_room_id,
+                       state.message_revision AS state_message_revision,
+                       state.variant_key AS state_variant_key,
+                       state.payload_schema_version AS state_payload_schema_version,
+                       state.origin_event_id AS state_origin_event_id,
+                       state.state_event_id AS state_event_id,
+                       state.is_withdrawn AS state_is_withdrawn,
+                       state.payload->>'event_type' AS state_event_type,
+                       state.payload->>'message_id' AS state_message_entity_key,
                        log.created_at
                 FROM \(unsafeRaw: table("user_sync_log")) AS log
                 LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
@@ -90,7 +103,40 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 """).all(decoding: ProjectionSyncRow.self)
             guard !rows.isEmpty else { throw V2UserProjectionWorkerError.corruptPersistence }
             var expected = checkpoint.projectedSequence + 1
-            for row in rows {
+            var rowIndex = 0
+            while rowIndex < rows.count {
+                if acceptedMessageBatchEnabled,
+                   let firstInput = acceptedMessageBatchInput(rows[rowIndex]) {
+                    var batch = [firstInput]
+                    var nextIndex = rowIndex + 1
+                    while nextIndex < rows.count,
+                          let input = acceptedMessageBatchInput(rows[nextIndex]) {
+                        batch.append(input)
+                        nextIndex += 1
+                    }
+                    guard firstInput.sequence == expected,
+                          batch.enumerated().allSatisfy({ offset, input in
+                              input.sequence == expected + Int64(offset)
+                          })
+                    else { throw V2UserProjectionWorkerError.corruptPersistence }
+                    do {
+                        try await applyAcceptedMessageBatch(
+                            batch, userID: checkpoint.userID, sql: sql
+                        )
+                    } catch V2UserProjectionWorkerError.invalidPayload {
+                        throw ProjectionApplyFailure(
+                            userID: checkpoint.userID,
+                            expectedCheckpoint: checkpoint.projectedSequence,
+                            failedSequence: firstInput.sequence,
+                            sourceEventID: firstInput.sourceEventID,
+                            code: "invalid_payload"
+                        )
+                    }
+                    expected += Int64(batch.count)
+                    rowIndex = nextIndex
+                    continue
+                }
+                let row = rows[rowIndex]
                 try Task.checkCancellation()
                 guard row.sequence == expected else {
                     throw V2UserProjectionWorkerError.corruptPersistence
@@ -130,6 +176,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                     )
                 }
                 expected += 1
+                rowIndex += 1
             }
             try await sql.raw("""
                 UPDATE \(unsafeRaw: table("user_projection_checkpoints"))
@@ -146,6 +193,128 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         } catch let failure as ProjectionApplyFailure {
             return try await recordFailure(failure, now: now)
         }
+    }
+
+    /// Returns a typed fast-path input only for the immutable revision-one
+    /// state shape produced by `PostgresV2MessageProjectionStateRepository`.
+    /// Full payload validation belongs to that single state-creation boundary;
+    /// this recipient-specific path rechecks identity, revision, room, event
+    /// and deterministic state ID without decoding the same body per user.
+    /// Anything else deliberately falls back to the established state machine.
+    private func acceptedMessageBatchInput(
+        _ row: ProjectionSyncRow
+    ) -> AcceptedMessageProjectionBatchInput? {
+        guard row.projectionKind == "message",
+              let stateID = row.messageStateID,
+              let messageID = row.stateMessageID,
+              let roomID = row.stateRoomID,
+              row.stateMessageRevision == 1,
+              row.stateVariantKey == 0,
+              row.statePayloadSchemaVersion == 1,
+              row.stateOriginEventID == row.sourceEventID,
+              row.stateEventID == row.sourceEventID,
+              row.stateIsWithdrawn == false,
+              row.stateEventType == "message.accepted",
+              let entityKey = row.stateMessageEntityKey,
+              UUID(uuidString: entityKey) == messageID,
+              (try? v2MessageProjectionStateID(
+                  messageID: messageID, messageRevision: 1
+              )) == stateID
+        else { return nil }
+        let microseconds = (row.createdAt.timeIntervalSince1970 * 1_000_000).rounded(.down)
+        guard microseconds.isFinite,
+              microseconds >= Double(Int64.min), microseconds <= Double(Int64.max)
+        else { return nil }
+        return .init(
+            sequence: row.sequence,
+            sourceEventID: row.sourceEventID,
+            messageStateID: stateID,
+            messageID: messageID,
+            // Preserve the established projection-key representation from
+            // the already-validated immutable payload. UUID comparison is
+            // case-insensitive, but changing representation only on the fast
+            // path would make batch on/off produce different snapshots.
+            entityKey: entityKey,
+            roomID: roomID,
+            createdAtMicroseconds: Int64(microseconds)
+        )
+    }
+
+    /// Closes and inserts a run of independent accepted-message versions in
+    /// one PostgreSQL round trip. The final count is an integrity fence: one
+    /// invalid state throws and rolls the entire surrounding checkpoint
+    /// transaction back, exactly like the sequential implementation.
+    private func applyAcceptedMessageBatch(
+        _ inputs: [AcceptedMessageProjectionBatchInput],
+        userID: UUID,
+        sql: any SQLDatabase
+    ) async throws {
+        guard !inputs.isEmpty,
+              let inputJSON = String(data: try JSONEncoder().encode(inputs), encoding: .utf8)
+        else { throw V2UserProjectionWorkerError.invalidPayload }
+        let writesInlinePayload = messageWriteMode != .shared
+        let writesStateReference = messageWriteMode != .inline
+        guard let result = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT value.sequence, value.source_event_id, value.message_state_id,
+                       value.message_id, value.entity_key, value.room_id,
+                       value.created_at_microseconds
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
+                    sequence bigint, source_event_id uuid, message_state_id uuid,
+                    message_id uuid, entity_key text, room_id uuid,
+                    created_at_microseconds bigint
+                )
+            ), validated AS MATERIALIZED (
+                SELECT input.sequence, input.source_event_id, input.message_state_id,
+                       input.message_id, input.entity_key, input.created_at_microseconds,
+                       state.room_id, state.origin_event_id, state.payload
+                FROM input
+                JOIN \(unsafeRaw: table("message_projection_states")) AS state
+                  ON state.state_id = input.message_state_id
+                 AND state.state_event_id = input.source_event_id
+                 AND state.message_id = input.message_id
+                 AND lower(input.entity_key) = input.message_id::text
+                 AND state.room_id = input.room_id
+                 AND state.message_revision = 1
+                 AND state.variant_key = 0
+                 AND state.payload_schema_version = 1
+                 AND state.origin_event_id = state.state_event_id
+                 AND state.is_withdrawn = FALSE
+                 AND state.payload->>'event_type' = 'message.accepted'
+                 AND lower(state.payload->>'message_id') = state.message_id::text
+                 AND lower(state.payload->>'room_id') = state.room_id::text
+                 AND state.payload->>'message_revision' = '1'
+            ), closed AS (
+                UPDATE \(unsafeRaw: table("user_projection_versions")) AS version
+                SET valid_to_sequence = validated.sequence
+                FROM validated
+                WHERE version.user_id = \(bind: userID)
+                  AND version.projection_kind = 'message'
+                  AND version.entity_key = validated.entity_key
+                  AND version.valid_to_sequence IS NULL
+                RETURNING 1
+            ), inserted AS (
+                INSERT INTO \(unsafeRaw: table("user_projection_versions"))
+                    (user_id, projection_kind, entity_key, scope_room_id,
+                     valid_from_sequence, valid_to_sequence, source_event_id,
+                     payload, message_state_id, created_at)
+                SELECT \(bind: userID), 'message', validated.entity_key,
+                       validated.room_id, validated.sequence, NULL,
+                       validated.origin_event_id,
+                       CASE WHEN \(bind: writesInlinePayload) THEN validated.payload ELSE NULL END,
+                       CASE WHEN \(bind: writesStateReference)
+                            THEN validated.message_state_id ELSE NULL END,
+                       to_timestamp(validated.created_at_microseconds / 1000000)
+                         + (validated.created_at_microseconds % 1000000)
+                           * INTERVAL '1 microsecond'
+                FROM validated
+                ORDER BY validated.sequence
+                RETURNING 1
+            )
+            SELECT COUNT(*) AS inserted_count FROM inserted
+            """).first(decoding: ProjectionBatchCountRow.self),
+              result.insertedCount == inputs.count
+        else { throw V2UserProjectionWorkerError.invalidPayload }
     }
 
     private func recordFailure(
@@ -696,6 +865,16 @@ private struct ProjectionSyncRow: Decodable {
     let projectionKind: String
     let payloadJSON: String?
     let messageStateID: UUID?
+    let stateMessageID: UUID?
+    let stateRoomID: UUID?
+    let stateMessageRevision: Int64?
+    let stateVariantKey: Int64?
+    let statePayloadSchemaVersion: Int64?
+    let stateOriginEventID: UUID?
+    let stateEventID: UUID?
+    let stateIsWithdrawn: Bool?
+    let stateEventType: String?
+    let stateMessageEntityKey: String?
     let createdAt: Date
 
     enum CodingKeys: String, CodingKey {
@@ -704,8 +883,41 @@ private struct ProjectionSyncRow: Decodable {
         case projectionKind = "projection_kind"
         case payloadJSON = "payload_json"
         case messageStateID = "message_state_id"
+        case stateMessageID = "state_message_id"
+        case stateRoomID = "state_room_id"
+        case stateMessageRevision = "state_message_revision"
+        case stateVariantKey = "state_variant_key"
+        case statePayloadSchemaVersion = "state_payload_schema_version"
+        case stateOriginEventID = "state_origin_event_id"
+        case stateEventID = "state_event_id"
+        case stateIsWithdrawn = "state_is_withdrawn"
+        case stateEventType = "state_event_type"
+        case stateMessageEntityKey = "state_message_entity_key"
         case createdAt = "created_at"
     }
+}
+private struct AcceptedMessageProjectionBatchInput: Encodable, Sendable {
+    let sequence: Int64
+    let sourceEventID: UUID
+    let messageStateID: UUID
+    let messageID: UUID
+    let entityKey: String
+    let roomID: UUID
+    let createdAtMicroseconds: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case sequence
+        case sourceEventID = "source_event_id"
+        case messageStateID = "message_state_id"
+        case messageID = "message_id"
+        case entityKey = "entity_key"
+        case roomID = "room_id"
+        case createdAtMicroseconds = "created_at_microseconds"
+    }
+}
+private struct ProjectionBatchCountRow: Decodable {
+    let insertedCount: Int
+    enum CodingKeys: String, CodingKey { case insertedCount = "inserted_count" }
 }
 private struct ProjectionPayloadRow: Decodable {
     let payloadJSON: String; let sourceEventID: UUID

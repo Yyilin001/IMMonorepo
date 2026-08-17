@@ -13,6 +13,10 @@ and the [V2 document entry](../IMV2/docs/README.md).
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`. Before
    deployment, run `bash scripts/test_v2_postgres_schema_bootstrap.sh` against
    a disposable PostgreSQL instance to verify clean bootstrap and schema drift.
+   Existing current-2 databases must also apply the additive online index
+   migration `IMV2/sql/changes/2026-08-17-user-projection-ready-index-expand.sql`
+   before starting this binary; it uses `CREATE INDEX CONCURRENTLY` and does
+   not require a schema downgrade on application rollback.
 2. Provision PEM certificate-chain and private-key files through the deployment
    secret store.
 3. Provision a random 32-byte-or-longer access-token HMAC key as base64. The
@@ -162,6 +166,13 @@ evidence remains local-stack coverage, not a production deployment approval.
   application-owned heartbeats; background clients rely on reconnect and sync.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the
   bounded durable path from room outbox to fan-out plan to user sync log.
+- Gateway PostgreSQL work is split into explicit foreground, Sync, Delivery,
+  Projection and Maintenance pools whose per-event-loop sum remains inside the
+  legacy aggregate ceiling. A separate short admission queue returns retryable
+  `SERVER_BUSY` before Fluent's longer pool timeout. Projection claim
+  concurrency, accepted-message batch projection, Sync-hint coalescing,
+  metrics, staged rollout and rollback are documented in
+  [the single-node performance runbook](../IMV2/docs/10-operations/single-node-performance-rollout-runbook.md).
 - Message Snapshot payloads use an expand/contract rollout controlled by
   `IM_V2_MESSAGE_PROJECTION_WRITE_MODE` (`inline`, `dual`, `shared`) and
   `IM_V2_MESSAGE_PROJECTION_READ_MODE` (`inline`, `prefer_shared`, `shared`).

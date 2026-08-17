@@ -72,6 +72,52 @@ struct V2VaporMetricsRoutesTests {
         }
     }
 
+    @Test("metrics route includes bounded runtime-pressure gauges and counters")
+    func rendersRuntimePressureMetrics() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let telemetry = V2PrometheusTelemetrySink()
+        let source = RuntimePressureMetricsProbe(snapshot: .init(
+            databaseWork: .init(
+                foreground: .init(
+                    inFlight: 4, queued: 3, admittedRequests: 20,
+                    queueFullRejections: 2, timeoutRejections: 3,
+                    cancelledRequests: 1
+                ),
+                sync: .init(
+                    inFlight: 2, queued: 1, admittedRequests: 10,
+                    queueFullRejections: 0, timeoutRejections: 1,
+                    cancelledRequests: 0
+                )
+            ),
+            databasePools: .init(pools: [
+                .init(poolClass: .shared, eventLoopHandles: 4, connectionCeiling: 64)
+            ]),
+            syncWake: .init(
+                pendingUsers: 6, inFlightUsers: 2,
+                coalescedNotifications: 7, deliveredNotifications: 9,
+                droppedNotifications: 8
+            )
+        ))
+        V2VaporMetricsRoutes.register(
+            on: app, telemetry: telemetry, runtimePressureMetrics: source
+        )
+
+        try await app.testing().test(.GET, "metrics") { response async throws in
+            let body = response.body.string
+            #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground\"} 4"))
+            #expect(body.contains("im_v2_database_work_queued{class=\"sync\"} 1"))
+            #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground\",reason=\"timeout\"} 3"))
+            #expect(body.contains("im_v2_database_pool_event_loop_handles{pool=\"shared\"} 4"))
+            #expect(body.contains("im_v2_sync_wake_delivered_total 9"))
+            #expect(body.contains("im_v2_database_pool_connection_ceiling{pool=\"shared\"} 64"))
+            #expect(body.contains("im_v2_sync_wake_pending_users 6"))
+            #expect(body.contains("im_v2_sync_wake_in_flight_users 2"))
+            #expect(body.contains("im_v2_sync_wake_coalesced_total 7"))
+            #expect(body.contains("im_v2_sync_wake_dropped_total 8"))
+        }
+    }
+
     @Test("metrics route includes durable-work aggregates without accepting a shard label")
     func rendersDurableWorkGauges() async throws {
         let app = try await Application.make(.testing)
@@ -195,4 +241,12 @@ private struct DurableWorkMetricsProbe: V2DurableWorkMetricsSource {
     let snapshot: V2DurableWorkMetricsSnapshot
 
     func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot { snapshot }
+}
+
+private struct RuntimePressureMetricsProbe: V2RuntimePressureMetricsSource {
+    let snapshot: V2RuntimePressureMetricsSnapshot
+
+    func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
+        snapshot
+    }
 }

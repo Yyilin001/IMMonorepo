@@ -150,12 +150,20 @@ public struct PostgresV2SyncStore: V2SyncStore {
             let nextToken = try V2SyncToken(makeUUID().uuidString)
             let receipt = try V2SyncReceipt(makeUUID().uuidString)
             try await sql.raw("""
-                INSERT INTO \(unsafeRaw: table("sync_tokens")) (token, user_id, device_id, reset_generation, watermark, expires_at, created_at)
-                VALUES (\(bind: nextToken.rawValue), \(bind: userUUID), \(bind: deviceUUID), \(bind: cursor.resetGeneration), \(bind: lastSequence), \(bind: expiresAt), \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: table("sync_receipts")) (receipt, user_id, device_id, reset_generation, first_sequence, last_sequence, expires_at, created_at)
-                VALUES (\(bind: receipt.rawValue), \(bind: userUUID), \(bind: deviceUUID), \(bind: cursor.resetGeneration), \(bind: firstSequence), \(bind: lastSequence), \(bind: expiresAt), \(bind: now))
+                WITH issued_token AS (
+                    INSERT INTO \(unsafeRaw: table("sync_tokens"))
+                        (token, user_id, device_id, reset_generation, watermark, expires_at, created_at)
+                    VALUES (\(bind: nextToken.rawValue), \(bind: userUUID), \(bind: deviceUUID),
+                            \(bind: cursor.resetGeneration), \(bind: lastSequence), \(bind: expiresAt), \(bind: now))
+                    RETURNING 1
+                )
+                INSERT INTO \(unsafeRaw: table("sync_receipts"))
+                    (receipt, user_id, device_id, reset_generation, first_sequence,
+                     last_sequence, expires_at, created_at)
+                SELECT \(bind: receipt.rawValue), \(bind: userUUID), \(bind: deviceUUID),
+                       \(bind: cursor.resetGeneration), \(bind: firstSequence),
+                       \(bind: lastSequence), \(bind: expiresAt), \(bind: now)
+                FROM issued_token
                 """).run()
             return .ready(generation: generation, records: records, nextSyncToken: nextToken, receipt: receipt, hasMore: hasMore)
         }
@@ -171,15 +179,29 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             try await prepareActiveCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
-            guard let cursor = try await fetchCursor(
-                sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true
-            ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            guard let issued = try await sql.raw("""
-                SELECT first_sequence, last_sequence FROM \(unsafeRaw: table("sync_receipts"))
-                WHERE receipt = \(bind: receipt.rawValue) AND user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
-                  AND reset_generation = \(bind: generation) AND expires_at > \(bind: now)
-                """).first(decoding: SyncReceiptRow.self),
-                sequence >= issued.firstSequence, sequence <= issued.lastSequence,
+            guard let cursorAndReceipt = try await sql.raw("""
+                SELECT cursor.state, cursor.reset_generation, cursor.acknowledged_sequence,
+                       cursor.pending_snapshot_id, cursor.pending_base_sequence,
+                       cursor.completed_snapshot_id, cursor.completed_snapshot_ack_receipt,
+                       cursor.completed_snapshot_generation,
+                       cursor.completed_snapshot_base_sequence,
+                       receipt.first_sequence, receipt.last_sequence
+                FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                LEFT JOIN \(unsafeRaw: table("sync_receipts")) AS receipt
+                  ON receipt.receipt = \(bind: receipt.rawValue)
+                 AND receipt.user_id = cursor.user_id
+                 AND receipt.device_id = cursor.device_id
+                 AND receipt.reset_generation = \(bind: generation)
+                 AND receipt.expires_at > \(bind: now)
+                WHERE cursor.user_id = \(bind: userUUID)
+                  AND cursor.device_id = \(bind: deviceUUID)
+                FOR UPDATE OF cursor
+                """).first(decoding: DeviceCursorAndReceiptRow.self)
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let cursor = cursorAndReceipt.cursor
+            guard let firstSequence = cursorAndReceipt.firstSequence,
+                let lastSequence = cursorAndReceipt.lastSequence,
+                sequence >= firstSequence, sequence <= lastSequence,
                 sequence >= cursor.acknowledgedSequence
             else { throw V2SyncStoreError.invalidOrExpiredSyncReceipt }
             let nextGeneration = generation.addingReportingOverflow(1)
@@ -353,12 +375,30 @@ public struct PostgresV2SyncStore: V2SyncStore {
         userID: UUID,
         deviceID: UUID
     ) async throws {
-        try await lockActiveDevice(sql: sql, userID: userID, deviceID: deviceID)
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: table("device_sync_cursors")) (user_id, device_id, state, reset_generation)
-            VALUES (\(bind: userID), \(bind: deviceID), 'ready', 1)
-            ON CONFLICT (user_id, device_id) DO NOTHING
-            """).run()
+        guard let active = try await sql.raw("""
+            WITH locked AS MATERIALIZED (
+                SELECT pg_advisory_xact_lock(hashtextextended(
+                    CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
+                ))
+            ), active AS MATERIALIZED (
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
+                    WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
+                ) AS is_active
+                FROM locked
+            ), inserted AS (
+                INSERT INTO \(unsafeRaw: table("device_sync_cursors"))
+                    (user_id, device_id, state, reset_generation)
+                SELECT \(bind: userID), \(bind: deviceID), 'ready', 1
+                FROM active WHERE is_active
+                ON CONFLICT (user_id, device_id) DO NOTHING
+                RETURNING 1
+            )
+            SELECT is_active FROM active
+            """).first(decoding: ActiveDeviceRow.self)
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard active.isActive else { throw V2SyncStoreError.deviceRevoked }
     }
 
     /// Serializes cursor creation/mutation with the asynchronous revocation
@@ -369,18 +409,21 @@ public struct PostgresV2SyncStore: V2SyncStore {
         userID: UUID,
         deviceID: UUID
     ) async throws {
-        try await sql.raw("""
-            SELECT pg_advisory_xact_lock(hashtextextended(
-                CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
-            ))
-            """).run()
-        guard try await sql.raw("""
-            SELECT 1
-            FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
-            WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
-            """).first() == nil else {
-            throw V2SyncStoreError.deviceRevoked
-        }
+        guard let active = try await sql.raw("""
+            WITH locked AS MATERIALIZED (
+                SELECT pg_advisory_xact_lock(hashtextextended(
+                    CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
+                ))
+            )
+            SELECT NOT EXISTS (
+                SELECT 1
+                FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
+                WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
+            ) AS is_active
+            FROM locked
+            """).first(decoding: ActiveDeviceRow.self)
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard active.isActive else { throw V2SyncStoreError.deviceRevoked }
     }
 
     private func fetchCursor(sql: any SQLDatabase, userID: UUID, deviceID: UUID, lock: Bool) async throws -> DeviceCursorRow? {
@@ -451,6 +494,51 @@ private struct DeviceCursorRow: Decodable {
         case completedSnapshotID = "completed_snapshot_id", completedSnapshotAckReceipt = "completed_snapshot_ack_receipt"
         case completedSnapshotGeneration = "completed_snapshot_generation", completedSnapshotBaseSequence = "completed_snapshot_base_sequence"
     }
+}
+private struct DeviceCursorAndReceiptRow: Decodable {
+    let state: String
+    let resetGeneration: Int64
+    let acknowledgedSequence: Int64
+    let pendingSnapshotID: UUID?
+    let pendingBaseSequence: Int64?
+    let completedSnapshotID: UUID?
+    let completedSnapshotAckReceipt: String?
+    let completedSnapshotGeneration: Int64?
+    let completedSnapshotBaseSequence: Int64?
+    let firstSequence: Int64?
+    let lastSequence: Int64?
+
+    var cursor: DeviceCursorRow {
+        .init(
+            state: state,
+            resetGeneration: resetGeneration,
+            acknowledgedSequence: acknowledgedSequence,
+            pendingSnapshotID: pendingSnapshotID,
+            pendingBaseSequence: pendingBaseSequence,
+            completedSnapshotID: completedSnapshotID,
+            completedSnapshotAckReceipt: completedSnapshotAckReceipt,
+            completedSnapshotGeneration: completedSnapshotGeneration,
+            completedSnapshotBaseSequence: completedSnapshotBaseSequence
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case resetGeneration = "reset_generation"
+        case acknowledgedSequence = "acknowledged_sequence"
+        case pendingSnapshotID = "pending_snapshot_id"
+        case pendingBaseSequence = "pending_base_sequence"
+        case completedSnapshotID = "completed_snapshot_id"
+        case completedSnapshotAckReceipt = "completed_snapshot_ack_receipt"
+        case completedSnapshotGeneration = "completed_snapshot_generation"
+        case completedSnapshotBaseSequence = "completed_snapshot_base_sequence"
+        case firstSequence = "first_sequence"
+        case lastSequence = "last_sequence"
+    }
+}
+private struct ActiveDeviceRow: Decodable {
+    let isActive: Bool
+    enum CodingKeys: String, CodingKey { case isActive = "is_active" }
 }
 private struct SyncLogRow: Decodable {
     let sequence: Int64; let sourceEventID: UUID; let projectionKind: String; let payloadJSON: String

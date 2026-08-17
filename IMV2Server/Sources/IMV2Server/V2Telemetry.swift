@@ -197,6 +197,7 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Equatable, Sendab
     case idempotencyConflict = "IDEMPOTENCY_CONFLICT"
     case revisionConflict = "REVISION_CONFLICT"
     case rateLimited = "RATE_LIMITED"
+    case serverBusy = "SERVER_BUSY"
     case unavailable = "UNAVAILABLE"
     case syncTokenInvalid = "SYNC_TOKEN_INVALID"
     case syncReceiptInvalid = "SYNC_RECEIPT_INVALID"

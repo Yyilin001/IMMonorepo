@@ -181,12 +181,37 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("gateway workload pools are explicit and cannot exceed the legacy ceiling")
+    func validatesDatabaseWorkloadPoolBudget() {
+        var missing = runtimeValues
+        missing.removeValue(forKey: "IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing(
+            "IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(missing)
+            )
+        }
+
+        var oversized = runtimeValues
+        oversized["IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP"] = "5"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DATABASE_WORKLOAD_POOL_BUDGET"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversized)
+            )
+        }
+    }
+
     @Test("PostgreSQL policy bounds every wait and the aggregate physical pool budget")
     func validatesPostgresRuntimePolicy() throws {
         let configuration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(runtimeValues)
         )
         #expect(configuration.databasePolicy.eventLoopThreads == 4)
+        #expect(configuration.databaseWorkloadPoolBudget.totalConnectionsPerEventLoop == 8)
+        #expect(configuration.databaseWorkloadPoolIsolationEnabled)
         #expect(configuration.databasePolicy.poolTimeoutMilliseconds == 3_000)
         #expect(configuration.databasePolicy.startupParameters.count == 1)
         #expect(configuration.databasePolicy.startupParameters.first?.0 == "options")
@@ -212,6 +237,32 @@ struct V2GatewayRuntimeConfigurationTests {
         )) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(exhausted)
+            )
+        }
+    }
+
+    @Test("isolated projection capacity accounts for every schema on one physical database")
+    func validatesProjectionLanesPerPhysicalDatabase() {
+        var values = runtimeValues
+        values["IM_V2_USER_SHARD_STORES_JSON"] = """
+        [{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"},
+         {"bucket":"users-next","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2_next"}]
+        """
+        // Four projection connections cannot safely reserve two projector
+        // lanes plus one snapshot builder for each of the two schemas.
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_USER_PROJECTION_CONCURRENCY/IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+
+        values["IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP"] = "2"
+        values["IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP"] = "9"
+        #expect(throws: Never.self) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
             )
         }
     }
@@ -250,6 +301,20 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.capacityProfile.limits.maxEligibleMembers == 100_000)
         #expect(configuration.workerBatchSize == 256)
         #expect(configuration.workerPollIntervalMilliseconds == 100)
+        #expect(configuration.userProjectionConcurrency == 2)
+        #expect(configuration.foregroundDatabaseWorkLimit == 16)
+        #expect(configuration.syncDatabaseWorkLimit == 4)
+        #expect(configuration.foregroundDatabaseWorkMaximumQueued == 384)
+        #expect(configuration.syncDatabaseWorkMaximumQueued == 128)
+        #expect(configuration.databaseWorkAdmissionTimeoutMilliseconds == 200)
+        #expect(configuration.databaseWorkAdmissionEnabled)
+        #expect(configuration.syncWakeCoalescingMilliseconds == 40)
+        #expect(configuration.syncWakeMaximumPendingUsers == 50_000)
+        #expect(configuration.syncWakeDeliveryConcurrency == 64)
+        #expect(configuration.syncWakeCoalescingEnabled)
+        #expect(configuration.acceptedMessageProjectionBatchEnabled)
+        #expect(configuration.commandSuccessLogSamplePermille == 10)
+        #expect(configuration.commandSlowLogThresholdMilliseconds == 250)
         #expect(configuration.fanoutDeliveryCommitBatchSize == 128)
         #expect(configuration.crossStoreFanoutDeliveryCommitBatchSize == 256)
         #expect(configuration.crossStoreFanoutDeliveryCommitConcurrency == 2)
@@ -483,6 +548,12 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
             "IM_V2_DATABASE_EVENT_LOOP_THREADS": "4",
             "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "8",
+            "IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP": "4",
+            "IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP": "1",
+            "IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP": "1",
+            "IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP": "1",
+            "IM_V2_DATABASE_MAINTENANCE_CONNECTIONS_PER_EVENT_LOOP": "1",
+            "IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED": "true",
             "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS": "512",
             "IM_V2_MAX_USER_SHARD_STORES": "16",
             "IM_V2_DATABASE_CONNECT_TIMEOUT_MS": "5000",
@@ -514,6 +585,20 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_IDLE_TIMEOUT_MS": "60000",
             "IM_V2_WORKER_BATCH_SIZE": "256",
             "IM_V2_WORKER_POLL_INTERVAL_MS": "100",
+            "IM_V2_USER_PROJECTION_CONCURRENCY": "2",
+            "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT": "16",
+            "IM_V2_SYNC_DATABASE_WORK_LIMIT": "4",
+            "IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED": "384",
+            "IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED": "128",
+            "IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS": "200",
+            "IM_V2_DATABASE_WORK_ADMISSION_ENABLED": "true",
+            "IM_V2_SYNC_WAKE_COALESCING_MS": "40",
+            "IM_V2_SYNC_WAKE_MAX_PENDING_USERS": "50000",
+            "IM_V2_SYNC_WAKE_DELIVERY_CONCURRENCY": "64",
+            "IM_V2_SYNC_WAKE_COALESCING_ENABLED": "true",
+            "IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED": "true",
+            "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE": "10",
+            "IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS": "250",
             "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "128",
             "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "256",
             "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY": "2",

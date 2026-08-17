@@ -36,11 +36,22 @@ enum IMV2OperatorServerApp {
                 ),
                 as: .psql
             )
-            let database = app.db(.psql)
-            try await V2PostgresSessionReadiness.verify(
-                database: database,
-                policy: configuration.databasePolicy
+            let databaseEventLoops = Array(applicationEventLoops.makeIterator())
+            guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let controlPool = try V2ApplicationEventLoopDatabasePool(
+                application: app,
+                identifier: .psql,
+                eventLoops: databaseEventLoops
             )
+            for eventLoopDatabase in controlPool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(
+                    database: eventLoopDatabase,
+                    policy: configuration.databasePolicy
+                )
+            }
+            let database: any Database = controlPool.database
             try await V2SchemaReadiness.verify(database: database)
             var shardDatabasesByURL: [String: any Database] = [
                 configuration.databaseURL: database
@@ -59,13 +70,20 @@ enum IMV2OperatorServerApp {
                         ),
                         as: identifier
                     )
-                    shardDatabase = app.db(identifier)
+                    let shardPool = try V2ApplicationEventLoopDatabasePool(
+                        application: app,
+                        identifier: identifier,
+                        eventLoops: databaseEventLoops
+                    )
+                    for eventLoopDatabase in shardPool.eventLoopDatabases {
+                        try await V2PostgresSessionReadiness.verify(
+                            database: eventLoopDatabase,
+                            policy: configuration.databasePolicy
+                        )
+                    }
+                    shardDatabase = shardPool.database
                     shardDatabasesByURL[storage.databaseURL] = shardDatabase
                 }
-                try await V2PostgresSessionReadiness.verify(
-                    database: shardDatabase,
-                    policy: configuration.databasePolicy
-                )
                 try await V2SchemaReadiness.verify(database: shardDatabase, schema: storage.schema)
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }

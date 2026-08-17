@@ -1,0 +1,184 @@
+import Foundation
+@testable import IMV2Server
+import Testing
+
+@Suite("V2 database work admission")
+struct V2DatabaseWorkAdmissionTests {
+    @Test("foreground and Sync own independent queue reservations")
+    func isolatesWorkClassQueues() async throws {
+        let controller = makeController(timeout: .seconds(1))
+        #expect(await controller.acquire(.foreground) == .admitted)
+        #expect(await controller.acquire(.sync) == .admitted)
+
+        let queuedForeground = Task { await controller.acquire(.foreground) }
+        let queuedSync = Task { await controller.acquire(.sync) }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await controller.snapshot().foregroundQueued == 1)
+        #expect(await controller.snapshot().syncQueued == 1)
+
+        // Filling one lane does not consume the other lane's queue budget.
+        #expect(await controller.acquire(.foreground) == .rejected(.queueFull))
+        #expect(await controller.acquire(.sync) == .rejected(.queueFull))
+        await controller.release(.foreground)
+        await controller.release(.sync)
+        #expect(await queuedForeground.value == .admitted)
+        #expect(await queuedSync.value == .admitted)
+        await controller.release(.foreground)
+        await controller.release(.sync)
+
+        let snapshot = await controller.snapshot()
+        #expect(snapshot.foreground.queueFullRejections == 1)
+        #expect(snapshot.sync.queueFullRejections == 1)
+        #expect(snapshot.foreground.admittedRequests == 2)
+        #expect(snapshot.sync.admittedRequests == 2)
+        #expect(snapshot.queued == 0)
+    }
+
+    @Test("a queued request acquires after the older permit releases")
+    func releasesToQueuedRequest() async throws {
+        let controller = makeController(timeout: .milliseconds(200))
+        #expect(await controller.acquire(.foreground) == .admitted)
+        let queued = Task { await controller.acquire(.foreground) }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await controller.snapshot().queued == 1)
+        await controller.release(.foreground)
+        #expect(await queued.value == .admitted)
+        await controller.release(.foreground)
+    }
+
+    @Test("cancelling a queued request removes it without recording overload")
+    func cancellationRemovesWaiter() async throws {
+        let controller = makeController(timeout: .seconds(1))
+        #expect(await controller.acquire(.foreground) == .admitted)
+        let queued = Task { await controller.acquire(.foreground) }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await controller.snapshot().foregroundQueued == 1)
+        queued.cancel()
+        #expect(await queued.value == .cancelled)
+        let snapshot = await controller.snapshot()
+        #expect(snapshot.foregroundInFlight == 1)
+        #expect(snapshot.foregroundQueued == 0)
+        #expect(snapshot.foreground.cancelledRequests == 1)
+        #expect(snapshot.rejectedRequests == 0)
+        await controller.release(.foreground)
+    }
+
+    @Test("timeout and queue-full rejections remain distinct counters")
+    func distinguishesRejectionReasons() async {
+        let controller = makeController(timeout: .milliseconds(10))
+        #expect(await controller.acquire(.sync) == .admitted)
+        let timedOut = Task { await controller.acquire(.sync) }
+        while await controller.snapshot().syncQueued == 0 { await Task.yield() }
+        #expect(await controller.acquire(.sync) == .rejected(.queueFull))
+        #expect(await timedOut.value == .rejected(.timeout))
+        let snapshot = await controller.snapshot().sync
+        #expect(snapshot.queueFullRejections == 1)
+        #expect(snapshot.timeoutRejections == 1)
+        #expect(snapshot.rejectedRequests == 2)
+        await controller.release(.sync)
+    }
+
+    @Test("one lane grants queued work in FIFO order")
+    func grantsInFIFOOrder() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 16,
+            maximumSyncQueued: 1,
+            timeout: .seconds(2)
+        ))
+        #expect(await controller.acquire(.foreground) == .admitted)
+        let order = AdmissionOrderRecorder()
+        var tasks: [Task<Void, Never>] = []
+        for index in 0..<16 {
+            tasks.append(Task {
+                let result = await controller.acquire(.foreground)
+                if result == .admitted {
+                    await order.append(index)
+                    await controller.release(.foreground)
+                }
+            })
+            while await controller.snapshot().foregroundQueued != index + 1 {
+                await Task.yield()
+            }
+        }
+
+        await controller.release(.foreground)
+        for task in tasks { await task.value }
+        #expect(await order.values() == Array(0..<16))
+        let snapshot = await controller.snapshot().foreground
+        #expect(snapshot.inFlight == 0)
+        #expect(snapshot.queued == 0)
+        #expect(snapshot.admittedRequests == 17)
+    }
+
+    @Test("cancellation racing permit release neither leaks nor overspends permits")
+    func cancellationReleaseRaceIsBalanced() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 4,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 512,
+            maximumSyncQueued: 1,
+            timeout: .seconds(3)
+        ))
+        for _ in 0..<4 {
+            #expect(await controller.acquire(.foreground) == .admitted)
+        }
+        let tasks = (0..<256).map { _ in
+            Task {
+                let result = await controller.acquire(.foreground)
+                if result == .admitted {
+                    await controller.release(.foreground)
+                }
+                return result
+            }
+        }
+        while await controller.snapshot().foregroundQueued != tasks.count {
+            await Task.yield()
+        }
+
+        for index in stride(from: 0, to: tasks.count, by: 2) {
+            tasks[index].cancel()
+        }
+        for _ in 0..<4 { await controller.release(.foreground) }
+        var results: [V2DatabaseWorkAdmissionResult] = []
+        results.reserveCapacity(tasks.count)
+        for task in tasks {
+            results.append(await task.value)
+        }
+
+        let admitted = results.filter { $0 == .admitted }.count
+        let cancelled = results.filter { $0 == .cancelled }.count
+        #expect(admitted + cancelled == tasks.count)
+        let snapshot = await controller.snapshot().foreground
+        #expect(snapshot.inFlight == 0)
+        #expect(snapshot.queued == 0)
+        #expect(snapshot.admittedRequests == UInt64(4 + admitted))
+        #expect(snapshot.cancelledRequests == UInt64(cancelled))
+        #expect(snapshot.rejectedRequests == 0)
+    }
+
+    private func makeController(
+        timeout: Duration
+    ) -> V2DatabaseWorkAdmissionController {
+        V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: timeout
+        ))
+    }
+}
+
+private actor AdmissionOrderRecorder {
+    private var recorded: [Int] = []
+
+    func append(_ value: Int) {
+        recorded.append(value)
+    }
+
+    func values() -> [Int] {
+        recorded
+    }
+}

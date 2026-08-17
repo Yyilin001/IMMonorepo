@@ -6,6 +6,122 @@ import Testing
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
+    @Test("database admission rejects overload with a stable retryable protocol error")
+    func databaseAdmissionReturnsServerBusy() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .milliseconds(5)
+        ))
+        #expect(await admission.acquire(.foreground) == .admitted)
+        let telemetry = V2InMemoryTelemetrySink()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
+                seed: [(fixture.roomState, fixture.shardState)],
+                authorizedActors: [fixture.userID]
+            )),
+            sync: fixture.syncService(),
+            telemetry: telemetry,
+            databaseWorkAdmission: admission
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "SERVER_BUSY")
+        #expect(response.error.retryable)
+        guard case .gatewayCommand(_, .sendMessage, .rejected, .serverBusy, _) =
+            await telemetry.events().first
+        else {
+            Issue.record("expected a privacy-safe server-busy metric")
+            await admission.release(.foreground)
+            return
+        }
+        await admission.release(.foreground)
+    }
+
+    @Test("cancelling admission wait propagates cancellation instead of server busy")
+    func databaseAdmissionCancellationPropagates() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .seconds(1)
+        ))
+        #expect(await admission.acquire(.foreground) == .admitted)
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
+                seed: [(fixture.roomState, fixture.shardState)],
+                authorizedActors: [fixture.userID]
+            )),
+            sync: fixture.syncService(),
+            databaseWorkAdmission: admission
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let waiting = Task {
+            try await handler.handle(envelope: request, identity: fixture.identity)
+        }
+        while await admission.snapshot().foregroundQueued == 0 {
+            await Task.yield()
+        }
+        waiting.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await waiting.value
+        }
+        #expect(await admission.snapshot().foreground.cancelledRequests == 1)
+        await admission.release(.foreground)
+    }
+
+    @Test("process-local unsubscribe remains available during database overload")
+    func databaseAdmissionBypassesUnsubscribe() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .milliseconds(5)
+        ))
+        #expect(await admission.acquire(.foreground) == .admitted)
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
+                seed: [(fixture.roomState, fixture.shardState)],
+                authorizedActors: [fixture.userID]
+            )),
+            sync: fixture.syncService(),
+            databaseWorkAdmission: admission
+        )
+        var request = IMV2Envelope()
+        request.groupEventUnsubscribe = .init()
+
+        let response = try await handler.handle(
+            envelope: request,
+            identity: fixture.identity
+        )
+        guard case .some(.acknowledged) = response.body else {
+            Issue.record("expected process-local unsubscribe success")
+            await admission.release(.foreground)
+            return
+        }
+        #expect(await admission.snapshot().foregroundQueued == 0)
+        await admission.release(.foreground)
+    }
+
     @Test("a database pool timeout returns unavailable without escaping the command boundary")
     func databasePoolTimeoutKeepsCommandBoundaryAlive() async throws {
         let fixture = try GatewayDomainFixture()

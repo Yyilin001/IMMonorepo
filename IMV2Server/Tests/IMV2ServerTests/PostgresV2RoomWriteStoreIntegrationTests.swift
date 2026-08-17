@@ -46,6 +46,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AS exists
                 """).first(decoding: ExistsRow.self))
             #expect(nonFanoutSyncIdentityIndexExists.exists)
+            let projectionReadyOrderIndexExists = try #require(try await sql.raw("""
+                SELECT to_regclass(
+                    'im_v2.user_projection_checkpoints_ready_order_idx'
+                ) IS NOT NULL AS exists
+                """).first(decoding: ExistsRow.self))
+            #expect(projectionReadyOrderIndexExists.exists)
             let fullSyncIdentityConstraintIsAbsent = try #require(try await sql.raw("""
                 SELECT NOT EXISTS (
                     SELECT 1 FROM pg_constraint
@@ -381,6 +387,326 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      '00000000-0000-0000-0000-00000000001c', \(bind: Date(timeIntervalSince1970: 1_750_000_000)))
                 """).run()
             #expect(try await v2ResolvedGroupPermissions(roomID: roomUUID, role: .member, sql: sql) == [])
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("accepted-message projection batches consecutive shared-state references")
+    func acceptedMessageProjectionBatchPreservesNarrowReferences() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000c71")!
+            let sender = UUID(uuidString: "00000000-0000-0000-0000-000000000c72")!
+            let room = UUID(uuidString: "00000000-0000-0000-0000-000000000c73")!
+            let messages = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000C74")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000C75")!,
+            ]
+            let events = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000c76")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000c77")!,
+            ]
+            let states = try messages.map {
+                try v2MessageProjectionStateID(messageID: $0, messageRevision: 1)
+            }
+            let createdAt = Date(timeIntervalSince1970: 1_750_000_000)
+            func payload(message: UUID, sequence: Int, text: String) throws -> String {
+                let object: [String: Any] = [
+                    "event_type": "message.accepted",
+                    "message_id": message.uuidString,
+                    "room_id": room.uuidString,
+                    "room_sequence": sequence,
+                    "timeline_sequence": sequence,
+                    "sender_user_id": sender.uuidString,
+                    "text": text,
+                    "media_ids": [],
+                    "media_presentations": [],
+                    "mention_user_ids": [],
+                    "mentions_everyone": false,
+                    "entities": [],
+                    "reply_to_message_id": NSNull(),
+                    "forwarded_from_message_id": NSNull(),
+                    "forwarded_from_user_id": NSNull(),
+                    "message_revision": 1,
+                    "server_created_at_ms": 1_750_000_000_000 + sequence,
+                ]
+                return String(
+                    decoding: try JSONSerialization.data(withJSONObject: object),
+                    as: UTF8.self
+                )
+            }
+            let payloads = try [
+                payload(message: messages[0], sequence: 1, text: "one"),
+                payload(message: messages[1], sequence: 2, text: "two"),
+            ]
+
+            for index in messages.indices {
+                try await sql.raw("""
+                    INSERT INTO im_v2.message_projection_states
+                        (state_id, message_id, room_id, message_revision, variant_key,
+                         origin_event_id, state_event_id, is_withdrawn,
+                         payload_schema_version, payload, created_at)
+                    VALUES
+                        (\(bind: states[index]), \(bind: messages[index]), \(bind: room), 1, 0,
+                         \(bind: events[index]), \(bind: events[index]), FALSE,
+                         1, \(bind: payloads[index])::jsonb, \(bind: createdAt))
+                    """).run()
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_sync_payloads
+                        (source_event_id, projection_kind, payload, created_at, message_state_id)
+                    VALUES
+                        (\(bind: events[index]), 'message', NULL, \(bind: createdAt),
+                         \(bind: states[index]))
+                    """).run()
+            }
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+                VALUES (\(bind: user), 2)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind,
+                     payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: user), 1, \(bind: events[0]), 'message', NULL,
+                     'fanout_shared', \(bind: createdAt)),
+                    (\(bind: user), 2, \(bind: events[1]), 'message', NULL,
+                     'fanout_shared', \(bind: createdAt))
+                """).run()
+
+            let worker = PostgresV2UserProjectionWorker(
+                database: app.db(.psql), batchSize: 10,
+                messageWriteMode: .shared, acceptedMessageBatchEnabled: true
+            )
+            #expect(try await worker.runOnce(now: createdAt) == .init(
+                claimed: true, appliedRecordCount: 2
+            ))
+            #expect(try await worker.runOnce(now: createdAt).claimed == false)
+            let projected = try await currentV3ProjectionItems(
+                sql: sql, userID: .init(user.uuidString), kind: "message"
+            )
+            #expect(projected.map(\.entityKey) == messages.map(\.uuidString).sorted())
+            #expect(Set(projected.compactMap { $0.string("text") }) == ["one", "two"])
+            #expect(try await count(
+                "im_v2.user_projection_versions WHERE projection_kind = 'message' AND payload IS NULL AND message_state_id IS NOT NULL",
+                on: sql
+            ) == 2)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("accepted-message fast path rolls back before an invalid shared state")
+    func acceptedMessageProjectionBatchRollsBackAtExactInvalidSequence() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000d71")!
+            let sender = UUID(uuidString: "00000000-0000-0000-0000-000000000d72")!
+            let room = UUID(uuidString: "00000000-0000-0000-0000-000000000d73")!
+            let messages = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d74")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d75")!,
+            ]
+            let events = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d76")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d77")!,
+            ]
+            let invalidOrigin = UUID(
+                uuidString: "00000000-0000-0000-0000-000000000d78"
+            )!
+            let states = try messages.map {
+                try v2MessageProjectionStateID(messageID: $0, messageRevision: 1)
+            }
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            for index in messages.indices {
+                let payload = """
+                {"event_type":"message.accepted","message_id":"\(messages[index].uuidString)","room_id":"\(room.uuidString)","room_sequence":\(index + 1),"timeline_sequence":\(index + 1),"sender_user_id":"\(sender.uuidString)","text":"message-\(index)","media_ids":[],"media_presentations":[],"mention_user_ids":[],"mentions_everyone":false,"entities":[],"reply_to_message_id":null,"forwarded_from_message_id":null,"forwarded_from_user_id":null,"message_revision":1,"server_created_at_ms":1750000000000}
+                """
+                let origin = index == 0 ? events[index] : invalidOrigin
+                try await sql.raw("""
+                    INSERT INTO im_v2.message_projection_states
+                        (state_id, message_id, room_id, message_revision, variant_key,
+                         origin_event_id, state_event_id, is_withdrawn,
+                         payload_schema_version, payload, created_at)
+                    VALUES
+                        (\(bind: states[index]), \(bind: messages[index]), \(bind: room), 1, 0,
+                         \(bind: origin), \(bind: events[index]), FALSE, 1,
+                         \(bind: payload)::jsonb, \(bind: now))
+                    """).run()
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_sync_payloads
+                        (source_event_id, projection_kind, payload, created_at, message_state_id)
+                    VALUES (\(bind: events[index]), 'message', NULL, \(bind: now),
+                            \(bind: states[index]))
+                    """).run()
+            }
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+                VALUES (\(bind: user), 2)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind,
+                     payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: user), 1, \(bind: events[0]), 'message', NULL,
+                     'fanout_shared', \(bind: now)),
+                    (\(bind: user), 2, \(bind: events[1]), 'message', NULL,
+                     'fanout_shared', \(bind: now))
+                """).run()
+
+            let worker = PostgresV2UserProjectionWorker(
+                database: app.db(.psql), batchSize: 10,
+                retryPolicy: .init(
+                    initialDelay: 1, maximumDelay: 1,
+                    maximumAttempts: 2, jitterFraction: 0
+                ),
+                messageWriteMode: .shared,
+                acceptedMessageBatchEnabled: true
+            )
+            #expect(try await worker.runOnce(now: now) == .init(
+                claimed: true, appliedRecordCount: 0, failedRecordCount: 1
+            ))
+            #expect(try await count("im_v2.user_projection_versions", on: sql) == 0)
+            let projectedSequence = try #require(try await sql.raw("""
+                SELECT projected_sequence AS value
+                FROM im_v2.user_projection_checkpoints WHERE user_id = \(bind: user)
+                """).first(decoding: CountRow.self)).value
+            #expect(projectedSequence == 0)
+            let failedSequence = try #require(try await sql.raw("""
+                SELECT failed_sequence AS value
+                FROM im_v2.user_projection_checkpoints WHERE user_id = \(bind: user)
+                """).first(decoding: CountRow.self)).value
+            #expect(failedSequence == 2)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("concurrent projectors claim distinct users without duplicate versions")
+    func concurrentUserProjectionClaimsRemainExclusive() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let users = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d81")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d82")!,
+            ]
+            let events = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d83")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d84")!,
+            ]
+            let targets = [
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d85")!,
+                UUID(uuidString: "00000000-0000-0000-0000-000000000d86")!,
+            ]
+            for index in users.indices {
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+                    VALUES (\(bind: users[index]), 1)
+                    """).run()
+                let payload = """
+                {"target_user_id":"\(targets[index].uuidString)","state":"accepted","updated_at_ms":1750000000000}
+                """
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_sync_log
+                        (user_id, user_sync_sequence, source_event_id, projection_kind,
+                         payload, payload_storage, created_at)
+                    VALUES (\(bind: users[index]), 1, \(bind: events[index]),
+                            'relationship', \(bind: payload)::jsonb, 'inline', \(bind: now))
+                    """).run()
+            }
+
+            let worker = PostgresV2UserProjectionWorker(
+                database: app.db(.psql), batchSize: 10
+            )
+            async let first = worker.runOnce(now: now)
+            async let second = worker.runOnce(now: now)
+            let (firstReport, secondReport) = try await (first, second)
+            #expect(firstReport.appliedRecordCount + secondReport.appliedRecordCount == 2)
+            #expect(firstReport.claimed)
+            #expect(secondReport.claimed)
+            #expect(try await count("im_v2.user_projection_versions", on: sql) == 2)
+            #expect(try await worker.runOnce(now: now).claimed == false)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()

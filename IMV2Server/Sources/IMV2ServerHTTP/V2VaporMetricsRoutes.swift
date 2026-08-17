@@ -9,7 +9,8 @@ public enum V2VaporMetricsRoutes {
         telemetry: V2PrometheusTelemetrySink,
         connectionMetrics: (any V2ConnectionMetricsSource)? = nil,
         transportMetrics: (any V2GatewayTransportMetricsSource)? = nil,
-        durableWorkMetrics: (any V2DurableWorkMetricsSource)? = nil
+        durableWorkMetrics: (any V2DurableWorkMetricsSource)? = nil,
+        runtimePressureMetrics: (any V2RuntimePressureMetricsSource)? = nil
     ) {
         app.get("metrics") { _ async -> Response in
             let response = Response(status: .ok)
@@ -27,6 +28,11 @@ public enum V2VaporMetricsRoutes {
             }
             if let durableWorkMetrics {
                 document += v2RenderPrometheusDurableWorkMetrics(await durableWorkMetrics.durableWorkMetricsSnapshot())
+            }
+            if let runtimePressureMetrics {
+                document += v2RenderPrometheusRuntimePressureMetrics(
+                    await runtimePressureMetrics.runtimePressureMetricsSnapshot()
+                )
             }
             response.body = .init(string: document)
             return response

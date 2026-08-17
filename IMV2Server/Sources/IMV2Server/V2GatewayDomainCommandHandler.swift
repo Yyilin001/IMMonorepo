@@ -148,9 +148,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let forwardMessages: any V2GatewayForwardMessagesHandling
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
+    private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private let now: @Sendable () -> Date
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, now: @escaping @Sendable () -> Date = Date.init) {
         self.sendMessage = sendMessage
         self.membership = membership
         self.withdrawal = withdrawal
@@ -170,6 +171,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.forwardMessages = forwardMessages
         self.sync = sync
         self.telemetry = telemetry
+        self.databaseWorkAdmission = databaseWorkAdmission
         self.now = now
     }
 
@@ -193,6 +195,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         forwardMessagesHandler: any V2GatewayForwardMessagesHandling,
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.sendMessage = sendMessage
@@ -214,6 +217,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         forwardMessages = forwardMessagesHandler
         self.sync = sync
         self.telemetry = telemetry
+        self.databaseWorkAdmission = databaseWorkAdmission
         self.now = now
     }
 
@@ -222,7 +226,55 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         let command = v2TelemetryCommand(for: envelope)
         let startedAt = now()
         do {
-            let response = try await handleWithoutTelemetry(envelope: envelope, identity: identity)
+            let response: IMV2Envelope
+            if let databaseWorkAdmission,
+               let workClass = databaseWorkClass(for: envelope) {
+                switch await databaseWorkAdmission.acquire(workClass) {
+                case .admitted:
+                    break
+                case .rejected:
+                    response = errorEnvelope(code: "SERVER_BUSY", retryable: true)
+                    return await recordAndReturn(
+                        response, traceID: traceID, command: command, startedAt: startedAt
+                    )
+                case .cancelled:
+                    throw CancellationError()
+                }
+                guard !Task.isCancelled else {
+                    await databaseWorkAdmission.release(workClass)
+                    throw CancellationError()
+                }
+                do {
+                    response = try await handleWithoutTelemetry(envelope: envelope, identity: identity)
+                    await databaseWorkAdmission.release(workClass)
+                } catch {
+                    await databaseWorkAdmission.release(workClass)
+                    throw error
+                }
+            } else {
+                response = try await handleWithoutTelemetry(envelope: envelope, identity: identity)
+            }
+            return await recordAndReturn(
+                response, traceID: traceID, command: command, startedAt: startedAt
+            )
+        } catch {
+            await telemetry.record(.gatewayCommand(
+                traceID: traceID,
+                command: command,
+                outcome: .failed,
+                rejection: nil,
+                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+            ))
+            throw error
+        }
+    }
+
+    private func recordAndReturn(
+        _ response: IMV2Envelope,
+        traceID: UUID,
+        command: V2GatewayTelemetryCommand,
+        startedAt: Date
+    ) async -> IMV2Envelope {
             let hasProtocolError: Bool
             let rejection: V2GatewayTelemetryRejection?
             if case .error(let error) = response.body {
@@ -243,15 +295,22 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
                 elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
             ))
             return response
-        } catch {
-            await telemetry.record(.gatewayCommand(
-                traceID: traceID,
-                command: command,
-                outcome: .failed,
-                rejection: nil,
-                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
-            ))
-            throw error
+    }
+
+    private func databaseWorkClass(
+        for envelope: IMV2Envelope
+    ) -> V2DatabaseWorkClass? {
+        guard envelope.body != nil else { return nil }
+        switch envelope.body {
+        case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
+            return .sync
+        case .groupEventUnsubscribe, .unsubscribePresence, .unsubscribeTyping:
+            // These commands only release process-local subscription state or
+            // return a static success envelope. They must remain available to
+            // shed resources while PostgreSQL is overloaded.
+            return nil
+        default:
+            return .foreground
         }
     }
 

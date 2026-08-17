@@ -62,12 +62,24 @@ services:
       # foreground sends before PostgreSQL itself is saturated. Eight bounded
       # claim lanes preserve the measured 2,048-delivery budget per pass. The
       # server partitions those lanes by target user, so they no longer fight
-      # over the same monotonic user-sequence rows. Four event loops with 16
-      # connections each leave 56 slots for foreground commands while all
-      # eight delivery lanes are busy. Together with PostgreSQL's 150-connection
-      # ceiling, this retains headroom for account, operator and maintenance
-      # traffic without letting the gateway grow the pool without a bound.
+      # Four event loops expose a 64-connection Gateway ceiling. The role
+      # values below are retained for controlled isolation A/B runs, but the
+      # default shared topology lets a hot class borrow idle capacity. The
+      # foreground/Sync admission limits below reserve 16 shared slots for
+      # durable workers before Fluent pool wait. PostgreSQL max_connections
+      # must separately include Account, Operator and operational headroom.
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 16
+      IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP: 8
+      IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP: 4
+      IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP: 2
+      IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP: 1
+      IM_V2_DATABASE_MAINTENANCE_CONNECTIONS_PER_EVENT_LOOP: 1
+      # Shared borrowing remains the production default until an identical
+      # workload proves a role split improves both foreground and convergence
+      # SLOs. The role budgets above remain an explicit rollback experiment.
+      IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "false"
+      IM_V2_FOREGROUND_DATABASE_WORK_LIMIT: 32
+      IM_V2_SYNC_DATABASE_WORK_LIMIT: 16
       IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE: 256
       IM_V2_MAX_DELIVERY_CONCURRENCY: 8
     ulimits:
