@@ -853,6 +853,19 @@ public struct V2CrossStoreFanoutDeliveryStore:
         )
     }
 
+    public func claimFreshDirectPreplannedForRecovery(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
+        guard let coLocatedControlBucket,
+              bucket == coLocatedControlBucket
+        else { return [] }
+        return try await control.claimFreshDirectPreplannedForRecovery(
+            bucket: bucket, partition: partition, now: now,
+            leaseDuration: leaseDuration, limit: limit
+        )
+    }
+
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {
         let input: V2FanoutProjectionInput
         if lease.projectionKind == "message" {

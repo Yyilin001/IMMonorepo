@@ -54,10 +54,11 @@ public enum V2FanoutDeliveryClaimLane: Sendable, Equatable {
     case expiredLease
 }
 
-/// One stable share of a concurrent claim pass. Every delivery for the same
-/// target user resolves to the same partition, so parallel workers do not
-/// contend on that user's monotonic sync-sequence row. Durable lease tokens
-/// remain the correctness fence if the process concurrency changes later.
+/// One stable share of a concurrent claim pass. Generic and recovery delivery
+/// assigns the same target user to one partition so workers do not contend on
+/// that user's monotonic sync-sequence row. The co-located direct fast path may
+/// instead assign both recipients by source event. Durable row/advisory fences
+/// retain correctness if process concurrency or replica count changes later.
 public struct V2FanoutDeliveryClaimPartition: Sendable, Equatable {
     public let index: Int
     public let count: Int
@@ -109,6 +110,23 @@ public protocol V2FreshDirectFanoutDeliveryStore: V2FanoutDeliveryStore {
         bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
         now: Date, limit: Int
     ) async throws -> [V2FreshDirectFanoutDeliveryCommit]
+    /// Converts a failed no-lease fast-path row into an ordinary durable lease.
+    /// This is invoked only after the atomic fast path throws; normal generic
+    /// fresh scans may therefore exclude direct rows and use their user-lane
+    /// partial index without stranding poison work.
+    func claimFreshDirectPreplannedForRecovery(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease]
+}
+
+public extension V2FreshDirectFanoutDeliveryStore {
+    func claimFreshDirectPreplannedForRecovery(
+        bucket _: String?, partition _: V2FanoutDeliveryClaimPartition?,
+        now _: Date, leaseDuration _: TimeInterval, limit _: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
+        []
+    }
 }
 
 public struct V2FreshDirectFanoutDeliveryCommit: Equatable, Sendable {
@@ -335,6 +353,17 @@ public struct V2FanoutDeliveryWorker: Sendable {
                     // bad row then consumes retry policy and eventually pauses
                     // instead of becoming an unmetered fast-path poison loop.
                     freshDirectError = error
+                    do {
+                        leases = try await freshDirectStore
+                            .claimFreshDirectPreplannedForRecovery(
+                                bucket: bucket, partition: claimPartition,
+                                now: claimTime, leaseDuration: leaseDuration,
+                                limit: limit
+                            )
+                        if !leases.isEmpty { break }
+                    } catch {
+                        freshDirectError = error
+                    }
                 }
             }
             if let claimPartition,

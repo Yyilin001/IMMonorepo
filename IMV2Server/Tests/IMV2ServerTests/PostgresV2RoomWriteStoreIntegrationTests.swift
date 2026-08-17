@@ -1859,6 +1859,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 on: sql
             ) == acceptedEventCount * 2)
             #expect(try await count(
+                "im_v2.fanout_deliveries AS delivery JOIN im_v2.room_events AS event ON event.event_id = delivery.source_event_id WHERE event.event_type = 'message.accepted' AND delivery.fresh_direct_eligible",
+                on: sql
+            ) == acceptedEventCount * 2)
+            #expect(try await count(
                 "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
                 on: sql
             ) == 0)
@@ -2003,6 +2007,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ),
                 now: { now.addingTimeInterval(5) }
             )
+            #expect(try await count(
+                "im_v2.fanout_deliveries WHERE source_event_id = '\(fallbackTrigger.sourceEventID.uuidString)' AND NOT fresh_direct_eligible",
+                on: sql
+            ) == 2)
             while try await fallbackDeliveryWorker.runOnce(limit: 16).claimedCount > 0 {}
             let fallbackRelease = try await drainFanoutCompletionReleases(
                 database: app.db(.psql),

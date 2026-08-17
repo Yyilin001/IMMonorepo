@@ -48,6 +48,9 @@ Planner。
   只能创建互斥的 `planning + room_outbox`，不得同时存在 partial direct work。
 - plan、completion unit、两个 delivery 与消息同事务提交；宕机不存在“消息已接受但可靠
   投递记录尚未创建”的窗口。
+- 只有该事务创建的两条 direct delivery 写入 `fresh_direct_eligible=true`。快路径直接从这个
+  窄、可索引的 durable 分类领取，禁止依赖 `fanout_plans.state` 的瞬时统计量驱动大表 join；
+  plan/unit 不变量仍由同事务创建和 completion 计数更新共同校验，异常会整批回滚并进入恢复协议。
 - 同一 source event 的两位接收者归属同一 fresh lane。跨 replica 再以 non-blocking source
   advisory lock 选出唯一 materializer；未取得锁的事务释放候选行稍后重试，不等待也不争抢
   `(source_event_id,projection_kind)` 唯一键。远端 target 仍在自己的物理 store 建立引用。
@@ -61,6 +64,9 @@ Planner。
 - fresh claim 按 source event 使用固定 8 个数据库 hash lane；任意较小 worker 数只接管与
   自身 index 同余的 lane。这样调整进程并发不改变所有权、同一事件的两个 target 不被进程内
   worker 拆开，同时 PostgreSQL 可使用表达式索引避免重复扫描全部 pending delivery。
+- 非 direct 的 fresh work 仍按 target user 使用固定 8 个 lane，retry/expired work 也始终按
+  target user 分区；不能把 source-event 分区扩展到通用投影，否则同一用户的 Sync sequence
+  会被多个 worker 并发更新并产生 transaction-id lock wait。
 
 ## 回退与兼容
 

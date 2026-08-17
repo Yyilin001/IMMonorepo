@@ -57,38 +57,44 @@ public struct PostgresV2FanoutDeliveryStore:
         self.payloadWriteMode = payloadWriteMode
     }
 
-    /// A fixed source-event lane makes the fresh predicate indexable while
-    /// assigning both recipients of one direct event to the same transaction.
-    /// Each worker owns every stable lane congruent to its process-local index,
-    /// so ownership remains disjoint when process concurrency changes.
+    /// A fixed database lane makes fresh predicates indexable while allowing
+    /// the process to run any smaller worker count. Generic work is assigned
+    /// by target user so sequence writers remain disjoint; only the explicitly
+    /// classified direct fast path is assigned by source event so its two
+    /// recipients share one payload-materialization transaction.
     private static let stableFreshLaneCount: Int64 = 8
 
-    private static func partitionEligibility(
-        _ partition: V2FanoutDeliveryClaimPartition?,
-        usesStableFreshLanes: Bool
+    private static func dynamicTargetPartitionEligibility(
+        _ partition: V2FanoutDeliveryClaimPartition?
     ) -> SQLQueryString {
         guard let partition else { return "" }
-        guard usesStableFreshLanes else {
-            return """
-                AND mod(
-                    hashtextextended(delivery.target_user_id::text, 0)
-                        & 9223372036854775807,
-                    \(bind: Int64(partition.count))
-                ) = \(bind: Int64(partition.index))
-                """
-        }
+        return """
+            AND mod(
+                hashtextextended(delivery.target_user_id::text, 0)
+                    & 9223372036854775807,
+                \(bind: Int64(partition.count))
+            ) = \(bind: Int64(partition.index))
+            """
+    }
+
+    private static func stableFreshPartitionEligibility(
+        _ partition: V2FanoutDeliveryClaimPartition?, bySourceEvent: Bool
+    ) -> SQLQueryString {
+        guard let partition else { return "" }
         let lanes = stride(
             from: Int64(partition.index), to: stableFreshLaneCount,
             by: partition.count
         ).map { $0 }
+        let identity = bySourceEvent
+            ? "delivery.source_event_id::text"
+            : "delivery.target_user_id::text"
         if lanes.count == 1, let lane = lanes.first {
             // PostgreSQL does not reliably reduce `= ANY(singleton)` to an
-            // equality index condition. Emit the scalar form for the common
-            // eight-worker topology so the source-lane expression index also
-            // supplies the requested source/target ordering.
+            // equality index condition. The scalar form lets the matching
+            // expression index also supply source/target ordering.
             return """
                 AND mod(
-                    hashtextextended(delivery.source_event_id::text, 0)
+                    hashtextextended(\(unsafeRaw: identity), 0)
                         & 9223372036854775807,
                     8
                 ) = \(bind: lane)
@@ -96,7 +102,7 @@ public struct PostgresV2FanoutDeliveryStore:
         }
         return """
             AND mod(
-                hashtextextended(delivery.source_event_id::text, 0)
+                hashtextextended(\(unsafeRaw: identity), 0)
                     & 9223372036854775807,
                 8
             ) = ANY(\(bind: lanes)::bigint[])
@@ -144,20 +150,52 @@ public struct PostgresV2FanoutDeliveryStore:
         )
     }
 
+    public func claimFreshDirectPreplannedForRecovery(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, leaseDuration: TimeInterval, limit: Int
+    ) async throws -> [V2FanoutDeliveryLease] {
+        try await claimPendingRows(
+            bucket: bucket, lane: .fresh, now: now,
+            leaseDuration: leaseDuration, limit: limit,
+            partition: partition, freshSelection: .directOnly
+        )
+    }
+
+    private enum FreshSelection: Equatable {
+        case automatic
+        case directOnly
+    }
+
     private func claimPendingRows(
         bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date,
         leaseDuration: TimeInterval, limit: Int,
         maximumInlinePayloadBytes: Int? = nil,
-        partition: V2FanoutDeliveryClaimPartition? = nil
+        partition: V2FanoutDeliveryClaimPartition? = nil,
+        freshSelection: FreshSelection = .automatic
     ) async throws -> [V2FanoutDeliveryLease] {
         guard leaseDuration > 0, limit > 0 else { return [] }
         let token = makeUUID()
         let expiry = now.addingTimeInterval(leaseDuration)
         let eligibility = lane.sqlEligibilityPredicate(now: now)
         let ordering = lane.sqlOrdering
-        let partitionEligibility = Self.partitionEligibility(
-            partition, usesStableFreshLanes: lane == .fresh
-        )
+        let selectsDirectRecovery = freshSelection == .directOnly
+        let selectsGenericFresh = lane == .fresh
+            && maximumInlinePayloadBytes == nil
+            && !selectsDirectRecovery
+        let freshClassEligibility: SQLQueryString = if selectsDirectRecovery {
+            "AND delivery.fresh_direct_eligible"
+        } else if selectsGenericFresh {
+            "AND NOT delivery.fresh_direct_eligible"
+        } else {
+            ""
+        }
+        let partitionEligibility = if selectsDirectRecovery {
+            Self.stableFreshPartitionEligibility(partition, bySourceEvent: true)
+        } else if lane == .fresh {
+            Self.stableFreshPartitionEligibility(partition, bySourceEvent: false)
+        } else {
+            Self.dynamicTargetPartitionEligibility(partition)
+        }
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows: [ClaimedDeliveryRow]
@@ -172,6 +210,7 @@ public struct PostgresV2FanoutDeliveryStore:
                             WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
                               AND plan.state = 'planned'
                               AND \(eligibility)
+                              \(freshClassEligibility)
                               \(partitionEligibility)
                             ORDER BY \(ordering)
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
@@ -218,6 +257,7 @@ public struct PostgresV2FanoutDeliveryStore:
                         WHERE delivery.target_shard_bucket = \(bind: bucket) AND delivery.state = 'pending'
                           AND plan.state = 'planned'
                           AND \(eligibility)
+                          \(freshClassEligibility)
                           \(partitionEligibility)
                         ORDER BY \(ordering)
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
@@ -242,6 +282,7 @@ public struct PostgresV2FanoutDeliveryStore:
                               ON plan.source_event_id = delivery.source_event_id
                             WHERE delivery.state = 'pending' AND plan.state = 'planned'
                               AND \(eligibility)
+                              \(freshClassEligibility)
                               \(partitionEligibility)
                             ORDER BY \(ordering)
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
@@ -287,6 +328,7 @@ public struct PostgresV2FanoutDeliveryStore:
                           ON plan.source_event_id = delivery.source_event_id
                         WHERE delivery.state = 'pending' AND plan.state = 'planned'
                           AND \(eligibility)
+                          \(freshClassEligibility)
                           \(partitionEligibility)
                         ORDER BY \(ordering)
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
@@ -333,8 +375,8 @@ public struct PostgresV2FanoutDeliveryStore:
         } else {
             ""
         }
-        let partitionEligibility = Self.partitionEligibility(
-            partition, usesStableFreshLanes: true
+        let partitionEligibility = Self.stableFreshPartitionEligibility(
+            partition, bySourceEvent: true
         )
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
@@ -346,21 +388,14 @@ public struct PostgresV2FanoutDeliveryStore:
                        delivery.target_shard_bucket, delivery.observed_router_epoch,
                        delivery.retry_count, NULL::text AS event_payload_json
                 FROM im_v2.fanout_deliveries AS delivery
-                JOIN im_v2.fanout_plans AS plan
-                  ON plan.source_event_id = delivery.source_event_id
-                JOIN im_v2.fanout_completion_units AS unit
-                  ON unit.source_event_id = delivery.source_event_id
-                 AND unit.completion_unit_id = delivery.completion_unit_id
                 WHERE delivery.state = 'pending'
+                  AND delivery.fresh_direct_eligible
                   AND delivery.projection_kind = 'message'
                   AND delivery.claim_token IS NULL
                   AND delivery.lease_expires_at IS NULL
                   AND delivery.next_attempt_at IS NULL
                   AND delivery.paused_at IS NULL
                   AND delivery.retry_count = 0
-                  AND plan.state = 'planned'
-                  AND plan.target_rule->>'planning_strategy' = 'direct_preplanned'
-                  AND unit.state = 'pending'
                   \(bucketEligibility)
                   \(partitionEligibility)
                 ORDER BY delivery.source_event_id, delivery.target_user_id,
@@ -453,7 +488,14 @@ public struct PostgresV2FanoutDeliveryStore:
                 guard !route.requiresForwarding,
                       route.writeBucket == candidate.targetShardBucket,
                       route.routerEpoch == candidate.observedRouterEpoch
-                else { continue }
+                else {
+                    // Roll back the whole no-lease batch. The worker will
+                    // immediately claim these explicitly-classified rows via
+                    // the ordinary route-fenced recovery path; silently
+                    // skipping one would otherwise strand it behind the
+                    // generic fresh index's NOT-direct predicate.
+                    throw V2UserShardRouterError.invalidRoute
+                }
                 accepted.append(.init(
                     sourceEventID: try .init(candidate.sourceEventID.uuidString),
                     targetUserID: try .init(candidate.targetUserID.uuidString),

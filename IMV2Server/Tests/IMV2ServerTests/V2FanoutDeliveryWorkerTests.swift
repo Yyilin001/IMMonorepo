@@ -87,7 +87,8 @@ struct V2FanoutDeliveryWorkerTests {
             claimedCount: 1, committedCount: 0, staleCount: 0, releasedCount: 1
         ))
         #expect(await store.fastCallCount() == 1)
-        #expect(await store.claimCallCount() == 1)
+        #expect(await store.recoveryClaimCallCount() == 1)
+        #expect(await store.claimCallCount() == 0)
         #expect(await store.retryCount() == 1)
     }
 
@@ -311,6 +312,7 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
     private var fastCalls = 0
     private var limits: [Int] = []
     private var claimCalls = 0
+    private var recoveryClaimCalls = 0
     private var retries = 0
 
     init(
@@ -333,6 +335,16 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
         limits.append(limit)
         if failFresh { throw DeliveryFailure.failed }
         return freshCommits
+    }
+
+    func claimFreshDirectPreplannedForRecovery(
+        bucket _: String?, partition _: V2FanoutDeliveryClaimPartition?,
+        now _: Date, leaseDuration _: TimeInterval, limit _: Int
+    ) -> [V2FanoutDeliveryLease] {
+        recoveryClaimCalls += 1
+        guard !didClaim else { return [] }
+        didClaim = true
+        return [lease]
     }
 
     func claimPending(
@@ -370,6 +382,7 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
     func fastCallCount() -> Int { fastCalls }
     func fastLimits() -> [Int] { limits }
     func claimCallCount() -> Int { claimCalls }
+    func recoveryClaimCallCount() -> Int { recoveryClaimCalls }
     func retryCount() -> Int { retries }
 }
 

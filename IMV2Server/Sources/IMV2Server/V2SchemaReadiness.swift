@@ -134,23 +134,44 @@ public enum V2SchemaReadiness {
                 "\(schema).message_projection_states[room-event-storage]"
             )
         }
-        guard let freshSourceLaneIndex = try await sql.raw("""
+        guard let freshDeliveryContract = try await sql.raw("""
             SELECT EXISTS (
                 SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = \(bind: schema)
+                  AND table_name = 'fanout_deliveries'
+                  AND column_name = 'fresh_direct_eligible'
+                  AND is_nullable = 'NO'
+            ) AND EXISTS (
+                SELECT 1
+                FROM pg_constraint AS constraint_record
+                JOIN pg_class AS relation
+                  ON relation.oid = constraint_record.conrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = \(bind: schema)
+                  AND relation.relname = 'fanout_deliveries'
+                  AND constraint_record.conname =
+                      'fanout_deliveries_fresh_direct_kind_check'
+                  AND constraint_record.convalidated
+            ) AND (
+                SELECT COUNT(*) = 2
                 FROM pg_index AS index_record
                 JOIN pg_class AS index_relation
                   ON index_relation.oid = index_record.indexrelid
                 JOIN pg_namespace AS namespace
                   ON namespace.oid = index_relation.relnamespace
                 WHERE namespace.nspname = \(bind: schema)
-                  AND index_relation.relname =
-                      'fanout_deliveries_fresh_source_lane_claim_idx'
+                  AND index_relation.relname IN (
+                      'fanout_deliveries_fresh_direct_source_lane_claim_idx',
+                      'fanout_deliveries_fresh_generic_target_lane_claim_idx'
+                  )
                   AND index_record.indisvalid
                   AND index_record.indisready
             ) AS exists
-            """).first(decoding: ExistsRow.self), freshSourceLaneIndex.exists else {
+            """).first(decoding: ExistsRow.self), freshDeliveryContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(
-                "\(schema).fanout_deliveries[fresh-source-lane-index]"
+                "\(schema).fanout_deliveries[fresh-delivery-contract]"
             )
         }
     }

@@ -15,7 +15,8 @@ IM_V2_DIRECT_FANOUT_MODE=preplanned  # 仅 message.accepted 私聊快路径
 ## 启用前门槛
 
 1. 当前 schema readiness 通过，router configuration 恰有一行且 override 无无效 bucket；
-   `fanout_deliveries_fresh_source_lane_claim_idx` 已创建且有效；
+   `fanout_deliveries_fresh_direct_source_lane_claim_idx` 与
+   `fanout_deliveries_fresh_generic_target_lane_claim_idx` 已创建且有效；
 2. `room_outbox`、fanout plan/delivery、completion release 无 paused/长期 leased backlog；
 3. 备份可恢复，记录 gateway image digest、配置、数据库参数和基线压测结果；
 4. 集成测试已覆盖 exact-two、route fallback、corrupt audience rollback、重试与 payload 等价；
@@ -73,6 +74,11 @@ WHERE plan.target_rule->>'planning_strategy' = 'direct_preplanned'
 同时观察 ACK/s、端到端 p95/p99、DB CPU、WAL、transaction rate、lock wait、ready/leased/
 scheduled/paused delivery、terminal completion release 与连接池等待。日志和报告只能保存聚合，
 不得记录 room/user/message ID 或正文。
+
+新建的 direct-preplanned delivery 必须同时标记 `fresh_direct_eligible=true`；该标记只决定
+无 lease 快路径的领取方式，不参与授权。普通 Planner 生成的工作必须保持 false。历史行或滚动
+升级期间由旧 binary 写入的 false 行会安全回落到 lease-fenced 路径，不能批量修改 terminal
+历史数据来“提高命中率”。
 
 `IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` 只是一次 claim pass 的上限；fresh direct 的单事务
 上限仍由 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` 控制（当前最大 128）。压测时不要为了追求

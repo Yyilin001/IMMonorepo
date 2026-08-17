@@ -1405,10 +1405,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             ), direct_delivery_insert AS (
                 INSERT INTO im_v2.fanout_deliveries
                     (source_event_id, target_user_id, projection_kind,
-                     completion_unit_id, target_shard_bucket, observed_router_epoch)
+                     completion_unit_id, target_shard_bucket, observed_router_epoch,
+                     fresh_direct_eligible)
                 SELECT completion.source_event_id, route.user_id, 'message',
                        completion.completion_unit_id, route.target_shard_bucket,
-                       route.observed_router_epoch
+                       route.observed_router_epoch, TRUE
                 FROM direct_completion_insert AS completion
                 CROSS JOIN direct_routed_targets AS route
                 RETURNING source_event_id, target_user_id

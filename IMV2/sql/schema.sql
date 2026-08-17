@@ -434,6 +434,8 @@ CREATE TABLE im_v2.fanout_deliveries (
     next_attempt_at timestamp with time zone,
     paused_at timestamp with time zone,
     last_failure_code text,
+    fresh_direct_eligible boolean DEFAULT false NOT NULL,
+    CONSTRAINT fanout_deliveries_fresh_direct_kind_check CHECK (((NOT fresh_direct_eligible) OR (projection_kind = 'message'::text))),
     CONSTRAINT fanout_deliveries_observed_router_epoch_check CHECK ((observed_router_epoch >= 0)),
     CONSTRAINT fanout_deliveries_pause_state_check CHECK (((state = 'paused'::text) = (paused_at IS NOT NULL))),
     CONSTRAINT fanout_deliveries_retry_count_check CHECK ((retry_count >= 0)),
@@ -2304,7 +2306,9 @@ CREATE INDEX fanout_deliveries_expired_lease_claim_idx ON im_v2.fanout_deliverie
 
 CREATE INDEX fanout_deliveries_fresh_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
 
-CREATE INDEX fanout_deliveries_fresh_source_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((source_event_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
+CREATE INDEX fanout_deliveries_fresh_direct_source_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((source_event_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE (fresh_direct_eligible AND (state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
+
+CREATE INDEX fanout_deliveries_fresh_generic_target_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE ((NOT fresh_direct_eligible) AND (state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
 
 CREATE INDEX fanout_deliveries_retry_due_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, next_attempt_at, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NOT NULL) AND (lease_expires_at IS NULL));
 

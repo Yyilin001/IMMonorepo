@@ -13,6 +13,7 @@ projection_ready_index_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-17-user
 room_event_storage_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-message-projection-room-event-storage-expand.sql"
 fanout_fresh_partition_index_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-fresh-partition-index-expand.sql"
 fanout_fresh_source_lane_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-fresh-source-lane-expand.sql"
+fanout_direct_eligibility_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-direct-eligibility-expand.sql"
 expand_sql_relative="IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
 schema_relative="IMV2/sql/schema.sql"
 project_name="imv2-message-projection-expand-regression"
@@ -53,6 +54,7 @@ psql < "${projection_ready_index_expand_sql}" >/dev/null
 psql < "${room_event_storage_expand_sql}" >/dev/null
 psql < "${fanout_fresh_partition_index_expand_sql}" >/dev/null
 psql < "${fanout_fresh_source_lane_expand_sql}" >/dev/null
+psql < "${fanout_direct_eligibility_expand_sql}" >/dev/null
 
 normalize_schema() {
   awk '
