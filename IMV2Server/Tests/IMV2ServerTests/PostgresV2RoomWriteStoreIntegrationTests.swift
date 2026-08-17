@@ -1021,7 +1021,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("relay plans and acknowledges multiple source events as one fenced database batch")
+    @Test("relay and delivery persist multiple source events as fenced database batches")
     func relayUsesSetBasedPlanAndOutboxBatches() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
@@ -1114,6 +1114,43 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.room_outbox WHERE state = 'published' AND claim_token IS NULL", on: sql) == 2)
             #expect(try await count("im_v2.fanout_completion_units", on: sql) == 4)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 6)
+
+            // A completed inbox effect is immutable. Besides avoiding a
+            // second heap version and index rewrite per target, inserting its
+            // sequence in the original row means migration/compaction can
+            // never observe a half-recorded result inside this transaction.
+            // Make that physical write-shape a regression invariant instead
+            // of relying on PostgreSQL statistics from a benchmark.
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.reject_consumer_inbox_update()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    RAISE EXCEPTION 'consumer inbox results must be insert-only';
+                END;
+                $$;
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER consumer_inbox_result_must_be_insert_only
+                BEFORE UPDATE ON im_v2.consumer_inbox
+                FOR EACH ROW EXECUTE FUNCTION im_v2.reject_consumer_inbox_update()
+                """).run()
+            let delivery = try await V2FanoutDeliveryWorker(
+                store: PostgresV2FanoutDeliveryStore(database: app.db(.psql)),
+                now: { now.addingTimeInterval(2) }
+            ).runOnce(limit: 8)
+            #expect(delivery == .init(
+                claimedCount: 6,
+                committedCount: 6,
+                staleCount: 0,
+                releasedCount: 0
+            ))
+            #expect(try await count(
+                "im_v2.consumer_inbox WHERE user_sync_sequence IS NOT NULL",
+                on: sql
+            ) == 6)
+            #expect(try await count("im_v2.user_sync_log", on: sql) == 6)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()

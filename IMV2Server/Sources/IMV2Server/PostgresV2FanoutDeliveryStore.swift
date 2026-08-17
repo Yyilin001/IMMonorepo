@@ -823,9 +823,15 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
 
     /// Projects a colocated batch with one set-based SQL statement.  The CTEs
     /// deliberately follow the durable effect order: fence/lock delivery,
-    /// insert inbox, reserve one sequence range per user, append sync rows,
-    /// then terminalize the fenced deliveries.  Any error rolls back the
-    /// entire statement and its encompassing transaction.
+    /// reserve one sequence range per user, insert the complete inbox fence,
+    /// append sync rows, then terminalize the fenced deliveries. Any error
+    /// rolls back the entire statement and its encompassing transaction.
+    ///
+    /// `user_sync_sequence` is part of the inbox compaction index. Inserting
+    /// an incomplete inbox row and updating it after sequence allocation would
+    /// therefore force a non-HOT heap update plus another entry in every inbox
+    /// index. Building the sequence first lets the immutable result row be
+    /// inserted once without weakening the unique consumer fence.
     private func projectAndTerminalizeBatch(
         sql: any SQLDatabase,
         ordered: [BatchFanoutDeliveryLease],
@@ -847,18 +853,12 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
         // plus any concurrently committed one without taking a no-op row
         // update lock on the common source event.
         try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
-        let insertedInboxCount = try await insertClaimedInboxes(
-            sql: sql, inputJSON: inputJSON, now: now
-        )
-        guard insertedInboxCount == ordered.count else {
-            throw V2FanoutDeliveryError.inboxAlreadyCommitted
-        }
         let sequenceReservationCTEs = usesDistinctTargetFastPath
             ? """
             reserved_sequence AS (
                 INSERT INTO im_v2.user_sync_sequences AS sequence (user_id, next_sequence)
                 SELECT target_user_id, 1
-                FROM pending_inbox
+                FROM claimed
                 ORDER BY target_user_id
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = sequence.next_sequence + 1
@@ -868,15 +868,13 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                        claimed.projection_kind, claimed.claim_token, claimed.completion_unit_id,
                        reserved_sequence.next_sequence AS user_sync_sequence
                 FROM claimed
-                JOIN pending_inbox
-                  USING (source_event_id, target_user_id, projection_kind)
                 JOIN reserved_sequence ON reserved_sequence.user_id = claimed.target_user_id
             )
             """
             : """
             per_user AS (
                 SELECT target_user_id AS user_id, COUNT(*)::bigint AS sequence_count
-                FROM pending_inbox
+                FROM claimed
                 GROUP BY target_user_id
             ), reserved_sequence AS (
                 INSERT INTO im_v2.user_sync_sequences AS sequence (user_id, next_sequence)
@@ -895,8 +893,6 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                              ORDER BY claimed.source_event_id, claimed.target_user_id, claimed.projection_kind
                            ) AS user_sync_sequence
                 FROM claimed
-                JOIN pending_inbox
-                  USING (source_event_id, target_user_id, projection_kind)
                 JOIN per_user ON per_user.user_id = claimed.target_user_id
                 JOIN reserved_sequence ON reserved_sequence.user_id = claimed.target_user_id
             )
@@ -918,14 +914,6 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                  AND delivery.projection_kind = input.projection_kind
                 WHERE delivery.state = 'pending' AND delivery.claim_token = input.claim_token
                 FOR UPDATE OF delivery
-            ), pending_inbox AS MATERIALIZED (
-                SELECT inbox.source_event_id, inbox.target_user_id,
-                       inbox.projection_kind
-                FROM im_v2.consumer_inbox AS inbox
-                JOIN claimed
-                  USING (source_event_id, target_user_id, projection_kind)
-                WHERE inbox.consumer_name = \(bind: consumerName)
-                  AND inbox.user_sync_sequence IS NULL
             ), \(unsafeRaw: sequenceReservationCTEs), payload_keys AS MATERIALIZED (
                 -- A batch commonly contains many target users for the same
                 -- source event. Deduplicate the keys *before* evaluating the
@@ -949,40 +937,46 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                 SELECT payloads.source_event_id, payloads.projection_kind
                 FROM payloads
                 JOIN im_v2.fanout_sync_payloads AS shared
-                  ON shared.source_event_id = payloads.source_event_id
+                 ON shared.source_event_id = payloads.source_event_id
                  AND shared.projection_kind = payloads.projection_kind
                  AND shared.payload = payloads.payload
-            ), inserted_log AS (
-                INSERT INTO im_v2.user_sync_log
-                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, payload_storage, created_at)
-                SELECT numbered.target_user_id, numbered.user_sync_sequence, numbered.source_event_id,
-                       numbered.projection_kind, NULL, 'fanout_shared',
-                       \(bind: now)
+            ), recorded_inbox AS (
+                INSERT INTO im_v2.consumer_inbox
+                    (consumer_name, source_event_id, target_user_id,
+                     projection_kind, committed_at, user_sync_sequence)
+                SELECT \(bind: consumerName), numbered.source_event_id,
+                       numbered.target_user_id, numbered.projection_kind,
+                       \(bind: now), numbered.user_sync_sequence
                 FROM numbered
                 JOIN verified_payloads
                   ON verified_payloads.source_event_id = numbered.source_event_id
                  AND verified_payloads.projection_kind = numbered.projection_kind
+                ORDER BY numbered.source_event_id, numbered.target_user_id,
+                         numbered.projection_kind
+                ON CONFLICT DO NOTHING
+                RETURNING source_event_id, target_user_id, projection_kind,
+                          user_sync_sequence
+            ), inserted_log AS (
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, payload_storage, created_at)
+                SELECT recorded_inbox.target_user_id,
+                       recorded_inbox.user_sync_sequence,
+                       recorded_inbox.source_event_id,
+                       recorded_inbox.projection_kind,
+                       NULL, 'fanout_shared',
+                       \(bind: now)
+                FROM recorded_inbox
                 RETURNING user_id, user_sync_sequence, source_event_id, projection_kind
-            ), recorded_inbox AS (
-                UPDATE im_v2.consumer_inbox AS inbox
-                SET user_sync_sequence = inserted_log.user_sync_sequence
-                FROM inserted_log
-                WHERE inbox.consumer_name = \(bind: consumerName)
-                  AND inbox.source_event_id = inserted_log.source_event_id
-                  AND inbox.target_user_id = inserted_log.user_id
-                  AND inbox.projection_kind = inserted_log.projection_kind
-                RETURNING inbox.source_event_id, inbox.target_user_id,
-                          inbox.projection_kind, inbox.user_sync_sequence
             ), terminalized AS (
                 UPDATE im_v2.fanout_deliveries AS delivery
                 SET state = 'terminal', claim_token = NULL, lease_expires_at = NULL,
                     next_attempt_at = NULL, paused_at = NULL, last_failure_code = NULL
                 FROM numbered
-                JOIN recorded_inbox
-                  ON recorded_inbox.target_user_id = numbered.target_user_id
-                 AND recorded_inbox.user_sync_sequence = numbered.user_sync_sequence
-                 AND recorded_inbox.source_event_id = numbered.source_event_id
-                 AND recorded_inbox.projection_kind = numbered.projection_kind
+                JOIN inserted_log
+                  ON inserted_log.user_id = numbered.target_user_id
+                 AND inserted_log.user_sync_sequence = numbered.user_sync_sequence
+                 AND inserted_log.source_event_id = numbered.source_event_id
+                 AND inserted_log.projection_kind = numbered.projection_kind
                 WHERE delivery.source_event_id = numbered.source_event_id
                   AND delivery.target_user_id = numbered.target_user_id
                   AND delivery.projection_kind = numbered.projection_kind
@@ -999,9 +993,9 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
                        claimed.projection_kind, claimed.completion_unit_id, NULL::bigint,
                        'inbox_conflict'::text AS outcome
                 FROM claimed
-                LEFT JOIN pending_inbox
+                LEFT JOIN recorded_inbox
                   USING (source_event_id, target_user_id, projection_kind)
-                WHERE pending_inbox.source_event_id IS NULL
+                WHERE recorded_inbox.source_event_id IS NULL
             )
             SELECT ordinal, source_event_id, target_user_id, projection_kind,
                    completion_unit_id, user_sync_sequence, outcome
@@ -1039,44 +1033,6 @@ public struct PostgresV2FanoutDeliveryStore: V2PartitionedFanoutDeliveryStore, V
             ))
         }
         return prepared
-    }
-
-    /// PostgreSQL data-modifying CTE siblings share one snapshot and cannot
-    /// update a row inserted by another sibling except through RETURNING.
-    /// Persist inbox fences in their own statement first, while remaining in
-    /// the same transaction, so the set-based log/update/terminalize statement
-    /// can see and record every allocated sequence.
-    private func insertClaimedInboxes(
-        sql: any SQLDatabase, inputJSON: String, now: Date
-    ) async throws -> Int {
-        try await sql.raw("""
-            WITH input AS (
-                SELECT source_event_id, target_user_id, projection_kind, claim_token
-                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
-                    ordinal integer, source_event_id uuid, target_user_id uuid,
-                    projection_kind text, claim_token uuid
-                )
-            ), claimed AS MATERIALIZED (
-                SELECT input.source_event_id, input.target_user_id,
-                       input.projection_kind
-                FROM input
-                JOIN im_v2.fanout_deliveries AS delivery
-                  ON delivery.source_event_id = input.source_event_id
-                 AND delivery.target_user_id = input.target_user_id
-                 AND delivery.projection_kind = input.projection_kind
-                WHERE delivery.state = 'pending'
-                  AND delivery.claim_token = input.claim_token
-                FOR UPDATE OF delivery
-            )
-            INSERT INTO im_v2.consumer_inbox
-                (consumer_name, source_event_id, target_user_id,
-                 projection_kind, committed_at)
-            SELECT \(bind: consumerName), source_event_id, target_user_id,
-                   projection_kind, \(bind: now)
-            FROM claimed
-            ON CONFLICT DO NOTHING
-            RETURNING source_event_id
-            """).all(decoding: InboxInsertRow.self).count
     }
 
     private func ensureSharedPayloads(sql: any SQLDatabase, inputJSON: String, now: Date) async throws {
