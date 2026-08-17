@@ -10,6 +10,16 @@ public enum V2GatewayRuntimeConfigurationError: Error, Equatable, Sendable {
     case invalid(String)
 }
 
+/// Controls whether accepted or edited message content enters the durable
+/// review pipeline. Disabling the lane leaves existing jobs untouched and
+/// deliberately does not backfill messages created while it is disabled.
+public enum V2ContentReviewMode: String, Equatable, Sendable {
+    case enabled
+    case disabled
+
+    var enqueuesJobs: Bool { self == .enabled }
+}
+
 /// Metrics are intentionally bound to a loopback-only listener. A collector
 /// must run in the same host or pod namespace; exposing these operational
 /// details through the public realtime or media listeners is forbidden.
@@ -189,9 +199,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let groupRoomShardID: String
     public let strangerMessagePolicy: V2StrangerMessagePolicy
     public let push: V2PushRuntimeConfiguration
-    /// Content review stays disabled until a separately authenticated audit
-    /// principal is provisioned. Terms are deployment policy, never client
-    /// input; richer AI/OCR providers use the same worker boundary.
+    /// The mode controls durable job creation and worker startup. A separately
+    /// authenticated audit principal is additionally required to run the
+    /// worker. Terms are deployment policy, never client input; richer
+    /// AI/OCR providers use the same worker boundary.
+    public let contentReviewMode: V2ContentReviewMode
     public let contentReviewSafetyActorUserID: UserID?
     public let contentReviewViolationTerms: [String]
     public let contentReviewEscalationTerms: [String]
@@ -334,6 +346,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
             window: TimeInterval(try Self.positive("IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS", environment: environment))
         )
+        let rawContentReviewMode = try Self.required("IM_V2_CONTENT_REVIEW_MODE", environment: environment).lowercased()
+        guard let parsedContentReviewMode = V2ContentReviewMode(rawValue: rawContentReviewMode) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_MODE")
+        }
+        contentReviewMode = parsedContentReviewMode
         if let rawSafetyActor = Self.optional("IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID", environment: environment) {
             do {
                 guard UUID(uuidString: rawSafetyActor) != nil else {

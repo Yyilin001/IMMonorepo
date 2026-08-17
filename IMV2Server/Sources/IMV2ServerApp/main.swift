@@ -162,7 +162,8 @@ enum IMV2ServerApp {
                 store: PostgresV2RoomWriteStore(
                     database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
-                    shadowForwarder: userShardShadowForwarder
+                    shadowForwarder: userShardShadowForwarder,
+                    contentReviewMode: configuration.contentReviewMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -180,7 +181,7 @@ enum IMV2ServerApp {
                 capacityProfile: configuration.capacityProfile
             )
             let edit = V2MessageEditService(
-                store: PostgresV2MessageEditStore(database: database),
+                store: PostgresV2MessageEditStore(database: database, contentReviewMode: configuration.contentReviewMode),
                 capacityProfile: configuration.capacityProfile,
                 maximumTextUTF8Bytes: configuration.messageLimits.maxUTF8Bytes
             )
@@ -257,7 +258,8 @@ enum IMV2ServerApp {
                 capacityProfile: configuration.capacityProfile
             )
             let contentReviewWorker: V2ContentReviewWorker?
-            if let safetyActor = configuration.contentReviewSafetyActorUserID {
+            if configuration.contentReviewMode == .enabled,
+               let safetyActor = configuration.contentReviewSafetyActorUserID {
                 contentReviewWorker = try V2ContentReviewWorker(
                     store: PostgresV2ContentReviewStore(database: database),
                     reviewer: V2ConfiguredContentReviewer(
@@ -283,7 +285,12 @@ enum IMV2ServerApp {
             )
             let forwardMessages = V2ForwardMessagesService(
                 database: database,
-                writeStore: PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder),
+                writeStore: PostgresV2RoomWriteStore(
+                    database: database,
+                    strangerMessagePolicy: configuration.strangerMessagePolicy,
+                    shadowForwarder: userShardShadowForwarder,
+                    contentReviewMode: configuration.contentReviewMode
+                ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
             )

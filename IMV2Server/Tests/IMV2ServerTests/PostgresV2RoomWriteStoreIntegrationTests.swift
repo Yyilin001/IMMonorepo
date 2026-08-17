@@ -1321,7 +1321,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let writer = PostgresV2RoomWriteStore(
                 database: app.db(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
-                shadowForwarder: messageShadowRecorder
+                shadowForwarder: messageShadowRecorder,
+                contentReviewMode: .enabled
             )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
@@ -7265,6 +7266,78 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await app.asyncShutdown()
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("disabled content review creates no job for message acceptance or editing")
+    func disabledContentReviewSkipsDurableJobs() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3
+            ))
+            let sender = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: app.db(.psql), contentReviewMode: .disabled),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted(let accepted) = try await sender.send(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                clientMessageID: clientMessageID,
+                text: "review lane disabled"
+            )) else {
+                Issue.record("expected accepted message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(try await count("im_v2.content_review_jobs", on: sql) == 0)
+
+            let editor = V2MessageEditService(
+                store: PostgresV2MessageEditStore(database: app.db(.psql), contentReviewMode: .disabled),
+                capacityProfile: profile,
+                maximumTextUTF8Bytes: 64,
+                identifiers: .init(makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000da1")! }),
+                now: { now.addingTimeInterval(1) }
+            )
+            guard case .edited = try await editor.edit(.init(
+                roomID: roomID,
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-000000000da2"),
+                messageID: accepted.messageID,
+                expectedMessageRevision: 1,
+                text: "still not reviewed"
+            )) else {
+                Issue.record("expected edited message")
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(try await count("im_v2.content_review_jobs", on: sql) == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
             try? await app.asyncShutdown()
             throw error
         }

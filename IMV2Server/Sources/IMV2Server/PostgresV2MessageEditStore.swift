@@ -7,7 +7,12 @@ import SQLKit
 /// fan-out plan and durable operation replay record as one transaction.
 public struct PostgresV2MessageEditStore: V2MessageEditStore {
     private let database: any Database
-    public init(database: any Database) { self.database = database }
+    private let contentReviewMode: V2ContentReviewMode
+
+    public init(database: any Database, contentReviewMode: V2ContentReviewMode) {
+        self.database = database
+        self.contentReviewMode = contentReviewMode
+    }
 
     public func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome {
         try await database.transaction { transaction in
@@ -43,19 +48,21 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore {
             let eventUUID = try editUUID(eventID), planUUID = try editUUID(planID)
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextSequence) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.messages SET text_body = \(bind: command.text), rich_entities = '[]'::jsonb, content_revision = \(bind: nextRevision) WHERE message_id = \(bind: messageID)").run()
-            // A review verdict is valid only for the exact content revision.
-            // Replacing a claimed job clears its lease in this same edit
-            // transaction, so an old worker can only mark itself superseded.
-            try await sql.raw("""
-                INSERT INTO im_v2.content_review_jobs
-                    (message_id, room_id, expected_content_revision, state, decision, claim_token, lease_expires_at, retry_count, created_at, completed_at)
-                VALUES (\(bind: messageID), \(bind: roomID), \(bind: nextRevision), 'pending', NULL, NULL, NULL, 0, \(bind: now), NULL)
-                ON CONFLICT (message_id) DO UPDATE
-                SET expected_content_revision = EXCLUDED.expected_content_revision, state = 'pending', decision = NULL,
-                    claim_token = NULL, lease_expires_at = NULL, retry_count = 0,
-                    next_attempt_at = NULL, paused_at = NULL, finding_category = NULL,
-                    finding_severity = NULL, finding_confidence = NULL, completed_at = NULL
-                """).run()
+            if contentReviewMode.enqueuesJobs {
+                // A review verdict is valid only for the exact content revision.
+                // Replacing a claimed job clears its lease in this same edit
+                // transaction, so an old worker can only mark itself superseded.
+                try await sql.raw("""
+                    INSERT INTO im_v2.content_review_jobs
+                        (message_id, room_id, expected_content_revision, state, decision, claim_token, lease_expires_at, retry_count, created_at, completed_at)
+                    VALUES (\(bind: messageID), \(bind: roomID), \(bind: nextRevision), 'pending', NULL, NULL, NULL, 0, \(bind: now), NULL)
+                    ON CONFLICT (message_id) DO UPDATE
+                    SET expected_content_revision = EXCLUDED.expected_content_revision, state = 'pending', decision = NULL,
+                        claim_token = NULL, lease_expires_at = NULL, retry_count = 0,
+                        next_attempt_at = NULL, paused_at = NULL, finding_category = NULL,
+                        finding_severity = NULL, finding_confidence = NULL, completed_at = NULL
+                    """).run()
+            }
             try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), fanout_window_used = \(bind: nextRoom.fanoutWindow.used), outstanding_fanout_units = \(bind: nextRoom.outstandingFanoutUnits), outstanding_plans = \(bind: nextRoom.outstandingPlans), shard_lease_id = \(bind: try editUUID(lease.id)), shard_lease_generation = \(bind: try editSigned(lease.generation)) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used), fanout_window_used = \(bind: lease.fanoutWindow.used), outstanding_fanout_units = \(bind: nextShard.outstandingFanoutUnits), outstanding_plans = \(bind: nextShard.outstandingPlans) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try editUUID(lease.id)) AND generation = \(bind: try editSigned(lease.generation))").run()
             try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: nextSequence), 'message.edited', \(bind: actorID), jsonb_build_object('event_type', 'message.edited', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: nextSequence), 'message_id', \(bind: messageID.uuidString), 'message_revision', \(bind: nextRevision), 'text', \(bind: command.text), 'entities', '[]'::jsonb, 'actor_user_id', \(bind: actorID.uuidString), 'server_created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: room.membershipRevision), \(bind: now))").run()

@@ -14,15 +14,18 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let database: any Database
     private let strangerMessagePolicy: V2StrangerMessagePolicy
     private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let contentReviewMode: V2ContentReviewMode
 
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
-        shadowForwarder: any V2UserShardProjectionShadowing
+        shadowForwarder: any V2UserShardProjectionShadowing,
+        contentReviewMode: V2ContentReviewMode
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
         self.shadowForwarder = shadowForwarder
+        self.contentReviewMode = contentReviewMode
     }
 
     public func accept(
@@ -1035,15 +1038,17 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             VALUES
                 (\(bind: messageID), \(bind: roomID), \(bind: roomSequence), \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID), \(bind: message.text), \(bind: entitiesJSON)::jsonb, NULLIF(\(bind: replyToMessageID), '')::uuid, \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID), \(bind: message.createdAt))
             """).run()
-        // This outbox row commits with the message. A process crash between
-        // acceptance and worker wake therefore cannot create an unreviewed
-        // blind spot; leases recover the work without touching the hot send
-        // path again.
-        try await sql.raw("""
-            INSERT INTO im_v2.content_review_jobs
-                (message_id, room_id, expected_content_revision, state, created_at)
-            VALUES (\(bind: messageID), \(bind: roomID), 1, 'pending', \(bind: message.createdAt))
-            """).run()
+        if contentReviewMode.enqueuesJobs {
+            // This outbox row commits with the message. A process crash between
+            // acceptance and worker wake therefore cannot create an unreviewed
+            // blind spot; leases recover the work without touching the hot send
+            // path again.
+            try await sql.raw("""
+                INSERT INTO im_v2.content_review_jobs
+                    (message_id, room_id, expected_content_revision, state, created_at)
+                VALUES (\(bind: messageID), \(bind: roomID), 1, 'pending', \(bind: message.createdAt))
+                """).run()
+        }
         if !message.media.isEmpty {
             try await sql.raw("""
                 INSERT INTO im_v2.message_media_references
@@ -1199,6 +1204,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     (message_id, room_id, expected_content_revision, state, created_at)
                 SELECT message_id, room_id, 1, 'pending', \(bind: message.createdAt)
                 FROM message_insert
+                WHERE \(bind: contentReviewMode.enqueuesJobs)
                 RETURNING message_id
             ), media_insert AS (
                 INSERT INTO im_v2.message_media_references
@@ -1277,7 +1283,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               mutation.roomCount == 1,
               mutation.admissionCount == 1,
               mutation.messageCount == 1,
-              mutation.reviewCount == 1,
+              mutation.reviewCount == (contentReviewMode.enqueuesJobs ? 1 : 0),
               mutation.mediaCount == Int64(message.media.count),
               mutation.mentionCount == Int64(message.mentions.count),
               mutation.eventCount == 1,

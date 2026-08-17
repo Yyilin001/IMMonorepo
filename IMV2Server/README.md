@@ -242,7 +242,10 @@ evidence remains local-stack coverage, not a production deployment approval.
 - `IM_V2_GROUP_ROOM_SHARD_ID` selects the admission pool used for atomically
   created group rooms and their initial memberships.
 - Content review has a durable per-message outbox and a lease-fenced worker.
-  Set `IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID` to enable it; the configured
+  `IM_V2_CONTENT_REVIEW_MODE=disabled` stops both new job creation and worker
+  startup without deleting existing jobs; messages accepted while disabled
+  are not backfilled. Set the mode to `enabled` and provision
+  `IM_V2_CONTENT_REVIEW_SAFETY_ACTOR_USER_ID` to run the worker. The configured
   actor is an audit principal, never a client-supplied identity and need not
   be a room member. `...VIOLATION_TERMS` and `...ESCALATION_TERMS` are only a
   deterministic baseline. Production AI/OCR/image/video adapters implement

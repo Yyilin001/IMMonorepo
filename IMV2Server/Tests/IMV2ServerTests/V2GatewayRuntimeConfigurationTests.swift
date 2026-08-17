@@ -234,6 +234,20 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("content-review mode explicitly enables or disables the durable lane")
+    func parsesContentReviewMode() throws {
+        var values = runtimeValues
+        values["IM_V2_CONTENT_REVIEW_MODE"] = "disabled"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(values)
+        ).contentReviewMode == .disabled)
+
+        values["IM_V2_CONTENT_REVIEW_MODE"] = "unexpected"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_MODE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
     @Test("content-review policy parses only when the trusted actor is explicitly provisioned")
     func parsesContentReviewPolicy() throws {
         var values = runtimeValues
@@ -452,6 +466,7 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_GROUP_ROOM_SHARD_ID": "rooms-primary",
             "IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW": "3",
             "IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS": "86400",
+            "IM_V2_CONTENT_REVIEW_MODE": "enabled",
             "IM_V2_CAPACITY_PROFILE_ID": "standard",
             "IM_V2_MAX_ELIGIBLE_MEMBERS": "100000",
             "IM_V2_MAX_COMMANDS_PER_WINDOW": "1000",
