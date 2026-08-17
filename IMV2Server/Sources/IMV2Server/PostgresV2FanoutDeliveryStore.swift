@@ -29,19 +29,16 @@ public struct PostgresV2FanoutDeliveryStore:
     private let makeUUID: @Sendable () -> UUID
     private let batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy
     private let payloadWriteMode: V2FanoutPayloadWriteMode
-    private let freshDirectPayloadsArePreseeded: Bool
     private let consumerName = "v2-fanout-delivery"
 
     public init(
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
-        payloadWriteMode: V2FanoutPayloadWriteMode = .body,
-        freshDirectPayloadsArePreseeded: Bool = false
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
     ) {
         self.database = database
         self.makeUUID = makeUUID
         self.payloadWriteMode = payloadWriteMode
-        self.freshDirectPayloadsArePreseeded = freshDirectPayloadsArePreseeded
         batchSequenceReservationStrategy = .automatic
     }
 
@@ -52,20 +49,18 @@ public struct PostgresV2FanoutDeliveryStore:
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
         batchSequenceReservationStrategy: V2FanoutBatchSequenceReservationStrategy,
-        payloadWriteMode: V2FanoutPayloadWriteMode = .body,
-        freshDirectPayloadsArePreseeded: Bool = false
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
     ) {
         self.database = database
         self.makeUUID = makeUUID
         self.batchSequenceReservationStrategy = batchSequenceReservationStrategy
         self.payloadWriteMode = payloadWriteMode
-        self.freshDirectPayloadsArePreseeded = freshDirectPayloadsArePreseeded
     }
 
-    /// A fixed database lane makes the partition predicate indexable while
-    /// allowing the process to run any smaller worker count. Each worker owns
-    /// every stable lane congruent to its process-local partition index, so
-    /// ownership remains disjoint and complete when concurrency changes.
+    /// A fixed source-event lane makes the fresh predicate indexable while
+    /// assigning both recipients of one direct event to the same transaction.
+    /// Each worker owns every stable lane congruent to its process-local index,
+    /// so ownership remains disjoint when process concurrency changes.
     private static let stableFreshLaneCount: Int64 = 8
 
     private static func partitionEligibility(
@@ -88,7 +83,7 @@ public struct PostgresV2FanoutDeliveryStore:
         ).map { $0 }
         return """
             AND mod(
-                hashtextextended(delivery.target_user_id::text, 0)
+                hashtextextended(delivery.source_event_id::text, 0)
                     & 9223372036854775807,
                 8
             ) = ANY(\(bind: lanes)::bigint[])
@@ -332,7 +327,7 @@ public struct PostgresV2FanoutDeliveryStore:
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let candidates = try await sql.raw("""
+            var candidates = try await sql.raw("""
                 SELECT delivery.source_event_id, delivery.target_user_id,
                        delivery.projection_kind, delivery.completion_unit_id,
                        delivery.target_shard_bucket, delivery.observed_router_epoch,
@@ -360,6 +355,35 @@ public struct PostgresV2FanoutDeliveryStore:
                 LIMIT \(bind: limit)
                 FOR UPDATE OF delivery SKIP LOCKED
                 """).all(decoding: ClaimedDeliveryRow.self)
+            guard !candidates.isEmpty else { return [] }
+
+            // Stable lanes prevent same-process overlap. Replicas can still
+            // observe the same lane, and a boundary batch can contain only
+            // one of an event's two rows. A non-blocking source lock elects
+            // exactly one transaction to materialize that event's shared
+            // payload; losers release their row locks and retry later.
+            let candidateSourceIDs = Array(Set(candidates.map(\.sourceEventID)))
+                .sorted { $0.uuidString < $1.uuidString }
+            let candidateSourceIDsJSON = try batchJSON(candidateSourceIDs)
+            let ownedSources = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT value::uuid AS source_event_id
+                    FROM jsonb_array_elements_text(
+                        \(bind: candidateSourceIDsJSON)::jsonb
+                    ) AS value
+                )
+                SELECT source_event_id
+                FROM input
+                WHERE pg_try_advisory_xact_lock(
+                    hashtextextended(
+                        'v2-fresh-direct-source:' || source_event_id::text,
+                        0
+                    )
+                )
+                ORDER BY source_event_id
+                """).all(decoding: SourceEventRow.self)
+            let ownedSourceIDs = Set(ownedSources.map(\.sourceEventID))
+            candidates.removeAll { !ownedSourceIDs.contains($0.sourceEventID) }
             guard !candidates.isEmpty else { return [] }
 
             let lockUsers = Array(Set(candidates.map { $0.targetUserID.uuidString.lowercased() }))
@@ -437,8 +461,7 @@ public struct PostgresV2FanoutDeliveryStore:
                 )
             }.sorted { $0.key < $1.key }
             let prepared = try await projectAndTerminalizeBatch(
-                sql: sql, ordered: ordered, now: now, fence: .freshDirect,
-                prepareSharedPayloads: !freshDirectPayloadsArePreseeded
+                sql: sql, ordered: ordered, now: now, fence: .freshDirect
             )
             guard prepared.count == ordered.count else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -1085,8 +1108,7 @@ public struct PostgresV2FanoutDeliveryStore:
         sql: any SQLDatabase,
         ordered: [BatchFanoutDeliveryLease],
         now: Date,
-        fence: BatchProjectionDeliveryFence = .claimed,
-        prepareSharedPayloads: Bool = true
+        fence: BatchProjectionDeliveryFence = .claimed
     ) async throws -> [PreparedFanoutDeliveryCommit] {
         let inputJSON = try batchJSON(try ordered.enumerated().map { offset, item in
             try BatchProjectionInput(ordinal: offset, item: item)
@@ -1133,9 +1155,7 @@ public struct PostgresV2FanoutDeliveryStore:
         // projection statement can then read its own newly inserted payload
         // plus any concurrently committed one without taking a no-op row
         // update lock on the common source event.
-        if prepareSharedPayloads {
-            try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
-        }
+        try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
         let sequenceReservationCTEs = usesDistinctTargetFastPath
             ? """
             reserved_sequence AS (

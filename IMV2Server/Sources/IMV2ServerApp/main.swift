@@ -334,9 +334,7 @@ enum IMV2ServerApp {
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    fanoutPayloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    coLocatedControlBuckets: coLocatedControlBuckets
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -472,9 +470,7 @@ enum IMV2ServerApp {
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    fanoutPayloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    coLocatedControlBuckets: coLocatedControlBuckets
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -520,8 +516,7 @@ enum IMV2ServerApp {
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(
                 database: deliveryDatabase,
-                payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                freshDirectPayloadsArePreseeded: !coLocatedControlBuckets.isEmpty
+                payloadWriteMode: configuration.fanoutPayloadWriteMode
             )
             let fanoutCompletionReleaseWorker = V2FanoutCompletionReleaseWorker(
                 store: fanoutDeliveryControlStore

@@ -134,6 +134,25 @@ public enum V2SchemaReadiness {
                 "\(schema).message_projection_states[room-event-storage]"
             )
         }
+        guard let freshSourceLaneIndex = try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_index AS index_record
+                JOIN pg_class AS index_relation
+                  ON index_relation.oid = index_record.indexrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = index_relation.relnamespace
+                WHERE namespace.nspname = \(bind: schema)
+                  AND index_relation.relname =
+                      'fanout_deliveries_fresh_source_lane_claim_idx'
+                  AND index_record.indisvalid
+                  AND index_record.indisready
+            ) AS exists
+            """).first(decoding: ExistsRow.self), freshSourceLaneIndex.exists else {
+            throw V2SchemaReadinessError.unavailableTable(
+                "\(schema).fanout_deliveries[fresh-source-lane-index]"
+            )
+        }
     }
 }
 

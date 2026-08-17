@@ -87,8 +87,10 @@ public protocol V2FanoutDeliveryStore: Sendable {
 }
 
 /// Optional claim capability for stores that can keep concurrent delivery
-/// workers target-user-disjoint. Other stores retain the original fenced
-/// `SKIP LOCKED` claim behavior.
+/// workers disjoint. Recovery lanes partition by target user; the co-located
+/// fresh-direct path may instead partition by source event so both recipients
+/// share one payload-materialization transaction. Other stores retain the
+/// original fenced `SKIP LOCKED` claim behavior.
 public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
     func claimPending(
         bucket: String?, lane: V2FanoutDeliveryClaimLane,
