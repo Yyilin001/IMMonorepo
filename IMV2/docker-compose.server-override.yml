@@ -2,23 +2,28 @@
 # The base compose file intentionally stays suitable for a developer laptop;
 # this overlay supplies server restart policy, file-descriptor ceilings and a
 # bounded PostgreSQL memory/WAL budget without weakening commit durability.
+# The limits total 12.75 GiB, leaving roughly 2 GiB for the kernel and Docker
+# on the 14.85-GiB host. PostgreSQL owns the largest share because the durable
+# working set is larger than 6 GiB; keeping the database at the old 4-GiB
+# limit forced the cgroup to repeatedly evict and refault database pages while
+# the host still had reclaimable memory.
 services:
   postgres:
     restart: unless-stopped
-    mem_limit: 4g
-    shm_size: 1g
+    mem_limit: 8g
+    shm_size: 2g
     command:
       - postgres
       - -c
       - max_connections=150
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=2GB
       - -c
-      - effective_cache_size=3GB
+      - effective_cache_size=6GB
       - -c
       - work_mem=8MB
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=512MB
       - -c
       - wal_buffers=16MB
       - -c
@@ -40,6 +45,7 @@ services:
 
   account:
     restart: unless-stopped
+    mem_limit: 1g
     ulimits:
       nofile:
         soft: 65536
@@ -47,7 +53,7 @@ services:
 
   gateway:
     restart: unless-stopped
-    mem_limit: 4g
+    mem_limit: 3g
     environment:
       # A delivery pass holds one PostgreSQL connection while it leases rows,
       # then performs commit-sized projection transactions. The generic 100k
@@ -71,6 +77,7 @@ services:
 
   operator:
     restart: unless-stopped
+    mem_limit: 512m
     ulimits:
       nofile:
         soft: 65536

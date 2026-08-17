@@ -14,7 +14,11 @@ services:
       # The normal local profile intentionally allows only 1,000 commands per
       # 24-hour fenced lease. A distinct immutable profile keeps performance
       # testing from weakening or mutating that application safety contract.
-      IM_V2_CAPACITY_PROFILE_ID: loadtest-v1
+      # A profile ID identifies one immutable 24-hour capacity lease. A fresh
+      # campaign must seed its pools and use fresh users/rooms; existing rooms
+      # remain bound to the profile under which they were created. The helper
+      # script enforces that explicit setup instead of rewriting room leases.
+      IM_V2_CAPACITY_PROFILE_ID: ${IM_V2_LOAD_CAPACITY_PROFILE_ID:-loadtest-v2}
       IM_V2_MAX_COMMANDS_PER_WINDOW: 100000
       # Stable pair hashing in the gateway spreads independent direct rooms
       # across admission rows while all data remains on this one PostgreSQL

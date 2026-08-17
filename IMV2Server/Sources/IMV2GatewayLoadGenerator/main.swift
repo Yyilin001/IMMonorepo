@@ -1,4 +1,8 @@
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -21,8 +25,12 @@ enum IMV2GatewayLoadGenerator {
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
             print(report.summary)
         } catch {
-            fputs("load generator failed: \(error)\n", stderr)
+            FileHandle.standardError.write(Data("load generator failed: \(error)\n".utf8))
+            #if canImport(Darwin)
             Darwin.exit(1)
+            #elseif canImport(Glibc)
+            Glibc.exit(1)
+            #endif
         }
     }
 }
@@ -30,6 +38,7 @@ enum IMV2GatewayLoadGenerator {
 private struct LoadConfiguration: Sendable {
     let host: String
     let port: Int
+    let revision: String
     let serverName: String
     let caPath: String
     let credentialsPath: String
@@ -67,6 +76,7 @@ private struct LoadConfiguration: Sendable {
         else { throw LoadError.invalidArguments }
 
         self.host = host
+        revision = values["--revision"] ?? "unknown"
         serverName = values["--server-name"] ?? "localhost"
         self.caPath = caPath
         self.credentialsPath = credentialsPath
@@ -825,7 +835,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
 }
 
 private struct LoadReport: Encodable {
-    let revision = "10a8d647d134e9ca7af6effee674aba6da271ae2"
+    let revision: String
     let host: String
     let port: Int
     let requestedConnections: Int
@@ -870,6 +880,7 @@ private struct LoadReport: Encodable {
     let terminalError: String?
 
     init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, terminalError: Error?) {
+        revision = configuration.revision
         host = configuration.host
         port = configuration.port
         requestedConnections = configuration.connections
@@ -970,6 +981,7 @@ private enum LoadError: Error, CustomStringConvertible {
 }
 
 private func residentMemoryBytes() -> UInt64 {
+    #if canImport(Darwin)
     var info = mach_task_basic_info()
     var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
     let result = withUnsafeMutablePointer(to: &info) { pointer in
@@ -978,6 +990,22 @@ private func residentMemoryBytes() -> UInt64 {
         }
     }
     return result == KERN_SUCCESS ? UInt64(info.resident_size) : 0
+    #elseif canImport(Glibc)
+    // Linux exposes the current resident set without requiring a sampling
+    // subprocess. Keep the parser deliberately narrow: VmRSS is expressed in
+    // KiB by procfs and a missing/malformed field disables only the local
+    // memory guard instead of aborting the workload.
+    guard let status = try? String(contentsOfFile: "/proc/self/status", encoding: .utf8),
+          let line = status.split(whereSeparator: \.isNewline).first(where: {
+              $0.hasPrefix("VmRSS:")
+          }),
+          let kibibytes = line.split(whereSeparator: \.isWhitespace)
+              .dropFirst()
+              .compactMap({ UInt64($0) })
+              .first
+    else { return 0 }
+    return kibibytes * 1_024
+    #endif
 }
 
 private extension TimeAmount {
