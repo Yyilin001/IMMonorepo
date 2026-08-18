@@ -939,6 +939,7 @@ enum IMV2ServerApp {
                         let pressure = await databaseWorkAdmission.snapshot()
                         selectedConcurrency = concurrencyController.concurrencyForPass(
                             isIdle: cadence.isIdle,
+                            foregroundInFlight: pressure.foregroundInFlight,
                             foregroundQueued: pressure.foregroundQueued
                         )
                         let report = try await fanoutPipeline.runDeliveryOnce(
@@ -955,6 +956,7 @@ enum IMV2ServerApp {
                             selectedConcurrency: selectedConcurrency,
                             claimedCount: report.claimedCount,
                             perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
+                            foregroundInFlight: pressureAfterPass.foregroundInFlight,
                             foregroundQueued: pressureAfterPass.foregroundQueued
                         )
                     } catch is CancellationError {
@@ -965,6 +967,7 @@ enum IMV2ServerApp {
                             selectedConcurrency: selectedConcurrency,
                             claimedCount: 0,
                             perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
+                            foregroundInFlight: pressure.foregroundInFlight,
                             foregroundQueued: pressure.foregroundQueued,
                             failed: true
                         )

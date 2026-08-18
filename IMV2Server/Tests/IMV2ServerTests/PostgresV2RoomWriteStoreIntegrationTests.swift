@@ -5726,6 +5726,45 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("unknown device refresh is terminal without a foreign-key failure or cross-account mutation")
+    func unknownDeviceCredentialRefreshIsTerminalNoOp() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let issuer = try V2PostgresDeviceCredentialService(
+                database: app.db(.psql),
+                tokenHMACKey: try .init(rawBytes: Data(repeating: 0x31, count: 32)),
+                replayEnvelopeKey: try .init(rawBytes: Data(repeating: 0x32, count: 32)),
+                now: { Date(timeIntervalSince1970: 1_750_000_000) }
+            )
+            let refresh = try V2DeviceCredentialRefresh(
+                userID: try .init("00000000-0000-0000-0000-000000000211"),
+                deviceID: try .init("00000000-0000-0000-0000-000000000212"),
+                refreshCredential: "unknown-refresh-credential",
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000213")!
+            )
+
+            #expect(try await issuer.refresh(refresh) == .terminalRejection)
+            #expect(try await count("im_v2.auth_devices", on: sql) == 0)
+            #expect(try await count("im_v2.device_refresh_sessions", on: sql) == 0)
+            #expect(try await count("im_v2.device_access_tokens", on: sql) == 0)
+            #expect(try await count("im_v2.device_revocation_events", on: sql) == 0)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("device sessions paginate metadata and revoke remote installations with bounded SQL")
     func deviceSessionManagementRevokesOnlyTheRequestedDevice() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

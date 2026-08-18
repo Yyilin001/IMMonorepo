@@ -48,7 +48,7 @@
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
-   Delivery 的配置值是上限，不再是持续忙时固定值：空闲探测使用 1 lane，正常前台安全值为 4；只有前台无排队且连续满批才逐级升到 8，一旦前台出现排队立即回落到 4。
+   Delivery 的配置值是上限，不再是持续忙时固定值：空闲探测使用 1 lane，正常前台安全值为 4；只有前台 `in-flight = 0`、`queued = 0` 且连续满批时才逐级升到 8，一旦出现已接纳或排队的前台工作立即回落到 4。仅观察 queue 会在前台槽位已经占满但尚未形成队列时错误扩容，造成尾延迟放大。
 5. 启用 Sync wake coalescing。比较 Pull 平均 records、Pull QPS、hint delivered/drop 和消息可见延迟。
 6. 最后开启成功日志采样。Prometheus 计数不受采样影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
 7. 空库或 backfill/inline 三项精确审计已经为 0 的压测环境，叠加
@@ -69,6 +69,8 @@
 - Gateway p50/p95/p99、`SERVER_BUSY`、`UNAVAILABLE`、PostgreSQL CPU、WAL bytes/s、commit latency、lock wait 和连接数。
 
 在 PostgreSQL 启用 `pg_stat_statements` 的环境中，按 total execution time、calls 和 mean time 检查 Top SQL。不要只凭一次 `EXPLAIN` 增加索引；候选索引必须在与生产数据分布相近的副本上用 `EXPLAIN (ANALYZE, BUFFERS, WAL)` 验证，并同时计算写放大和 relation size。
+
+私聊接受事务保持“大数据修改 CTE + 最终窄 shard 预留 UPDATE”两个语句。不要把 shard 预留合入主 CTE：单机 A/B 中，共享 shard 行锁使主 CTE mean time 从约 7.4 ms 增到 24.6 ms，350 msg/s 的消息 p95 从约 312 ms 回退到 1,994 ms。独立 UPDATE 仍处于同一数据库事务内，预留失败会回滚此前全部写入，不降低原子性。
 
 本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段使用
 同一统计纪元的前后快照计算差值，不要清空共享数据库统计：

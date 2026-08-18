@@ -521,6 +521,10 @@ CREATE TABLE im_v2.durable_work_replay_audit (
     CONSTRAINT durable_work_replay_audit_target_shape_check CHECK ((((target_kind = ANY (ARRAY['room_outbox'::text, 'content_review'::text, 'media_scan'::text, 'media_purge'::text])) AND (target_user_id IS NULL) AND (projection_kind IS NULL)) OR ((target_kind = 'fanout_delivery'::text) AND (target_user_id IS NOT NULL) AND (projection_kind IS NOT NULL)) OR ((target_kind = ANY (ARRAY['read_receipt_preference_propagation'::text, 'user_projection'::text])) AND (target_user_id IS NOT NULL) AND (projection_kind IS NULL))))
 );
 
+-- Fan-out bookkeeping is update-heavy: pending rows become terminal within
+-- seconds, while the normal retention worker removes them days later. Use a
+-- row-count-independent vacuum threshold so dead tuples and partial-index
+-- entries cannot grow for hours at sustained message rates.
 CREATE TABLE im_v2.fanout_completion_units (
     source_event_id uuid NOT NULL,
     completion_unit_id uuid NOT NULL,
@@ -540,7 +544,8 @@ CREATE TABLE im_v2.fanout_completion_units (
     CONSTRAINT fanout_completion_units_retry_count_check CHECK ((retry_count >= 0)),
     CONSTRAINT fanout_completion_units_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'terminal'::text, 'released'::text]))),
     CONSTRAINT fanout_completion_units_target_count_check CHECK ((target_count >= 0))
-);
+)
+WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
 
 CREATE TABLE im_v2.fanout_deliveries (
     source_event_id uuid NOT NULL,
@@ -563,7 +568,8 @@ CREATE TABLE im_v2.fanout_deliveries (
     CONSTRAINT fanout_deliveries_pause_state_check CHECK (((state = 'paused'::text) = (paused_at IS NOT NULL))),
     CONSTRAINT fanout_deliveries_retry_count_check CHECK ((retry_count >= 0)),
     CONSTRAINT fanout_deliveries_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'terminal'::text, 'paused'::text])))
-);
+)
+WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
 
 CREATE TABLE im_v2.fanout_plan_targets (
     source_event_id uuid NOT NULL,
@@ -591,30 +597,8 @@ CREATE TABLE im_v2.fanout_plans (
     CONSTRAINT fanout_plans_source_room_sequence_check CHECK ((source_room_sequence > 0)),
     CONSTRAINT fanout_plans_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'terminal'::text]))),
     CONSTRAINT fanout_plans_target_count_check CHECK (((target_count IS NULL) OR (target_count >= 0)))
-);
-
--- Fan-out bookkeeping is update-heavy: pending rows become terminal within
--- seconds, while the normal retention worker removes them days later. Use a
--- row-count-independent vacuum threshold so dead tuples and partial-index
--- entries cannot grow for hours at sustained message rates.
-ALTER TABLE im_v2.fanout_deliveries SET (
-    autovacuum_vacuum_scale_factor = 0.02,
-    autovacuum_vacuum_threshold = 1000,
-    autovacuum_analyze_scale_factor = 0.02,
-    autovacuum_analyze_threshold = 1000
-);
-ALTER TABLE im_v2.fanout_completion_units SET (
-    autovacuum_vacuum_scale_factor = 0.02,
-    autovacuum_vacuum_threshold = 1000,
-    autovacuum_analyze_scale_factor = 0.02,
-    autovacuum_analyze_threshold = 1000
-);
-ALTER TABLE im_v2.fanout_plans SET (
-    autovacuum_vacuum_scale_factor = 0.02,
-    autovacuum_vacuum_threshold = 1000,
-    autovacuum_analyze_scale_factor = 0.02,
-    autovacuum_analyze_threshold = 1000
-);
+)
+WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
 
 CREATE TABLE im_v2.fanout_sync_payloads (
     source_event_id uuid NOT NULL,

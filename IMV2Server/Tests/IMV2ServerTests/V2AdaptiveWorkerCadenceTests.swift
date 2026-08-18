@@ -32,11 +32,12 @@ struct V2AdaptiveWorkerCadenceTests {
             saturatedPassesBeforeScaleUp: 2
         )
 
-        #expect(controller.concurrencyForPass(isIdle: false, foregroundQueued: 0) == 4)
+        #expect(controller.concurrencyForPass(isIdle: false, foregroundInFlight: 0, foregroundQueued: 0) == 4)
         controller.observePass(
             selectedConcurrency: 4,
             claimedCount: 512,
             perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
             foregroundQueued: 0
         )
         #expect(controller.activeConcurrency == 4)
@@ -44,13 +45,16 @@ struct V2AdaptiveWorkerCadenceTests {
             selectedConcurrency: 4,
             claimedCount: 512,
             perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
             foregroundQueued: 0
         )
         #expect(controller.activeConcurrency == 5)
 
-        #expect(controller.concurrencyForPass(isIdle: true, foregroundQueued: 0) == 1)
+        #expect(controller.concurrencyForPass(isIdle: true, foregroundInFlight: 0, foregroundQueued: 0) == 1)
         #expect(controller.activeConcurrency == 5)
-        #expect(controller.concurrencyForPass(isIdle: false, foregroundQueued: 1) == 4)
+        #expect(controller.concurrencyForPass(isIdle: false, foregroundInFlight: 1, foregroundQueued: 0) == 4)
+        #expect(controller.activeConcurrency == 4)
+        #expect(controller.concurrencyForPass(isIdle: false, foregroundInFlight: 0, foregroundQueued: 1) == 4)
         #expect(controller.activeConcurrency == 4)
     }
 
@@ -66,20 +70,56 @@ struct V2AdaptiveWorkerCadenceTests {
             selectedConcurrency: 4,
             claimedCount: 511,
             perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
             foregroundQueued: 0
         )
         controller.observePass(
             selectedConcurrency: 1,
             claimedCount: 128,
             perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
             foregroundQueued: 0
         )
         controller.observePass(
             selectedConcurrency: 4,
             claimedCount: 512,
             perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
             foregroundQueued: 0,
             failed: true
+        )
+
+        #expect(controller.activeConcurrency == 4)
+    }
+
+    @Test("admitted foreground work resets delivery scale-up evidence before a queue forms")
+    func adaptiveDeliveryConcurrencyTreatsInFlightAsPressure() {
+        var controller = V2AdaptiveFanoutDeliveryConcurrency(
+            configuredMaximum: 6,
+            foregroundSafeMaximum: 4,
+            saturatedPassesBeforeScaleUp: 2
+        )
+
+        controller.observePass(
+            selectedConcurrency: 4,
+            claimedCount: 512,
+            perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
+            foregroundQueued: 0
+        )
+        controller.observePass(
+            selectedConcurrency: 4,
+            claimedCount: 512,
+            perLaneSaturationCount: 128,
+            foregroundInFlight: 1,
+            foregroundQueued: 0
+        )
+        controller.observePass(
+            selectedConcurrency: 4,
+            claimedCount: 512,
+            perLaneSaturationCount: 128,
+            foregroundInFlight: 0,
+            foregroundQueued: 0
         )
 
         #expect(controller.activeConcurrency == 4)
@@ -90,6 +130,6 @@ struct V2AdaptiveWorkerCadenceTests {
         var controller = V2AdaptiveFanoutDeliveryConcurrency(configuredMaximum: 2)
 
         #expect(controller.activeConcurrency == 2)
-        #expect(controller.concurrencyForPass(isIdle: false, foregroundQueued: 7) == 2)
+        #expect(controller.concurrencyForPass(isIdle: false, foregroundInFlight: 2, foregroundQueued: 7) == 2)
     }
 }

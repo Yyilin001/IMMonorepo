@@ -83,15 +83,18 @@ public struct V2AdaptiveFanoutDeliveryConcurrency: Equatable, Sendable {
         activeConcurrency = min(configuredMaximum, foregroundSafeMaximum)
     }
 
-    /// Idle polling is always a one-lane probe. Foreground pressure is sampled
-    /// immediately before every pass so queued commands do not wait for a busy
-    /// delivery pass to finish before the controller sheds background work.
+    /// Idle polling is always a one-lane probe. Foreground pressure includes
+    /// admitted work as well as queued work: waiting for the queue alone lets
+    /// Delivery expand while every reserved foreground slot is already busy,
+    /// which creates a self-amplifying latency cliff at saturation.
     public mutating func concurrencyForPass(
         isIdle: Bool,
+        foregroundInFlight: Int,
         foregroundQueued: Int
     ) -> Int {
+        precondition(foregroundInFlight >= 0)
         precondition(foregroundQueued >= 0)
-        if foregroundQueued > 0 {
+        if foregroundInFlight > 0 || foregroundQueued > 0 {
             activeConcurrency = foregroundSafeMaximum
             consecutiveSaturatedPasses = 0
         }
@@ -106,15 +109,17 @@ public struct V2AdaptiveFanoutDeliveryConcurrency: Equatable, Sendable {
         selectedConcurrency: Int,
         claimedCount: Int,
         perLaneSaturationCount: Int,
+        foregroundInFlight: Int,
         foregroundQueued: Int,
         failed: Bool = false
     ) {
         precondition(selectedConcurrency > 0)
         precondition(claimedCount >= 0)
         precondition(perLaneSaturationCount > 0)
+        precondition(foregroundInFlight >= 0)
         precondition(foregroundQueued >= 0)
 
-        guard !failed, foregroundQueued == 0 else {
+        guard !failed, foregroundInFlight == 0, foregroundQueued == 0 else {
             activeConcurrency = foregroundSafeMaximum
             consecutiveSaturatedPasses = 0
             return

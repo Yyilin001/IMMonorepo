@@ -383,10 +383,37 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     }
 
     private func revokeDevice(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID, at now: Date) async throws {
-        try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at = COALESCE(revoked_at, \(bind: now)) WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)").run()
-        try await sql.raw("UPDATE im_v2.device_refresh_sessions SET revoked_at = COALESCE(revoked_at, \(bind: now)) WHERE device_id = \(bind: deviceID)").run()
-        try await sql.raw("UPDATE im_v2.device_access_tokens SET revoked_at = COALESCE(revoked_at, \(bind: now)) WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)").run()
-        try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) VALUES (\(bind: userID), \(bind: deviceID), \(bind: now)) ON CONFLICT (device_id) DO NOTHING").run()
+        // Anchor every mutation to an authoritative user/device row. An
+        // unknown or mismatched device must be a terminal no-op: inserting a
+        // revocation event for it violates the event foreign key, while
+        // revoking a refresh session by device ID alone could affect another
+        // account when the request carries the wrong user ID.
+        try await sql.raw("""
+            WITH revoked_device AS MATERIALIZED (
+                UPDATE im_v2.auth_devices
+                SET revoked_at = COALESCE(revoked_at, \(bind: now))
+                WHERE user_id = \(bind: userID)
+                  AND device_id = \(bind: deviceID)
+                RETURNING user_id, device_id
+            ), revoked_refresh_session AS (
+                UPDATE im_v2.device_refresh_sessions AS session
+                SET revoked_at = COALESCE(session.revoked_at, \(bind: now))
+                FROM revoked_device AS device
+                WHERE session.device_id = device.device_id
+                RETURNING session.device_id
+            ), revoked_access_tokens AS (
+                UPDATE im_v2.device_access_tokens AS token
+                SET revoked_at = COALESCE(token.revoked_at, \(bind: now))
+                FROM revoked_device AS device
+                WHERE token.user_id = device.user_id
+                  AND token.device_id = device.device_id
+                RETURNING token.device_id
+            )
+            INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at)
+            SELECT user_id, device_id, \(bind: now)
+            FROM revoked_device
+            ON CONFLICT (device_id) DO NOTHING
+            """).run()
     }
 
     private func lock(_ sql: any SQLDatabase, key: String) async throws {
