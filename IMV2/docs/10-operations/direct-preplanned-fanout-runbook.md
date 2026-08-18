@@ -7,10 +7,16 @@
 ```text
 IM_V2_DIRECT_FANOUT_MODE=planner     # 兼容基线
 IM_V2_DIRECT_FANOUT_MODE=preplanned  # 仅 message.accepted 私聊快路径
+IM_V2_DIRECT_FANOUT_MODE=room_log    # 私聊 message.accepted 以 room_events/cursor 可靠恢复
 ```
 
 该开关不适用于群聊，不关闭 Delivery Worker，也不修改权限策略。内容审核是独立 durable lane；
 关闭审核只减少该 lane 的工作，不能作为启用 fast path 的前置条件。
+
+`room_log` 不创建该消息的 `room_outbox`、fanout plan/completion/delivery、共享投影引用或
+`user_sync_log` message 行。其正确性审计应改为检查一条 canonical message 对应一条 room event，
+并确认没有上述 fanout 工件；压测必须启用 `--room-log-reads 1`，让每个压测客户端按 cursor 拉取。
+编辑、撤回、reaction 和 moderation mutation 尚未改走 room log，仍需按原 fanout 指标观察。
 
 ## 启用前门槛
 

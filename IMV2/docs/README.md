@@ -17,6 +17,7 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | 执行用户分片迁移 | [user-shard migration runbook](10-operations/user-shard-migration-runbook.md) |
 | 灰度消息投影正文去重 | [message projection sharing runbook](10-operations/message-projection-sharing-runbook.md) |
 | 灰度私聊直达投递 | [direct preplanned fan-out runbook](10-operations/direct-preplanned-fanout-runbook.md) |
+| 私聊房间日志恢复决策 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) |
 
 ## 阅读约定
 
