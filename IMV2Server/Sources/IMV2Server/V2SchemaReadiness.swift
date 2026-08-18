@@ -214,7 +214,7 @@ public enum V2SchemaReadiness {
                 AND COUNT(*) FILTER (
                     WHERE trigger_record.tgname IN (
                         'user_sync_log_projection_effect_v4',
-                        'user_sync_log_snapshot_v5_projection'
+                        'user_sync_log_snapshot_v6_projection'
                     )
                 ) = 2 AS exists
             FROM pg_trigger AS trigger_record

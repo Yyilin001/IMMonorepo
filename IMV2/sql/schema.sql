@@ -75,7 +75,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.enqueue_user_projection_v5() RETURNS trigger
+CREATE FUNCTION im_v2.enqueue_user_projection_v6() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -84,11 +84,7 @@ BEGIN
     SELECT user_id, 0, min(created_at)
     FROM inserted_user_sync_rows
     GROUP BY user_id
-    ON CONFLICT (user_id) DO UPDATE SET updated_at = LEAST(
-        im_v2.user_projection_checkpoints.updated_at,
-        EXCLUDED.updated_at
-    )
-    WHERE im_v2.user_projection_checkpoints.updated_at > EXCLUDED.updated_at;
+    ON CONFLICT (user_id) DO NOTHING;
 
     INSERT INTO im_v2.user_projection_ready
         (user_id, available_at, enqueued_at, updated_at)
@@ -99,19 +95,7 @@ BEGIN
       ON checkpoint.user_id = inserted.user_id
      AND checkpoint.state = 'ready'
     GROUP BY inserted.user_id
-    ON CONFLICT (user_id) DO UPDATE
-    SET available_at = LEAST(
-            im_v2.user_projection_ready.available_at,
-            EXCLUDED.available_at
-        ),
-        enqueued_at = LEAST(
-            im_v2.user_projection_ready.enqueued_at,
-            EXCLUDED.enqueued_at
-        ),
-        updated_at = GREATEST(
-            im_v2.user_projection_ready.updated_at,
-            EXCLUDED.updated_at
-        );
+    ON CONFLICT (user_id) DO NOTHING;
 
     INSERT INTO im_v2.user_sync_retention
         (user_id, compacted_through_sequence, updated_at)
@@ -2654,7 +2638,7 @@ CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON i
 
 CREATE TRIGGER user_sync_log_projection_effect_v4 AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.capture_user_projection_effect_v4();
 
-CREATE TRIGGER user_sync_log_snapshot_v5_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v5();
+CREATE TRIGGER user_sync_log_snapshot_v6_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v6();
 
 ALTER TABLE ONLY im_v2.content_review_cases
     ADD CONSTRAINT content_review_cases_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE CASCADE;

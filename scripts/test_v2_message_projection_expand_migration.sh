@@ -16,6 +16,8 @@ fanout_fresh_source_lane_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fa
 fanout_direct_eligibility_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-direct-eligibility-expand.sql"
 fanout_direct_target_lane_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-direct-target-lane-expand.sql"
 user_sync_log_statement_triggers_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-user-sync-log-statement-triggers-expand.sql"
+user_projection_ready_queue_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-user-projection-ready-queue-expand.sql"
+user_projection_ready_queue_v6_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-user-projection-ready-queue-v6-expand.sql"
 fanout_direct_user_microbatch_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-direct-user-microbatch-expand.sql"
 fanout_direct_integrity_expand_sql="${repo_root}/IMV2/sql/changes/2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql"
 expand_sql_relative="IMV2/sql/changes/2026-08-17-message-projection-sharing-expand.sql"
@@ -61,6 +63,8 @@ psql < "${fanout_fresh_source_lane_expand_sql}" >/dev/null
 psql < "${fanout_direct_eligibility_expand_sql}" >/dev/null
 psql < "${fanout_direct_target_lane_expand_sql}" >/dev/null
 psql < "${user_sync_log_statement_triggers_expand_sql}" >/dev/null
+psql < "${user_projection_ready_queue_expand_sql}" >/dev/null
+psql < "${user_projection_ready_queue_v6_expand_sql}" >/dev/null
 psql < "${fanout_direct_user_microbatch_expand_sql}" >/dev/null
 psql < "${fanout_direct_integrity_expand_sql}" >/dev/null
 

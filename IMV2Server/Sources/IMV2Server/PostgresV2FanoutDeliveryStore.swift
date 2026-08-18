@@ -374,22 +374,22 @@ public struct PostgresV2FanoutDeliveryStore:
         now: Date, limit: Int
     ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
         guard limit > 0 else { return [] }
-        var mayRetryConcurrentCompatibilityMaterialization = true
+        var mayRetryConcurrentPayloadMaterialization = true
         while true {
             do {
                 return try await commitFreshDirectPreplannedOnce(
                     bucket: bucket, partition: partition, now: now, limit: limit
                 )
             } catch V2FanoutDeliveryError.inboxAlreadyCommitted
-                where mayRetryConcurrentCompatibilityMaterialization {
+                where mayRetryConcurrentPayloadMaterialization {
                 // Two replicas can recover different recipients of one event
-                // accepted by an older binary while its shared payload row is
-                // still absent. Under READ COMMITTED, the loser of INSERT ..
-                // ON CONFLICT cannot see the winner in its original statement
-                // snapshot. Roll back its untouched delivery rows and retry
-                // once; a real immutable inbox conflict repeats and remains a
-                // hard error on the second attempt.
-                mayRetryConcurrentCompatibilityMaterialization = false
+                // while its shared payload row is still absent. Under READ
+                // COMMITTED, the loser of INSERT .. ON CONFLICT cannot see the
+                // winner in its original statement snapshot. Roll back its
+                // untouched delivery rows and retry once; a real immutable
+                // inbox conflict repeats and remains a hard error on the
+                // second attempt.
+                mayRetryConcurrentPayloadMaterialization = false
             }
         }
     }
@@ -1286,12 +1286,11 @@ public struct PostgresV2FanoutDeliveryStore:
                 AND delivery.retry_count = 0
                 """
         }
-        // Fresh direct acceptance already materializes the one immutable
-        // shared body in its source transaction. Skipping this statement is
-        // safe because `verified_payloads` below remains an integrity fence:
-        // a missing or mismatched row cannot produce an inbox/log commit.
-        // The claimed compatibility lane still materializes payloads for
-        // older binaries and non-message fan-out event kinds.
+        // Fresh-direct projection materializes the one immutable shared body
+        // inside the projection statement below, keeping that write off the
+        // acknowledgement path without weakening its integrity fence. The
+        // claimed lane retains the established separate materialization step
+        // for non-direct, older-binary and non-message work.
         if case .claimed = fence {
             try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
         }
@@ -1373,12 +1372,12 @@ public struct PostgresV2FanoutDeliveryStore:
                 FROM payload_keys
                 JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
             ), materialized_missing_payloads AS (
-                -- Current acceptance binaries create this immutable row in
-                -- the source transaction. Keep an in-statement expand-path
-                -- for deliveries accepted by an older binary or restored by
-                -- an operator. `DO NOTHING` never rewrites a current row, and
-                -- the RETURNING key lets this statement consume its own new
-                -- row without a second database round trip.
+                -- Create the immutable shared body in the same transaction as
+                -- its first durable inbox/log effects. `DO NOTHING` never
+                -- rewrites a current row, and the RETURNING key lets this
+                -- statement consume its own new row without a second database
+                -- round trip. Restored and older-binary work uses the same
+                -- integrity path.
                 INSERT INTO im_v2.fanout_sync_payloads
                     (source_event_id, projection_kind, payload,
                      message_state_id, created_at)

@@ -334,8 +334,7 @@ enum IMV2ServerApp {
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -471,8 +470,7 @@ enum IMV2ServerApp {
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode
+                    directFanoutMode: configuration.directFanoutMode
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits

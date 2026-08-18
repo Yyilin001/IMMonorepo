@@ -475,6 +475,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw(
                 "CREATE TABLE im_v2.test_checkpoint_updates (user_id uuid NOT NULL)"
             ).run()
+            try await sql.raw(
+                "CREATE TABLE im_v2.test_ready_updates (user_id uuid NOT NULL)"
+            ).run()
             try await sql.raw("""
                 CREATE FUNCTION im_v2.record_test_checkpoint_update() RETURNS trigger
                     LANGUAGE plpgsql AS $$
@@ -485,9 +488,23 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 $$
                 """).run()
             try await sql.raw("""
+                CREATE FUNCTION im_v2.record_test_ready_update() RETURNS trigger
+                    LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO im_v2.test_ready_updates (user_id) VALUES (NEW.user_id);
+                    RETURN NEW;
+                END;
+                $$
+                """).run()
+            try await sql.raw("""
                 CREATE TRIGGER record_test_checkpoint_update
                     AFTER UPDATE ON im_v2.user_projection_checkpoints
                     FOR EACH ROW EXECUTE FUNCTION im_v2.record_test_checkpoint_update()
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER record_test_ready_update
+                    AFTER UPDATE ON im_v2.user_projection_ready
+                    FOR EACH ROW EXECUTE FUNCTION im_v2.record_test_ready_update()
                 """).run()
 
             // Four rows and two users produce exactly two checkpoint/retention
@@ -510,6 +527,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.user_sync_retention", on: sql) == 2)
             #expect(try await count("im_v2.user_projection_effects", on: sql) == 4)
             #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
+            #expect(try await count("im_v2.test_ready_updates", on: sql) == 0)
 
             // Newer work must not rewrite an unchanged checkpoint tuple.
             try await sql.raw("""
@@ -527,9 +545,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      '{"state":"accepted"}'::jsonb, 'inline', \(bind: later))
                 """).run()
             #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
+            #expect(try await count("im_v2.test_ready_updates", on: sql) == 0)
 
-            // A backdated migration record still moves scheduling time once,
-            // after per-statement user deduplication.
+            // Backdated restoration work is already represented by the
+            // durable wake row. It must not rewrite either row or contend
+            // with a projector that currently owns them.
             try await sql.raw("""
                 INSERT INTO im_v2.user_sync_log
                     (user_id, user_sync_sequence, source_event_id,
@@ -538,11 +558,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     (\(bind: firstUser), 5, \(bind: events[8]), 'relationship',
                      '{"state":"accepted"}'::jsonb, 'inline', \(bind: backdated))
                 """).run()
-            #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 1)
+            #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
+            #expect(try await count("im_v2.test_ready_updates", on: sql) == 0)
             let backdatedCheckpoint = try #require(try await sql.raw("""
                 SELECT COUNT(*) AS value
                 FROM im_v2.user_projection_checkpoints
-                WHERE user_id = \(bind: firstUser) AND updated_at = \(bind: backdated)
+                WHERE user_id = \(bind: firstUser) AND updated_at = \(bind: now)
                 """).first(decoding: CountRow.self))
             #expect(backdatedCheckpoint.value == 1)
 
@@ -2165,8 +2186,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 shadowForwarder: messageShadowRecorder,
                 contentReviewMode: .enabled,
-                directFanoutMode: .preplanned,
-                payloadWriteMode: .reference
+                directFanoutMode: .preplanned
             )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
@@ -2306,7 +2326,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count(
                 "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
                 on: sql
-            ) == acceptedEventCount)
+            ) == 0)
 
             let directDeliveryControl = PostgresV2FanoutDeliveryStore(
                 database: app.db(.psql), payloadWriteMode: .reference
