@@ -1,0 +1,8 @@
+# Opt-in overlay for the direct-room canonical event-log recovery path.
+# Apply only after the client build that owns durable direct room cursors is
+# available. This changes new direct `message.accepted` writes only; group
+# delivery and direct message mutations retain their existing paths.
+services:
+  gateway:
+    environment:
+      IM_V2_DIRECT_FANOUT_MODE: room_log
