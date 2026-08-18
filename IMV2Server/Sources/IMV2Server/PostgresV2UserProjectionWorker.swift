@@ -60,16 +60,19 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             }
             guard let checkpoint = try await sql.raw("""
                 SELECT checkpoint.user_id, checkpoint.projected_sequence
-                FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                FROM \(unsafeRaw: table("user_projection_ready")) AS ready
+                JOIN \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                  ON checkpoint.user_id = ready.user_id
                 JOIN \(unsafeRaw: table("user_sync_sequences")) AS sequence
                   ON sequence.user_id = checkpoint.user_id
-                WHERE checkpoint.projected_sequence < sequence.next_sequence
+                WHERE ready.available_at <= \(bind: now)
+                  AND checkpoint.projected_sequence < sequence.next_sequence
                   AND checkpoint.state = 'ready'
                   AND (checkpoint.next_attempt_at IS NULL OR checkpoint.next_attempt_at <= \(bind: now))
                   AND (checkpoint.migration_fence_expires_at IS NULL
                        OR checkpoint.migration_fence_expires_at <= now())
-                ORDER BY checkpoint.updated_at, checkpoint.user_id
-                FOR UPDATE OF checkpoint SKIP LOCKED
+                ORDER BY ready.available_at, ready.enqueued_at, ready.user_id
+                FOR UPDATE OF ready, checkpoint SKIP LOCKED
                 LIMIT 1
                 """).first(decoding: ProjectionCheckpointRow.self) else {
                 return .init(claimed: false, appliedRecordCount: 0)
@@ -179,12 +182,28 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 rowIndex += 1
             }
             try await sql.raw("""
-                UPDATE \(unsafeRaw: table("user_projection_checkpoints"))
-                SET projected_sequence = \(bind: expected - 1), state = 'ready',
-                    failure_count = 0, failed_sequence = NULL,
-                    next_attempt_at = NULL, last_failure_code = NULL,
-                    paused_at = NULL, updated_at = \(bind: now)
-                WHERE user_id = \(bind: checkpoint.userID)
+                WITH advanced AS (
+                    UPDATE \(unsafeRaw: table("user_projection_checkpoints"))
+                    SET projected_sequence = \(bind: expected - 1), state = 'ready',
+                        failure_count = 0, failed_sequence = NULL,
+                        next_attempt_at = NULL, last_failure_code = NULL,
+                        paused_at = NULL, updated_at = \(bind: now)
+                    WHERE user_id = \(bind: checkpoint.userID)
+                    RETURNING user_id, projected_sequence
+                ), removed_if_caught_up AS (
+                    DELETE FROM \(unsafeRaw: table("user_projection_ready")) AS ready
+                    USING advanced, \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                    WHERE ready.user_id = advanced.user_id
+                      AND sequence.user_id = advanced.user_id
+                      AND sequence.next_sequence <= advanced.projected_sequence
+                    RETURNING ready.user_id
+                )
+                UPDATE \(unsafeRaw: table("user_projection_ready")) AS ready
+                SET available_at = \(bind: now), updated_at = \(bind: now)
+                FROM advanced, \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                WHERE ready.user_id = advanced.user_id
+                  AND sequence.user_id = advanced.user_id
+                  AND sequence.next_sequence > advanced.projected_sequence
                 """).run()
             return .init(claimed: true, appliedRecordCount: rows.count)
             }
@@ -356,6 +375,15 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                         updated_at = \(bind: now)
                     WHERE user_id = \(bind: failure.userID)
                     """).run()
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: table("user_projection_ready"))
+                        (user_id, available_at, enqueued_at, updated_at)
+                    VALUES (\(bind: failure.userID), \(bind: nextAttemptAt),
+                            \(bind: now), \(bind: now))
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET available_at = EXCLUDED.available_at,
+                        updated_at = EXCLUDED.updated_at
+                    """).run()
                 return .init(claimed: true, appliedRecordCount: 0, failedRecordCount: 1)
             case .pause:
                 try await sql.raw("""
@@ -365,6 +393,10 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                         next_attempt_at = NULL,
                         last_failure_code = \(bind: failure.code),
                         paused_at = \(bind: now), updated_at = \(bind: now)
+                    WHERE user_id = \(bind: failure.userID)
+                    """).run()
+                try await sql.raw("""
+                    DELETE FROM \(unsafeRaw: table("user_projection_ready"))
                     WHERE user_id = \(bind: failure.userID)
                     """).run()
                 return .init(

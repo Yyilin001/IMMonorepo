@@ -15,7 +15,7 @@ public enum V2SchemaReadiness {
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_permission_operations", "group_role_operations", "message_forward_operations",
         "fanout_plans", "fanout_plan_targets", "fanout_completion_units", "fanout_deliveries", "consumer_inbox",
         "user_sync_sequences", "user_sync_log", "fanout_sync_payloads", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
-        "user_projection_versions", "user_projection_checkpoints", "user_sync_retention", "sync_snapshot_artifacts",
+        "user_projection_versions", "user_projection_checkpoints", "user_projection_ready", "user_sync_retention", "sync_snapshot_artifacts",
         "sync_snapshot_pages", "device_snapshot_resets", "sync_tokens", "sync_receipts", "push_campaigns",
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints",
         "media_objects", "media_upload_operations", "media_upload_grants", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
@@ -214,7 +214,7 @@ public enum V2SchemaReadiness {
                 AND COUNT(*) FILTER (
                     WHERE trigger_record.tgname IN (
                         'user_sync_log_projection_effect_v4',
-                        'user_sync_log_snapshot_v4_projection'
+                        'user_sync_log_snapshot_v5_projection'
                     )
                 ) = 2 AS exists
             FROM pg_trigger AS trigger_record

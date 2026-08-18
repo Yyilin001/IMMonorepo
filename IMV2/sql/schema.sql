@@ -75,7 +75,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.enqueue_user_projection_v4() RETURNS trigger
+CREATE FUNCTION im_v2.enqueue_user_projection_v5() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -89,6 +89,29 @@ BEGIN
         EXCLUDED.updated_at
     )
     WHERE im_v2.user_projection_checkpoints.updated_at > EXCLUDED.updated_at;
+
+    INSERT INTO im_v2.user_projection_ready
+        (user_id, available_at, enqueued_at, updated_at)
+    SELECT inserted.user_id, min(inserted.created_at),
+           min(inserted.created_at), min(inserted.created_at)
+    FROM inserted_user_sync_rows AS inserted
+    JOIN im_v2.user_projection_checkpoints AS checkpoint
+      ON checkpoint.user_id = inserted.user_id
+     AND checkpoint.state = 'ready'
+    GROUP BY inserted.user_id
+    ON CONFLICT (user_id) DO UPDATE
+    SET available_at = LEAST(
+            im_v2.user_projection_ready.available_at,
+            EXCLUDED.available_at
+        ),
+        enqueued_at = LEAST(
+            im_v2.user_projection_ready.enqueued_at,
+            EXCLUDED.enqueued_at
+        ),
+        updated_at = GREATEST(
+            im_v2.user_projection_ready.updated_at,
+            EXCLUDED.updated_at
+        );
 
     INSERT INTO im_v2.user_sync_retention
         (user_id, compacted_through_sequence, updated_at)
@@ -1679,6 +1702,13 @@ CREATE TABLE im_v2.user_projection_effects (
     CONSTRAINT user_projection_effects_user_sync_sequence_check CHECK ((user_sync_sequence > 0))
 );
 
+CREATE TABLE im_v2.user_projection_ready (
+    user_id uuid NOT NULL,
+    available_at timestamp with time zone NOT NULL,
+    enqueued_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
 CREATE TABLE im_v2.user_projection_versions (
     user_id uuid NOT NULL,
     projection_kind text NOT NULL,
@@ -2299,6 +2329,9 @@ ALTER TABLE ONLY im_v2.user_projection_checkpoints
 ALTER TABLE ONLY im_v2.user_projection_effects
     ADD CONSTRAINT user_projection_effects_pkey PRIMARY KEY (user_id, source_event_id, projection_kind);
 
+ALTER TABLE ONLY im_v2.user_projection_ready
+    ADD CONSTRAINT user_projection_ready_pkey PRIMARY KEY (user_id);
+
 ALTER TABLE ONLY im_v2.user_projection_versions
     ADD CONSTRAINT user_projection_versions_pkey PRIMARY KEY (user_id, projection_kind, entity_key, valid_from_sequence);
 
@@ -2575,6 +2608,8 @@ CREATE INDEX user_projection_effects_direct_room_idx ON im_v2.user_projection_ef
 
 CREATE INDEX user_projection_effects_user_sequence_idx ON im_v2.user_projection_effects USING btree (user_id, user_sync_sequence);
 
+CREATE INDEX user_projection_ready_claim_idx ON im_v2.user_projection_ready USING btree (available_at, enqueued_at, user_id);
+
 CREATE UNIQUE INDEX user_projection_versions_current_idx ON im_v2.user_projection_versions USING btree (user_id, projection_kind, entity_key) WHERE (valid_to_sequence IS NULL);
 
 CREATE INDEX user_projection_versions_current_room_idx ON im_v2.user_projection_versions USING btree (user_id, scope_room_id) WHERE ((valid_to_sequence IS NULL) AND (scope_room_id IS NOT NULL));
@@ -2619,7 +2654,7 @@ CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON i
 
 CREATE TRIGGER user_sync_log_projection_effect_v4 AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.capture_user_projection_effect_v4();
 
-CREATE TRIGGER user_sync_log_snapshot_v4_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v4();
+CREATE TRIGGER user_sync_log_snapshot_v5_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v5();
 
 ALTER TABLE ONLY im_v2.content_review_cases
     ADD CONSTRAINT content_review_cases_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE CASCADE;

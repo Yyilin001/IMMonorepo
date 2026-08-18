@@ -16,19 +16,22 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let shadowForwarder: any V2UserShardProjectionShadowing
     private let contentReviewMode: V2ContentReviewMode
     private let directFanoutMode: V2DirectFanoutMode
+    private let payloadWriteMode: V2FanoutPayloadWriteMode
 
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
         shadowForwarder: any V2UserShardProjectionShadowing,
         contentReviewMode: V2ContentReviewMode,
-        directFanoutMode: V2DirectFanoutMode = .planner
+        directFanoutMode: V2DirectFanoutMode = .planner,
+        payloadWriteMode: V2FanoutPayloadWriteMode = .body
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
         self.shadowForwarder = shadowForwarder
         self.contentReviewMode = contentReviewMode
         self.directFanoutMode = directFanoutMode
+        self.payloadWriteMode = payloadWriteMode
     }
 
     public func accept(
@@ -1299,9 +1302,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 FROM event_insert
                 WHERE event_insert.payload = \(bind: messageProjectionState.payloadJSON)::jsonb
                 ON CONFLICT DO NOTHING
-                RETURNING 1
+                RETURNING state_id
             ), message_state_existing AS MATERIALIZED (
-                SELECT 1
+                SELECT state_id
                 FROM im_v2.message_projection_state_values
                 WHERE state_id = \(bind: messageProjectionState.stateID)
                   AND message_id = \(bind: messageProjectionState.messageID)
@@ -1313,6 +1316,22 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                   AND is_withdrawn = \(bind: messageProjectionState.isWithdrawn)
                   AND payload_schema_version = \(bind: messageProjectionState.payloadSchemaVersion)
                   AND payload = \(bind: messageProjectionState.payloadJSON)::jsonb
+            ), message_state_ready AS MATERIALIZED (
+                SELECT state_id FROM message_state_insert
+                UNION ALL
+                SELECT state_id FROM message_state_existing
+            ), shared_payload_insert AS (
+                INSERT INTO im_v2.fanout_sync_payloads
+                    (source_event_id, projection_kind, payload,
+                     message_state_id, created_at)
+                SELECT event_insert.event_id, 'message',
+                       CASE WHEN \(bind: payloadWriteMode == .reference)
+                            THEN NULL ELSE event_insert.payload END,
+                       message_state_ready.state_id, \(bind: message.createdAt)
+                FROM event_insert
+                CROSS JOIN message_state_ready
+                ON CONFLICT DO NOTHING
+                RETURNING source_event_id
             ), authoritative_direct_targets AS MATERIALIZED (
                 SELECT membership.user_id
                 FROM event_insert
@@ -1429,6 +1448,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    (SELECT count(*) FROM event_insert) AS event_count,
                    ((SELECT count(*) FROM message_state_insert)
                     + (SELECT count(*) FROM message_state_existing)) AS message_state_count,
+                   (SELECT count(*) FROM shared_payload_insert) AS shared_payload_count,
                    (SELECT count(*) FROM plan_insert) AS plan_count,
                    (SELECT count(*) FROM outbox_insert) AS outbox_count,
                    (SELECT target_count FROM direct_shape) AS direct_target_count,
@@ -1445,6 +1465,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               mutation.mentionCount == Int64(message.mentions.count),
               mutation.eventCount == 1,
               mutation.messageStateCount == 1,
+              mutation.sharedPayloadCount == 1,
               mutation.planCount == 1
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -1872,6 +1893,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     let mentionCount: Int64
     let eventCount: Int64
     let messageStateCount: Int64
+    let sharedPayloadCount: Int64
     let planCount: Int64
     let outboxCount: Int64
     let directTargetCount: Int64
@@ -1889,6 +1911,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
         case mentionCount = "mention_count"
         case eventCount = "event_count"
         case messageStateCount = "message_state_count"
+        case sharedPayloadCount = "shared_payload_count"
         case planCount = "plan_count"
         case outboxCount = "outbox_count"
         case directTargetCount = "direct_target_count"

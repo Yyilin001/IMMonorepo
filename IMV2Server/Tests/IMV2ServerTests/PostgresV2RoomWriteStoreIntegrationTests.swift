@@ -991,6 +991,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 claimed: true, appliedRecordCount: 2
             ))
             #expect(try await worker.runOnce(now: createdAt).claimed == false)
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 0)
             let projected = try await currentV3ProjectionItems(
                 sql: sql, userID: .init(user.uuidString), kind: "message"
             )
@@ -2164,7 +2165,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 shadowForwarder: messageShadowRecorder,
                 contentReviewMode: .enabled,
-                directFanoutMode: .preplanned
+                directFanoutMode: .preplanned,
+                payloadWriteMode: .reference
             )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
@@ -2304,7 +2306,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count(
                 "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
                 on: sql
-            ) == 0)
+            ) == acceptedEventCount)
 
             let directDeliveryControl = PostgresV2FanoutDeliveryStore(
                 database: app.db(.psql), payloadWriteMode: .reference
@@ -6039,6 +6041,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      \(bind: "{\"target_user_id\":\"\(target.uuidString.lowercased())\",\"state\":\"accepted\",\"updated_at_ms\":1750000000000}")::jsonb,
                      'inline', \(bind: now))
                 """).run()
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 2)
             let worker = PostgresV2UserProjectionWorker(
                 database: app.db(.psql),
                 batchSize: 10,
@@ -6054,6 +6057,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await worker.runOnce(now: now) == .init(
                 claimed: true, appliedRecordCount: 1
             ))
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 1)
             #expect(try await worker.runOnce(now: now.addingTimeInterval(2)) == .init(
                 claimed: true, appliedRecordCount: 0,
                 failedRecordCount: 1, pausedUserCount: 1
@@ -6067,6 +6071,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(paused.failureCount == 2)
             #expect(paused.failedSequence == 1)
             #expect(paused.lastFailureCode == "missing_payload")
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 0)
             #expect(try await currentV3ProjectionItems(
                 sql: sql, userID: .init(healthyUser.uuidString), kind: "relationship"
             ).count == 1)
@@ -6095,9 +6100,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ),
                 reason: .dataRepaired
             )).outcome == .requeued)
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 1)
             #expect(try await worker.runOnce(now: now.addingTimeInterval(3)) == .init(
                 claimed: true, appliedRecordCount: 1
             ))
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 0)
             #expect(try await currentV3ProjectionItems(
                 sql: sql, userID: .init(poisonUser.uuidString), kind: "relationship"
             ).count == 1)

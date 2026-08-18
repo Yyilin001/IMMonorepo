@@ -20,7 +20,7 @@
 - wire contract 为 protobuf protocol 19；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  121 张表、298 个索引、8 个非内部 trigger、8 个 schema function；这是唯一建库合同。
+  122 张表、300 个索引、8 个非内部 trigger、8 个 schema function；这是唯一建库合同。
   受控压测环境的既有 current-2 数据库可按 migration regression 覆盖的 expand 顺序在线更新，
   readiness 会拒绝缺少 statement-level Sync 或 fresh-direct 完整性合同的旧结构。
 - ClientKit 主 SQLite 与派生搜索库分别只有一个当前建库入口；已有本地数据库不升级，

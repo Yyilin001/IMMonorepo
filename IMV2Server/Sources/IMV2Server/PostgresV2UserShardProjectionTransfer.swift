@@ -172,6 +172,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 userID: userID, token: record.migrationID
             )
         }
+        try await sql.raw("DELETE FROM \(unsafeRaw: sourceTable("user_projection_ready")) WHERE user_id = \(bind: userID)").run()
         try await sql.raw("DELETE FROM \(unsafeRaw: sourceTable("user_projection_checkpoints")) WHERE user_id = \(bind: userID)").run()
         try await sql.raw("DELETE FROM \(unsafeRaw: sourceTable("user_sync_retention")) WHERE user_id = \(bind: userID)").run()
         try await sql.raw("DELETE FROM \(unsafeRaw: sourceTable("user_sync_sequences")) WHERE user_id = \(bind: userID)").run()
@@ -404,6 +405,26 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                     ON CONFLICT (user_id) DO UPDATE SET
                         compacted_through_sequence = EXCLUDED.compacted_through_sequence,
                         updated_at = EXCLUDED.updated_at
+                    """).run()
+            }
+            if let sequence, let checkpoint,
+               checkpoint.state == "ready",
+               checkpoint.projectedSequence < sequence.nextSequence {
+                let availableAt = checkpoint.nextAttemptAt ?? checkpoint.updatedAt
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: targetTable("user_projection_ready"))
+                        (user_id, available_at, enqueued_at, updated_at)
+                    VALUES (\(bind: userID), \(bind: availableAt),
+                            \(bind: checkpoint.updatedAt), \(bind: Date()))
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET available_at = EXCLUDED.available_at,
+                        enqueued_at = EXCLUDED.enqueued_at,
+                        updated_at = EXCLUDED.updated_at
+                    """).run()
+            } else {
+                try await sql.raw("""
+                    DELETE FROM \(unsafeRaw: targetTable("user_projection_ready"))
+                    WHERE user_id = \(bind: userID)
                     """).run()
             }
         }

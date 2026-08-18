@@ -374,6 +374,30 @@ public struct PostgresV2FanoutDeliveryStore:
         now: Date, limit: Int
     ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
         guard limit > 0 else { return [] }
+        var mayRetryConcurrentCompatibilityMaterialization = true
+        while true {
+            do {
+                return try await commitFreshDirectPreplannedOnce(
+                    bucket: bucket, partition: partition, now: now, limit: limit
+                )
+            } catch V2FanoutDeliveryError.inboxAlreadyCommitted
+                where mayRetryConcurrentCompatibilityMaterialization {
+                // Two replicas can recover different recipients of one event
+                // accepted by an older binary while its shared payload row is
+                // still absent. Under READ COMMITTED, the loser of INSERT ..
+                // ON CONFLICT cannot see the winner in its original statement
+                // snapshot. Roll back its untouched delivery rows and retry
+                // once; a real immutable inbox conflict repeats and remains a
+                // hard error on the second attempt.
+                mayRetryConcurrentCompatibilityMaterialization = false
+            }
+        }
+    }
+
+    private func commitFreshDirectPreplannedOnce(
+        bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
+        now: Date, limit: Int
+    ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
         let bucketEligibility: SQLQueryString = if let bucket {
             "AND delivery.target_shard_bucket = \(bind: bucket)"
         } else {
@@ -964,31 +988,33 @@ public struct PostgresV2FanoutDeliveryStore:
             guard let userID = UUID(uuidString: user.rawValue) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            return RouterFenceInput(ordinal: index, userID: userID)
+            return RouterFenceInput(
+                ordinal: index, userID: userID, lockUser: user.rawValue
+            )
         }
-        // The global configuration lock prevents an epoch change. Per-user
-        // advisory locks let unrelated users continue while serializing this
-        // batch with route finalization/cutover for exactly these identities.
-        let lockUsers = Array(Set(users.map(\.rawValue))).sorted()
-        let lockUsersJSON = try batchJSON(lockUsers)
-        try await sql.raw("""
-            SELECT pg_advisory_xact_lock_shared(hashtextextended(lock_user, 0))
-            FROM jsonb_array_elements_text(\(bind: lockUsersJSON)::jsonb) AS value(lock_user)
-            ORDER BY lock_user
-            """).run()
-        guard try await sql.raw("""
-            SELECT router_epoch
-            FROM im_v2.user_shard_router_configuration
-            WHERE configuration_key = TRUE
-            """).first(decoding: RouterFenceConfigurationRow.self) != nil
-        else { throw V2UserShardRouteControlError.missingRouterConfiguration }
         let inputJSON = try batchJSON(requested)
+        // Acquire the stable, de-duplicated per-user cutover barrier and read
+        // all routes in one statement. This preserves the exact advisory-lock
+        // protocol used by migration finalization while removing two network
+        // round trips from every delivery batch.
         let rows = try await sql.raw("""
-            WITH input AS (
-                SELECT ordinal, user_id
+            WITH input AS MATERIALIZED (
+                SELECT ordinal, user_id, lock_user
                 FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
-                    ordinal integer, user_id uuid
+                    ordinal integer, user_id uuid, lock_user text
                 )
+            ), lock_users AS MATERIALIZED (
+                SELECT DISTINCT lock_user
+                FROM input
+                ORDER BY lock_user
+            ), acquired_locks AS MATERIALIZED (
+                SELECT pg_advisory_xact_lock_shared(
+                           hashtextextended(lock_user, 0)
+                       ) AS acquired
+                FROM lock_users
+                ORDER BY lock_user
+            ), lock_barrier AS MATERIALIZED (
+                SELECT COUNT(*) AS acquired_count FROM acquired_locks
             )
             SELECT input.ordinal,
                    COALESCE(route.write_bucket, config.default_write_bucket) AS write_bucket,
@@ -996,6 +1022,7 @@ public struct PostgresV2FanoutDeliveryStore:
                    COALESCE(route.read_fallback_bucket, config.default_read_fallback_bucket) AS read_fallback_bucket
             FROM input
             CROSS JOIN im_v2.user_shard_router_configuration AS config
+            CROSS JOIN lock_barrier
             LEFT JOIN im_v2.user_shard_route_overrides AS route ON route.user_id = input.user_id
             WHERE config.configuration_key = TRUE
             ORDER BY input.ordinal
@@ -1259,11 +1286,15 @@ public struct PostgresV2FanoutDeliveryStore:
                 AND delivery.retry_count = 0
                 """
         }
-        // Do this as the first statement of the same transaction. A second
-        // projection statement can then read its own newly inserted payload
-        // plus any concurrently committed one without taking a no-op row
-        // update lock on the common source event.
-        try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
+        // Fresh direct acceptance already materializes the one immutable
+        // shared body in its source transaction. Skipping this statement is
+        // safe because `verified_payloads` below remains an integrity fence:
+        // a missing or mismatched row cannot produce an inbox/log commit.
+        // The claimed compatibility lane still materializes payloads for
+        // older binaries and non-message fan-out event kinds.
+        if case .claimed = fence {
+            try await ensureSharedPayloads(sql: sql, inputJSON: inputJSON, now: now)
+        }
         let sequenceReservationCTEs = usesDistinctTargetFastPath
             ? """
             reserved_sequence AS (
@@ -1341,18 +1372,44 @@ public struct PostgresV2FanoutDeliveryStore:
                        event.payload
                 FROM payload_keys
                 JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
+            ), materialized_missing_payloads AS (
+                -- Current acceptance binaries create this immutable row in
+                -- the source transaction. Keep an in-statement expand-path
+                -- for deliveries accepted by an older binary or restored by
+                -- an operator. `DO NOTHING` never rewrites a current row, and
+                -- the RETURNING key lets this statement consume its own new
+                -- row without a second database round trip.
+                INSERT INTO im_v2.fanout_sync_payloads
+                    (source_event_id, projection_kind, payload,
+                     message_state_id, created_at)
+                SELECT payloads.source_event_id, payloads.projection_kind,
+                       CASE WHEN \(bind: payloadWriteMode == .reference)
+                                  AND state.payload = payloads.payload
+                            THEN NULL ELSE payloads.payload END,
+                       state.state_id, \(bind: now)
+                FROM payloads
+                LEFT JOIN im_v2.message_projection_state_values AS state
+                  ON state.state_event_id = payloads.source_event_id
+                 AND state.variant_key = 0
+                 AND payloads.projection_kind = 'message'
+                ON CONFLICT (source_event_id, projection_kind) DO NOTHING
+                RETURNING source_event_id, projection_kind
             ), verified_payloads AS MATERIALIZED (
                 -- The preceding statement made the body durable. This is
                 -- deliberately read-only validation so independent batches
                 -- do not serialize on an otherwise immutable payload row.
                 SELECT payloads.source_event_id, payloads.projection_kind
                 FROM payloads
-                JOIN im_v2.fanout_sync_payloads AS shared
+                LEFT JOIN im_v2.fanout_sync_payloads AS shared
                  ON shared.source_event_id = payloads.source_event_id
                  AND shared.projection_kind = payloads.projection_kind
                 LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_id = shared.message_state_id
-                WHERE COALESCE(shared.payload, state.payload) = payloads.payload
+                LEFT JOIN materialized_missing_payloads AS inserted
+                  ON inserted.source_event_id = payloads.source_event_id
+                 AND inserted.projection_kind = payloads.projection_kind
+                WHERE inserted.source_event_id IS NOT NULL
+                   OR COALESCE(shared.payload, state.payload) = payloads.payload
             ), recorded_inbox AS (
                 INSERT INTO im_v2.consumer_inbox
                     (consumer_name, source_event_id, target_user_id,
@@ -2124,14 +2181,15 @@ private struct ExternalBatchAcknowledgementInput: Encodable {
         case userSyncSequence = "user_sync_sequence"
     }
 }
-private struct RouterFenceConfigurationRow: Decodable {
-    let routerEpoch: Int64
-    enum CodingKeys: String, CodingKey { case routerEpoch = "router_epoch" }
-}
 private struct RouterFenceInput: Encodable {
     let ordinal: Int
     let userID: UUID
-    enum CodingKeys: String, CodingKey { case ordinal; case userID = "user_id" }
+    let lockUser: String
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case userID = "user_id"
+        case lockUser = "lock_user"
+    }
 }
 private struct RouterFenceRouteRow: Decodable {
     let ordinal: Int

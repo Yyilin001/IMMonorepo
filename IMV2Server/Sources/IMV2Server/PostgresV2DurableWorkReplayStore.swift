@@ -125,19 +125,29 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                     throw V2DurableWorkReplayStoreError.corruptPersistenceState
                 }
                 didRequeue = try await sql.raw("""
-                    UPDATE im_v2.user_projection_checkpoints AS checkpoint
-                    SET state = 'ready', failure_count = 0, failed_sequence = NULL,
-                        next_attempt_at = NULL, last_failure_code = NULL,
-                        paused_at = NULL, updated_at = \(bind: now)
-                    WHERE checkpoint.user_id = \(bind: targetUserID)
-                      AND checkpoint.state = 'paused'
-                      AND EXISTS (
-                          SELECT 1
-                          FROM im_v2.user_sync_log AS log
-                          WHERE log.user_id = checkpoint.user_id
-                            AND log.user_sync_sequence = checkpoint.failed_sequence
-                            AND log.source_event_id = \(bind: sourceEventID)
-                      )
+                    WITH requeued AS (
+                        UPDATE im_v2.user_projection_checkpoints AS checkpoint
+                        SET state = 'ready', failure_count = 0, failed_sequence = NULL,
+                            next_attempt_at = NULL, last_failure_code = NULL,
+                            paused_at = NULL, updated_at = \(bind: now)
+                        WHERE checkpoint.user_id = \(bind: targetUserID)
+                          AND checkpoint.state = 'paused'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM im_v2.user_sync_log AS log
+                              WHERE log.user_id = checkpoint.user_id
+                                AND log.user_sync_sequence = checkpoint.failed_sequence
+                                AND log.source_event_id = \(bind: sourceEventID)
+                          )
+                        RETURNING checkpoint.user_id
+                    )
+                    INSERT INTO im_v2.user_projection_ready
+                        (user_id, available_at, enqueued_at, updated_at)
+                    SELECT user_id, \(bind: now), \(bind: now), \(bind: now)
+                    FROM requeued
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET available_at = EXCLUDED.available_at,
+                        updated_at = EXCLUDED.updated_at
                     RETURNING \(bind: sourceEventID) AS source_event_id
                     """).first(decoding: ReplayTargetRow.self) != nil
             }
