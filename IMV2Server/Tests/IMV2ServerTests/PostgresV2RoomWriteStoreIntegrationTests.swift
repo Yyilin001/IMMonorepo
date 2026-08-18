@@ -2186,7 +2186,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 shadowForwarder: messageShadowRecorder,
                 contentReviewMode: .enabled,
-                directFanoutMode: .preplanned
+                directFanoutMode: .preplanned,
+                payloadWriteMode: .reference
             )
             let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
@@ -2326,7 +2327,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count(
                 "im_v2.fanout_sync_payloads AS shared JOIN im_v2.room_events AS event ON event.event_id = shared.source_event_id WHERE event.event_type = 'message.accepted' AND shared.payload IS NULL AND shared.message_state_id IS NOT NULL",
                 on: sql
-            ) == 0)
+            ) == acceptedEventCount)
 
             let directDeliveryControl = PostgresV2FanoutDeliveryStore(
                 database: app.db(.psql), payloadWriteMode: .reference
