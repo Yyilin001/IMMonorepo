@@ -18,8 +18,8 @@ struct V2LocalSchemaContractTests {
 
         #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
-        #expect(try schemaObjectCount(in: primary) == 161)
-        #expect(try schemaFingerprint(in: primary) == 0x9b4c_0dd2_bd14_6a0a)
+        #expect(try schemaObjectCount(in: primary) == 162)
+        #expect(try schemaFingerprint(in: primary) == 0x2e6c_e090_d997_ef7c)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

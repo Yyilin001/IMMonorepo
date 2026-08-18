@@ -420,21 +420,21 @@ struct V2SyncEngineTests {
         )
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("hybrid-member-token"), receipt: .init("hybrid-member-receipt"), hasMore: false, capabilityProfile: "base"))
 
-        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
-        try await store.markGroupEventUnauthorized(roomID: .init(roomID))
-        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
+        try await store.markRoomEventUnauthorized(roomID: .init(roomID))
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == .largeGroupHybrid)
         #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
-            deliveryMode: .largeGroupHybrid,
+            delivery: .durableRoomLog,
             isAuthorized: false
         ))
 
         let reopenedStore = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
         #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
-            deliveryMode: .largeGroupHybrid,
+            delivery: .durableRoomLog,
             isAuthorized: false
         ))
-        #expect(try await reopenedStore.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await reopenedStore.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
 
         let reauthorizedRecord = try V2ClientSyncRecord(
             sequence: 2,
@@ -458,10 +458,10 @@ struct V2SyncEngineTests {
             capabilityProfile: "base"
         ))
         #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
-            deliveryMode: .largeGroupHybrid,
+            delivery: .durableRoomLog,
             isAuthorized: true
         ))
-        #expect(try await reopenedStore.knownHybridGroupRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
+        #expect(try await reopenedStore.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
     }
 
     @Test("a room-log page and its cursor commit atomically and accept an exact retry")
@@ -618,7 +618,7 @@ struct V2SyncEngineTests {
         let engine = V2ForegroundGroupEventPreviewEngine(transport: transport, store: store)
 
         #expect(try await store.groupEventAccess(roomID: roomID) == .init(
-            deliveryMode: .standardFanout,
+            delivery: .foregroundPreview,
             isAuthorized: true
         ))
         #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 1, hasMore: false))
@@ -654,9 +654,9 @@ struct V2SyncEngineTests {
 
         _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
 
-        #expect(try await store.knownHybridGroupRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
-            deliveryMode: .largeGroupHybrid,
+            delivery: .durableRoomLog,
             isAuthorized: false
         ))
     }
@@ -1739,7 +1739,7 @@ private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
         self.roomIDs = roomIDs
     }
 
-    func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) -> [RoomID] {
+    func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) -> [RoomID] {
         let sorted = roomIDs.sorted { $0.rawValue < $1.rawValue }
         let matching = roomID.map { cursor in
             sorted.filter { $0.rawValue > cursor.rawValue }
@@ -1748,8 +1748,8 @@ private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
     }
     func hybridGroupBackgroundCursor() -> RoomID? { backgroundCursor }
     func setHybridGroupBackgroundCursor(_ roomID: RoomID?) { backgroundCursor = roomID }
-    func isKnownHybridGroupRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
-    func markGroupEventUnauthorized(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
+    func isKnownRoomLogRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
+    func markRoomEventUnauthorized(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
     func groupEventCursor(roomID: RoomID) -> UInt64 { cursors[roomID, default: 0] }
     func applyGroupEventPage(_ page: V2ClientGroupEventPage) -> UInt64 {
         cursors[page.roomID] = page.nextRoomSequence

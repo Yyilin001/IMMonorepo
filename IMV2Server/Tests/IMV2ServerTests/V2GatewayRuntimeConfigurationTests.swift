@@ -39,6 +39,12 @@ struct V2GatewayRuntimeConfigurationTests {
             environment: V2DictionaryRuntimeEnvironment(preplanned)
         ).directFanoutMode == .preplanned)
 
+        var roomLog = runtimeValues
+        roomLog["IM_V2_DIRECT_FANOUT_MODE"] = "room_log"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(roomLog)
+        ).directFanoutMode == .roomLog)
+
         var referencePayload = runtimeValues
         referencePayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "reference"
         #expect(try V2GatewayRuntimeConfiguration(

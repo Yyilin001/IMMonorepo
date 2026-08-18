@@ -16,7 +16,7 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
               let actorUUID = UUID(uuidString: actorUserID.rawValue),
               afterRoomSequence <= UInt64(Int64.max)
         else { throw V2GroupEventLogError.corruptPersistenceState }
-        _ = try await authorizedGroupRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
+        _ = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
 
         let rows = try await sql.raw("""
             SELECT event_id, room_sequence, event_type, payload::text AS payload_json
@@ -52,15 +52,18 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
         guard let sql = database as? any SQLDatabase else {
             throw V2GroupEventLogError.corruptPersistenceState
         }
-        let room = try await authorizedGroupRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
+        let room = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
         return .init(roomID: roomID, highWatermark: try groupEventUnsigned(room.roomSequence))
     }
 
-    /// Both immutable group modes can make a foreground room-event read. A
-    /// standard group's read is only an online preview; reliable fan-out and
-    /// its per-user acknowledgement remain authoritative. Membership is
-    /// rechecked on every pull, so a stale hint never reveals payload data.
-    private func authorizedGroupRoom(
+    /// Group rooms and direct rooms use the same cursor protocol. A direct
+    /// room is admitted here only after its pair/membership policy has
+    /// accepted the write; every pull still checks the revision fence below,
+    /// so a stale wake can never reveal pre-join or post-leave payloads.
+    /// Standard groups remain preview-only: their delivery stream is still
+    /// authoritative unless the room is explicitly configured for its hybrid
+    /// event-log mode.
+    private func authorizedRoom(
         roomID: RoomID,
         actorUserID: UserID,
         sql: any SQLDatabase
@@ -81,7 +84,9 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
             WHERE rooms.room_id = \(bind: roomUUID)
             """).first(decoding: GroupEventLogRoomRow.self)
         else { throw V2GroupEventLogError.roomNotFound }
-        guard room.roomKind == "group" else { throw V2GroupEventLogError.roomNotFound }
+        guard room.roomKind == "group" || room.roomKind == "direct" else {
+            throw V2GroupEventLogError.roomNotFound
+        }
         guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
         return room
     }

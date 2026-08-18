@@ -103,6 +103,14 @@ extension GRDBV2LocalSyncStore {
                 applied_room_sequence INTEGER NOT NULL CHECK (applied_room_sequence >= 0)
             );
 
+        -- A rejected cursor pull must be remembered for direct rooms too.
+        -- Their profile remains useful for rendering history, but is not an
+        -- authorization grant for another network read.
+        CREATE TABLE v2_room_event_authorizations (
+                room_id TEXT PRIMARY KEY,
+                is_authorized INTEGER NOT NULL CHECK (is_authorized IN (0, 1))
+            );
+
         CREATE TABLE v2_group_events (
                 room_id TEXT NOT NULL,
                 room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),

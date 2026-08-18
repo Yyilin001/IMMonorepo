@@ -108,6 +108,10 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     /// non-authoritative foreground availability hints; it does not change
     /// the durable fan-out or acknowledgement contract.
     public let groupDeliveryMode: V2GroupDeliveryMode?
+    /// True when this accepted message is durably recovered from the room
+    /// event log rather than the per-user fan-out stream. The hint itself is
+    /// best effort; the room cursor remains authoritative.
+    public let usesRoomEventLog: Bool
     public let createdAt: Date
 
     public init(
@@ -123,6 +127,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        usesRoomEventLog: Bool = false,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -138,6 +143,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         self.entities = entities
         self.replyTo = replyTo
         self.groupDeliveryMode = groupDeliveryMode
+        self.usesRoomEventLog = usesRoomEventLog
         self.createdAt = createdAt
     }
 
@@ -146,7 +152,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     /// substituted presentation unrepresentable in the response model.
     public func materialized(
         mediaPresentations: [V2MediaPresentation],
-        groupDeliveryMode: V2GroupDeliveryMode? = nil
+        groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        usesRoomEventLog: Bool = false
     ) -> V2AcceptedMessage {
         V2AcceptedMessage(
             messageID: messageID,
@@ -162,6 +169,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             entities: entities,
             replyTo: replyTo,
             groupDeliveryMode: groupDeliveryMode,
+            usesRoomEventLog: usesRoomEventLog,
             createdAt: createdAt
         )
     }
@@ -187,6 +195,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     /// non-authoritative foreground availability hints; it does not change
     /// the durable fan-out or acknowledgement contract.
     public let groupDeliveryMode: V2GroupDeliveryMode?
+    /// See ``V2AcceptedMessageDraft/usesRoomEventLog``.
+    public let usesRoomEventLog: Bool
     public let createdAt: Date
 
     public init(
@@ -203,6 +213,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        usesRoomEventLog: Bool = false,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -220,6 +231,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.entities = entities
         self.replyTo = replyTo
         self.groupDeliveryMode = groupDeliveryMode
+        self.usesRoomEventLog = usesRoomEventLog
         self.createdAt = createdAt
     }
 }

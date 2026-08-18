@@ -65,6 +65,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             guard room.capacityProfileID == capacityProfile.id else {
                 throw V2RoomWriteStoreError.capacityProfileMismatch
             }
+            // A direct room has a fixed, authorization-checked audience. In
+            // room-log mode its canonical event is the durable delivery
+            // record; per-user Delivery/Inbox rows would only duplicate that
+            // fact. This is deployment policy, not client input.
+            let usesDirectRoomLog = room.kind == "direct" && directFanoutMode == .roomLog
 
             // A completed command must replay its canonical result even if a
             // later membership change removes the sender. Otherwise a lost
@@ -84,7 +89,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     media: try priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) },
                     mediaPresentations: try priorMedia.map { try $0.presentation },
                     mentions: try priorMentions.map { try $0.target },
-                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                    groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
+                    usesRoomEventLog: usesDirectRoomLog
                 )
                 let outcome: V2SendMessageOutcome = accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
                     && accepted.entities == command.entities && accepted.replyTo == command.replyTo
@@ -185,8 +191,19 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             let roomState = try room.commandState(roomID: command.roomID, admission: admission)
             let shardState = try shard.admissionState()
             let result: V2SendMessageAcceptanceResult
-            switch room.deliveryMode {
-            case .standardFanout:
+            if usesDirectRoomLog {
+                result = try roomLogReduction(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardState,
+                    profile: capacityProfile.limits,
+                    identifiers: identifiers,
+                    reliableTargetCount: 0,
+                    now: now
+                )
+            } else {
+                switch room.deliveryMode {
+                case .standardFanout:
                 result = try V2SendMessageReducer.reduce(
                     command: command,
                     roomState: roomState,
@@ -195,7 +212,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     identifiers: identifiers,
                     now: now
                 )
-            case .largeGroupHybrid:
+                case .largeGroupHybrid:
                 result = try hybridReduction(
                     command: command,
                     roomState: roomState,
@@ -205,12 +222,14 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     reliableTargetCount: hybridReliableTargets.count,
                     now: now
                 )
+                }
             }
             guard case .accepted(let writeSet) = result else {
                 return .init(
                     outcome: result.outcome(
                         mediaPresentations: mediaPresentations,
-                        groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                        groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
+                        usesRoomEventLog: usesDirectRoomLog
                     ),
                     acceptedDirectProjectionShadows: []
                 )
@@ -232,7 +251,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             let timelineWriteSet = try withTimelineSequence(writeSet, timelineSequence: unsigned(room.timelineSequence + 1))
             let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
                 mediaPresentations: mediaPresentations,
-                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil
+                groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
+                usesRoomEventLog: usesDirectRoomLog
             )
             let acceptedState = try V2MessageProjectionState(
                 accepted: acceptedMessage,
@@ -260,7 +280,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 sql: sql
             )
             var acceptedDirectProjectionShadows: [DirectProjectionShadowRequest] = []
-            if let directContext {
+            if let directContext,
+               (!directContext.senderProfileVisibleToRecipient || directContext.senderCanSend != true || directContext.supportAccountID != nil) {
                 let recipientID = directContext.recipientID
                 let projectionChanges = try await appendDirectPostAcceptanceProjections(
                     roomID: roomID,
@@ -1080,6 +1101,38 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         }
         let mentionsJSON = try roomWriteJSON(mentions)
 
+        let usesDirectRoomLog = room.kind == "direct" && directFanoutMode == .roomLog
+        if usesDirectRoomLog {
+            guard writeSet.fanoutPlan.reservation.cost.targetCount == 0 else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            try await persistRoomLogMessage(
+                writeSet,
+                command: command,
+                room: room,
+                roomID: roomID,
+                messageID: messageID,
+                eventID: eventID,
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                roomSequence: roomSequence,
+                timelineSequence: timelineSequence,
+                shardLeaseID: shardLeaseID,
+                shardLeaseGeneration: shardLeaseGeneration,
+                entitiesJSON: entitiesJSON,
+                mediaJSON: mediaJSON,
+                mediaPresentationsJSON: mediaPresentationsJSON,
+                mentionedUsersJSON: mentionedUsersJSON,
+                referencesJSON: referencesJSON,
+                mentionsJSON: mentionsJSON,
+                replyToMessageID: replyToMessageID,
+                forwardedFromMessageID: forwardedFromMessageID,
+                forwardedFromUserID: forwardedFromUserID,
+                sql: sql
+            )
+            return
+        }
+
         if room.deliveryMode == .standardFanout {
             try await persistStandardFanout(
                 writeSet,
@@ -1577,6 +1630,142 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         }
     }
 
+    /// Persists the canonical direct-room event without manufacturing a
+    /// second durable copy for each of its two members. The event and its
+    /// revision-fenced membership checks are the recovery contract; the
+    /// foreground wake is intentionally outside this transaction and is only
+    /// a latency optimisation.
+    private func persistRoomLogMessage(
+        _ writeSet: V2MessageAcceptanceTransaction,
+        command: V2SendMessageCommand,
+        room: RoomRow,
+        roomID: UUID,
+        messageID: UUID,
+        eventID: UUID,
+        senderID: UUID,
+        clientMessageID: UUID,
+        roomSequence: Int64,
+        timelineSequence: Int64,
+        shardLeaseID: UUID,
+        shardLeaseGeneration: Int64,
+        entitiesJSON: String,
+        mediaJSON: String,
+        mediaPresentationsJSON: String,
+        mentionedUsersJSON: String,
+        referencesJSON: String,
+        mentionsJSON: String,
+        replyToMessageID: String,
+        forwardedFromMessageID: UUID?,
+        forwardedFromUserID: UUID?,
+        sql: any SQLDatabase
+    ) async throws {
+        let message = writeSet.acceptedMessage
+        let admission = writeSet.nextRoomState.admission
+        guard let mutation = try await sql.raw("""
+            WITH room_update AS (
+                UPDATE im_v2.rooms
+                SET room_sequence = \(bind: roomSequence),
+                    timeline_sequence = \(bind: timelineSequence)
+                WHERE room_id = \(bind: roomID)
+                RETURNING room_id
+            ), admission_update AS (
+                UPDATE im_v2.room_admission AS admission
+                SET command_window_used = \(bind: admission.commandWindow.used),
+                    fanout_window_used = \(bind: admission.fanoutWindow.used),
+                    outstanding_fanout_units = \(bind: admission.outstandingFanoutUnits),
+                    outstanding_plans = \(bind: admission.outstandingPlans),
+                    shard_lease_id = \(bind: shardLeaseID),
+                    shard_lease_generation = \(bind: shardLeaseGeneration)
+                FROM room_update
+                WHERE admission.room_id = room_update.room_id
+                RETURNING admission.room_id
+            ), message_insert AS (
+                INSERT INTO im_v2.messages
+                    (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
+                     client_message_id, text_body, rich_entities, reply_to_message_id,
+                     forwarded_from_message_id, forwarded_from_user_id, created_at)
+                SELECT \(bind: messageID), admission_update.room_id, \(bind: roomSequence),
+                       \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
+                       \(bind: message.text), \(bind: entitiesJSON)::jsonb,
+                       NULLIF(\(bind: replyToMessageID), '')::uuid,
+                       \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
+                       \(bind: message.createdAt)
+                FROM admission_update
+                RETURNING message_id, room_id
+            ), review_insert AS (
+                INSERT INTO im_v2.content_review_jobs
+                    (message_id, room_id, expected_content_revision, state, created_at)
+                SELECT message_id, room_id, 1, 'pending', \(bind: message.createdAt)
+                FROM message_insert
+                WHERE \(bind: contentReviewMode.enqueuesJobs)
+                RETURNING message_id
+            ), media_insert AS (
+                INSERT INTO im_v2.message_media_references
+                    (message_id, media_id, ordinal, referenced_at)
+                SELECT message_insert.message_id, reference.media_id, reference.ordinal,
+                       \(bind: message.createdAt)
+                FROM message_insert
+                CROSS JOIN jsonb_to_recordset(\(bind: referencesJSON)::jsonb)
+                     AS reference(ordinal integer, media_id uuid)
+                RETURNING message_id
+            ), mention_insert AS (
+                INSERT INTO im_v2.message_mentions
+                    (message_id, ordinal, mention_kind, mentioned_user_id, created_at)
+                SELECT message_insert.message_id, mention.ordinal, mention.mention_kind,
+                       mention.mentioned_user_id, \(bind: message.createdAt)
+                FROM message_insert
+                CROSS JOIN jsonb_to_recordset(\(bind: mentionsJSON)::jsonb)
+                     AS mention(ordinal integer, mention_kind text, mentioned_user_id uuid)
+                RETURNING message_id
+            ), event_insert AS (
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
+                     committed_membership_revision, created_at)
+                SELECT \(bind: eventID), message_insert.room_id, \(bind: roomSequence),
+                       'message.accepted', \(bind: senderID),
+                       jsonb_build_object(
+                           'event_type', 'message.accepted',
+                           'message_id', \(bind: messageID.uuidString),
+                           'room_id', \(bind: roomID.uuidString),
+                           'room_sequence', \(bind: roomSequence),
+                           'timeline_sequence', \(bind: timelineSequence),
+                           'sender_user_id', \(bind: senderID.uuidString),
+                           'text', \(bind: message.text),
+                           'media_ids', \(bind: mediaJSON)::jsonb,
+                           'media_presentations', \(bind: mediaPresentationsJSON)::jsonb,
+                           'mention_user_ids', \(bind: mentionedUsersJSON)::jsonb,
+                           'mentions_everyone', \(bind: message.mentions.contains(.everyone)),
+                           'entities', \(bind: entitiesJSON)::jsonb,
+                           'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
+                           'forwarded_from_message_id', NULLIF(\(bind: command.forwardedFrom?.messageID.rawValue ?? ""), ''),
+                           'forwarded_from_user_id', NULLIF(\(bind: command.forwardedFrom?.senderUserID.rawValue ?? ""), ''),
+                           'message_revision', 1,
+                           'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000))
+                       ),
+                       \(bind: room.membershipRevision), \(bind: message.createdAt)
+                FROM message_insert
+                RETURNING event_id
+            )
+            SELECT (SELECT count(*) FROM room_update) AS room_count,
+                   (SELECT count(*) FROM admission_update) AS admission_count,
+                   (SELECT count(*) FROM message_insert) AS message_count,
+                   (SELECT count(*) FROM review_insert) AS review_count,
+                   (SELECT count(*) FROM media_insert) AS media_count,
+                   (SELECT count(*) FROM mention_insert) AS mention_count,
+                   (SELECT count(*) FROM event_insert) AS event_count
+            """).first(decoding: RoomLogMessageMutationRow.self),
+              mutation.roomCount == 1,
+              mutation.admissionCount == 1,
+              mutation.messageCount == 1,
+              mutation.reviewCount == (contentReviewMode.enqueuesJobs ? 1 : 0),
+              mutation.mediaCount == Int64(message.media.count),
+              mutation.mentionCount == Int64(message.mentions.count),
+              mutation.eventCount == 1
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+    }
+
     private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
         guard !media.isEmpty else { return [] }
         guard Set(media).count == media.count else { throw V2MediaStoreError.invalidReferenceSet }
@@ -1674,14 +1863,16 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
 private extension V2SendMessageAcceptanceResult {
     func outcome(
         mediaPresentations: [V2MediaPresentation] = [],
-        groupDeliveryMode: V2GroupDeliveryMode? = nil
+        groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        usesRoomEventLog: Bool = false
     ) -> V2SendMessageOutcome {
         switch self {
         case .accepted:
             preconditionFailure("accepted transactions must be persisted before becoming a send outcome")
         case .idempotent(let message): .idempotent(message.materialized(
             mediaPresentations: mediaPresentations,
-            groupDeliveryMode: groupDeliveryMode
+            groupDeliveryMode: groupDeliveryMode,
+            usesRoomEventLog: usesRoomEventLog
         ))
         case .idempotencyConflict: .idempotencyConflict
         case .rateLimited(let seconds): .rateLimited(retryAfterSeconds: seconds)
@@ -1710,7 +1901,7 @@ private struct RoomRow: Decodable {
     }
 }
 
-private func hybridReduction(
+private func roomLogReduction(
     command: V2SendMessageCommand,
     roomState: V2RoomCommandState,
     shardState: ShardAdmissionState,
@@ -1763,6 +1954,29 @@ private func hybridReduction(
             nextShardState: nextShard
         ))
     }
+}
+
+// Kept as a narrow semantic wrapper while group hybrid still has explicit
+// mention deliveries. Both paths share the command-only admission invariant
+// when their canonical room event has no reliable projection targets.
+private func hybridReduction(
+    command: V2SendMessageCommand,
+    roomState: V2RoomCommandState,
+    shardState: ShardAdmissionState,
+    profile: RoomCapacityProfile,
+    identifiers: V2AcceptanceIdentifiers,
+    reliableTargetCount: Int,
+    now: Date
+) throws -> V2SendMessageAcceptanceResult {
+    try roomLogReduction(
+        command: command,
+        roomState: roomState,
+        shardState: shardState,
+        profile: profile,
+        identifiers: identifiers,
+        reliableTargetCount: reliableTargetCount,
+        now: now
+    )
 }
 
 private func hybridMentionTargetIDs(_ mentions: [V2MentionTarget], excluding senderID: UUID) -> [UUID] {
@@ -2247,6 +2461,26 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     }
 }
 
+private struct RoomLogMessageMutationRow: Decodable {
+    let roomCount: Int64
+    let admissionCount: Int64
+    let messageCount: Int64
+    let reviewCount: Int64
+    let mediaCount: Int64
+    let mentionCount: Int64
+    let eventCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case roomCount = "room_count"
+        case admissionCount = "admission_count"
+        case messageCount = "message_count"
+        case reviewCount = "review_count"
+        case mediaCount = "media_count"
+        case mentionCount = "mention_count"
+        case eventCount = "event_count"
+    }
+}
+
 private struct MessageRow: Decodable {
     let messageID: UUID
     let roomID: UUID
@@ -2265,7 +2499,8 @@ private struct MessageRow: Decodable {
         mentions: [V2MentionTarget] = [],
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
-        groupDeliveryMode: V2GroupDeliveryMode? = nil
+        groupDeliveryMode: V2GroupDeliveryMode? = nil,
+        usesRoomEventLog: Bool = false
     ) throws -> V2AcceptedMessage {
         let entities = try JSONDecoder().decode([V2MessageEntity].self, from: Data(richEntities.utf8))
         try V2RichMessageContent.validate(text: textBody, entities: entities)
@@ -2275,7 +2510,7 @@ private struct MessageRow: Decodable {
         } else {
             replyTo = nil
         }
-        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, createdAt: createdAt)
+        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, usesRoomEventLog: usesRoomEventLog, createdAt: createdAt)
     }
 }
 

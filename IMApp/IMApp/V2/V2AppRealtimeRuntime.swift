@@ -913,15 +913,15 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
         }
         let progress: V2GroupEventSyncProgress
         do {
-            switch access.deliveryMode {
-            case .largeGroupHybrid:
+            switch access.delivery {
+            case .durableRoomLog:
                 progress = try await groupEventSync.synchronizeOnePage(roomID: parsedRoomID)
-            case .standardFanout:
+            case .foregroundPreview:
                 progress = try await foregroundGroupPreview.synchronizeOnePage(roomID: parsedRoomID)
             }
         } catch let error as V2RealtimeTransportError {
             guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-            try await localStore.markGroupEventUnauthorized(roomID: parsedRoomID)
+            try await localStore.markRoomEventUnauthorized(roomID: parsedRoomID)
             return .notHybridRoom
         }
         return .synchronized(appliedEventCount: progress.appliedEventCount, hasMore: progress.hasMore)
@@ -936,10 +936,10 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
         }
         do {
             let cursor: UInt64
-            switch access.deliveryMode {
-            case .largeGroupHybrid:
+            switch access.delivery {
+            case .durableRoomLog:
                 cursor = try await localStore.groupEventCursor(roomID: parsedRoomID)
-            case .standardFanout:
+            case .foregroundPreview:
                 cursor = try await foregroundGroupPreview.cursor(roomID: parsedRoomID)
             }
             let subscription = try await subscriptionTransport.subscribeToGroupEvents(
@@ -950,7 +950,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
             return .subscribed(highWatermark: subscription.highWatermark)
         } catch let error as V2RealtimeTransportError {
             guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-            try await localStore.markGroupEventUnauthorized(roomID: parsedRoomID)
+            try await localStore.markRoomEventUnauthorized(roomID: parsedRoomID)
             return .notHybridRoom
         }
     }

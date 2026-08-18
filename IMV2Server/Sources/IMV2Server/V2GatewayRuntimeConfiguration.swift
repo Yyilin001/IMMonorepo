@@ -40,6 +40,11 @@ public enum V2MessageProjectionReadMode: String, Equatable, Sendable {
 public enum V2DirectFanoutMode: String, Equatable, Sendable {
     case planner
     case preplanned
+    /// The direct room event log is the durable source of truth. Clients
+    /// recover by room cursor and foreground subscriptions receive only a
+    /// best-effort waterline hint, so no per-message user projection or
+    /// delivery lease is needed for the fixed two-user audience.
+    case roomLog = "room_log"
 }
 
 /// Controls whether an accepted-message incremental sync body is retained in

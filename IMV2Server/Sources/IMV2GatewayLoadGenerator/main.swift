@@ -55,6 +55,7 @@ private struct LoadConfiguration: Sendable {
     let targetsPerConnection: Int
     let targetOffset: Int
     let syncReads: Bool
+    let roomLogReads: Bool
     let heartbeatSeconds: Int
     let maximumRSSMegabytes: Int
     let maximumFailurePercent: Double
@@ -104,6 +105,7 @@ private struct LoadConfiguration: Sendable {
         targetsPerConnection = try Self.integer(values["--targets-per-connection"] ?? "3", range: 1...32)
         targetOffset = try Self.integer(values["--target-offset"] ?? "1", range: 1...4_999)
         syncReads = try Self.integer(values["--sync-reads"] ?? "1", range: 0...1) == 1
+        roomLogReads = try Self.integer(values["--room-log-reads"] ?? "0", range: 0...1) == 1
         maximumRSSMegabytes = try Self.integer(values["--max-rss-mb"] ?? "2048", range: 256...8_192)
         guard let maximumFailurePercent = Double(values["--max-failure-percent"] ?? "1"),
               maximumFailurePercent >= 0, maximumFailurePercent <= 100
@@ -168,10 +170,14 @@ private final class LoadStatistics: @unchecked Sendable {
         var syncBatchesReceived = 0
         var syncRecordsReceived = 0
         var syncAcknowledged = 0
+        var roomEventPullsSent = 0
+        var roomEventPagesReceived = 0
+        var roomEventRecordsReceived = 0
         var authenticationMilliseconds: [Double] = []
         var heartbeatMilliseconds: [Double] = []
         var messageMilliseconds: [Double] = []
         var syncPullMilliseconds: [Double] = []
+        var roomEventPullMilliseconds: [Double] = []
         var maximumRSSBytes: UInt64 = 0
     }
 
@@ -234,6 +240,14 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordSyncAcknowledged() { lock.withLock { state.syncAcknowledged += 1 } }
+    func recordRoomEventPullSent() { lock.withLock { state.roomEventPullsSent += 1 } }
+    func recordRoomEventPage(milliseconds: Double, records: Int) {
+        lock.withLock {
+            state.roomEventPagesReceived += 1
+            state.roomEventRecordsReceived += records
+            state.roomEventPullMilliseconds.append(milliseconds)
+        }
+    }
     func recordRSS(_ bytes: UInt64) { lock.withLock { state.maximumRSSBytes = max(state.maximumRSSBytes, bytes) } }
     func snapshot() -> State { lock.withLock { state } }
 
@@ -363,6 +377,7 @@ private struct LoadRun {
                             maximumInFlightMessagesPerConnection: configuration.maximumInFlightMessagesPerConnection,
                             messageBytes: configuration.messageBytes,
                             syncReads: configuration.syncReads,
+                            roomLogReads: configuration.roomLogReads,
                             started: started,
                             authenticated: authenticated,
                             statistics: statistics
@@ -443,6 +458,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case directRoom(targetUserID: String, sent: NIODeadline)
         case message(sent: NIODeadline, roomID: String)
         case syncPull(sent: NIODeadline)
+        case roomEventPull(sent: NIODeadline, roomID: String)
         case syncAck(hasMore: Bool)
     }
 
@@ -455,6 +471,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let maximumInFlightMessagesPerConnection: Int
     private let messageText: String
     private let syncReads: Bool
+    private let roomLogReads: Bool
     private let started: NIODeadline
     private let authenticatedPromise: EventLoopPromise<Void>
     private let statistics: LoadStatistics
@@ -470,6 +487,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var nextSyncToken = ""
     private var syncInFlight = false
     private var syncRequested = false
+    private var roomEventCursors: [String: UInt64] = [:]
+    private var roomEventPullRooms: Set<String> = []
     private var heartbeatTask: RepeatedTask?
     private var messageTask: RepeatedTask?
     private var authenticationCompleted = false
@@ -486,6 +505,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         maximumInFlightMessagesPerConnection: Int,
         messageBytes: Int,
         syncReads: Bool,
+        roomLogReads: Bool,
         started: NIODeadline,
         authenticated: EventLoopPromise<Void>,
         statistics: LoadStatistics
@@ -508,6 +528,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
         messageText = String(repeating: "x", count: messageBytes)
         self.syncReads = syncReads
+        self.roomLogReads = roomLogReads
         self.started = started
         authenticatedPromise = authenticated
         self.statistics = statistics
@@ -622,6 +643,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                       response.roomSequence > 0
                 else { throw LoadError.unexpectedResponse }
                 statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
+                if roomLogReads { try sendRoomEventPullIfNeeded(roomID: roomID, context: context) }
 
             case .syncPull(let sent):
                 guard case .syncBatch(let batch)? = envelope.body else {
@@ -656,6 +678,24 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     hasMore: batch.hasMore_p,
                     context: context
                 )
+
+            case .roomEventPull(let sent, let roomID):
+                roomEventPullRooms.remove(roomID)
+                guard case .groupEventPage(let page)? = envelope.body,
+                      page.roomID == roomID,
+                      page.nextRoomSequence >= roomEventCursors[roomID, default: 0],
+                      page.events.count <= 100,
+                      zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+                      (page.events.last?.roomSequence ?? roomEventCursors[roomID, default: 0]) == page.nextRoomSequence
+                else { throw LoadError.unexpectedResponse }
+                roomEventCursors[roomID] = page.nextRoomSequence
+                statistics.recordRoomEventPage(
+                    milliseconds: (NIODeadline.now() - sent).millisecondsDouble,
+                    records: page.events.count
+                )
+                if page.hasMore_p {
+                    try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
+                }
 
             case .syncAck(let hasMore):
                 guard case .acknowledged? = envelope.body else { throw LoadError.unexpectedResponse }
@@ -790,6 +830,26 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
+    /// This models the durable private-room recovery contract: a sender or
+    /// recipient receives only a waterline/ack, then advances its own room
+    /// cursor. One in-flight read per room coalesces bursts; a `has_more`
+    /// response is drained immediately so recovery cannot stall after a full
+    /// page, while later messages schedule the next bounded pull.
+    private func sendRoomEventPullIfNeeded(roomID: String, context: ChannelHandlerContext) throws {
+        guard roomEventPullRooms.insert(roomID).inserted else { return }
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID
+        request.protocolVersion = IMV2ProtocolVersion.current
+        request.groupEventPull = .init()
+        request.groupEventPull.roomID = roomID
+        request.groupEventPull.afterRoomSequence = roomEventCursors[roomID, default: 0]
+        request.groupEventPull.pageSize = 100
+        pendingRequests[requestID] = .roomEventPull(sent: .now(), roomID: roomID)
+        statistics.recordRoomEventPullSent()
+        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    }
+
     private func sendSyncAck(
         generation: UInt64,
         highestSequence: UInt64,
@@ -825,6 +885,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .syncPull, .syncAck:
             syncInFlight = false
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
+        case .roomEventPull(_, let roomID):
+            roomEventPullRooms.remove(roomID)
+            statistics.recordWorkloadFailure(kind: "room_event", code: code, retryable: retryable)
         case .directRoom:
             statistics.recordWorkloadFailure(kind: "direct_room", code: code, retryable: retryable)
         }
@@ -870,6 +933,7 @@ private struct LoadReport: Encodable {
     let targetsPerConnection: Int
     let targetOffset: Int
     let syncReads: Bool
+    let roomLogReads: Bool
     let startedAt: Date
     let endedAt: Date
     let attempted: Int
@@ -892,11 +956,15 @@ private struct LoadReport: Encodable {
     let syncBatchesReceived: Int
     let syncRecordsReceived: Int
     let syncAcknowledged: Int
+    let roomEventPullsSent: Int
+    let roomEventPagesReceived: Int
+    let roomEventRecordsReceived: Int
     let maximumRSSMegabytes: Double
     let authenticationLatency: Percentiles
     let heartbeatLatency: Percentiles
     let messageLatency: Percentiles
     let syncPullLatency: Percentiles
+    let roomEventPullLatency: Percentiles
     let terminalError: String?
 
     init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, terminalError: Error?) {
@@ -915,6 +983,7 @@ private struct LoadReport: Encodable {
         targetsPerConnection = configuration.targetsPerConnection
         targetOffset = configuration.targetOffset
         syncReads = configuration.syncReads
+        roomLogReads = configuration.roomLogReads
         self.startedAt = startedAt
         self.endedAt = endedAt
         attempted = state.attempted
@@ -937,16 +1006,20 @@ private struct LoadReport: Encodable {
         syncBatchesReceived = state.syncBatchesReceived
         syncRecordsReceived = state.syncRecordsReceived
         syncAcknowledged = state.syncAcknowledged
+        roomEventPullsSent = state.roomEventPullsSent
+        roomEventPagesReceived = state.roomEventPagesReceived
+        roomEventRecordsReceived = state.roomEventRecordsReceived
         maximumRSSMegabytes = Double(state.maximumRSSBytes) / 1_048_576
         authenticationLatency = .init(samples: state.authenticationMilliseconds)
         heartbeatLatency = .init(samples: state.heartbeatMilliseconds)
         messageLatency = .init(samples: state.messageMilliseconds)
         syncPullLatency = .init(samples: state.syncPullMilliseconds)
+        roomEventPullLatency = .init(samples: state.roomEventPullMilliseconds)
         self.terminalError = terminalError.map(String.init(describing:))
     }
 
     var summary: String {
-        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) sync_records=\(syncRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
     }
 }
 

@@ -8698,6 +8698,130 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("direct room-log messages persist once and recover only through revision-fenced room cursors")
+    func persistsDirectRoomLogWithoutPerUserFanoutArtifacts() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_200_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10, maxCommandsPerWindow: 100,
+                maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100,
+                maxOutstandingPlans: 100, maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 3
+            ))
+            let lease = UUID(uuidString: "00000000-0000-0000-0000-00000000c001")!
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-primary', 'standard', \(bind: lease), 1, \(bind: now.addingTimeInterval(600)),
+                        100, 100, 100, 100)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, created_at, updated_at)
+                VALUES
+                    (\(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now), \(bind: now)),
+                    (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: now), \(bind: now)),
+                    (\(bind: memberThreeUUID), 'member016', '成员三', 1, \(bind: now), \(bind: now))
+                """).run()
+            let direct = try V2DirectMessagingService(
+                store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                roomShardID: "rooms-primary",
+                now: { now }
+            )
+            let recipient = try UserID(memberTwoUUID.uuidString)
+            guard case .opened(let room) = try await direct.open(
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-00000000c002"),
+                targetUserID: recipient
+            ) else {
+                Issue.record("expected direct room")
+                return
+            }
+            let writer = PostgresV2RoomWriteStore(
+                database: app.db(.psql),
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
+                shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                contentReviewMode: .disabled,
+                directFanoutMode: .roomLog
+            )
+            let messages = V2SendMessageService(
+                store: writer, capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64), now: { now }
+            )
+            let clientID = try ClientMessageID("00000000-0000-0000-0000-00000000c003")
+            guard case .accepted(let accepted) = try await messages.send(.init(
+                roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
+                text: "只写一次的私聊"
+            )) else {
+                Issue.record("expected room-log acceptance")
+                return
+            }
+            #expect(accepted.usesRoomEventLog)
+            let replay = try await messages.send(.init(
+                roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
+                text: "只写一次的私聊"
+            ))
+            guard case .idempotent(let replayed) = replay else {
+                Issue.record("expected idempotent replay")
+                return
+            }
+            #expect(replayed == accepted)
+
+            let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
+            let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)
+            let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
+            #expect(senderPage.events.map(\.roomSequence) == [accepted.roomSequence])
+            #expect(recipientPage.events == senderPage.events)
+            #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
+            await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
+            }
+
+            #expect(try await count("im_v2.messages", on: sql) == 1)
+            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
+            #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_completion_units", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_deliveries", on: sql) == 0)
+            #expect(try await count("im_v2.room_outbox", on: sql) == 0)
+            #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
+
+            let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
+            try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
+            try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = 1 WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberTwoUUID)").run()
+            await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
+            }
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("a 100k hybrid group persists ordinary messages as room-log events and fans out only explicit mentions")
     func acceptsOneHundredThousandMemberHybridRoomWithoutGlobalFanout() async throws {
         guard Environment.get("IMV2_RUN_HYBRID_100K_CAPACITY") == "1",

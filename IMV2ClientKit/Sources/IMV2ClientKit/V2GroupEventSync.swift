@@ -73,15 +73,22 @@ public struct V2ClientGroupEventSubscription: Equatable, Sendable {
     }
 }
 
-/// Durable local access state for a projected group room. Delivery mode is a
-/// required room invariant; authorization is mutable device state that the
-/// server can revoke independently with `FORBIDDEN`.
+/// Selects whether a room-event read is its durable recovery stream or only
+/// an online preview layered over ordinary user sync.
+public enum V2ClientRoomEventDelivery: Equatable, Sendable {
+    case durableRoomLog
+    case foregroundPreview
+}
+
+/// Durable local access state for a projected room. A private room never
+/// borrows a synthetic group delivery mode: it is explicitly a durable room
+/// log, while a standard group remains a foreground-only preview.
 public struct V2ClientGroupEventAccess: Equatable, Sendable {
-    public let deliveryMode: V2GroupDeliveryMode
+    public let delivery: V2ClientRoomEventDelivery
     public let isAuthorized: Bool
 
-    public init(deliveryMode: V2GroupDeliveryMode, isAuthorized: Bool) {
-        self.deliveryMode = deliveryMode
+    public init(delivery: V2ClientRoomEventDelivery, isAuthorized: Bool) {
+        self.delivery = delivery
         self.isAuthorized = isAuthorized
     }
 }
@@ -94,20 +101,20 @@ public protocol V2ClientGroupEventSubscriptionTransport: Sendable {
 }
 
 public protocol V2LocalGroupEventStore: Sendable {
-    /// Only rooms explicitly created as hybrid are eligible for room-log
-    /// synchronization. The mode is a durable room invariant, not a runtime
-    /// heuristic based on the current member count.
-    func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) async throws -> [RoomID]
+    /// Rooms whose event log is the durable recovery stream. This includes
+    /// large-group hybrid rooms and private rooms; standard fan-out groups
+    /// deliberately stay out of this background scheduler.
+    func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) async throws -> [RoomID]
     /// Durable keyset cursor for fair background scheduling. This cursor is
     /// only a scheduling hint; per-room event cursors remain the delivery
     /// authority.
     func hybridGroupBackgroundCursor() async throws -> RoomID?
     func setHybridGroupBackgroundCursor(_ roomID: RoomID?) async throws
-    func isKnownHybridGroupRoom(roomID: RoomID) async throws -> Bool
+    func isKnownRoomLogRoom(roomID: RoomID) async throws -> Bool
     /// Stops room-log pulls after the authoritative server says this device's
     /// user is no longer a member. Historical local projections and the
     /// immutable delivery mode remain readable.
-    func markGroupEventUnauthorized(roomID: RoomID) async throws
+    func markRoomEventUnauthorized(roomID: RoomID) async throws
     func groupEventCursor(roomID: RoomID) async throws -> UInt64
     func applyGroupEventPage(_ page: V2ClientGroupEventPage) async throws -> UInt64
 }
@@ -166,9 +173,9 @@ public actor V2GroupEventSyncEngine {
         precondition(maximumPages > 0 && maximumPages <= 10_000)
         let cursor = try await store.hybridGroupBackgroundCursor()
         let probeLimit = maximumPages + 1
-        var roomIDs = try await store.knownHybridGroupRoomIDs(after: cursor, limit: probeLimit)
+        var roomIDs = try await store.knownRoomLogRoomIDs(after: cursor, limit: probeLimit)
         if cursor != nil, roomIDs.count < probeLimit {
-            let wrapped = try await store.knownHybridGroupRoomIDs(after: nil, limit: probeLimit - roomIDs.count)
+            let wrapped = try await store.knownRoomLogRoomIDs(after: nil, limit: probeLimit - roomIDs.count)
             var seen = Set(roomIDs)
             roomIDs.append(contentsOf: wrapped.filter { seen.insert($0).inserted })
         }
@@ -195,7 +202,7 @@ public actor V2GroupEventSyncEngine {
                 roomHasMoreEvents = roomHasMoreEvents || progress.hasMore
             } catch let error as V2RealtimeTransportError {
                 guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
-                try await store.markGroupEventUnauthorized(roomID: roomID)
+                try await store.markRoomEventUnauthorized(roomID: roomID)
             }
             // Persist after each bounded attempt. A crash can repeat the last
             // room but cannot reset every restart to the lexicographically

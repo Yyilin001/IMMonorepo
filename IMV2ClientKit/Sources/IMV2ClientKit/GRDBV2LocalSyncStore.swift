@@ -211,35 +211,35 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    public func knownHybridGroupRoomIDs(after roomID: RoomID?, limit: Int) throws -> [RoomID] {
+    public func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) throws -> [RoomID] {
         precondition(limit > 0 && limit <= 10_001)
         return try databasePool.read { db in
-            let rawRoomIDs: [String]
-            if let roomID {
-                rawRoomIDs = try String.fetchAll(
-                    db,
-                    sql: """
-                        SELECT room_id
-                        FROM v2_room_profile_projections
-                        WHERE delivery_mode = ? AND is_group_event_authorized = 1 AND room_id > ?
-                        ORDER BY room_id
-                        LIMIT ?
-                        """,
-                    arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID.rawValue, limit]
-                )
-            } else {
-                rawRoomIDs = try String.fetchAll(
-                    db,
-                    sql: """
+            let rawRoomIDs = try String.fetchAll(
+                db,
+                sql: """
+                    WITH room_log_rooms AS (
                         SELECT room_id
                         FROM v2_room_profile_projections
                         WHERE delivery_mode = ? AND is_group_event_authorized = 1
-                        ORDER BY room_id
-                        LIMIT ?
-                        """,
-                    arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, limit]
-                )
-            }
+                        UNION
+                        SELECT direct.room_id
+                        FROM (
+                            SELECT room_id FROM v2_direct_room_profile_projections
+                            UNION
+                            SELECT room_id FROM v2_direct_room_identities
+                        ) AS direct
+                        LEFT JOIN v2_room_event_authorizations AS authorization
+                          ON authorization.room_id = direct.room_id
+                        WHERE COALESCE(authorization.is_authorized, 1) = 1
+                    )
+                    SELECT room_id
+                    FROM room_log_rooms
+                    WHERE (? IS NULL OR room_id > ?)
+                    ORDER BY room_id
+                    LIMIT ?
+                    """,
+                arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID?.rawValue, roomID?.rawValue, limit]
+            )
             return try rawRoomIDs.map(RoomID.init)
         }
     }
@@ -267,30 +267,58 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    public func isKnownHybridGroupRoom(roomID: RoomID) throws -> Bool {
+    public func isKnownRoomLogRoom(roomID: RoomID) throws -> Bool {
         try databasePool.read { db in
             try Bool.fetchOne(
                 db,
-                sql: "SELECT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = ? AND delivery_mode = ? AND is_group_event_authorized = 1)",
-                arguments: [roomID.rawValue, V2GroupDeliveryMode.largeGroupHybrid.rawValue]
+                sql: """
+                    SELECT EXISTS (
+                        SELECT 1 FROM v2_room_profile_projections
+                        WHERE room_id = ? AND delivery_mode = ? AND is_group_event_authorized = 1
+                        UNION ALL
+                        SELECT 1
+                        FROM (
+                            SELECT room_id FROM v2_direct_room_profile_projections
+                            UNION
+                            SELECT room_id FROM v2_direct_room_identities
+                        ) AS direct
+                        LEFT JOIN v2_room_event_authorizations AS authorization
+                          ON authorization.room_id = direct.room_id
+                        WHERE direct.room_id = ? AND COALESCE(authorization.is_authorized, 1) = 1
+                    )
+                    """,
+                arguments: [roomID.rawValue, V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID.rawValue]
             ) ?? false
         }
     }
 
     public func groupEventAccess(roomID: RoomID) throws -> V2ClientGroupEventAccess? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(
+            if let row = try Row.fetchOne(
                 db,
                 sql: "SELECT delivery_mode, is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?",
                 arguments: [roomID.rawValue]
-            ) else { return nil }
-            guard let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String) else {
-                throw V2ClientProjectionError.invalidMessagePayload
+            ) {
+                guard let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String) else {
+                    throw V2ClientProjectionError.invalidMessagePayload
+                }
+                return .init(
+                    delivery: deliveryMode == .largeGroupHybrid ? .durableRoomLog : .foregroundPreview,
+                    isAuthorized: row["is_group_event_authorized"] as Bool
+                )
             }
-            return .init(
-                deliveryMode: deliveryMode,
-                isAuthorized: row["is_group_event_authorized"] as Bool
-            )
+            let directKnown = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_identities WHERE room_id = ?)",
+                arguments: [roomID.rawValue, roomID.rawValue]
+            ) ?? false
+            guard directKnown else { return nil }
+            let authorized = try Bool.fetchOne(
+                db,
+                sql: "SELECT COALESCE((SELECT is_authorized FROM v2_room_event_authorizations WHERE room_id = ?), 1)",
+                arguments: [roomID.rawValue]
+            ) ?? true
+            return .init(delivery: .durableRoomLog, isAuthorized: authorized)
         }
     }
 
@@ -305,12 +333,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    public func markGroupEventUnauthorized(roomID: RoomID) throws {
+    public func markRoomEventUnauthorized(roomID: RoomID) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
             try db.execute(
                 sql: "UPDATE v2_room_profile_projections SET is_group_event_authorized = 0 WHERE room_id = ?",
                 arguments: [roomID.rawValue]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO v2_room_event_authorizations (room_id, is_authorized)
+                    SELECT ?, 0
+                    WHERE EXISTS (
+                        SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ?
+                        UNION ALL
+                        SELECT 1 FROM v2_direct_room_identities WHERE room_id = ?
+                    )
+                    ON CONFLICT(room_id) DO UPDATE SET is_authorized = excluded.is_authorized
+                    """,
+                arguments: [roomID.rawValue, roomID.rawValue, roomID.rawValue]
             )
         }
     }
@@ -877,8 +918,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             else { throw V2ClientSyncError.snapshotMismatch }
             if state["activation_prepared"] as Bool { return }
 
-            try Self.preserveRoomLogProjection(inSnapshotShadows: db)
             try Self.prepareDeviceOwnedIdentityShadow(db: db)
+            // Direct-room eligibility is represented by the device identity
+            // shadow, so it must be prepared (and invalidations applied)
+            // before deciding which independent room-log cursors survive.
+            try Self.preserveRoomLogProjection(inSnapshotShadows: db)
             try Self.rebuildConversationSummaries(
                 messages: Self.snapshotShadowTable(for: "v2_message_projections"),
                 summaries: Self.snapshotShadowTable(for: "v2_conversation_summaries"),
@@ -956,13 +1000,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static let snapshotVirtualBankTables = ["v2_contact_profile_search"]
 
     /// A Snapshot V3 artifact is the canonical baseline for the per-user sync
-    /// stream. Hybrid-room history is owned by the independent ordered room
-    /// log and has its own durable cursor, so replacing those rows would leave
-    /// the cursor ahead of the visible projection. Copy only rows belonging to
-    /// rooms that the incoming baseline still authorizes as hybrid rooms; a
-    /// membership removal remains authoritative and therefore drops the room.
+    /// stream. Room-log history has its own durable cursor, so replacing its
+    /// rows would leave the cursor ahead of visible projections. Preserve only
+    /// room-log rooms that remain represented in the incoming baseline; a
+    /// removed group membership or a revoked direct identity therefore drops
+    /// its local event history instead of granting it new read authority.
     private static func preserveRoomLogProjection(inSnapshotShadows db: Database) throws {
         let shadowRooms = snapshotShadowTable(for: "v2_room_profile_projections")
+        let shadowDirectProfiles = snapshotShadowTable(for: "v2_direct_room_profile_projections")
+        let shadowDirectIdentities = snapshotShadowTable(for: "v2_direct_room_identities")
         let shadowMessages = snapshotShadowTable(for: "v2_message_projections")
         let shadowTombstones = snapshotShadowTable(for: "v2_message_tombstones")
         let shadowReactions = snapshotShadowTable(for: "v2_message_reactions")
@@ -978,11 +1024,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
         func copyRoomRows(table: String, shadow: String) throws {
             try db.execute(sql: """
+                WITH room_log_rooms AS (
+                    SELECT room_id
+                    FROM \(shadowRooms)
+                    WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                    UNION
+                    SELECT direct.room_id
+                    FROM (
+                        SELECT room_id FROM \(shadowDirectProfiles)
+                        UNION
+                        SELECT room_id FROM \(shadowDirectIdentities)
+                    ) AS direct
+                    LEFT JOIN v2_room_event_authorizations AS authorization
+                      ON authorization.room_id = direct.room_id
+                    WHERE COALESCE(authorization.is_authorized, 1) = 1
+                )
                 INSERT INTO \(shadow)
                 SELECT live.*
                 FROM \(table) AS live
-                JOIN \(shadowRooms) AS room ON room.room_id = live.room_id
-                WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+                JOIN room_log_rooms AS room ON room.room_id = live.room_id
                 ON CONFLICT DO NOTHING
                 """, arguments: [hybridMode])
         }
@@ -1008,18 +1068,46 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let shadowEvents = snapshotShadowTable(for: "v2_group_events")
         let shadowCursors = snapshotShadowTable(for: "v2_group_event_cursors")
         try db.execute(sql: """
+            WITH room_log_rooms AS (
+                SELECT room_id
+                FROM \(shadowRooms)
+                WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                UNION
+                SELECT direct.room_id
+                FROM (
+                    SELECT room_id FROM \(shadowDirectProfiles)
+                    UNION
+                    SELECT room_id FROM \(shadowDirectIdentities)
+                ) AS direct
+                LEFT JOIN v2_room_event_authorizations AS authorization
+                  ON authorization.room_id = direct.room_id
+                WHERE COALESCE(authorization.is_authorized, 1) = 1
+            )
             INSERT INTO \(shadowEvents)
             SELECT event.*
             FROM v2_group_events AS event
-            JOIN \(shadowRooms) AS room ON room.room_id = event.room_id
-            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            JOIN room_log_rooms AS room ON room.room_id = event.room_id
             """, arguments: [hybridMode])
         try db.execute(sql: """
+            WITH room_log_rooms AS (
+                SELECT room_id
+                FROM \(shadowRooms)
+                WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                UNION
+                SELECT direct.room_id
+                FROM (
+                    SELECT room_id FROM \(shadowDirectProfiles)
+                    UNION
+                    SELECT room_id FROM \(shadowDirectIdentities)
+                ) AS direct
+                LEFT JOIN v2_room_event_authorizations AS authorization
+                  ON authorization.room_id = direct.room_id
+                WHERE COALESCE(authorization.is_authorized, 1) = 1
+            )
             INSERT INTO \(shadowCursors)
             SELECT cursor.*
             FROM v2_group_event_cursors AS cursor
-            JOIN \(shadowRooms) AS room ON room.room_id = cursor.room_id
-            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            JOIN room_log_rooms AS room ON room.room_id = cursor.room_id
             """, arguments: [hybridMode])
     }
 
@@ -2103,6 +2191,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     updatedAt.timeIntervalSince1970
                 ]
             )
+            try db.execute(
+                sql: "INSERT INTO v2_room_event_authorizations (room_id, is_authorized) VALUES (?, 1) ON CONFLICT(room_id) DO UPDATE SET is_authorized = excluded.is_authorized",
+                arguments: [roomID.rawValue]
+            )
         }
     }
 
@@ -2789,6 +2881,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     private static func persist(_ projection: V2ClientDirectRoomProfileProjection, target: ProjectionTableTarget = .live, db: Database) throws {
         let table = target.table("v2_direct_room_profile_projections")
+        func grantRoomEventAccessIfLive() throws {
+            guard case .live = target else { return }
+            try db.execute(
+                sql: "INSERT INTO v2_room_event_authorizations (room_id, is_authorized) VALUES (?, 1) ON CONFLICT(room_id) DO UPDATE SET is_authorized = excluded.is_authorized",
+                arguments: [projection.roomID.rawValue]
+            )
+        }
         if let existing = try Row.fetchOne(db, sql: "SELECT source_event_id, target_user_id, public_handle, display_name, account_kind, revision FROM \(table) WHERE room_id = ?", arguments: [projection.roomID.rawValue]) {
             let existingRevision: Int64 = existing["revision"]
             let incomingRevision = try storageInteger(projection.revision)
@@ -2805,10 +2904,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             }
             try db.execute(sql: "UPDATE \(table) SET source_event_id = ?, target_user_id = ?, public_handle = ?, display_name = ?, account_kind = ?, revision = ?, updated_at = ? WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, projection.publicIdentity.accountKind.rawValue, incomingRevision, projection.updatedAt.timeIntervalSince1970, projection.roomID.rawValue])
             try persist(profileView(from: projection), target: target, db: db)
+            try grantRoomEventAccessIfLive()
             return
         }
         try db.execute(sql: "INSERT INTO \(table) (room_id, source_event_id, target_user_id, public_handle, display_name, account_kind, revision, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.publicIdentity.userID.rawValue, projection.publicIdentity.handle.rawValue, projection.publicIdentity.displayName, projection.publicIdentity.accountKind.rawValue, try storageInteger(projection.revision), projection.updatedAt.timeIntervalSince1970])
         try persist(profileView(from: projection), target: target, db: db)
+        try grantRoomEventAccessIfLive()
     }
 
     private static func profileView(from projection: V2ClientDirectRoomProfileProjection) throws -> V2ProfileView {

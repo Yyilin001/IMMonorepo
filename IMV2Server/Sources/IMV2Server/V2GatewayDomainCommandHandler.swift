@@ -538,7 +538,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         let outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo))
         switch outcome {
         case .accepted(let message):
-            if message.groupDeliveryMode != nil {
+            if message.groupDeliveryMode != nil || message.usesRoomEventLog {
                 await foregroundGroupEventHints.publishForegroundHint(.init(roomID: message.roomID, highWatermark: message.roomSequence))
             }
             return acceptedMessageEnvelope(message)

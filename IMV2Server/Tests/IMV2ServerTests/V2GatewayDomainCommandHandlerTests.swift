@@ -282,6 +282,38 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await hints.values() == [.init(roomID: fixture.roomID, highWatermark: 9)])
     }
 
+    @Test("an accepted direct room-log message emits only a best-effort foreground watermark hint")
+    func acceptedDirectRoomLogMessagePublishesForegroundHint() async throws {
+        let fixture = try GatewayDomainFixture()
+        let accepted = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000041"),
+            roomID: fixture.roomID,
+            roomSequence: 10,
+            senderUserID: fixture.userID,
+            clientMessageID: fixture.clientMessageID,
+            text: "private-log",
+            mediaPresentations: [],
+            usesRoomEventLog: true,
+            createdAt: fixture.now
+        )
+        let hints = GatewayForegroundHintRecorder()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))),
+            foregroundGroupEventHints: hints,
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "private-log"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.messageAccepted.roomSequence == 10)
+        #expect(await hints.values() == [.init(roomID: fixture.roomID, highWatermark: 10)])
+    }
+
     @Test("invalid sync state is returned as a stable protocol error")
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()

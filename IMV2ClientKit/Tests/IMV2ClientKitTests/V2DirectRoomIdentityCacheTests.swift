@@ -27,6 +27,55 @@ struct V2DirectRoomIdentityCacheTests {
         #expect(try await restarted.directRoomIdentities().first?.publicIdentity.displayName == "更新名称")
     }
 
+    @Test("a direct room identity owns a durable room-event cursor and remembers a forbidden pull")
+    func directIdentityEnrollsDurableRoomLog() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-direct-room-log-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d71")!)
+        let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000d72")
+        let identity = try V2PublicIdentity(
+            userID: .init("00000000-0000-0000-0000-000000000d73"),
+            handle: .init("room_log_peer"), displayName: "私聊对方", accountKind: .regular
+        )
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity)
+
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [roomID])
+        #expect(try await store.groupEventAccess(roomID: roomID) == .init(
+            delivery: .durableRoomLog, isAuthorized: true
+        ))
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "event_type": "message.accepted",
+            "message_id": "00000000-0000-0000-0000-000000000d74",
+            "room_id": roomID.rawValue,
+            "room_sequence": 1,
+            "message_revision": 1,
+            "sender_user_id": identity.userID.rawValue,
+            "text": "离线恢复的私聊",
+            "mention_user_ids": [],
+            "mentions_everyone": false,
+            "server_created_at_ms": 1_750_000_000_000,
+        ])
+        let event = try V2ClientGroupEvent(
+            sourceEventID: .init("00000000-0000-0000-0000-000000000d75"),
+            roomSequence: 1, projectionKind: "message", payload: payload
+        )
+        let page = V2ClientGroupEventPage(roomID: roomID, events: [event], nextRoomSequence: 1, hasMore: false)
+        #expect(try await store.applyGroupEventPage(page) == 1)
+        #expect(try await store.messages(in: roomID).map(\.text) == ["离线恢复的私聊"])
+        #expect(try await store.groupEventCursor(roomID: roomID) == 1)
+
+        try await store.markRoomEventUnauthorized(roomID: roomID)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.groupEventAccess(roomID: roomID) == .init(
+            delivery: .durableRoomLog, isAuthorized: false
+        ))
+        let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        #expect(try await restarted.groupEventAccess(roomID: roomID) == .init(
+            delivery: .durableRoomLog, isAuthorized: false
+        ))
+        #expect(try await restarted.groupEventCursor(roomID: roomID) == 1)
+    }
+
     @Test("authoritative direct profile sync replaces the local lookup cache and survives a reset")
     func appliesAuthoritativeProjectionAndSnapshot() async throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-direct-profile-\(UUID().uuidString).sqlite")
@@ -134,6 +183,26 @@ struct V2DirectRoomIdentityCacheTests {
             publicIdentity: identity,
             updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
         )
+        let roomEventPayload = try JSONSerialization.data(withJSONObject: [
+            "event_type": "message.accepted",
+            "message_id": "00000000-0000-0000-0000-000000000d54",
+            "room_id": roomID.rawValue,
+            "room_sequence": 1,
+            "message_revision": 1,
+            "sender_user_id": identity.userID.rawValue,
+            "text": "重置时保留的私聊",
+            "mention_user_ids": [],
+            "mentions_everyone": false,
+            "server_created_at_ms": 1_750_000_000_000,
+        ])
+        _ = try await store.applyGroupEventPage(.init(
+            roomID: roomID,
+            events: [try .init(
+                sourceEventID: .init("00000000-0000-0000-0000-000000000d55"),
+                roomSequence: 1, projectionKind: "message", payload: roomEventPayload
+            )],
+            nextRoomSequence: 1, hasMore: false
+        ))
 
         let reset = try V2ClientResetRequired(
             snapshotID: .init("direct-cache-empty-snapshot"),
@@ -164,6 +233,8 @@ struct V2DirectRoomIdentityCacheTests {
                 updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
             )
         ])
+        #expect(try await store.groupEventCursor(roomID: roomID) == 1)
+        #expect(try await store.messages(in: roomID).map(\.text) == ["重置时保留的私聊"])
     }
 
     @Test("snapshot invalidation does not mutate the live identity cache before activation")

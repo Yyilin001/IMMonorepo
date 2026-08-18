@@ -2012,7 +2012,7 @@ struct V2ConversationStoreTests {
 
         #expect(try await synchronizer.subscribe(roomID: roomID.rawValue) == .notHybridRoom)
         #expect(try await localStore.groupEventAccess(roomID: roomID) == .init(
-            deliveryMode: .standardFanout,
+            delivery: .foregroundPreview,
             isAuthorized: false
         ))
 
