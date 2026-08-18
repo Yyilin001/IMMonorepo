@@ -49,28 +49,19 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             let roomID = try uuid(command.roomID)
             let senderID = try uuid(command.senderUserID)
             let clientMessageID = try uuid(command.clientMessageID)
-            // `messages` and `direct_message_denials` share the same client
-            // operation namespace. Serialize that namespace before taking a
-            // room lock so two commands reusing one ID in different rooms
-            // cannot race through both existence checks. The materialized CTE
-            // keeps the lock order explicit while folding two client/server
-            // round trips into one PostgreSQL statement.
-            let operationLockKey = "v2-message-operation:" + senderID.uuidString + ":" + clientMessageID.uuidString
-            guard let room = try await sql.raw("""
-                WITH operation_lock AS MATERIALIZED (
-                    SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))
-                )
-                SELECT room.room_kind, room.room_shard_id, room.room_sequence,
-                       room.timeline_sequence, room.membership_revision,
-                       room.capacity_profile_id, room.delivery_mode, room.frozen_at
-                FROM operation_lock
-                CROSS JOIN im_v2.rooms AS room
-                WHERE room.room_id = \(bind: roomID)
-                FOR UPDATE OF room
-                """).first(decoding: RoomRow.self)
-            else {
-                throw V2RoomWriteStoreError.roomNotFound
-            }
+            try await acquireMessageOperationLock(
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                sql: sql
+            )
+            let loadedContext = try await loadMessageAcceptanceContext(
+                roomID: roomID,
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                now: now,
+                sql: sql
+            )
+            let room = loadedContext.room
             guard room.capacityProfileID == capacityProfile.id else {
                 throw V2RoomWriteStoreError.capacityProfileMismatch
             }
@@ -79,11 +70,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // later membership change removes the sender. Otherwise a lost
             // acceptance response becomes an observable false rejection and
             // clients cannot safely retain their immutable operation ID.
-            switch try await existingMessageOperation(
-                senderID: senderID,
-                clientMessageID: clientMessageID,
-                sql: sql
-            ) {
+            switch try loadedContext.existingOperation() {
             case .accepted(let existing):
                 let priorMedia = try await sql.raw("""
                     SELECT reference.media_id, media.content_type, media.byte_count
@@ -121,73 +108,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             guard room.frozenAt == nil else {
                 throw V2RoomWriteStoreError.roomFrozen
             }
-            let acceptanceSnapshots = try await sql.raw("""
-                WITH locked_admission AS MATERIALIZED (
-                SELECT admission.eligible_member_count AS room_eligible_member_count,
-                       admission.command_window_limit AS room_command_window_limit,
-                       admission.command_window_used AS room_command_window_used,
-                       admission.fanout_window_limit AS room_fanout_window_limit,
-                       admission.fanout_window_used AS room_fanout_window_used,
-                       admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
-                       admission.outstanding_fanout_units AS room_outstanding_fanout_units,
-                       admission.max_outstanding_plans AS room_max_outstanding_plans,
-                       admission.outstanding_plans AS room_outstanding_plans,
-                       admission.shard_lease_id AS room_shard_lease_id,
-                       admission.shard_lease_generation AS room_shard_lease_generation,
-                       shard.lease_id AS shard_lease_id,
-                       shard.generation AS shard_generation,
-                       shard.valid_until AS shard_valid_until,
-                       shard.command_window_limit AS shard_command_window_limit,
-                       shard.command_window_used AS shard_command_window_used,
-                       shard.fanout_window_limit AS shard_fanout_window_limit,
-                       shard.fanout_window_used AS shard_fanout_window_used,
-                       shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
-                       shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
-                       shard.max_outstanding_plans AS shard_max_outstanding_plans,
-                       shard.outstanding_plans AS shard_outstanding_plans
-                FROM im_v2.room_admission AS admission
-                JOIN im_v2.shard_admission_pools AS shard
-                  ON shard.room_shard_id = \(bind: room.roomShardID)
-                 AND shard.capacity_profile_id = \(bind: room.capacityProfileID)
-                WHERE admission.room_id = \(bind: roomID)
-                FOR UPDATE OF admission
-                ), locked_actor AS MATERIALIZED (
-                    SELECT membership.role AS actor_role,
-                           EXISTS (
-                               SELECT 1
-                               FROM im_v2.public_user_profiles AS profile
-                               WHERE profile.user_id = \(bind: senderID)
-                                 AND profile.state = 'active'
-                                 AND NOT EXISTS (
-                                     SELECT 1 FROM im_v2.account_disables AS disabled
-                                     WHERE disabled.user_id = profile.user_id
-                                 )
-                           ) AS sender_is_active,
-                           EXISTS (
-                               SELECT 1 FROM im_v2.room_member_mutes AS mute
-                               WHERE mute.room_id = \(bind: roomID)
-                                 AND mute.user_id = \(bind: senderID)
-                                 AND mute.mute_until > \(bind: now)
-                           ) AS muted
-                    FROM locked_admission
-                    JOIN im_v2.room_memberships AS membership
-                      ON membership.room_id = \(bind: roomID)
-                     AND membership.user_id = \(bind: senderID)
-                     AND membership.joined_revision <= \(bind: room.membershipRevision)
-                     AND (membership.left_revision IS NULL
-                          OR membership.left_revision > \(bind: room.membershipRevision))
-                    FOR UPDATE OF membership
-                )
-                SELECT locked_admission.*, actor.actor_role,
-                       actor.sender_is_active, actor.muted
-                FROM locked_admission
-                LEFT JOIN locked_actor AS actor ON TRUE
-                """).all(decoding: AdmissionSnapshotRow.self)
-            guard acceptanceSnapshots.count == 1,
-                  let admissionSnapshot = acceptanceSnapshots.first
-            else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
+            let admissionSnapshot = try loadedContext.admissionSnapshot()
             let admission = admissionSnapshot.room
             let shard = admissionSnapshot.shard
             guard admission.shardLeaseID == shard.leaseID,
@@ -212,11 +133,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
             let directContext: DirectMessageAcceptanceContext?
             if room.kind == "direct" {
-                let context = try await directMessageContext(
-                    roomID: roomID,
-                    senderID: senderID,
-                    sql: sql
-                )
+                let context = try directMessageContext(from: loadedContext.directPolicySnapshot())
                 directContext = context
                 if let restriction = context.restriction {
                     let denied = try await persistDirectMessageDenied(
@@ -568,84 +485,241 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         )
     }
 
-    /// Reads the immutable pair plus all ordinary relationship gates in one
-    /// snapshot. The result is reused for quota admission and post-commit
-    /// direct projections, avoiding a second policy scan inside the same
-    /// room-serialized transaction.
-    private func directMessageContext(
+    /// Acquires the operation fence in its own statement. PostgreSQL fixes a
+    /// statement snapshot before evaluating a CTE; after a concurrent sender
+    /// releases this lock, the following read must therefore start with a new
+    /// snapshot to observe the committed idempotency result.
+    private func acquireMessageOperationLock(
+        senderID: UUID,
+        clientMessageID: UUID,
+        sql: any SQLDatabase
+    ) async throws {
+        let key = "v2-message-operation:" + senderID.uuidString + ":" + clientMessageID.uuidString
+        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+
+    /// One transaction-scoped read loads the room, idempotency result, room
+    /// admission, sender membership, and direct-message policy together. The
+    /// operation fence has already established a fresh snapshot; the CTE lock
+    /// graph preserves room -> room admission -> sender membership -> direct
+    /// pair. The shared shard row remains a narrow final reservation.
+    private func loadMessageAcceptanceContext(
         roomID: UUID,
         senderID: UUID,
+        clientMessageID: UUID,
+        now: Date,
         sql: any SQLDatabase
-    ) async throws -> DirectMessageAcceptanceContext {
-        guard let policy = try await sql.raw("""
-            WITH pair AS MATERIALIZED (
-                SELECT room_id, lower_user_id, higher_user_id,
-                       lower_profile_visible_to_higher, higher_profile_visible_to_lower,
-                       lower_can_send, higher_can_send,
-                       CASE WHEN lower_user_id = \(bind: senderID)
-                            THEN higher_user_id ELSE lower_user_id END AS recipient_user_id
-                FROM im_v2.direct_room_pairs
-                WHERE room_id = \(bind: roomID)
-                  AND (lower_user_id = \(bind: senderID) OR higher_user_id = \(bind: senderID))
-                FOR UPDATE
+    ) async throws -> MessageAcceptanceContextRow {
+        let rows = try await sql.raw("""
+            WITH locked_room AS MATERIALIZED (
+                SELECT room.room_kind, room.room_shard_id, room.room_sequence,
+                       room.timeline_sequence, room.membership_revision,
+                       room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                       room.room_id
+                FROM im_v2.rooms AS room
+                WHERE room.room_id = \(bind: roomID)
+                FOR UPDATE OF room
+            ), prior_operation AS MATERIALIZED (
+                SELECT 'accepted'::text AS prior_outcome_kind,
+                       message.message_id AS prior_message_id,
+                       message.room_id AS prior_room_id,
+                       message.room_sequence AS prior_room_sequence,
+                       message.timeline_sequence AS prior_timeline_sequence,
+                       message.sender_user_id AS prior_sender_user_id,
+                       message.client_message_id AS prior_client_message_id,
+                       message.text_body AS prior_text_body,
+                       message.rich_entities::text AS prior_rich_entities,
+                       message.reply_to_message_id AS prior_reply_to_message_id,
+                       message.created_at AS prior_created_at,
+                       NULL::uuid AS prior_source_event_id,
+                       NULL::text AS prior_denial_reason
+                FROM locked_room
+                JOIN im_v2.messages AS message ON TRUE
+                WHERE message.sender_user_id = \(bind: senderID)
+                  AND message.client_message_id = \(bind: clientMessageID)
+                UNION ALL
+                SELECT 'denied'::text, NULL::uuid, denial.room_id, NULL::bigint,
+                       denial.timeline_sequence, denial.sender_user_id,
+                       denial.client_message_id, NULL::text, NULL::text,
+                       NULL::uuid, denial.created_at, denial.source_event_id,
+                       denial.reason
+                FROM locked_room
+                JOIN im_v2.direct_message_denials AS denial ON TRUE
+                WHERE denial.sender_user_id = \(bind: senderID)
+                  AND denial.client_message_id = \(bind: clientMessageID)
+            ), prior_operation_count AS MATERIALIZED (
+                SELECT COUNT(*)::integer AS prior_operation_count FROM prior_operation
+            ), fresh_room AS MATERIALIZED (
+                SELECT room.*
+                FROM locked_room AS room
+                WHERE NOT EXISTS (SELECT 1 FROM prior_operation)
+            ), locked_admission AS MATERIALIZED (
+                SELECT admission.eligible_member_count AS room_eligible_member_count,
+                       admission.command_window_limit AS room_command_window_limit,
+                       admission.command_window_used AS room_command_window_used,
+                       admission.fanout_window_limit AS room_fanout_window_limit,
+                       admission.fanout_window_used AS room_fanout_window_used,
+                       admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
+                       admission.outstanding_fanout_units AS room_outstanding_fanout_units,
+                       admission.max_outstanding_plans AS room_max_outstanding_plans,
+                       admission.outstanding_plans AS room_outstanding_plans,
+                       admission.shard_lease_id AS room_shard_lease_id,
+                       admission.shard_lease_generation AS room_shard_lease_generation,
+                       shard.lease_id AS shard_lease_id,
+                       shard.generation AS shard_generation,
+                       shard.valid_until AS shard_valid_until,
+                       shard.command_window_limit AS shard_command_window_limit,
+                       shard.command_window_used AS shard_command_window_used,
+                       shard.fanout_window_limit AS shard_fanout_window_limit,
+                       shard.fanout_window_used AS shard_fanout_window_used,
+                       shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
+                       shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
+                       shard.max_outstanding_plans AS shard_max_outstanding_plans,
+                       shard.outstanding_plans AS shard_outstanding_plans
+                FROM fresh_room AS room
+                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = room.room_shard_id
+                 AND shard.capacity_profile_id = room.capacity_profile_id
+                FOR UPDATE OF admission
+            ), locked_actor AS MATERIALIZED (
+                SELECT membership.role AS actor_role,
+                       EXISTS (
+                           SELECT 1
+                           FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = \(bind: senderID)
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS sender_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_member_mutes AS mute
+                           WHERE mute.room_id = room.room_id
+                             AND mute.user_id = \(bind: senderID)
+                             AND mute.mute_until > \(bind: now)
+                       ) AS muted
+                FROM fresh_room AS room
+                CROSS JOIN locked_admission
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.room_id = room.room_id
+                 AND membership.user_id = \(bind: senderID)
+                 AND membership.joined_revision <= room.membership_revision
+                 AND (membership.left_revision IS NULL
+                      OR membership.left_revision > room.membership_revision)
+                FOR UPDATE OF membership
+            ), direct_pair AS MATERIALIZED (
+                SELECT pair.room_id, pair.lower_user_id, pair.higher_user_id,
+                       pair.lower_profile_visible_to_higher,
+                       pair.higher_profile_visible_to_lower,
+                       pair.lower_can_send, pair.higher_can_send,
+                       CASE WHEN pair.lower_user_id = \(bind: senderID)
+                            THEN pair.higher_user_id ELSE pair.lower_user_id END AS recipient_user_id
+                FROM fresh_room AS room
+                CROSS JOIN locked_actor
+                JOIN im_v2.direct_room_pairs AS pair ON pair.room_id = room.room_id
+                WHERE room.room_kind = 'direct'
+                  AND (pair.lower_user_id = \(bind: senderID)
+                       OR pair.higher_user_id = \(bind: senderID))
+                FOR UPDATE OF pair
             ), special AS MATERIALIZED (
                 SELECT account.account_user_id, account.account_kind, account.status,
                        account.allows_customer_messages, account.allows_service_messages
                 FROM im_v2.special_accounts AS account
-                JOIN pair
+                JOIN direct_pair AS pair
                   ON account.account_user_id = \(bind: senderID)
                   OR account.account_user_id = pair.recipient_user_id
                 ORDER BY account.account_user_id
                 FOR KEY SHARE OF account
+            ), direct_policy AS MATERIALIZED (
+                SELECT pair.recipient_user_id,
+                       CASE WHEN pair.lower_user_id = \(bind: senderID)
+                            THEN pair.lower_profile_visible_to_higher
+                            ELSE pair.higher_profile_visible_to_lower
+                       END AS sender_profile_visible_to_recipient,
+                       CASE WHEN pair.lower_user_id = \(bind: senderID)
+                            THEN pair.lower_can_send
+                            ELSE pair.higher_can_send
+                       END AS sender_can_send,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = pair.recipient_user_id
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS recipient_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.user_blocks AS block
+                           WHERE (block.blocker_user_id = pair.lower_user_id AND block.blocked_user_id = pair.higher_user_id)
+                              OR (block.blocker_user_id = pair.higher_user_id AND block.blocked_user_id = pair.lower_user_id)
+                       ) AS blocked,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.user_relationships AS relationship
+                           WHERE relationship.lower_user_id = pair.lower_user_id
+                             AND relationship.higher_user_id = pair.higher_user_id
+                             AND relationship.state = 'accepted'
+                       ) AS is_friend,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.messages AS message
+                           WHERE message.room_id = pair.room_id
+                             AND message.sender_user_id = pair.recipient_user_id
+                       ) AS recipient_has_replied,
+                       COALESCE((
+                           SELECT preference.allows_stranger_messages
+                           FROM im_v2.user_stranger_message_preferences AS preference
+                           WHERE preference.user_id = pair.recipient_user_id
+                       ), TRUE) AS allows_strangers,
+                       (SELECT account_kind FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_kind,
+                       (SELECT status FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_status,
+                       (SELECT allows_service_messages FROM special WHERE account_user_id = \(bind: senderID)) AS sender_allows_service_messages,
+                       (SELECT account_kind FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_kind,
+                       (SELECT status FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_status,
+                       (SELECT allows_customer_messages FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
+                FROM direct_pair AS pair
             )
-            SELECT pair.recipient_user_id,
-                   CASE WHEN pair.lower_user_id = \(bind: senderID)
-                        THEN pair.lower_profile_visible_to_higher
-                        ELSE pair.higher_profile_visible_to_lower
-                   END AS sender_profile_visible_to_recipient,
-                   CASE WHEN pair.lower_user_id = \(bind: senderID)
-                        THEN pair.lower_can_send
-                        ELSE pair.higher_can_send
-                   END AS sender_can_send,
-                   EXISTS (
-                       SELECT 1 FROM im_v2.public_user_profiles AS profile
-                       WHERE profile.user_id = pair.recipient_user_id
-                         AND profile.state = 'active'
-                         AND NOT EXISTS (
-                             SELECT 1 FROM im_v2.account_disables AS disabled
-                             WHERE disabled.user_id = profile.user_id
-                         )
-                   ) AS recipient_is_active,
-                   EXISTS (
-                       SELECT 1 FROM im_v2.user_blocks AS block
-                       WHERE (block.blocker_user_id = pair.lower_user_id AND block.blocked_user_id = pair.higher_user_id)
-                          OR (block.blocker_user_id = pair.higher_user_id AND block.blocked_user_id = pair.lower_user_id)
-                   ) AS blocked,
-                   EXISTS (
-                       SELECT 1 FROM im_v2.user_relationships AS relationship
-                       WHERE relationship.lower_user_id = pair.lower_user_id
-                         AND relationship.higher_user_id = pair.higher_user_id
-                         AND relationship.state = 'accepted'
-                   ) AS is_friend,
-                   EXISTS (
-                       SELECT 1 FROM im_v2.messages AS message
-                       WHERE message.room_id = pair.room_id
-                         AND message.sender_user_id = pair.recipient_user_id
-                   ) AS recipient_has_replied,
-                   COALESCE((
-                       SELECT preference.allows_stranger_messages
-                       FROM im_v2.user_stranger_message_preferences AS preference
-                       WHERE preference.user_id = pair.recipient_user_id
-                   ), TRUE) AS allows_strangers,
-                   (SELECT account_kind FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_kind,
-                   (SELECT status FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_status,
-                   (SELECT allows_service_messages FROM special WHERE account_user_id = \(bind: senderID)) AS sender_allows_service_messages,
-                   (SELECT account_kind FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_kind,
-                   (SELECT status FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_status,
-                   (SELECT allows_customer_messages FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
-            FROM pair
-            """).first(decoding: DirectMessagePolicySnapshotRow.self)
-        else { throw V2RoomWriteStoreError.actorNotEligible }
+            SELECT room.room_kind, room.room_shard_id, room.room_sequence,
+                   room.timeline_sequence, room.membership_revision,
+                   room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                   count.prior_operation_count,
+                   prior.prior_outcome_kind, prior.prior_message_id,
+                   prior.prior_room_id, prior.prior_room_sequence,
+                   prior.prior_timeline_sequence, prior.prior_sender_user_id,
+                   prior.prior_client_message_id, prior.prior_text_body,
+                   prior.prior_rich_entities, prior.prior_reply_to_message_id,
+                   prior.prior_created_at, prior.prior_source_event_id,
+                   prior.prior_denial_reason,
+                   admission.*, actor.actor_role, actor.sender_is_active, actor.muted,
+                   policy.recipient_user_id, policy.sender_profile_visible_to_recipient,
+                   policy.sender_can_send, policy.recipient_is_active, policy.blocked,
+                   policy.is_friend, policy.recipient_has_replied, policy.allows_strangers,
+                   policy.sender_account_kind, policy.sender_account_status,
+                   policy.sender_allows_service_messages, policy.recipient_account_kind,
+                   policy.recipient_account_status, policy.recipient_allows_customer_messages
+            FROM locked_room AS room
+            CROSS JOIN prior_operation_count AS count
+            LEFT JOIN prior_operation AS prior ON TRUE
+            LEFT JOIN locked_admission AS admission ON TRUE
+            LEFT JOIN locked_actor AS actor ON TRUE
+            LEFT JOIN direct_policy AS policy ON TRUE
+            """).all(decoding: MessageAcceptanceContextRow.self)
+        guard rows.count == 1, let row = rows.first else {
+            throw rows.isEmpty ? V2RoomWriteStoreError.roomNotFound : V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard row.priorOperationCount <= 1 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return row
+    }
+
+    /// The SQL loader above owns the consistent database snapshot and locks;
+    /// this pure mapping deliberately retains the existing direct-policy
+    /// decision table unchanged.
+    private func directMessageContext(
+        from policy: DirectMessagePolicySnapshotRow
+    ) throws -> DirectMessageAcceptanceContext {
 
         let recipientID = policy.recipientUserID
         let restriction: V2DirectMessageDenied.Reason?
@@ -745,41 +819,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         case .systemAccountReadOnly:
             "system_account_read_only"
         }
-    }
-
-    /// Resolves the accepted/denied operation namespace in one statement.
-    /// The caller already holds the operation advisory lock, so finding both
-    /// rows is durable corruption rather than a race that should be hidden by
-    /// arbitrary `LIMIT 1` ordering.
-    private func existingMessageOperation(
-        senderID: UUID,
-        clientMessageID: UUID,
-        sql: any SQLDatabase
-    ) async throws -> ExistingMessageOperation? {
-        let rows = try await sql.raw("""
-            SELECT 'accepted'::text AS outcome_kind,
-                   message.message_id, message.room_id, message.room_sequence,
-                   message.timeline_sequence, message.sender_user_id,
-                   message.client_message_id, message.text_body,
-                   message.rich_entities::text AS rich_entities,
-                   message.reply_to_message_id, message.created_at,
-                   NULL::uuid AS source_event_id, NULL::text AS denial_reason
-            FROM im_v2.messages AS message
-            WHERE message.sender_user_id = \(bind: senderID)
-              AND message.client_message_id = \(bind: clientMessageID)
-            UNION ALL
-            SELECT 'denied'::text, NULL::uuid, denial.room_id, NULL::bigint,
-                   denial.timeline_sequence, denial.sender_user_id,
-                   denial.client_message_id, NULL::text, NULL::text,
-                   NULL::uuid, denial.created_at, denial.source_event_id,
-                   denial.reason
-            FROM im_v2.direct_message_denials AS denial
-            WHERE denial.sender_user_id = \(bind: senderID)
-              AND denial.client_message_id = \(bind: clientMessageID)
-            """).all(decoding: MessageOperationReplayRow.self)
-        guard rows.count <= 1 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        guard let row = rows.first else { return nil }
-        return try row.operation()
     }
 
     private func appendDirectSendingCapabilityIfChanged(
@@ -1769,6 +1808,247 @@ private struct OrderedMentionInput: Encodable {
         case ordinal
         case mentionKind = "mention_kind"
         case mentionedUserID = "mentioned_user_id"
+    }
+}
+
+/// The one-row result of the send preflight CTE. `locked_room` is always
+/// present; every other group is optional because idempotent replay must not
+/// take fresh-send locks or policy decisions after its durable result exists.
+private struct MessageAcceptanceContextRow: Decodable {
+    let kind: String
+    let roomShardID: String
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let membershipRevision: Int64
+    let capacityProfileID: String
+    let deliveryMode: V2GroupDeliveryMode
+    let frozenAt: Date?
+    let priorOperationCount: Int
+    let priorOutcomeKind: String?
+    let priorMessageID: UUID?
+    let priorRoomID: UUID?
+    let priorRoomSequence: Int64?
+    let priorTimelineSequence: Int64?
+    let priorSenderUserID: UUID?
+    let priorClientMessageID: UUID?
+    let priorTextBody: String?
+    let priorRichEntities: String?
+    let priorReplyToMessageID: UUID?
+    let priorCreatedAt: Date?
+    let priorSourceEventID: UUID?
+    let priorDenialReason: String?
+    let roomEligibleMemberCount: Int?
+    let roomCommandWindowLimit: Int?
+    let roomCommandWindowUsed: Int?
+    let roomFanoutWindowLimit: Int?
+    let roomFanoutWindowUsed: Int?
+    let roomMaxOutstandingFanoutUnits: Int?
+    let roomOutstandingFanoutUnits: Int?
+    let roomMaxOutstandingPlans: Int?
+    let roomOutstandingPlans: Int?
+    let roomShardLeaseID: UUID?
+    let roomShardLeaseGeneration: Int64?
+    let shardLeaseID: UUID?
+    let shardGeneration: Int64?
+    let shardValidUntil: Date?
+    let shardCommandWindowLimit: Int?
+    let shardCommandWindowUsed: Int?
+    let shardFanoutWindowLimit: Int?
+    let shardFanoutWindowUsed: Int?
+    let shardMaxOutstandingFanoutUnits: Int?
+    let shardOutstandingFanoutUnits: Int?
+    let shardMaxOutstandingPlans: Int?
+    let shardOutstandingPlans: Int?
+    let actorRole: String?
+    let senderIsActive: Bool?
+    let muted: Bool?
+    let recipientUserID: UUID?
+    let senderProfileVisibleToRecipient: Bool?
+    let senderCanSend: Bool?
+    let recipientIsActive: Bool?
+    let blocked: Bool?
+    let isFriend: Bool?
+    let recipientHasReplied: Bool?
+    let allowsStrangers: Bool?
+    let senderAccountKind: String?
+    let senderAccountStatus: String?
+    let senderAllowsServiceMessages: Bool?
+    let recipientAccountKind: String?
+    let recipientAccountStatus: String?
+    let recipientAllowsCustomerMessages: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case kind = "room_kind"
+        case roomShardID = "room_shard_id"
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+        case membershipRevision = "membership_revision"
+        case capacityProfileID = "capacity_profile_id"
+        case deliveryMode = "delivery_mode"
+        case frozenAt = "frozen_at"
+        case priorOperationCount = "prior_operation_count"
+        case priorOutcomeKind = "prior_outcome_kind"
+        case priorMessageID = "prior_message_id"
+        case priorRoomID = "prior_room_id"
+        case priorRoomSequence = "prior_room_sequence"
+        case priorTimelineSequence = "prior_timeline_sequence"
+        case priorSenderUserID = "prior_sender_user_id"
+        case priorClientMessageID = "prior_client_message_id"
+        case priorTextBody = "prior_text_body"
+        case priorRichEntities = "prior_rich_entities"
+        case priorReplyToMessageID = "prior_reply_to_message_id"
+        case priorCreatedAt = "prior_created_at"
+        case priorSourceEventID = "prior_source_event_id"
+        case priorDenialReason = "prior_denial_reason"
+        case roomEligibleMemberCount = "room_eligible_member_count"
+        case roomCommandWindowLimit = "room_command_window_limit"
+        case roomCommandWindowUsed = "room_command_window_used"
+        case roomFanoutWindowLimit = "room_fanout_window_limit"
+        case roomFanoutWindowUsed = "room_fanout_window_used"
+        case roomMaxOutstandingFanoutUnits = "room_max_outstanding_fanout_units"
+        case roomOutstandingFanoutUnits = "room_outstanding_fanout_units"
+        case roomMaxOutstandingPlans = "room_max_outstanding_plans"
+        case roomOutstandingPlans = "room_outstanding_plans"
+        case roomShardLeaseID = "room_shard_lease_id"
+        case roomShardLeaseGeneration = "room_shard_lease_generation"
+        case shardLeaseID = "shard_lease_id"
+        case shardGeneration = "shard_generation"
+        case shardValidUntil = "shard_valid_until"
+        case shardCommandWindowLimit = "shard_command_window_limit"
+        case shardCommandWindowUsed = "shard_command_window_used"
+        case shardFanoutWindowLimit = "shard_fanout_window_limit"
+        case shardFanoutWindowUsed = "shard_fanout_window_used"
+        case shardMaxOutstandingFanoutUnits = "shard_max_outstanding_fanout_units"
+        case shardOutstandingFanoutUnits = "shard_outstanding_fanout_units"
+        case shardMaxOutstandingPlans = "shard_max_outstanding_plans"
+        case shardOutstandingPlans = "shard_outstanding_plans"
+        case actorRole = "actor_role"
+        case senderIsActive = "sender_is_active"
+        case muted
+        case recipientUserID = "recipient_user_id"
+        case senderProfileVisibleToRecipient = "sender_profile_visible_to_recipient"
+        case senderCanSend = "sender_can_send"
+        case recipientIsActive = "recipient_is_active"
+        case blocked
+        case isFriend = "is_friend"
+        case recipientHasReplied = "recipient_has_replied"
+        case allowsStrangers = "allows_strangers"
+        case senderAccountKind = "sender_account_kind"
+        case senderAccountStatus = "sender_account_status"
+        case senderAllowsServiceMessages = "sender_allows_service_messages"
+        case recipientAccountKind = "recipient_account_kind"
+        case recipientAccountStatus = "recipient_account_status"
+        case recipientAllowsCustomerMessages = "recipient_allows_customer_messages"
+    }
+
+    var room: RoomRow {
+        .init(
+            kind: kind,
+            roomShardID: roomShardID,
+            roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
+            membershipRevision: membershipRevision,
+            capacityProfileID: capacityProfileID,
+            deliveryMode: deliveryMode,
+            frozenAt: frozenAt
+        )
+    }
+
+    func existingOperation() throws -> ExistingMessageOperation? {
+        guard let priorOutcomeKind else {
+            guard priorMessageID == nil, priorRoomID == nil,
+                  priorRoomSequence == nil, priorTimelineSequence == nil,
+                  priorSenderUserID == nil, priorClientMessageID == nil,
+                  priorTextBody == nil, priorRichEntities == nil,
+                  priorReplyToMessageID == nil, priorCreatedAt == nil,
+                  priorSourceEventID == nil, priorDenialReason == nil
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return nil
+        }
+        guard let priorRoomID, let priorTimelineSequence, let priorSenderUserID,
+              let priorClientMessageID, let priorCreatedAt
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return try MessageOperationReplayRow(
+            outcomeKind: priorOutcomeKind,
+            messageID: priorMessageID,
+            roomID: priorRoomID,
+            roomSequence: priorRoomSequence,
+            timelineSequence: priorTimelineSequence,
+            senderUserID: priorSenderUserID,
+            clientMessageID: priorClientMessageID,
+            textBody: priorTextBody,
+            richEntities: priorRichEntities,
+            replyToMessageID: priorReplyToMessageID,
+            createdAt: priorCreatedAt,
+            sourceEventID: priorSourceEventID,
+            denialReason: priorDenialReason
+        ).operation()
+    }
+
+    func admissionSnapshot() throws -> AdmissionSnapshotRow {
+        guard let roomEligibleMemberCount, let roomCommandWindowLimit,
+              let roomCommandWindowUsed, let roomFanoutWindowLimit,
+              let roomFanoutWindowUsed, let roomMaxOutstandingFanoutUnits,
+              let roomOutstandingFanoutUnits, let roomMaxOutstandingPlans,
+              let roomOutstandingPlans, let roomShardLeaseID,
+              let roomShardLeaseGeneration, let shardLeaseID,
+              let shardGeneration, let shardValidUntil,
+              let shardCommandWindowLimit, let shardCommandWindowUsed,
+              let shardFanoutWindowLimit, let shardFanoutWindowUsed,
+              let shardMaxOutstandingFanoutUnits,
+              let shardOutstandingFanoutUnits, let shardMaxOutstandingPlans,
+              let shardOutstandingPlans
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return .init(
+            roomEligibleMemberCount: roomEligibleMemberCount,
+            roomCommandWindowLimit: roomCommandWindowLimit,
+            roomCommandWindowUsed: roomCommandWindowUsed,
+            roomFanoutWindowLimit: roomFanoutWindowLimit,
+            roomFanoutWindowUsed: roomFanoutWindowUsed,
+            roomMaxOutstandingFanoutUnits: roomMaxOutstandingFanoutUnits,
+            roomOutstandingFanoutUnits: roomOutstandingFanoutUnits,
+            roomMaxOutstandingPlans: roomMaxOutstandingPlans,
+            roomOutstandingPlans: roomOutstandingPlans,
+            roomShardLeaseID: roomShardLeaseID,
+            roomShardLeaseGeneration: roomShardLeaseGeneration,
+            shardLeaseID: shardLeaseID,
+            shardGeneration: shardGeneration,
+            shardValidUntil: shardValidUntil,
+            shardCommandWindowLimit: shardCommandWindowLimit,
+            shardCommandWindowUsed: shardCommandWindowUsed,
+            shardFanoutWindowLimit: shardFanoutWindowLimit,
+            shardFanoutWindowUsed: shardFanoutWindowUsed,
+            shardMaxOutstandingFanoutUnits: shardMaxOutstandingFanoutUnits,
+            shardOutstandingFanoutUnits: shardOutstandingFanoutUnits,
+            shardMaxOutstandingPlans: shardMaxOutstandingPlans,
+            shardOutstandingPlans: shardOutstandingPlans,
+            actorRole: actorRole,
+            senderIsActive: senderIsActive,
+            muted: muted
+        )
+    }
+
+    func directPolicySnapshot() throws -> DirectMessagePolicySnapshotRow {
+        guard let recipientUserID, let senderProfileVisibleToRecipient,
+              let recipientIsActive, let blocked, let isFriend,
+              let recipientHasReplied, let allowsStrangers
+        else { throw V2RoomWriteStoreError.actorNotEligible }
+        return .init(
+            recipientUserID: recipientUserID,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+            senderCanSend: senderCanSend,
+            recipientIsActive: recipientIsActive,
+            blocked: blocked,
+            isFriend: isFriend,
+            recipientHasReplied: recipientHasReplied,
+            allowsStrangers: allowsStrangers,
+            senderAccountKind: senderAccountKind,
+            senderAccountStatus: senderAccountStatus,
+            senderAllowsServiceMessages: senderAllowsServiceMessages,
+            recipientAccountKind: recipientAccountKind,
+            recipientAccountStatus: recipientAccountStatus,
+            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+        )
     }
 }
 
