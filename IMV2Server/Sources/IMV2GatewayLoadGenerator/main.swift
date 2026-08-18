@@ -344,7 +344,7 @@ private struct LoadRun {
         let eventLoop = group.next()
         let authenticated = eventLoop.makePromise(of: Void.self)
         let started = NIODeadline.now()
-        return ClientBootstrap(group: eventLoop)
+        let connection = ClientBootstrap(group: eventLoop)
             .connectTimeout(.seconds(10))
             .channelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
             .channelInitializer { channel in
@@ -371,7 +371,12 @@ private struct LoadRun {
                 }
             }
             .connect(host: configuration.host, port: configuration.port)
-            .flatMap { channel in authenticated.futureResult.map { channel } }
+
+        // A TCP/TLS setup failure happens before LoadConnectionHandler owns the
+        // authentication promise. Resolve that otherwise-unowned branch so a
+        // failed ramp can shut its EventLoopGroup down without leaking promises.
+        connection.cascadeFailure(to: authenticated)
+        return connection.flatMap { channel in authenticated.futureResult.map { channel } }
     }
 
     private func enforceGuards(statistics: LoadStatistics) throws {
