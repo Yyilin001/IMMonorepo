@@ -53,3 +53,82 @@ public struct V2AdaptiveWorkerCadence: Equatable, Sendable {
         return .milliseconds(min(overflowed ? maximumIdleIntervalMilliseconds : candidate, maximumIdleIntervalMilliseconds))
     }
 }
+
+/// Process-local pressure controller for fan-out delivery claim lanes.
+///
+/// Delivery is durable and may use spare database capacity aggressively, but
+/// it must yield as soon as foreground work queues. The controller therefore
+/// keeps a conservative foreground-safe level, scales up one lane at a time
+/// only after consecutive saturated passes, and sheds back to the floor in a
+/// single observation. It never changes the configured deployment ceiling.
+public struct V2AdaptiveFanoutDeliveryConcurrency: Equatable, Sendable {
+    public let configuredMaximum: Int
+    public let foregroundSafeMaximum: Int
+    public let saturatedPassesBeforeScaleUp: Int
+
+    public private(set) var activeConcurrency: Int
+    private var consecutiveSaturatedPasses = 0
+
+    public init(
+        configuredMaximum: Int,
+        foregroundSafeMaximum: Int = 4,
+        saturatedPassesBeforeScaleUp: Int = 3
+    ) {
+        precondition(configuredMaximum > 0)
+        precondition(foregroundSafeMaximum > 0)
+        precondition(saturatedPassesBeforeScaleUp > 0)
+        self.configuredMaximum = configuredMaximum
+        self.foregroundSafeMaximum = min(configuredMaximum, foregroundSafeMaximum)
+        self.saturatedPassesBeforeScaleUp = saturatedPassesBeforeScaleUp
+        activeConcurrency = min(configuredMaximum, foregroundSafeMaximum)
+    }
+
+    /// Idle polling is always a one-lane probe. Foreground pressure is sampled
+    /// immediately before every pass so queued commands do not wait for a busy
+    /// delivery pass to finish before the controller sheds background work.
+    public mutating func concurrencyForPass(
+        isIdle: Bool,
+        foregroundQueued: Int
+    ) -> Int {
+        precondition(foregroundQueued >= 0)
+        if foregroundQueued > 0 {
+            activeConcurrency = foregroundSafeMaximum
+            consecutiveSaturatedPasses = 0
+        }
+        return isIdle ? 1 : activeConcurrency
+    }
+
+    /// A pass is saturated only when every selected lane filled its bounded
+    /// co-located commit transaction. This avoids scaling on sparse or retry
+    /// work. Scale-up is deliberately gradual; foreground pressure or an error
+    /// immediately cancels the accumulated evidence.
+    public mutating func observePass(
+        selectedConcurrency: Int,
+        claimedCount: Int,
+        perLaneSaturationCount: Int,
+        foregroundQueued: Int,
+        failed: Bool = false
+    ) {
+        precondition(selectedConcurrency > 0)
+        precondition(claimedCount >= 0)
+        precondition(perLaneSaturationCount > 0)
+        precondition(foregroundQueued >= 0)
+
+        guard !failed, foregroundQueued == 0 else {
+            activeConcurrency = foregroundSafeMaximum
+            consecutiveSaturatedPasses = 0
+            return
+        }
+        guard selectedConcurrency == activeConcurrency,
+              activeConcurrency < configuredMaximum,
+              claimedCount >= selectedConcurrency * perLaneSaturationCount
+        else {
+            consecutiveSaturatedPasses = 0
+            return
+        }
+        consecutiveSaturatedPasses += 1
+        guard consecutiveSaturatedPasses >= saturatedPassesBeforeScaleUp else { return }
+        activeConcurrency += 1
+        consecutiveSaturatedPasses = 0
+    }
+}

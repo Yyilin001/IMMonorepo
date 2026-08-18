@@ -13,6 +13,7 @@
 | Sync admitted in-flight | 16 |
 | foreground / Sync 短队列 | 384 / 128 |
 | Projection concurrency / unique user schema | 2 |
+| Delivery concurrency ceiling / foreground-safe level | 8 / 4 |
 | Projection busy-drain pass / time budget | 16 / 50 ms |
 | Backlog maintenance idle poll | 1,000 ms |
 | Backlog maintenance busy pass / time budget | 4 / 100 ms |
@@ -40,12 +41,14 @@
    `2026-08-18-user-projection-ready-queue-expand.sql`、
    `2026-08-18-user-projection-ready-queue-v6-expand.sql`、
    `2026-08-18-user-projection-ready-queue-v7-expand.sql`、
-   `2026-08-18-fanout-direct-user-microbatch-expand.sql` 和
+   `2026-08-18-fanout-direct-user-microbatch-expand.sql`、
+   `2026-08-18-fanout-autovacuum-expand.sql` 和
    `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`；新库直接安装 canonical
    schema。确认逻辑 view、validated storage constraint、append-only trigger 和索引存在后再部署 binary。
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
+   Delivery 的配置值是上限，不再是持续忙时固定值：空闲探测使用 1 lane，正常前台安全值为 4；只有前台无排队且连续满批才逐级升到 8，一旦前台出现排队立即回落到 4。
 5. 启用 Sync wake coalescing。比较 Pull 平均 records、Pull QPS、hint delivered/drop 和消息可见延迟。
 6. 最后开启成功日志采样。Prometheus 计数不受采样影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
 7. 空库或 backfill/inline 三项精确审计已经为 0 的压测环境，叠加

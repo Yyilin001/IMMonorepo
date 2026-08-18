@@ -928,21 +928,46 @@ enum IMV2ServerApp {
                 var cadence = V2AdaptiveWorkerCadence(
                     minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
                 )
+                var concurrencyController = V2AdaptiveFanoutDeliveryConcurrency(
+                    configuredMaximum: configuration.capacityProfile.limits.maxDeliveryConcurrency
+                )
                 while !Task.isCancelled {
                     var didWork = false
+                    var selectedConcurrency = 1
                     do {
+                        try Task.checkCancellation()
+                        let pressure = await databaseWorkAdmission.snapshot()
+                        selectedConcurrency = concurrencyController.concurrencyForPass(
+                            isIdle: cadence.isIdle,
+                            foregroundQueued: pressure.foregroundQueued
+                        )
                         let report = try await fanoutPipeline.runDeliveryOnce(
                             claimLimit: cadence.claimLimit(
                                 configuredLimit: configuration.fanoutDeliveryClaimBatchSize
                             ),
-                            concurrency: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxDeliveryConcurrency
+                            concurrency: selectedConcurrency
                         )
                         didWork = report.claimedCount > 0 || report.committedCount > 0 ||
                             report.staleCount > 0 || report.staleRouteCount > 0 ||
                             report.releasedCount > 0 || report.pausedCount > 0
+                        let pressureAfterPass = await databaseWorkAdmission.snapshot()
+                        concurrencyController.observePass(
+                            selectedConcurrency: selectedConcurrency,
+                            claimedCount: report.claimedCount,
+                            perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
+                            foregroundQueued: pressureAfterPass.foregroundQueued
+                        )
                     } catch is CancellationError {
                         break
                     } catch {
+                        let pressure = await databaseWorkAdmission.snapshot()
+                        concurrencyController.observePass(
+                            selectedConcurrency: selectedConcurrency,
+                            claimedCount: 0,
+                            perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
+                            foregroundQueued: pressure.foregroundQueued,
+                            failed: true
+                        )
                         logger.error("IM V2 fan-out delivery failed; retrying")
                     }
                     do {

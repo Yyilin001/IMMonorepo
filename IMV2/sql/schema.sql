@@ -593,6 +593,29 @@ CREATE TABLE im_v2.fanout_plans (
     CONSTRAINT fanout_plans_target_count_check CHECK (((target_count IS NULL) OR (target_count >= 0)))
 );
 
+-- Fan-out bookkeeping is update-heavy: pending rows become terminal within
+-- seconds, while the normal retention worker removes them days later. Use a
+-- row-count-independent vacuum threshold so dead tuples and partial-index
+-- entries cannot grow for hours at sustained message rates.
+ALTER TABLE im_v2.fanout_deliveries SET (
+    autovacuum_vacuum_scale_factor = 0.02,
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_analyze_threshold = 1000
+);
+ALTER TABLE im_v2.fanout_completion_units SET (
+    autovacuum_vacuum_scale_factor = 0.02,
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_analyze_threshold = 1000
+);
+ALTER TABLE im_v2.fanout_plans SET (
+    autovacuum_vacuum_scale_factor = 0.02,
+    autovacuum_vacuum_threshold = 1000,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_analyze_threshold = 1000
+);
+
 CREATE TABLE im_v2.fanout_sync_payloads (
     source_event_id uuid NOT NULL,
     projection_kind text NOT NULL,

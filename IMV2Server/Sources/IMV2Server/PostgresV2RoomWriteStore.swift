@@ -329,13 +329,31 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 stateEventID: messageStateEventID,
                 createdAt: acceptedMessage.createdAt
             )
-            try await persist(
+            let shardReservation = try shardAdmissionReservation(
+                from: shardState,
+                to: timelineWriteSet.nextShardState
+            )
+            // The common established-conversation/group path has no writes
+            // after persistence, so its authoritative shard reservation can
+            // be the tail CTE of that same statement. First-message direct
+            // projections and support-session updates retain the independent
+            // final statement to preserve the global shard lock ordering.
+            let mayReserveShardInsidePersistence = directContext == nil || (
+                directContext?.senderProfileVisibleToRecipient == true &&
+                    directContext?.senderCanSend == true &&
+                    directContext?.supportAccountID == nil
+            )
+            let shardReservedInsidePersistence = try await persist(
                 timelineWriteSet,
                 command: command,
                 mediaPresentations: mediaPresentations,
                 messageProjectionState: storedMessageState,
                 room: room,
                 directRecipientID: directContext?.recipientID,
+                shardReservation: shardReservation,
+                reserveShardInsidePersistence: mayReserveShardInsidePersistence,
+                shardReservationTime: now,
+                shardRetryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
                 sql: sql
             )
             var acceptedDirectProjectionShadows: [DirectProjectionShadowRequest] = []
@@ -375,18 +393,17 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     )
                 }
             }
-            // Keep this as the final database statement. The conditional
-            // increment is the authoritative shard-capacity decision; a
-            // rejection throws so every preceding room/message write rolls
-            // back with the transaction.
-            try await reserveShardAdmission(
-                from: shardState,
-                to: timelineWriteSet.nextShardState,
-                room: room,
-                retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
-                now: now,
-                sql: sql
-            )
+            if !shardReservedInsidePersistence {
+                // This remains the final statement whenever first-message
+                // projections or support-session state follow the base write.
+                try await reserveShardAdmission(
+                    shardReservation,
+                    room: room,
+                    retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
+                    now: now,
+                    sql: sql
+                )
+            }
             return .init(
                 outcome: .accepted(acceptedMessage),
                 acceptedDirectProjectionShadows: acceptedDirectProjectionShadows
@@ -413,14 +430,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     /// for this single tail update. Predicates mirror the schema constraints so
     /// a capacity race becomes a normal admission rejection, never a partial
     /// commit or a constraint error.
-    private func reserveShardAdmission(
+    private func shardAdmissionReservation(
         from initial: ShardAdmissionState,
-        to next: ShardAdmissionState,
-        room: RoomRow,
-        retryAfterSeconds: Int,
-        now: Date,
-        sql: any SQLDatabase
-    ) async throws {
+        to next: ShardAdmissionState
+    ) throws -> ShardAdmissionReservation {
         guard let initialLease = initial.lease, let nextLease = next.lease,
               initialLease.id == nextLease.id,
               initialLease.generation == nextLease.generation
@@ -434,41 +447,76 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               outstandingUnitDelta >= 0, outstandingPlanDelta >= 0
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
 
-        let leaseID = try uuid(nextLease.id)
-        let generation = try signed(nextLease.generation)
+        return try .init(
+            leaseID: uuid(nextLease.id),
+            generation: signed(nextLease.generation),
+            commandDelta: commandDelta,
+            fanoutDelta: fanoutDelta,
+            outstandingUnitDelta: outstandingUnitDelta,
+            outstandingPlanDelta: outstandingPlanDelta
+        )
+    }
+
+    private func reserveShardAdmission(
+        _ reservation: ShardAdmissionReservation,
+        room: RoomRow,
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
         let applied = try await sql.raw("""
             UPDATE im_v2.shard_admission_pools
-            SET command_window_used = command_window_used + \(bind: commandDelta),
-                fanout_window_used = fanout_window_used + \(bind: fanoutDelta),
-                outstanding_fanout_units = outstanding_fanout_units + \(bind: outstandingUnitDelta),
-                outstanding_plans = outstanding_plans + \(bind: outstandingPlanDelta)
+            SET command_window_used = command_window_used + \(bind: reservation.commandDelta),
+                fanout_window_used = fanout_window_used + \(bind: reservation.fanoutDelta),
+                outstanding_fanout_units = outstanding_fanout_units + \(bind: reservation.outstandingUnitDelta),
+                outstanding_plans = outstanding_plans + \(bind: reservation.outstandingPlanDelta)
             WHERE room_shard_id = \(bind: room.roomShardID)
               AND capacity_profile_id = \(bind: room.capacityProfileID)
-              AND lease_id = \(bind: leaseID)
-              AND generation = \(bind: generation)
+              AND lease_id = \(bind: reservation.leaseID)
+              AND generation = \(bind: reservation.generation)
               AND valid_until > \(bind: now)
-              AND command_window_used <= command_window_limit - \(bind: commandDelta)
-              AND fanout_window_used <= fanout_window_limit - \(bind: fanoutDelta)
-              AND outstanding_fanout_units <= max_outstanding_fanout_units - \(bind: outstandingUnitDelta)
-              AND outstanding_plans <= max_outstanding_plans - \(bind: outstandingPlanDelta)
+              AND command_window_used <= command_window_limit - \(bind: reservation.commandDelta)
+              AND fanout_window_used <= fanout_window_limit - \(bind: reservation.fanoutDelta)
+              AND outstanding_fanout_units <= max_outstanding_fanout_units - \(bind: reservation.outstandingUnitDelta)
+              AND outstanding_plans <= max_outstanding_plans - \(bind: reservation.outstandingPlanDelta)
             RETURNING 1 AS applied
             """).first(decoding: ShardAdmissionMutationRow.self)
         guard applied != nil else {
-            guard let current = try await sql.raw("""
-                SELECT lease_id, generation, valid_until
-                FROM im_v2.shard_admission_pools
-                WHERE room_shard_id = \(bind: room.roomShardID)
-                  AND capacity_profile_id = \(bind: room.capacityProfileID)
-                """).first(decoding: CurrentShardLeaseRow.self)
-            else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
-            guard current.leaseID == leaseID, current.generation == generation else {
-                throw LateShardAdmissionRejection.unavailable(.missingShardLease)
-            }
-            guard current.validUntil > now else {
-                throw LateShardAdmissionRejection.unavailable(.expiredShardLease)
-            }
-            throw LateShardAdmissionRejection.rateLimited(retryAfterSeconds: retryAfterSeconds)
+            try await throwShardAdmissionRejection(
+                reservation,
+                room: room,
+                retryAfterSeconds: retryAfterSeconds,
+                now: now,
+                sql: sql
+            )
+            throw V2RoomWriteStoreError.corruptPersistenceState
         }
+    }
+
+    /// Classifies the zero-row result of the conditional reservation without
+    /// weakening the authoritative predicate. This second read exists only on
+    /// a rejected transaction; the accepted hot path remains one statement.
+    private func throwShardAdmissionRejection(
+        _ reservation: ShardAdmissionReservation,
+        room: RoomRow,
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        guard let current = try await sql.raw("""
+            SELECT lease_id, generation, valid_until
+            FROM im_v2.shard_admission_pools
+            WHERE room_shard_id = \(bind: room.roomShardID)
+              AND capacity_profile_id = \(bind: room.capacityProfileID)
+            """).first(decoding: CurrentShardLeaseRow.self)
+        else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
+        guard current.leaseID == reservation.leaseID,
+              current.generation == reservation.generation
+        else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
+        guard current.validUntil > now else {
+            throw LateShardAdmissionRejection.unavailable(.expiredShardLease)
+        }
+        throw LateShardAdmissionRejection.rateLimited(retryAfterSeconds: retryAfterSeconds)
     }
 
     /// The control store remains the source of truth for direct-profile
@@ -938,8 +986,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         messageProjectionState: V2StoredMessageProjectionState,
         room: RoomRow,
         directRecipientID: UUID?,
+        shardReservation: ShardAdmissionReservation,
+        reserveShardInsidePersistence: Bool,
+        shardReservationTime: Date,
+        shardRetryAfterSeconds: Int,
         sql: any SQLDatabase
-    ) async throws {
+    ) async throws -> Bool {
         let message = writeSet.acceptedMessage
         let roomID = try uuid(message.roomID)
         let messageID = try uuid(message.messageID)
@@ -1006,7 +1058,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         let mentionsJSON = try roomWriteJSON(mentions)
 
         if room.deliveryMode == .standardFanout {
-            try await persistStandardFanout(
+            return try await persistStandardFanout(
                 writeSet,
                 command: command,
                 room: room,
@@ -1031,9 +1083,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 forwardedFromUserID: forwardedFromUserID,
                 messageProjectionState: messageProjectionState,
                 directRecipientID: directRecipientID,
+                shardReservation: shardReservation,
+                reserveShardAdmission: reserveShardInsidePersistence,
+                shardReservationTime: shardReservationTime,
+                shardRetryAfterSeconds: shardRetryAfterSeconds,
                 sql: sql
             )
-            return
         }
 
         try await sql.raw("""
@@ -1157,6 +1212,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             storage: .roomEvent,
             sql: sql
         )
+        return false
     }
 
     /// The ordinary direct/group send path used to issue one network round
@@ -1188,8 +1244,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         forwardedFromUserID: UUID?,
         messageProjectionState: V2StoredMessageProjectionState,
         directRecipientID: UUID?,
+        shardReservation: ShardAdmissionReservation,
+        reserveShardAdmission: Bool,
+        shardReservationTime: Date,
+        shardRetryAfterSeconds: Int,
         sql: any SQLDatabase
-    ) async throws {
+    ) async throws -> Bool {
         let message = writeSet.acceptedMessage
         let admission = writeSet.nextRoomState.admission
         let targetCount = writeSet.fanoutPlan.reservation.cost.targetCount
@@ -1438,24 +1498,77 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 FROM plan_insert
                 WHERE state = 'planning'
                 RETURNING source_event_id
+            ), write_barrier AS MATERIALIZED (
+                SELECT (SELECT count(*) FROM room_update) AS room_count,
+                       (SELECT count(*) FROM admission_update) AS admission_count,
+                       (SELECT count(*) FROM message_insert) AS message_count,
+                       (SELECT count(*) FROM review_insert) AS review_count,
+                       (SELECT count(*) FROM media_insert) AS media_count,
+                       (SELECT count(*) FROM mention_insert) AS mention_count,
+                       (SELECT count(*) FROM event_insert) AS event_count,
+                       ((SELECT count(*) FROM message_state_insert)
+                        + (SELECT count(*) FROM message_state_existing)) AS message_state_count,
+                       (SELECT count(*) FROM shared_payload_insert) AS shared_payload_count,
+                       (SELECT count(*) FROM plan_insert) AS plan_count,
+                       (SELECT count(*) FROM outbox_insert) AS outbox_count,
+                       (SELECT target_count FROM direct_shape) AS direct_target_count,
+                       (SELECT routed_count FROM direct_shape) AS direct_routed_count,
+                       (SELECT count(*) FROM direct_completion_insert) AS completion_count,
+                       (SELECT count(*) FROM direct_delivery_insert) AS delivery_count,
+                       (SELECT count(*) FROM plan_insert WHERE state = 'planned') AS preplanned_plan_count
+            ), shard_admission_update AS (
+                UPDATE im_v2.shard_admission_pools AS shard
+                SET command_window_used = shard.command_window_used + \(bind: shardReservation.commandDelta),
+                    fanout_window_used = shard.fanout_window_used + \(bind: shardReservation.fanoutDelta),
+                    outstanding_fanout_units = shard.outstanding_fanout_units + \(bind: shardReservation.outstandingUnitDelta),
+                    outstanding_plans = shard.outstanding_plans + \(bind: shardReservation.outstandingPlanDelta)
+                FROM write_barrier
+                WHERE \(bind: reserveShardAdmission)
+                  AND write_barrier.room_count
+                      + write_barrier.admission_count
+                      + write_barrier.message_count
+                      + write_barrier.review_count
+                      + write_barrier.media_count
+                      + write_barrier.mention_count
+                      + write_barrier.event_count
+                      + write_barrier.message_state_count
+                      + write_barrier.shared_payload_count
+                      + write_barrier.plan_count
+                      + write_barrier.outbox_count
+                      + write_barrier.direct_target_count
+                      + write_barrier.direct_routed_count
+                      + write_barrier.completion_count
+                      + write_barrier.delivery_count
+                      + write_barrier.preplanned_plan_count >= 0
+                  AND shard.room_shard_id = \(bind: room.roomShardID)
+                  AND shard.capacity_profile_id = \(bind: room.capacityProfileID)
+                  AND shard.lease_id = \(bind: shardReservation.leaseID)
+                  AND shard.generation = \(bind: shardReservation.generation)
+                  AND shard.valid_until > \(bind: shardReservationTime)
+                  AND shard.command_window_used <= shard.command_window_limit - \(bind: shardReservation.commandDelta)
+                  AND shard.fanout_window_used <= shard.fanout_window_limit - \(bind: shardReservation.fanoutDelta)
+                  AND shard.outstanding_fanout_units <= shard.max_outstanding_fanout_units - \(bind: shardReservation.outstandingUnitDelta)
+                  AND shard.outstanding_plans <= shard.max_outstanding_plans - \(bind: shardReservation.outstandingPlanDelta)
+                RETURNING 1
             )
-            SELECT (SELECT count(*) FROM room_update) AS room_count,
-                   (SELECT count(*) FROM admission_update) AS admission_count,
-                   (SELECT count(*) FROM message_insert) AS message_count,
-                   (SELECT count(*) FROM review_insert) AS review_count,
-                   (SELECT count(*) FROM media_insert) AS media_count,
-                   (SELECT count(*) FROM mention_insert) AS mention_count,
-                   (SELECT count(*) FROM event_insert) AS event_count,
-                   ((SELECT count(*) FROM message_state_insert)
-                    + (SELECT count(*) FROM message_state_existing)) AS message_state_count,
-                   (SELECT count(*) FROM shared_payload_insert) AS shared_payload_count,
-                   (SELECT count(*) FROM plan_insert) AS plan_count,
-                   (SELECT count(*) FROM outbox_insert) AS outbox_count,
-                   (SELECT target_count FROM direct_shape) AS direct_target_count,
-                   (SELECT routed_count FROM direct_shape) AS direct_routed_count,
-                   (SELECT count(*) FROM direct_completion_insert) AS completion_count,
-                   (SELECT count(*) FROM direct_delivery_insert) AS delivery_count,
-                   (SELECT count(*) FROM plan_insert WHERE state = 'planned') AS preplanned_plan_count
+            SELECT write_barrier.room_count,
+                   write_barrier.admission_count,
+                   write_barrier.message_count,
+                   write_barrier.review_count,
+                   write_barrier.media_count,
+                   write_barrier.mention_count,
+                   write_barrier.event_count,
+                   write_barrier.message_state_count,
+                   write_barrier.shared_payload_count,
+                   write_barrier.plan_count,
+                   write_barrier.outbox_count,
+                   write_barrier.direct_target_count,
+                   write_barrier.direct_routed_count,
+                   write_barrier.completion_count,
+                   write_barrier.delivery_count,
+                   write_barrier.preplanned_plan_count,
+                   (SELECT count(*) FROM shard_admission_update) AS shard_admission_count
+            FROM write_barrier
             """).first(decoding: SetBasedRoomWriteMutationRow.self),
               mutation.roomCount == 1,
               mutation.admissionCount == 1,
@@ -1500,6 +1613,23 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                   mutation.outboxCount == 1
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
         }
+        if reserveShardAdmission {
+            guard mutation.shardAdmissionCount == 1 else {
+                try await throwShardAdmissionRejection(
+                    shardReservation,
+                    room: room,
+                    retryAfterSeconds: shardRetryAfterSeconds,
+                    now: shardReservationTime,
+                    sql: sql
+                )
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return true
+        }
+        guard mutation.shardAdmissionCount == 0 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return false
     }
 
     private func assertAvailableMedia(_ media: [V2MediaReference], ownerID: UUID, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
@@ -1873,6 +2003,15 @@ private struct ShardAdmissionMutationRow: Decodable {
     let applied: Int
 }
 
+private struct ShardAdmissionReservation: Sendable {
+    let leaseID: UUID
+    let generation: Int64
+    let commandDelta: Int
+    let fanoutDelta: Int
+    let outstandingUnitDelta: Int
+    let outstandingPlanDelta: Int
+}
+
 private struct CurrentShardLeaseRow: Decodable {
     let leaseID: UUID
     let generation: Int64
@@ -1901,6 +2040,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
     let completionCount: Int64
     let deliveryCount: Int64
     let preplannedPlanCount: Int64
+    let shardAdmissionCount: Int64
 
     enum CodingKeys: String, CodingKey {
         case roomCount = "room_count"
@@ -1919,6 +2059,7 @@ private struct SetBasedRoomWriteMutationRow: Decodable {
         case completionCount = "completion_count"
         case deliveryCount = "delivery_count"
         case preplannedPlanCount = "preplanned_plan_count"
+        case shardAdmissionCount = "shard_admission_count"
     }
 }
 

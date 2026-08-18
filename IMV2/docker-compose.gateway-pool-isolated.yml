@@ -4,6 +4,3 @@ services:
       # Preserve fixed capacity for foreground commands, Sync, durable
       # Delivery, projection, and maintenance during mixed-load A/B runs.
       IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "true"
-      # Four workers still cover the measured direct-delivery rate while
-      # avoiding eight simultaneous long projection transactions on one DB.
-      IM_V2_MAX_DELIVERY_CONCURRENCY: 4
