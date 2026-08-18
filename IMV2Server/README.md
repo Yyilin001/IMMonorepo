@@ -267,7 +267,11 @@ evidence remains local-stack coverage, not a production deployment approval.
   two-user rooms. It accepts either one pool ID or a bounded comma-separated
   pool list; an unordered user-pair hash selects one stable pool so reciprocal
   opens cannot split the same conversation. Every configured pool must have a
-  live lease for the selected capacity profile. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
+  live lease for the selected capacity profile. Because a direct pair and its
+  room profile are immutable, switching `IM_V2_CAPACITY_PROFILE_ID` also
+  requires fresh test users/pairs or an explicit room-profile migration; an
+  existing pair under another profile returns retryable `UNAVAILABLE` at open
+  instead of failing a later message write. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
   `IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS` are enforced in the durable message
   transaction; the normal baseline is 3 messages per 24 hours.
 - `IM_V2_GROUP_ROOM_SHARD_ID` selects the admission pool used for atomically

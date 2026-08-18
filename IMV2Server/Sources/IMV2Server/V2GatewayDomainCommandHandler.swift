@@ -418,6 +418,15 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted, V2RoomWriteStoreError.roomFrozen, V2RoomWriteStoreError.directMessageBlocked, V2RoomWriteStoreError.strangerMessagePermissionDenied {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
+        } catch V2RoomWriteStoreError.roomNotFound, V2RoomWriteStoreError.replyTargetNotFound {
+            return errorEnvelope(code: "NOT_FOUND", retryable: false)
+        } catch V2RoomWriteStoreError.capacityProfileMismatch, V2RoomWriteStoreError.corruptPersistenceState {
+            // Capacity profiles are immutable room contracts. A deployment
+            // using another profile, or a broken persisted admission
+            // invariant, is an operational availability failure—not a wire
+            // or authentication failure. Keep the authenticated connection
+            // alive and expose only the stable protocol vocabulary.
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2MentionValidationError.notAuthorized {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2ModerationAuthorizationError.notAuthorized {
@@ -487,6 +496,19 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             // The non-retryable code also prevents an oversized head record
             // from becoming an infinite client retry loop.
             return errorEnvelope(code: "SYNC_RECORD_TOO_LARGE", retryable: false)
+        } catch V2RoomMembershipStoreError.corruptPersistenceState,
+                V2MessageWithdrawalStoreError.corruptPersistenceState,
+                V2MessageEditStoreError.corruptPersistenceState,
+                V2MessageReactionStoreError.corruptPersistenceState,
+                V2ModerationStoreError.corruptPersistenceState,
+                V2ReadReceiptStoreError.corruptPersistenceState,
+                V2DirectMessagingStoreError.corruptPersistenceState,
+                V2GroupMessagingStoreError.corruptPersistenceState {
+            // Domain stores use this closed error for failed persistence
+            // invariants. None of these failures invalidates an authenticated
+            // transport session, and leaking the underlying database shape
+            // would expose internal state.
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error where v2PostgresFailureDisposition(error) != .other {

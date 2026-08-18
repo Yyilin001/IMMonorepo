@@ -2489,6 +2489,161 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("independent direct-room creation shares the shard fence and rejects an existing pair under another profile")
+    func directRoomCreationUsesSharedShardFence() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_150_000)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 10,
+                maxCommandsPerWindow: 100,
+                maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100,
+                maxOutstandingPlans: 100,
+                maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 3
+            ))
+            let leaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000151")!
+            try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans) VALUES ('rooms-concurrent-direct', 'standard', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 100, 100, 100, 100)").run()
+
+            let users = (0..<4).map {
+                UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", 0x160 + $0))!
+            }
+            for (index, userID) in users.enumerated() {
+                try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userID), \(bind: "direct_probe_\(index)"), \(bind: "并发用户\(index)"), 1, \(bind: now), \(bind: now))").run()
+            }
+
+            // The trigger sleeps after `open` has acquired the shard fence.
+            // A sequence is deliberately used as a non-transactional probe:
+            // both inserts can reach the trigger during the same sleep only
+            // when their shard row locks are compatible.
+            try await sql.raw("CREATE SEQUENCE im_v2.direct_room_shared_lock_probe").run()
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.pause_direct_room_insert()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    PERFORM nextval('im_v2.direct_room_shared_lock_probe');
+                    PERFORM pg_sleep(0.75);
+                    RETURN NEW;
+                END;
+                $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER pause_direct_room_insert
+                BEFORE INSERT ON im_v2.rooms
+                FOR EACH ROW
+                WHEN (NEW.room_kind = 'direct')
+                EXECUTE FUNCTION im_v2.pause_direct_room_insert()
+                """).run()
+
+            let service = try V2DirectMessagingService(
+                store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                roomShardID: "rooms-concurrent-direct",
+                now: { now }
+            )
+            let firstOperation = try DirectRoomOperationID("00000000-0000-0000-0000-000000000170")
+            let secondOperation = try DirectRoomOperationID("00000000-0000-0000-0000-000000000171")
+            let first = Task {
+                try await service.open(
+                    actorUserID: try .init(users[0].uuidString),
+                    operationID: firstOperation,
+                    targetUserID: try .init(users[1].uuidString)
+                )
+            }
+
+            let firstDeadline = Date().addingTimeInterval(2)
+            while Date() < firstDeadline {
+                let probe = try await sql.raw("SELECT last_value, is_called FROM im_v2.direct_room_shared_lock_probe").first(decoding: DirectRoomLockProbeRow.self)
+                if probe?.isCalled == true { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let second = Task {
+                try await service.open(
+                    actorUserID: try .init(users[2].uuidString),
+                    operationID: secondOperation,
+                    targetUserID: try .init(users[3].uuidString)
+                )
+            }
+
+            var bothReachedInsert = false
+            let sharedLockDeadline = Date().addingTimeInterval(0.5)
+            while Date() < sharedLockDeadline {
+                let probe = try await sql.raw("SELECT last_value, is_called FROM im_v2.direct_room_shared_lock_probe").first(decoding: DirectRoomLockProbeRow.self)
+                if probe?.isCalled == true, probe?.lastValue ?? 0 >= 2 {
+                    bothReachedInsert = true
+                    break
+                }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(bothReachedInsert)
+
+            guard case .opened(let firstRoom) = try await first.value,
+                  case .opened = try await second.value
+            else {
+                Issue.record("expected both independent direct rooms to open")
+                return
+            }
+
+            let otherProfile = try V2CapacityProfile(id: "next-profile", limits: profile.limits)
+            let otherProfileService = try V2DirectMessagingService(
+                store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                capacityProfile: otherProfile,
+                roomShardID: "rooms-concurrent-direct",
+                now: { now }
+            )
+            let mismatched = try await otherProfileService.open(
+                actorUserID: try .init(users[0].uuidString),
+                operationID: try .init("00000000-0000-0000-0000-000000000172"),
+                targetUserID: try .init(users[1].uuidString)
+            )
+            #expect(mismatched == .unavailable)
+
+            // A response-loss retry of the original immutable operation must
+            // still return its canonical result after a deployment change.
+            let replay = try await otherProfileService.open(
+                actorUserID: try .init(users[0].uuidString),
+                operationID: firstOperation,
+                targetUserID: try .init(users[1].uuidString)
+            )
+            guard case .idempotent(let replayedRoom) = replay else {
+                Issue.record("expected original operation replay")
+                return
+            }
+            #expect(replayedRoom.roomID == firstRoom.roomID)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("group creation fans out only room identity to its frozen initial audience")
     func groupCreationDeliversRoomProfileAndRetainsItInSnapshot() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -10603,6 +10758,14 @@ private struct TransferCursorAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey { case acknowledgedSequence = "acknowledged_sequence" }
 }
 private struct ExistsRow: Decodable { let exists: Bool }
+private struct DirectRoomLockProbeRow: Decodable {
+    let lastValue: Int64
+    let isCalled: Bool
+    enum CodingKeys: String, CodingKey {
+        case lastValue = "last_value"
+        case isCalled = "is_called"
+    }
+}
 private struct StringValueRow: Decodable { let value: String }
 private struct SyncPayloadEnvelopeRow: Decodable {
     let hasNullLogPayload: Bool

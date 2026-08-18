@@ -142,6 +142,44 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.error.retryable)
     }
 
+    @Test("a room capacity profile mismatch is retryable and does not escape the command boundary")
+    func capacityProfileMismatchKeepsCommandBoundaryAlive() async throws {
+        let fixture = try GatewayDomainFixture()
+        let telemetry = V2InMemoryTelemetrySink()
+        let store = InMemoryV2RoomWriteStore(
+            seed: [(fixture.roomState, fixture.shardState)],
+            authorizedActors: [fixture.userID],
+            capacityProfileID: "legacy"
+        )
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: store),
+            sync: fixture.syncService(),
+            telemetry: telemetry
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let first = try await handler.handle(envelope: request, identity: fixture.identity)
+        request.sendMessage.clientMessageID = UUID().uuidString
+        let second = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(first.error.code == "UNAVAILABLE")
+        #expect(first.error.retryable)
+        #expect(second.error.code == "UNAVAILABLE")
+        let events = await telemetry.events()
+        #expect(events.count == 2)
+        for event in events {
+            guard case .gatewayCommand(_, .sendMessage, .rejected, .unavailable, _) = event else {
+                Issue.record("expected a bounded unavailable rejection")
+                return
+            }
+        }
+    }
+
     @Test("send validates client data and takes the actor exclusively from the session")
     func sendValidationAndAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()

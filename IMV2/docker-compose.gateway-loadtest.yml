@@ -24,10 +24,11 @@ services:
       # across admission rows while all data remains on this one PostgreSQL
       # instance. The load-test bootstrap provisions the same eight pool IDs.
       IM_V2_DIRECT_ROOM_SHARD_ID: rooms-load-00,rooms-load-01,rooms-load-02,rooms-load-03,rooms-load-04,rooms-load-05,rooms-load-06,rooms-load-07
-      # Repeated runs intentionally reuse the same disposable user pairs.
-      # Keep the production stranger-message safety policy in the base file,
-      # but prevent it from turning a transport/database benchmark into a
-      # policy-limit benchmark after the third message for a pair.
+      # Repeated runs may reuse disposable user pairs only while retaining the
+      # same immutable capacity profile. A new profile requires fresh users
+      # and therefore fresh direct pairs. Keep the production stranger-message
+      # safety policy in the base file, but prevent a same-profile benchmark
+      # from becoming a policy-limit benchmark after the third message.
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 100000
       # Every test connection intentionally starts without a saved Sync
       # cursor and can therefore drain a large historical log while sending
