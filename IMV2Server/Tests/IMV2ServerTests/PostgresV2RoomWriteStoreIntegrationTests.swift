@@ -8239,6 +8239,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw TestConfigurationError.schemaAlreadyExists
             }
             try await installSchema(on: sql)
+
+            // The canonical schema must satisfy the complete startup contract
+            // before this test removes one required table. This catches a
+            // schema migration whose renamed functions or triggers were not
+            // reflected in the binary readiness gate.
+            try await V2SchemaReadiness.verify(database: app.db(.psql))
             try await sql.raw("DROP TABLE im_v2.account_password_login_rate_limits").run()
 
             await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.account_password_login_rate_limits")) {
