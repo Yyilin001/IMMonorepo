@@ -703,6 +703,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     CROSS JOIN unnest(ARRAY[\(bind: firstUser), \(bind: secondUser)]::uuid[])
                         AS target(target_user_id)
                     """).run()
+                // Mirror the acceptance contract: the immutable shared body
+                // commits before a fresh-direct delivery can become visible.
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_sync_payloads
+                        (source_event_id, projection_kind, payload, created_at)
+                    VALUES (\(bind: eventID), 'message', \(bind: payload)::jsonb,
+                            \(bind: now))
+                    """).run()
             }
 
             let firstEventID = UUID(
@@ -827,6 +835,24 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 DELETE FROM im_v2.fanout_completion_units
                 WHERE source_event_id = \(bind: firstEventID)
                   AND completion_unit_id = \(bind: alternateUnitID)
+                """).run()
+
+            // A BEFORE trigger proves the delivery statement does not merely
+            // rely on `ON CONFLICT DO NOTHING`: it must issue no payload INSERT
+            // at all once acceptance has published the immutable shared row.
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.reject_fresh_direct_payload_insert()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'fresh-direct delivery must not insert shared payloads';
+                END;
+                $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER reject_fresh_direct_payload_insert
+                BEFORE INSERT ON im_v2.fanout_sync_payloads
+                FOR EACH ROW
+                EXECUTE FUNCTION im_v2.reject_fresh_direct_payload_insert()
                 """).run()
 
             let firstReplica = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
@@ -1022,6 +1048,167 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 "im_v2.user_projection_versions WHERE projection_kind = 'message' AND payload IS NULL AND message_state_id IS NOT NULL",
                 on: sql
             ) == 2)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("projection completion cannot lose a concurrent durable ready enqueue")
+    func projectionCompletionFencesConcurrentReadyEnqueue() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000d61")!
+            let firstEvent = UUID(uuidString: "00000000-0000-0000-0000-000000000d62")!
+            let secondEvent = UUID(uuidString: "00000000-0000-0000-0000-000000000d63")!
+            let invalidatedUser = UUID(uuidString: "00000000-0000-0000-0000-000000000d64")!
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let payload = """
+            {"user_id":"\(invalidatedUser.uuidString)"}
+            """
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
+                VALUES (\(bind: user), 1)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id, projection_kind,
+                     payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: user), 1, \(bind: firstEvent), 'profile_invalidation',
+                     \(bind: payload)::jsonb, 'inline', \(bind: now))
+                """).run()
+
+            // The v6 enqueue trigger runs first. This test-only trigger then
+            // holds the same INSERT transaction open so the projector can
+            // exercise the exact delete-versus-commit race that previously
+            // lost the durable ready row.
+            let blockerLock: Int64 = 7_316_204_982
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.zz_test_block_after_projection_enqueue()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    PERFORM pg_advisory_xact_lock(7316204982);
+                    RETURN NULL;
+                END;
+                $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER zz_test_block_after_projection_enqueue
+                AFTER INSERT ON im_v2.user_sync_log
+                REFERENCING NEW TABLE AS inserted_user_sync_rows
+                FOR EACH STATEMENT
+                EXECUTE FUNCTION im_v2.zz_test_block_after_projection_enqueue()
+                """).run()
+
+            let gate = PostgreSQLTransactionGate()
+            let blocker = Task {
+                try await app.db(.psql).transaction { transaction in
+                    guard let transactionSQL = transaction as? any SQLDatabase else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    try await transactionSQL.raw(
+                        "SELECT pg_advisory_xact_lock(\(bind: blockerLock))"
+                    ).run()
+                    await gate.holdTransaction()
+                }
+            }
+            await gate.waitUntilHeld()
+
+            var enqueuer: Task<Void, Error>?
+            var projector: Task<V2UserProjectionWorkerReport, Error>?
+            do {
+                enqueuer = Task {
+                    try await app.db(.psql).transaction { transaction in
+                        guard let transactionSQL = transaction as? any SQLDatabase else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                        try await transactionSQL.raw("""
+                            UPDATE im_v2.user_sync_sequences
+                            SET next_sequence = 2
+                            WHERE user_id = \(bind: user)
+                            """).run()
+                        try await transactionSQL.raw("""
+                            INSERT INTO im_v2.user_sync_log
+                                (user_id, user_sync_sequence, source_event_id,
+                                 projection_kind, payload, payload_storage, created_at)
+                            VALUES
+                                (\(bind: user), 2, \(bind: secondEvent),
+                                 'profile_invalidation', \(bind: payload)::jsonb,
+                                 'inline', \(bind: now.addingTimeInterval(1)))
+                            """).run()
+                    }
+                }
+                try await waitForPostgreSQLLockWaiters(
+                    1, lockType: "advisory", on: sql
+                )
+                let worker = PostgresV2UserProjectionWorker(
+                    database: app.db(.psql), batchSize: 1,
+                    messageWriteMode: .shared
+                )
+                projector = Task {
+                    try await worker.runOnce(now: now.addingTimeInterval(2))
+                }
+                try await waitForPostgreSQLLockWaiters(
+                    1, lockType: "transactionid", on: sql
+                )
+            } catch {
+                enqueuer?.cancel()
+                projector?.cancel()
+                await gate.releaseTransaction()
+                _ = try? await blocker.value
+                _ = try? await enqueuer?.value
+                _ = try? await projector?.value
+                throw error
+            }
+
+            await gate.releaseTransaction()
+            try await blocker.value
+            try await enqueuer?.value
+            let projectionReport = try #require(try await projector?.value)
+            #expect(projectionReport == .init(claimed: true, appliedRecordCount: 1))
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 1)
+            let lag = try #require(try await sql.raw("""
+                SELECT sequence.next_sequence - checkpoint.projected_sequence AS value
+                FROM im_v2.user_sync_sequences AS sequence
+                JOIN im_v2.user_projection_checkpoints AS checkpoint USING (user_id)
+                WHERE sequence.user_id = \(bind: user)
+                """).first(decoding: CountRow.self)).value
+            #expect(lag == 1)
+
+            let finalWorker = PostgresV2UserProjectionWorker(
+                database: app.db(.psql), batchSize: 1,
+                messageWriteMode: .shared
+            )
+            #expect(try await finalWorker.runOnce(
+                now: now.addingTimeInterval(3)
+            ) == .init(claimed: true, appliedRecordCount: 1))
+            #expect(try await count("im_v2.user_projection_ready", on: sql) == 0)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -10877,14 +11064,24 @@ private actor PostgreSQLTransactionGate {
 }
 
 private func waitForAdvisoryWaiters(_ expected: Int64, on sql: any SQLDatabase) async throws {
+    try await waitForPostgreSQLLockWaiters(expected, lockType: "advisory", on: sql)
+}
+
+private func waitForPostgreSQLLockWaiters(
+    _ expected: Int64,
+    lockType: String,
+    on sql: any SQLDatabase
+) async throws {
     for _ in 0 ..< 300 {
-        let count = try await sql.raw(
-            "SELECT COUNT(*)::bigint AS value FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-        ).first(decoding: CountRow.self)?.value ?? 0
+        let count = try await sql.raw("""
+            SELECT COUNT(*)::bigint AS value
+            FROM pg_locks
+            WHERE locktype = \(bind: lockType) AND NOT granted
+            """).first(decoding: CountRow.self)?.value ?? 0
         if count >= expected { return }
         try await Task.sleep(for: .milliseconds(10))
     }
-    throw TestConfigurationError.advisoryWaiterTimeout
+    throw TestConfigurationError.lockWaiterTimeout(lockType)
 }
 
 private struct SnapshotV3ArtifactAssertionRow: Decodable {
@@ -11466,5 +11663,5 @@ private enum TestConfigurationError: Error {
     case invalidCrossStoreBatchCommitConcurrency(String)
     case invalidCrossStoreEventPayloadBytes(String)
     case postgresProfileUnavailable
-    case advisoryWaiterTimeout
+    case lockWaiterTimeout(String)
 }

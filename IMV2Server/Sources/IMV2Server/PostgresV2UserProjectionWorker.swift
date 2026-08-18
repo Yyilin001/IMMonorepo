@@ -182,7 +182,16 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 rowIndex += 1
             }
             try await sql.raw("""
-                WITH advanced AS (
+                WITH locked_sequence AS MATERIALIZED (
+                    -- Delivery reserves this same row before its Sync Log
+                    -- insert. Lock it before deciding whether the durable
+                    -- ready row is obsolete, so a concurrent v6 enqueue is
+                    -- ordered either wholly before or wholly after removal.
+                    SELECT user_id, next_sequence
+                    FROM \(unsafeRaw: table("user_sync_sequences"))
+                    WHERE user_id = \(bind: checkpoint.userID)
+                    FOR UPDATE
+                ), advanced AS (
                     UPDATE \(unsafeRaw: table("user_projection_checkpoints"))
                     SET projected_sequence = \(bind: expected - 1), state = 'ready',
                         failure_count = 0, failed_sequence = NULL,
@@ -192,7 +201,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                     RETURNING user_id, projected_sequence
                 ), removed_if_caught_up AS (
                     DELETE FROM \(unsafeRaw: table("user_projection_ready")) AS ready
-                    USING advanced, \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                    USING advanced, locked_sequence AS sequence
                     WHERE ready.user_id = advanced.user_id
                       AND sequence.user_id = advanced.user_id
                       AND sequence.next_sequence <= advanced.projected_sequence
@@ -200,7 +209,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 )
                 UPDATE \(unsafeRaw: table("user_projection_ready")) AS ready
                 SET available_at = \(bind: now), updated_at = \(bind: now)
-                FROM advanced, \(unsafeRaw: table("user_sync_sequences")) AS sequence
+                FROM advanced, locked_sequence AS sequence
                 WHERE ready.user_id = advanced.user_id
                   AND sequence.user_id = advanced.user_id
                   AND sequence.next_sequence > advanced.projected_sequence

@@ -1372,44 +1372,20 @@ public struct PostgresV2FanoutDeliveryStore:
                        event.payload
                 FROM payload_keys
                 JOIN im_v2.room_events AS event ON event.event_id = payload_keys.source_event_id
-            ), materialized_missing_payloads AS (
-                -- Current acceptance binaries create this immutable row in
-                -- the source transaction. Keep an in-statement expand-path
-                -- for deliveries accepted by an older binary or restored by
-                -- an operator. `DO NOTHING` never rewrites a current row, and
-                -- the RETURNING key lets this statement consume its own new
-                -- row without a second database round trip.
-                INSERT INTO im_v2.fanout_sync_payloads
-                    (source_event_id, projection_kind, payload,
-                     message_state_id, created_at)
-                SELECT payloads.source_event_id, payloads.projection_kind,
-                       CASE WHEN \(bind: payloadWriteMode == .reference)
-                                  AND state.payload = payloads.payload
-                            THEN NULL ELSE payloads.payload END,
-                       state.state_id, \(bind: now)
-                FROM payloads
-                LEFT JOIN im_v2.message_projection_state_values AS state
-                  ON state.state_event_id = payloads.source_event_id
-                 AND state.variant_key = 0
-                 AND payloads.projection_kind = 'message'
-                ON CONFLICT (source_event_id, projection_kind) DO NOTHING
-                RETURNING source_event_id, projection_kind
             ), verified_payloads AS MATERIALIZED (
-                -- The preceding statement made the body durable. This is
-                -- deliberately read-only validation so independent batches
-                -- do not serialize on an otherwise immutable payload row.
+                -- Acceptance (or the claimed compatibility preflight) made
+                -- the body durable. Keep the hot statement read-only at this
+                -- key: attempting an INSERT ... ON CONFLICT for every target
+                -- still performs unique-index and visibility work even when
+                -- the immutable row already exists.
                 SELECT payloads.source_event_id, payloads.projection_kind
                 FROM payloads
-                LEFT JOIN im_v2.fanout_sync_payloads AS shared
+                JOIN im_v2.fanout_sync_payloads AS shared
                  ON shared.source_event_id = payloads.source_event_id
                  AND shared.projection_kind = payloads.projection_kind
                 LEFT JOIN im_v2.message_projection_state_values AS state
                   ON state.state_id = shared.message_state_id
-                LEFT JOIN materialized_missing_payloads AS inserted
-                  ON inserted.source_event_id = payloads.source_event_id
-                 AND inserted.projection_kind = payloads.projection_kind
-                WHERE inserted.source_event_id IS NOT NULL
-                   OR COALESCE(shared.payload, state.payload) = payloads.payload
+                WHERE COALESCE(shared.payload, state.payload) = payloads.payload
             ), recorded_inbox AS (
                 INSERT INTO im_v2.consumer_inbox
                     (consumer_name, source_event_id, target_user_id,
