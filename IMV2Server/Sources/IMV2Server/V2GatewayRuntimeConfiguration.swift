@@ -192,6 +192,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// budget accounts for every schema's workers plus its snapshot builder.
     /// The checkpoint `SKIP LOCKED` fence preserves one ordered stream per user.
     public let userProjectionConcurrency: Int
+    /// Busy projector transactions run back-to-back, but these two independent
+    /// budgets force a cooperative executor yield under a sustained backlog.
+    public let userProjectionMaximumConsecutiveBusyPasses: Int
+    public let userProjectionBusyDrainBudgetMilliseconds: Int
     /// Process-local database admission bounds reject overload before a
     /// request spends the much longer Fluent pool timeout waiting for a slot.
     public let foregroundDatabaseWorkLimit: Int
@@ -240,6 +244,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let fanoutHint: V2FanoutHintRuntimeConfiguration
     public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
     public let maintenancePollIntervalMilliseconds: Int
+    /// High-volume retention tables use a separate backlog-drain loop. Busy
+    /// passes run back-to-back within these cooperative budgets; an empty pass
+    /// falls back to the independently configured idle poll interval.
+    public let backlogMaintenanceIdlePollIntervalMilliseconds: Int
+    public let backlogMaintenanceMaximumConsecutiveBusyPasses: Int
+    public let backlogMaintenanceBusyDrainBudgetMilliseconds: Int
     public let mediaWithdrawnRetentionSeconds: Int
     /// Server replay results outlive the first-party client retry window.
     /// Deployment may retain them longer, but never shorten this protocol
@@ -350,6 +360,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
         userProjectionConcurrency = try Self.boundedPositive(
             "IM_V2_USER_PROJECTION_CONCURRENCY", maximum: 16, environment: environment
+        )
+        userProjectionMaximumConsecutiveBusyPasses = try Self.boundedPositive(
+            "IM_V2_USER_PROJECTION_MAX_CONSECUTIVE_BUSY_PASSES",
+            maximum: 1_024,
+            environment: environment
+        )
+        userProjectionBusyDrainBudgetMilliseconds = try Self.boundedPositive(
+            "IM_V2_USER_PROJECTION_BUSY_DRAIN_BUDGET_MS",
+            maximum: 60_000,
+            environment: environment
         )
         foregroundDatabaseWorkLimit = try Self.boundedPositive(
             "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
@@ -468,6 +488,21 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             gatewayReplicaCount: gatewayReplicaCount
         )
         maintenancePollIntervalMilliseconds = try Self.positive("IM_V2_MAINTENANCE_POLL_INTERVAL_MS", environment: environment)
+        backlogMaintenanceIdlePollIntervalMilliseconds = try Self.boundedPositive(
+            "IM_V2_BACKLOG_MAINTENANCE_IDLE_POLL_INTERVAL_MS",
+            maximum: 2_000,
+            environment: environment
+        )
+        backlogMaintenanceMaximumConsecutiveBusyPasses = try Self.boundedPositive(
+            "IM_V2_BACKLOG_MAINTENANCE_MAX_CONSECUTIVE_BUSY_PASSES",
+            maximum: 1_024,
+            environment: environment
+        )
+        backlogMaintenanceBusyDrainBudgetMilliseconds = try Self.boundedPositive(
+            "IM_V2_BACKLOG_MAINTENANCE_BUSY_DRAIN_BUDGET_MS",
+            maximum: 60_000,
+            environment: environment
+        )
         mediaWithdrawnRetentionSeconds = try Self.positive("IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS", environment: environment)
         idempotencyRetentionSeconds = try Self.boundedPositive(
             "IM_V2_IDEMPOTENCY_RETENTION_SECONDS",

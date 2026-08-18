@@ -1,0 +1,32 @@
+# Optional single-node/load-test database telemetry overlay. It binds only to
+# host loopback and never publishes PostgreSQL itself. Production should use a
+# dedicated login with pg_monitor instead of the application owner used by the
+# local disposable stack.
+services:
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: postgres:5432/im_v2?sslmode=disable
+      DATA_SOURCE_USER: im_v2
+      DATA_SOURCE_PASS: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+      PG_EXPORTER_COLLECTION_TIMEOUT: 5s
+    command:
+      - --collector.long_running_transactions
+      - --collector.stat_activity_autovacuum
+      - --collector.stat_checkpointer
+      - --collector.stat_statements
+      - --collector.stat_statements.limit=100
+      - --collector.statio_user_indexes
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:9187:9187
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    pids_limit: 64

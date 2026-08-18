@@ -13,6 +13,9 @@
 | Sync admitted in-flight | 16 |
 | foreground / Sync 短队列 | 384 / 128 |
 | Projection concurrency / unique user schema | 2 |
+| Projection busy-drain pass / time budget | 16 / 50 ms |
+| Backlog maintenance idle poll | 1,000 ms |
+| Backlog maintenance busy pass / time budget | 4 / 100 ms |
 | admission timeout | 200 ms |
 | Sync hint window | 40 ms |
 | pending hint users | 50,000 |
@@ -32,14 +35,19 @@
 
 ## 上线顺序
 
-1. 对既有数据库先执行 `2026-08-17-user-projection-ready-index-expand.sql`、
-   `2026-08-18-message-projection-room-event-storage-expand.sql`；新库直接安装 canonical
+1. 对既有数据库按 migration regression 的顺序执行 expand SQL，最后包含
+   `2026-08-18-user-sync-log-statement-triggers-expand.sql`、
+   `2026-08-18-fanout-direct-user-microbatch-expand.sql` 和
+   `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`；新库直接安装 canonical
    schema。确认逻辑 view、validated storage constraint、append-only trigger 和索引存在后再部署 binary。
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
 5. 启用 Sync wake coalescing。比较 Pull 平均 records、Pull QPS、hint delivered/drop 和消息可见延迟。
 6. 最后开启成功日志采样。Prometheus 计数不受采样影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
+7. 空库或 backfill/inline 三项精确审计已经为 0 的压测环境，叠加
+   `docker-compose.gateway-shared.yml`，固定 `shared/shared + reference + preplanned`；旧库未完成
+   审计时禁止直接套用。
 
 ## 必看指标与告警
 
@@ -56,13 +64,19 @@
 
 在 PostgreSQL 启用 `pg_stat_statements` 的环境中，按 total execution time、calls 和 mean time 检查 Top SQL。不要只凭一次 `EXPLAIN` 增加索引；候选索引必须在与生产数据分布相近的副本上用 `EXPLAIN (ANALYZE, BUFFERS, WAL)` 验证，并同时计算写放大和 relation size。
 
-本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段前后：
+本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段使用
+同一统计纪元的前后快照计算差值，不要清空共享数据库统计：
 
 ```bash
-IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh reset
+IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh baseline /tmp/profile-A-before
 # 执行固定时长负载
-IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh report /tmp/profile-A
+IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh report /tmp/profile-A-after /tmp/profile-A-before
 ```
+
+报告目录中的 `delta_database.csv`、`delta_wal.csv`、`delta_io.csv`、
+`delta_statements.csv` 和 `delta_relations.csv` 才是该负载窗口的增量。若期间任何统计计数器被
+重置，脚本会拒绝生成差值。`reset` 仅用于完全隔离的一次性数据库，并强制要求
+`IM_V2_PROFILE_DATABASE_IS_DISPOSABLE=1`；禁止在共享测试库或生产库执行。
 
 恢复快照会删除 disposable 数据库的 `im_v2` schema，脚本因此同时要求显式
 `IM_V2_PROFILE_DATABASE_IS_DISPOSABLE=1` 且确认没有其他数据库 session；禁止对生产库执行。

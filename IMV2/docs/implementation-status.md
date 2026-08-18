@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-最后审阅：2026-08-16
+最后审阅：2026-08-18
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -19,8 +19,10 @@
 - 项目尚未上线，不支持旧协议、旧 SQLite、旧 PostgreSQL volume、旧 `.env.local` 或旧测试替身。
 - wire contract 为 protobuf protocol 19；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
-- PostgreSQL 只从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  119 张表、283 个索引、4 个非内部 trigger、4 个 schema function；这是唯一建库合同。
+- PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
+  121 张表、298 个索引、8 个非内部 trigger、8 个 schema function；这是唯一建库合同。
+  受控压测环境的既有 current-2 数据库可按 migration regression 覆盖的 expand 顺序在线更新，
+  readiness 会拒绝缺少 statement-level Sync 或 fresh-direct 完整性合同的旧结构。
 - ClientKit 主 SQLite 与派生搜索库分别只有一个当前建库入口；已有本地数据库不升级，
   由认证同步重建。schema contract 测试固定 161/5 个对象指纹并执行约束探针。
 - 本地 `.env.local` 必须是脚本生成的当前 11 键私有文件；缺键、多键、旧键、弱值或陈旧
@@ -33,15 +35,15 @@
 | TLS gateway 与协议 | TLS 1.3、protocol 19 协商、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
 | 账户与设备凭据 | 独立 account service、密码 cost-12、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
 | 公开身份与联系人 | required account kind、精确 handle 查询、资料更新、关系/屏蔽、按上下文资料读取、active roster 公开身份 | 仓库内已实现；HTTP/SQLite/PostgreSQL/iOS 测试 | 真机离线、多语言与人工无障碍验收 |
-| 私聊与普通群 | 幂等命令、事务准入、room event/outbox、冻结受众、planner、lease delivery、consumer inbox、user sync | 本机 PostgreSQL 集成已验证 | 代表性生产拓扑和负载报告 |
+| 私聊与普通群 | 幂等命令、事务准入、私聊 exact-two preplanned plan/unit/delivery、按用户公平微批、普通群 outbox/planner、lease/inbox/user sync | 双副本本机 PostgreSQL 集成已验证 | 代表性生产拓扑、A/B 和长稳态负载报告 |
 | 大群 Hybrid | 创建时固定 delivery mode；5,001...100,000 成员普通消息写 room log，显式 mention 才可靠 fan-out；客户端 cursor pull | 仓库内与 opt-in scale-shape 回归 | NATS 安全、持续负载、故障与设备可见延迟报告 |
 | 群管理与审核 | 成员 seek pagination、角色权限、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay | 仓库内已实现 | 生产审核 provider、operator 访问与保留政策 |
-| Sync 与 Snapshot V3 | per-user projection/checkpoint、有界 artifact page、ACK-before-activate、retained floor、日志 compaction、撤销设备清理 | 本机 PostgreSQL/ClientKit 故障回归 | 生产 replay window、存储阈值与长周期运行证据 |
+| Sync 与 Snapshot V3 | per-user projection/checkpoint、statement-level checkpoint/effect capture、有界 artifact page、ACK-before-activate、独立 busy-drain compaction、retained floor、撤销设备清理 | 本机 PostgreSQL/ClientKit 故障回归 | 生产 replay window、存储阈值与长周期运行证据 |
 | ClientKit 本地状态 | Keychain 设备会话、安装绑定、当前 SQLite schema、持久化 outbox、搜索派生库、事件授权与 delivery mode 分离 | 本机 198 项 ClientKit 回归及 iOS 聚焦回归 | 受保护数据、重启和真机 Keychain 发布验收 |
 | 媒体 | 设备绑定上传/下载 grant、扫描/审核/清理 outbox；本地流式文件 provider 与 EICAR 夹具 | 本机集成已验证 | 生产对象存储、扫描器、CDN、multipart abort 与滥用测试 |
 | Push 与实时提示 | 加密 APNs endpoint、generic wake；NATS 只作为可丢失提示，PostgreSQL/cursor 保持正确性 | 仓库内已实现，本地 broker 回归 | 真实 APNs、NATS TLS/NKey、broker 指标与 soak/failover |
 | 用户分片 | 持久化 route/epoch、copy/verify、forwarding、cutover、rollback、target-first retry 与 source cleanup | 双 PostgreSQL 本机集成已验证 | 独立权限部署、网络分区、长时间 forwarding 与操作员演练 |
-| 可观测与运维 | 低基数 metrics、paused work 告警、loopback operator、账号禁用/迁移/replay runbook、逻辑恢复 drill | 本机脚本与测试覆盖 | Alertmanager receiver、bastion/mTLS、WAL/PITR、RPO/RTO 演练 |
+| 可观测与运维 | 低基数 metrics、paused work 告警、loopback operator、非破坏性 PostgreSQL 前后快照差值、host-local exporter、逻辑恢复 drill | 本机脚本与测试覆盖 | Alertmanager receiver、bastion/mTLS、WAL/PITR、RPO/RTO 演练 |
 | iOS App | SwiftUI 状态、认证/同步、联系人、会话、群管理、媒体、Push 设置、离线 outbox；Swift 6 严格并发 | Simulator 构建、unit/UI 与本机双安装入口 | 真机签名、APNs、完整 VoiceOver/Reduce Motion/对比度与发布验收 |
 
 ## 唯一本地总门禁

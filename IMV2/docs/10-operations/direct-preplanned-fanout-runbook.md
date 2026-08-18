@@ -15,7 +15,7 @@ IM_V2_DIRECT_FANOUT_MODE=preplanned  # 仅 message.accepted 私聊快路径
 ## 启用前门槛
 
 1. 当前 schema readiness 通过，router configuration 恰有一行且 override 无无效 bucket；
-   `fanout_deliveries_fresh_direct_target_lane_claim_idx` 与
+   `fanout_deliveries_fresh_direct_user_microbatch_claim_idx` 与
    `fanout_deliveries_fresh_generic_target_lane_claim_idx` 已创建且有效；
 2. `room_outbox`、fanout plan/delivery、completion release 无 paused/长期 leased backlog；
 3. 备份可恢复，记录 gateway image digest、配置、数据库参数和基线压测结果；
@@ -85,8 +85,10 @@ scheduled/paused delivery、terminal completion release 与连接池等待。日
 瞬时 ACK/s 放大单事务，优先通过互不重叠的 target-user lane 并行扩展，并同时观察 lock
 wait、WAL burst 和 p99。target user 映射到固定 8 个数据库 lane，同一用户的 fresh delivery
 必须归属同一 lane；跨副本由非阻塞用户 advisory lock 再次仲裁。同一私聊事件的两条 delivery
-可以位于不同 lane，source-event advisory lock 仍保证正文只物化一次。禁止修改 SQL hash
-常量而不重建对应索引并完成相同数据快照的 A/B。
+可以位于不同 lane，正文通过唯一键和等值校验只物化一次。worker 对已取得 user lock 的多条
+source event 做有界微批；每事务最多选 8 个 user，并按 user 精确分配总 Delivery 配额，未取得
+user lock 的副本不得先持有对应 delivery row lock。禁止修改 SQL hash 常量、user 微批上限或
+配额算法而不重建对应索引并完成相同数据快照的 A/B。
 
 同库 fresh delivery 正常排空后应保持 `retry_count=0`；非零表示它按设计进入了恢复协议：
 
@@ -113,7 +115,7 @@ WHERE plan.target_rule->>'planning_strategy' = 'direct_preplanned';
 ## 性能验证矩阵
 
 用 `v2_profile_snapshot.sh capture/restore` 在每组前恢复同一 disposable 数据快照，并用
-`capture_v2_postgres_profile.sh reset/report` 保存 query/WAL/I/O 证据。在同一快照依次测试
+`capture_v2_postgres_profile.sh baseline/report` 以非破坏性前后快照保存 query/WAL/I/O 增量证据。在同一快照依次测试
 planner 基线与 preplanned：500、1k、2k 在线连接爬坡；随后固定连接
 执行 5 分钟消息阶梯与 30 分钟 soak。每级至少保存 accepted、rejected、timeout、ACK p50/p95/
 p99、端到端投影 p95/p99、DB CPU/IO/WAL、gateway CPU/RSS、表/索引增量和一致性计数。只有错误

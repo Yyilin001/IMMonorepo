@@ -32,9 +32,9 @@ store 与控制 schema 已由组合根证明同库，新鲜 direct delivery 在�
 `pending -> terminal`，不先写 claim token/retry count；远端分片、迁移转发、失败重试和过期
 lease 仍走原 claim-token 协议。快路径单事务行数不得超过同库
 `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE`，不能用更大的 claim limit 隐式扩大锁、回滚和 WAL
-边界。同库 fresh worker 按 source event 分配固定数据库 lane，并在 delivery 事务内只写一次
-shared payload/reference；消息接受事务不承担该投影写入。群聊和任何非私聊事件继续走
-Planner。
+边界。同库 fresh worker 按 target user 分配固定数据库 lane，并在一个用户微批中处理多个
+source event；shared payload 仍由 `(source_event_id, projection_kind)` 唯一键只物化一次。
+消息接受事务不承担该投影写入。群聊和任何非私聊事件继续走 Planner。
 
 ## 安全与一致性不变量
 
@@ -50,13 +50,20 @@ Planner。
   投递记录尚未创建”的窗口。
 - 只有该事务创建的两条 direct delivery 写入 `fresh_direct_eligible=true`。快路径直接从这个
   窄、可索引的 durable 分类领取，禁止依赖 `fanout_plans.state` 的瞬时统计量驱动大表 join；
-  plan/unit 不变量仍由同事务创建和 completion 计数更新共同校验，异常会整批回滚并进入恢复协议。
+  数据库 statement trigger 要求一次 fresh-direct INSERT 对每个 source 恰好两行且共用唯一
+  completion unit，并复核 planned plan、target count 与 audience kind；plan target rule/source
+  identity 及 delivery 的 source/target/kind/unit/eligibility 之后均不可变。应用层同事务计数断言
+  仍保留，任一层异常都整批回滚。
 - fresh direct 与普通 fresh work 一样按 target user 归属固定 lane，避免同一进程的 worker
   并发更新该用户的单调 Sync Sequence。跨 replica 再以 non-blocking exclusive user advisory
   lock 仲裁；未取得锁的行保持 pending，避免锁等待形成事务车队。
-- 同一 source event 的两位接收者可以位于不同 lane；non-blocking source advisory lock 仍选出
-  唯一 materializer，未取得锁的事务释放候选行稍后重试，不等待也不争抢
-  `(source_event_id,projection_kind)` 唯一键。远端 target 仍在自己的物理 store 建立引用。
+- 同一 source event 的两位接收者可以位于不同 lane。worker 先为候选 user 取得 non-blocking
+  advisory lock，再只锁定已拥有 user 的 delivery；未取得锁的副本不持有 delivery row lock。
+  单事务最多拥有 8 个 user，并把总 delivery 上限按 user 精确分配，避免一个重度用户吞掉整批
+  或提前锁住本事务不会处理的用户。
+  两个接收者并发物化正文时以 `(source_event_id,projection_kind)` 唯一键和等值校验收敛，允许
+  极短唯一键等待，但不会重复正文或产生 last-write-wins。远端 target 仍在自己的物理 store
+  建立引用。
 - `(source_event_id,target_user_id,projection_kind)`、inbox 和 immutable state 冲突仍按原
   幂等/等值验证处理，禁止 last-write-wins。
 - shared state 不是可见性授权。增量同步、Snapshot 与媒体下载仍必须先命中该用户的

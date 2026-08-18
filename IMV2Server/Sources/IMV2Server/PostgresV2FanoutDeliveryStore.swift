@@ -62,6 +62,11 @@ public struct PostgresV2FanoutDeliveryStore:
     /// by target user so sequence writers remain disjoint. Direct deliveries
     /// separately elect one source-event payload materializer below.
     private static let stableFreshLaneCount: Int64 = 8
+    /// A transaction may amortize sequence/trigger work across repeated
+    /// messages for several users, but must not pre-lock an entire claim-sized
+    /// user set that it cannot actually project. Eight users keeps advisory
+    /// ownership narrow and still fills the standard 128-row commit boundary.
+    private static let maximumFreshDirectUsersPerBatch = 8
 
     private static func dynamicTargetPartitionEligibility(
         _ partition: V2FanoutDeliveryClaimPartition?
@@ -379,11 +384,16 @@ public struct PostgresV2FanoutDeliveryStore:
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            var candidates = try await sql.raw("""
-                SELECT delivery.source_event_id, delivery.target_user_id,
-                       delivery.projection_kind, delivery.completion_unit_id,
-                       delivery.target_shard_bucket, delivery.observed_router_epoch,
-                       delivery.retry_count, NULL::text AS event_payload_json
+            // Discover users without taking row locks. Replicas then arbitrate
+            // the same stable user lane before any delivery row is locked, so
+            // a losing transaction cannot pin work it is not allowed to
+            // project. The matching partial index is user-first within a lane.
+            let candidateUserLimit = min(
+                limit, Self.maximumFreshDirectUsersPerBatch
+            )
+            let candidateUsers = try await sql.raw("""
+                SELECT DISTINCT ON (delivery.target_user_id)
+                       delivery.target_user_id
                 FROM im_v2.fanout_deliveries AS delivery
                 WHERE delivery.state = 'pending'
                   AND delivery.fresh_direct_eligible
@@ -395,41 +405,11 @@ public struct PostgresV2FanoutDeliveryStore:
                   AND delivery.retry_count = 0
                   \(bucketEligibility)
                   \(partitionEligibility)
-                ORDER BY delivery.source_event_id, delivery.target_user_id,
+                ORDER BY delivery.target_user_id, delivery.source_event_id,
                          delivery.projection_kind
-                LIMIT \(bind: limit)
-                FOR UPDATE OF delivery SKIP LOCKED
-                """).all(decoding: ClaimedDeliveryRow.self)
-            guard !candidates.isEmpty else { return [] }
-
-            // Stable lanes prevent same-process overlap. Replicas can still
-            // observe the same lane, and a boundary batch can contain only
-            // one of an event's two rows. A non-blocking source lock elects
-            // exactly one transaction to materialize that event's shared
-            // payload; losers release their row locks and retry later.
-            let candidateSourceIDs = Array(Set(candidates.map(\.sourceEventID)))
-                .sorted { $0.uuidString < $1.uuidString }
-            let candidateSourceIDsJSON = try batchJSON(candidateSourceIDs)
-            let ownedSources = try await sql.raw("""
-                WITH input AS MATERIALIZED (
-                    SELECT value::uuid AS source_event_id
-                    FROM jsonb_array_elements_text(
-                        \(bind: candidateSourceIDsJSON)::jsonb
-                    ) AS value
-                )
-                SELECT source_event_id
-                FROM input
-                WHERE pg_try_advisory_xact_lock(
-                    hashtextextended(
-                        'v2-fresh-direct-source:' || source_event_id::text,
-                        0
-                    )
-                )
-                ORDER BY source_event_id
-                """).all(decoding: SourceEventRow.self)
-            let ownedSourceIDs = Set(ownedSources.map(\.sourceEventID))
-            candidates.removeAll { !ownedSourceIDs.contains($0.sourceEventID) }
-            guard !candidates.isEmpty else { return [] }
+                LIMIT \(bind: candidateUserLimit)
+                """).all(decoding: FreshDirectCandidateUserRow.self)
+            guard !candidateUsers.isEmpty else { return [] }
 
             // Stable target lanes keep users disjoint inside one process. A
             // second replica may own the same database lane, so elect users
@@ -439,8 +419,7 @@ public struct PostgresV2FanoutDeliveryStore:
             // Foundation/V2Identifier canonicalizes UUID-backed IDs to the
             // uppercase spelling. Preserve it here: advisory keys are lexical
             // and must exactly match V2PostgresUserShardRouter cutover locks.
-            let lockUsers = Array(Set(candidates.map { $0.targetUserID.uuidString }))
-                .sorted()
+            let lockUsers = candidateUsers.map { $0.targetUserID.uuidString }.sorted()
             let lockUsersJSON = try batchJSON(lockUsers)
             let userLocks = try await sql.raw("""
                 WITH requested AS MATERIALIZED (
@@ -459,9 +438,63 @@ public struct PostgresV2FanoutDeliveryStore:
             let ownedUserIDs = Set(
                 userLocks.lazy.filter(\.acquired).map(\.lockUser)
             )
-            candidates.removeAll {
-                !ownedUserIDs.contains($0.targetUserID.uuidString)
-            }
+            let ownedTargetUserIDs = candidateUsers.lazy
+                .map(\.targetUserID)
+                .filter { ownedUserIDs.contains($0.uuidString) }
+                .sorted { $0.uuidString < $1.uuidString }
+            guard !ownedTargetUserIDs.isEmpty else { return [] }
+
+            // Divide the delivery boundary exactly across only the users this
+            // replica owns. A heavy lexically-first user can therefore use its
+            // share of the batch without consuming every row or preventing a
+            // second replica from progressing disjoint users.
+            let deliveriesPerUser = limit / ownedTargetUserIDs.count
+            let usersWithOneExtraDelivery = limit % ownedTargetUserIDs.count
+
+            // Only now acquire delivery row locks. One owned user may
+            // contribute several source events, which amortizes route checks,
+            // sequence reservation, trigger execution and transaction commit
+            // while preserving that user's strict source-event order.
+            let candidates = try await sql.raw("""
+                WITH owned_users AS MATERIALIZED (
+                    SELECT target_user_id, ordinal - 1 AS user_ordinal
+                    FROM unnest(\(bind: ownedTargetUserIDs)::uuid[])
+                        WITH ORDINALITY AS owned(target_user_id, ordinal)
+                )
+                SELECT candidate.source_event_id, candidate.target_user_id,
+                       candidate.projection_kind, candidate.completion_unit_id,
+                       candidate.target_shard_bucket, candidate.observed_router_epoch,
+                       candidate.retry_count, NULL::text AS event_payload_json
+                FROM owned_users
+                CROSS JOIN LATERAL (
+                    SELECT delivery.*
+                    FROM im_v2.fanout_deliveries AS delivery
+                    WHERE delivery.target_user_id = owned_users.target_user_id
+                      AND delivery.state = 'pending'
+                      AND delivery.fresh_direct_eligible
+                      AND delivery.projection_kind = 'message'
+                      AND delivery.claim_token IS NULL
+                      AND delivery.lease_expires_at IS NULL
+                      AND delivery.next_attempt_at IS NULL
+                      AND delivery.paused_at IS NULL
+                      AND delivery.retry_count = 0
+                      \(bucketEligibility)
+                      \(partitionEligibility)
+                    ORDER BY delivery.source_event_id,
+                             delivery.projection_kind
+                    LIMIT (
+                        \(bind: deliveriesPerUser)
+                        + CASE
+                            WHEN owned_users.user_ordinal
+                                    < \(bind: usersWithOneExtraDelivery)
+                            THEN 1 ELSE 0
+                          END
+                    )
+                    FOR UPDATE OF delivery SKIP LOCKED
+                ) AS candidate
+                ORDER BY candidate.target_user_id, candidate.source_event_id,
+                         candidate.projection_kind
+                """).all(decoding: ClaimedDeliveryRow.self)
             guard !candidates.isEmpty else { return [] }
 
             let routeInput = candidates.enumerated().map {
@@ -2431,6 +2464,14 @@ private struct BatchReleaseAdmissionRow: Decodable {
 private struct SourceEventRow: Decodable {
     let sourceEventID: UUID
     enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" }
+}
+
+private struct FreshDirectCandidateUserRow: Decodable {
+    let targetUserID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case targetUserID = "target_user_id"
+    }
 }
 private struct FreshDirectUserLockRow: Decodable {
     let lockUser: String

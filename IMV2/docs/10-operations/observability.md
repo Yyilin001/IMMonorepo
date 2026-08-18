@@ -137,6 +137,14 @@ ID、access/refresh token、正文、原始 frame、附件 URL、对象 key、�
 配置模板位于
 [`observability/prometheus/prometheus.yml.example`](../../observability/prometheus/prometheus.yml.example)。
 本机隔离验证通过 `scripts/check_v2_prometheus_rules.sh` 用 `promtool` 校验二者。
+单机压测还可叠加
+[`docker-compose.postgres-exporter.yml`](../../docker-compose.postgres-exporter.yml)，
+它固定使用 postgres_exporter `v0.20.1`，只把 `9187` 发布到主机 loopback，并开启
+statement、WAL、checkpoint、autovacuum、锁、长事务与 user-index I/O collector。
+Prometheus 模板已包含该 target。该本机 overlay 为方便 disposable 环境复用应用账号；
+正式环境必须创建独立登录并授予 PostgreSQL `pg_monitor`，密码用 secret file 注入，不能
+写入 Compose、命令行、工单或指标标签。官方 exporter 的 collection timeout 设为 5 秒，
+避免数据库变慢时监控连接反向堆积。
 本地账号栈的 `verify_v2_local_account_stack.sh` 还从 gateway 容器内部探测
 loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/scheduled/paused
 完整状态词汇；它由此拒绝使用旧镜像的“健康但缺指标”状态。

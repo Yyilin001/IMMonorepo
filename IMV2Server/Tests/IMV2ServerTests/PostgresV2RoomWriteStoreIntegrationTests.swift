@@ -442,6 +442,445 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("sync-log statement triggers deduplicate users and preserve immutable effects")
+    func syncLogStatementTriggersAreSetBased() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql, isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let firstUser = UUID(uuidString: "00000000-0000-0000-0000-000000000d01")!
+            let secondUser = UUID(uuidString: "00000000-0000-0000-0000-000000000d02")!
+            let events = (1 ... 9).map {
+                UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", 0xd10 + $0))!
+            }
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let later = now.addingTimeInterval(10)
+            let backdated = now.addingTimeInterval(-10)
+            try await sql.raw(
+                "CREATE TABLE im_v2.test_checkpoint_updates (user_id uuid NOT NULL)"
+            ).run()
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.record_test_checkpoint_update() RETURNS trigger
+                    LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO im_v2.test_checkpoint_updates (user_id) VALUES (NEW.user_id);
+                    RETURN NEW;
+                END;
+                $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER record_test_checkpoint_update
+                    AFTER UPDATE ON im_v2.user_projection_checkpoints
+                    FOR EACH ROW EXECUTE FUNCTION im_v2.record_test_checkpoint_update()
+                """).run()
+
+            // Four rows and two users produce exactly two checkpoint/retention
+            // inserts and no redundant conflict UPDATE.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id,
+                     projection_kind, payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: firstUser), 1, \(bind: events[0]), 'relationship',
+                     '{"state":"pending"}'::jsonb, 'inline', \(bind: now)),
+                    (\(bind: firstUser), 2, \(bind: events[1]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: now)),
+                    (\(bind: secondUser), 1, \(bind: events[2]), 'relationship',
+                     '{"state":"pending"}'::jsonb, 'inline', \(bind: now)),
+                    (\(bind: secondUser), 2, \(bind: events[3]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: now))
+                """).run()
+            #expect(try await count("im_v2.user_projection_checkpoints", on: sql) == 2)
+            #expect(try await count("im_v2.user_sync_retention", on: sql) == 2)
+            #expect(try await count("im_v2.user_projection_effects", on: sql) == 4)
+            #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
+
+            // Newer work must not rewrite an unchanged checkpoint tuple.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id,
+                     projection_kind, payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: firstUser), 3, \(bind: events[4]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: later)),
+                    (\(bind: firstUser), 4, \(bind: events[5]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: later)),
+                    (\(bind: secondUser), 3, \(bind: events[6]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: later)),
+                    (\(bind: secondUser), 4, \(bind: events[7]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: later))
+                """).run()
+            #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
+
+            // A backdated migration record still moves scheduling time once,
+            // after per-statement user deduplication.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id,
+                     projection_kind, payload, payload_storage, created_at)
+                VALUES
+                    (\(bind: firstUser), 5, \(bind: events[8]), 'relationship',
+                     '{"state":"accepted"}'::jsonb, 'inline', \(bind: backdated))
+                """).run()
+            #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 1)
+            let backdatedCheckpoint = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM im_v2.user_projection_checkpoints
+                WHERE user_id = \(bind: firstUser) AND updated_at = \(bind: backdated)
+                """).first(decoding: CountRow.self))
+            #expect(backdatedCheckpoint.value == 1)
+
+            // Compaction may remove a sync-log row while its stable projection
+            // effect remains. Reusing that immutable identity with a different
+            // body must still abort the complete statement.
+            try await sql.raw("""
+                DELETE FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: firstUser) AND user_sync_sequence = 1
+                """).run()
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_sync_log
+                        (user_id, user_sync_sequence, source_event_id,
+                         projection_kind, payload, payload_storage, created_at)
+                    VALUES
+                        (\(bind: firstUser), 6, \(bind: events[0]), 'relationship',
+                         '{"state":"conflicting"}'::jsonb, 'inline', \(bind: later))
+                    """).run()
+            }
+            let conflictingRow = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value FROM im_v2.user_sync_log
+                WHERE user_id = \(bind: firstUser) AND user_sync_sequence = 6
+                """).first(decoding: CountRow.self))
+            #expect(conflictingRow.value == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("two replicas drain all eight fresh-direct user lanes without gaps or duplicate payloads")
+    func freshDirectUserMicrobatchIsReplicaSafe() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 8),
+                as: .psql, isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let roomID = UUID(uuidString: "00000000-0000-0000-0001-000000000001")!
+            let users = (0 ..< 8).map {
+                UUID(uuidString: String(
+                    format: "00000000-0000-0000-0002-%012x", $0 + 1
+                ))!
+            }
+            let eventCount = 24
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms
+                    (room_id, room_kind, room_shard_id, room_sequence,
+                     membership_revision, capacity_profile_id, created_at,
+                     delivery_mode)
+                VALUES (\(bind: roomID), 'direct', 'rooms-primary',
+                        \(bind: eventCount), 2, 'test', \(bind: now),
+                        'standard_fanout')
+                """).run()
+
+            for index in 0 ..< eventCount {
+                let eventID = UUID(uuidString: String(
+                    format: "00000000-0000-0000-0003-%012x", index + 1
+                ))!
+                let planID = UUID(uuidString: String(
+                    format: "00000000-0000-0000-0004-%012x", index + 1
+                ))!
+                let completionID = UUID(uuidString: String(
+                    format: "00000000-0000-0000-0005-%012x", index + 1
+                ))!
+                let messageID = UUID(uuidString: String(
+                    format: "00000000-0000-0000-0006-%012x", index + 1
+                ))!
+                let firstUser = users[index % users.count]
+                let secondUser = users[(index + 3) % users.count]
+                let payload = """
+                    {"event_type":"message.accepted","message_id":"\(messageID.uuidString.lowercased())","room_id":"\(roomID.uuidString.lowercased())","message_revision":1}
+                    """
+                try await sql.raw("""
+                    WITH inserted_event AS (
+                        INSERT INTO im_v2.room_events
+                            (event_id, room_id, room_sequence, event_type,
+                             actor_user_id, payload,
+                             committed_membership_revision, created_at)
+                        VALUES (\(bind: eventID), \(bind: roomID), \(bind: index + 1),
+                                'message.accepted', \(bind: firstUser),
+                                \(bind: payload)::jsonb, 2, \(bind: now))
+                        RETURNING event_id
+                    ), inserted_plan AS (
+                        INSERT INTO im_v2.fanout_plans
+                            (plan_id, source_event_id, room_id,
+                             source_room_sequence, committed_membership_revision,
+                             target_rule, enumeration_checkpoint, target_count,
+                             reserved_fanout_cost, state, created_at,
+                             enumerated_target_count)
+                        SELECT \(bind: planID), event_id, \(bind: roomID),
+                               \(bind: index + 1), 2,
+                               '{"planning_strategy":"direct_preplanned"}'::jsonb,
+                               '{"complete":true}'::jsonb, 2, 2, 'planned',
+                               \(bind: now), 2
+                        FROM inserted_event
+                        RETURNING source_event_id
+                    ), inserted_unit AS (
+                        INSERT INTO im_v2.fanout_completion_units
+                            (source_event_id, completion_unit_id, target_boundary,
+                             target_count, state)
+                        SELECT source_event_id, \(bind: completionID),
+                               '{"audience_kind":"direct_preplanned"}'::jsonb,
+                               2, 'pending'
+                        FROM inserted_plan
+                        RETURNING source_event_id, completion_unit_id
+                    )
+                    INSERT INTO im_v2.fanout_deliveries
+                        (source_event_id, target_user_id, projection_kind,
+                         completion_unit_id, target_shard_bucket,
+                         observed_router_epoch, fresh_direct_eligible)
+                    SELECT source_event_id, target_user_id, 'message',
+                           completion_unit_id, 'test-users', 9, TRUE
+                    FROM inserted_unit
+                    CROSS JOIN unnest(ARRAY[\(bind: firstUser), \(bind: secondUser)]::uuid[])
+                        AS target(target_user_id)
+                    """).run()
+            }
+
+            let firstEventID = UUID(
+                uuidString: "00000000-0000-0000-0003-000000000001"
+            )!
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    UPDATE im_v2.fanout_deliveries
+                    SET fresh_direct_eligible = FALSE
+                    WHERE source_event_id = \(bind: firstEventID)
+                    """).run()
+            }
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    UPDATE im_v2.fanout_plans
+                    SET target_rule = '{}'::jsonb
+                    WHERE source_event_id = \(bind: firstEventID)
+                    """).run()
+            }
+
+            // A direct audience is one atomic completion unit. Two otherwise
+            // valid units with one recipient each must not pass the
+            // statement-level exact-two check.
+            let malformedEventID = UUID(
+                uuidString: "00000000-0000-0000-0003-000000000099"
+            )!
+            let malformedPlanID = UUID(
+                uuidString: "00000000-0000-0000-0004-000000000099"
+            )!
+            let malformedFirstUnitID = UUID(
+                uuidString: "00000000-0000-0000-0005-000000000099"
+            )!
+            let malformedSecondUnitID = UUID(
+                uuidString: "00000000-0000-0000-0005-000000000100"
+            )!
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    WITH inserted_event AS (
+                        INSERT INTO im_v2.room_events
+                            (event_id, room_id, room_sequence, event_type,
+                             actor_user_id, payload,
+                             committed_membership_revision, created_at)
+                        VALUES (
+                            \(bind: malformedEventID), \(bind: roomID),
+                            \(bind: eventCount + 1), 'message.accepted',
+                            \(bind: users[0]),
+                            '{"event_type":"message.accepted"}'::jsonb,
+                            2, \(bind: now)
+                        )
+                        RETURNING event_id
+                    ), inserted_plan AS (
+                        INSERT INTO im_v2.fanout_plans
+                            (plan_id, source_event_id, room_id,
+                             source_room_sequence, committed_membership_revision,
+                             target_rule, enumeration_checkpoint, target_count,
+                             reserved_fanout_cost, state, created_at,
+                             enumerated_target_count)
+                        SELECT \(bind: malformedPlanID), event_id, \(bind: roomID),
+                               \(bind: eventCount + 1), 2,
+                               '{"planning_strategy":"direct_preplanned"}'::jsonb,
+                               '{"complete":true}'::jsonb, 2, 2, 'planned',
+                               \(bind: now), 2
+                        FROM inserted_event
+                        RETURNING source_event_id
+                    ), inserted_units AS (
+                        INSERT INTO im_v2.fanout_completion_units
+                            (source_event_id, completion_unit_id,
+                             target_boundary, target_count, state)
+                        SELECT source_event_id, unit_id,
+                               '{"audience_kind":"direct_preplanned"}'::jsonb,
+                               2, 'pending'
+                        FROM inserted_plan
+                        CROSS JOIN unnest(ARRAY[
+                            \(bind: malformedFirstUnitID),
+                            \(bind: malformedSecondUnitID)
+                        ]::uuid[]) AS unit(unit_id)
+                        RETURNING source_event_id, completion_unit_id
+                    )
+                    INSERT INTO im_v2.fanout_deliveries
+                        (source_event_id, target_user_id, projection_kind,
+                         completion_unit_id, target_shard_bucket,
+                         observed_router_epoch, fresh_direct_eligible)
+                    SELECT source_event_id, target_user_id, 'message',
+                           completion_unit_id, 'test-users', 9, TRUE
+                    FROM inserted_units
+                    JOIN (VALUES
+                        (\(bind: malformedFirstUnitID), \(bind: users[0])),
+                        (\(bind: malformedSecondUnitID), \(bind: users[1]))
+                    ) AS target(completion_unit_id, target_user_id)
+                    USING (completion_unit_id)
+                    """).run()
+            }
+            #expect(try await count(
+                "im_v2.room_events WHERE event_id = '\(malformedEventID.uuidString)'",
+                on: sql
+            ) == 0)
+
+            // Even a valid alternate unit cannot be spliced into an existing
+            // fresh-direct identity after its creation statement commits.
+            let alternateUnitID = UUID(
+                uuidString: "00000000-0000-0000-0005-000000000101"
+            )!
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_completion_units
+                    (source_event_id, completion_unit_id, target_boundary,
+                     target_count, state)
+                VALUES (
+                    \(bind: firstEventID), \(bind: alternateUnitID),
+                    '{"audience_kind":"direct_preplanned"}'::jsonb,
+                    2, 'pending'
+                )
+                """).run()
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    UPDATE im_v2.fanout_deliveries
+                    SET completion_unit_id = \(bind: alternateUnitID)
+                    WHERE source_event_id = \(bind: firstEventID)
+                      AND target_user_id = \(bind: users[0])
+                    """).run()
+            }
+            try await sql.raw("""
+                DELETE FROM im_v2.fanout_completion_units
+                WHERE source_event_id = \(bind: firstEventID)
+                  AND completion_unit_id = \(bind: alternateUnitID)
+                """).run()
+
+            let firstReplica = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+            let secondReplica = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+            let firstMicrobatch = try await firstReplica.commitFreshDirectPreplanned(
+                bucket: "test-users", partition: nil,
+                now: now.addingTimeInterval(1), limit: 4
+            )
+            #expect(firstMicrobatch.count == 4)
+            #expect(Set(firstMicrobatch.map(\.targetUserID)).count == 4)
+            var passCount = 0
+            while true {
+                passCount += 1
+                guard passCount <= 100 else {
+                    Issue.record("fresh-direct replica drain did not converge")
+                    break
+                }
+                let committed = try await withThrowingTaskGroup(
+                    of: Int.self, returning: Int.self
+                ) { group in
+                    for replica in 0 ..< 2 {
+                        for lane in 0 ..< 8 {
+                            group.addTask {
+                                let store = replica == 0 ? firstReplica : secondReplica
+                                return try await store.commitFreshDirectPreplanned(
+                                    bucket: "test-users",
+                                    partition: .init(index: lane, count: 8),
+                                    now: now.addingTimeInterval(1),
+                                    limit: 4
+                                ).count
+                            }
+                        }
+                    }
+                    var total = 0
+                    for try await count in group { total += count }
+                    return total
+                }
+                if committed == 0 { break }
+            }
+
+            #expect(try await count(
+                "im_v2.fanout_deliveries WHERE state = 'terminal' AND retry_count = 0",
+                on: sql
+            ) == Int64(eventCount * 2))
+            #expect(try await count("im_v2.user_sync_log", on: sql) == Int64(eventCount * 2))
+            #expect(try await count("im_v2.consumer_inbox", on: sql) == Int64(eventCount * 2))
+            #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == Int64(eventCount))
+            #expect(try await count(
+                "im_v2.fanout_completion_units WHERE state = 'terminal' AND committed_target_count = 2",
+                on: sql
+            ) == Int64(eventCount))
+            let brokenSequences = try #require(try await sql.raw("""
+                SELECT COUNT(*) AS value
+                FROM (
+                    SELECT user_id
+                    FROM im_v2.user_sync_log
+                    GROUP BY user_id
+                    HAVING min(user_sync_sequence) <> 1
+                        OR max(user_sync_sequence) <> count(*)
+                        OR count(DISTINCT user_sync_sequence) <> count(*)
+                ) AS broken
+                """).first(decoding: CountRow.self))
+            #expect(brokenSequences.value == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("accepted-message projection batches consecutive shared-state references")
     func acceptedMessageProjectionBatchPreservesNarrowReferences() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -9061,8 +9500,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let controlReport = try await V2ControlPlaneHousekeepingWorker(
                 store: PostgresV2ControlPlaneHousekeepingStore(database: app.db(.psql)),
                 now: { now }
-            ).runOnce(limit: 8)
+            ).runOnce(limit: 256)
             #expect(controlReport.deletedRows == 9)
+            #expect(controlReport.deletedRows <= 256)
             #expect(controlReport.purgedIdempotencyRows == 1)
             #expect(controlReport.purgedExpiredConnectionLeaseRows == 1)
             #expect(controlReport.purgedExpiredCredentialReplayRows == 1)

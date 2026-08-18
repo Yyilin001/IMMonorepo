@@ -57,6 +57,12 @@ fingerprint 和 source retention cleanup 覆盖 floor 与
 inbox sequence。Prometheus 分别暴露 uncompacted records、projector lag、snapshot、GC 和
 sync-log relation 指标。
 
+高吞吐 compaction 不再绑定一分钟级通用 retention tick。独立 backlog-drain loop 在有工作时
+连续执行有界事务，并按 pass 数/墙钟预算主动 yield；空闲时才指数退避。每个用户批次删除的
+shared payload key 会用一次 `unnest` 集合 DELETE 回收，不再按 key 产生 N+1 SQL。该调度与
+control-plane terminal housekeeping 共用显式、独立的 busy/idle 容量配置，但各自仍只使用
+maintenance database pool。
+
 ## 拒绝的局部方案
 
 - 按 `created_at` TTL：离线设备和历史可见性没有时间等价物；

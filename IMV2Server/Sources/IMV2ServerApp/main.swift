@@ -703,9 +703,13 @@ enum IMV2ServerApp {
             let userProjectionTasks = userProjectionWorkers.flatMap { worker in
                 (0 ..< configuration.userProjectionConcurrency).map { workerIndex in
                     Task {
-                        var cadence = V2AdaptiveWorkerCadence(
-                            minimumIntervalMilliseconds:
-                                configuration.workerPollIntervalMilliseconds
+                        var cadence = V2BoundedBusyDrainCadence(
+                            minimumIdleIntervalMilliseconds:
+                                configuration.workerPollIntervalMilliseconds,
+                            maximumConsecutiveBusyPasses: configuration
+                                .userProjectionMaximumConsecutiveBusyPasses,
+                            maximumConsecutiveBusyDurationMilliseconds: configuration
+                                .userProjectionBusyDrainBudgetMilliseconds
                         )
                         while !Task.isCancelled {
                             // One reserved projector always guarantees durable
@@ -724,6 +728,7 @@ enum IMV2ServerApp {
                                 }
                                 continue
                             }
+                            let passStartedAt = ContinuousClock.now
                             var didWork = false
                             do {
                                 didWork = try await worker.runOnce().claimed
@@ -732,12 +737,21 @@ enum IMV2ServerApp {
                             } catch {
                                 logger.error("IM V2 user snapshot projection failed; retrying")
                             }
-                            do {
-                                try await Task.sleep(
-                                    for: cadence.delayAfterPass(didWork: didWork)
-                                )
-                            } catch {
-                                break
+                            let passDuration = passStartedAt.duration(to: .now)
+                            switch cadence.decisionAfterPass(
+                                didWork: didWork,
+                                passDuration: passDuration
+                            ) {
+                            case .continueImmediately:
+                                continue
+                            case .yield:
+                                await Task.yield()
+                            case .sleep(let duration):
+                                do {
+                                    try await Task.sleep(for: duration)
+                                } catch {
+                                    break
+                                }
                             }
                         }
                     }
@@ -1052,6 +1066,90 @@ enum IMV2ServerApp {
                     }
                 }
             }
+            // These tables grow with message throughput rather than operator
+            // activity. Keep their catch-up capacity independent of the
+            // minute-scale retention sweep while bounding executor and
+            // maintenance-pool occupancy after every database transaction.
+            let controlPlaneHousekeepingTask = Task {
+                var cadence = V2BoundedBusyDrainCadence(
+                    minimumIdleIntervalMilliseconds:
+                        configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
+                    maximumConsecutiveBusyPasses:
+                        configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
+                    maximumConsecutiveBusyDurationMilliseconds:
+                        configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
+                )
+                while !Task.isCancelled {
+                    let passStartedAt = ContinuousClock.now
+                    var didWork = false
+                    do {
+                        didWork = try await controlPlaneHousekeepingWorker.runOnce(
+                            limit: configuration.workerBatchSize
+                        ).didWork
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        logger.error("IM V2 control-plane housekeeping failed; retrying")
+                    }
+                    switch cadence.decisionAfterPass(
+                        didWork: didWork,
+                        passDuration: passStartedAt.duration(to: .now)
+                    ) {
+                    case .continueImmediately:
+                        continue
+                    case .yield:
+                        await Task.yield()
+                    case .sleep(let duration):
+                        do {
+                            try await Task.sleep(for: duration)
+                        } catch {
+                            break
+                        }
+                    }
+                }
+            }
+            let syncLogCompactionTask = Task {
+                var cadence = V2BoundedBusyDrainCadence(
+                    minimumIdleIntervalMilliseconds:
+                        configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
+                    maximumConsecutiveBusyPasses:
+                        configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
+                    maximumConsecutiveBusyDurationMilliseconds:
+                        configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
+                )
+                while !Task.isCancelled {
+                    let passStartedAt = ContinuousClock.now
+                    var didWork = false
+                    for worker in syncLogCompactionWorkers {
+                        do {
+                            let report = try await worker.runOnce(
+                                userLimit: min(8, configuration.workerBatchSize),
+                                rowLimit: configuration.workerBatchSize
+                            )
+                            didWork = didWork || report.didWork
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            logger.error("IM V2 user sync-log compaction failed; retrying")
+                        }
+                    }
+                    switch cadence.decisionAfterPass(
+                        didWork: didWork,
+                        passDuration: passStartedAt.duration(to: .now)
+                    ) {
+                    case .continueImmediately:
+                        continue
+                    case .yield:
+                        await Task.yield()
+                    case .sleep(let duration):
+                        do {
+                            try await Task.sleep(for: duration)
+                        } catch {
+                            break
+                        }
+                    }
+                }
+            }
             let maintenanceTask = Task {
                 var nextMaintenanceAt: Date?
                 var cadence = V2AdaptiveWorkerCadence(
@@ -1135,15 +1233,6 @@ enum IMV2ServerApp {
                         } catch {
                             logger.error("IM V2 media retention worker failed; retrying")
                         }
-                        do {
-                            _ = try await controlPlaneHousekeepingWorker.runOnce(
-                                limit: configuration.workerBatchSize
-                            )
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 control-plane housekeeping failed; retrying")
-                        }
                         for worker in syncHousekeepingWorkers {
                             do {
                                 _ = try await worker.runOnce(limit: configuration.workerBatchSize)
@@ -1169,18 +1258,6 @@ enum IMV2ServerApp {
                                 return
                             } catch {
                                 logger.error("IM V2 shared message-state cleanup failed; retrying")
-                            }
-                        }
-                        for worker in syncLogCompactionWorkers {
-                            do {
-                                _ = try await worker.runOnce(
-                                    userLimit: min(8, configuration.workerBatchSize),
-                                    rowLimit: configuration.workerBatchSize
-                                )
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 user sync-log compaction failed; retrying")
                             }
                         }
                         do {
@@ -1216,6 +1293,8 @@ enum IMV2ServerApp {
             contentReviewTask.cancel()
             pushWakeTask.cancel()
             revokedDeviceProjectionCleanupTask.cancel()
+            controlPlaneHousekeepingTask.cancel()
+            syncLogCompactionTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
             syncWakeCoalescerTask.cancel()
@@ -1231,6 +1310,8 @@ enum IMV2ServerApp {
             await contentReviewTask.value
             await pushWakeTask.value
             await revokedDeviceProjectionCleanupTask.value
+            await controlPlaneHousekeepingTask.value
+            await syncLogCompactionTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
             await syncWakeCoalescerTask.value

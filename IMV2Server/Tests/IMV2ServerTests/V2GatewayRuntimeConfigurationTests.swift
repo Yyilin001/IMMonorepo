@@ -302,6 +302,8 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.workerBatchSize == 256)
         #expect(configuration.workerPollIntervalMilliseconds == 100)
         #expect(configuration.userProjectionConcurrency == 2)
+        #expect(configuration.userProjectionMaximumConsecutiveBusyPasses == 16)
+        #expect(configuration.userProjectionBusyDrainBudgetMilliseconds == 50)
         #expect(configuration.foregroundDatabaseWorkLimit == 16)
         #expect(configuration.syncDatabaseWorkLimit == 4)
         #expect(configuration.foregroundDatabaseWorkMaximumQueued == 384)
@@ -325,6 +327,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.durableRetryPolicy.maximumAttempts == 10)
         #expect(configuration.durableRetryPolicy.jitterFraction == 0.2)
         #expect(configuration.maintenancePollIntervalMilliseconds == 60_000)
+        #expect(configuration.backlogMaintenanceIdlePollIntervalMilliseconds == 1_000)
+        #expect(configuration.backlogMaintenanceMaximumConsecutiveBusyPasses == 4)
+        #expect(configuration.backlogMaintenanceBusyDrainBudgetMilliseconds == 100)
         #expect(configuration.mediaWithdrawnRetentionSeconds == 2_592_000)
         #expect(configuration.idempotencyRetentionSeconds == 3_888_000)
         let expectedMetrics = try V2MetricsListenerConfiguration(host: "127.0.0.1", port: 9464)
@@ -586,6 +591,8 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_WORKER_BATCH_SIZE": "256",
             "IM_V2_WORKER_POLL_INTERVAL_MS": "100",
             "IM_V2_USER_PROJECTION_CONCURRENCY": "2",
+            "IM_V2_USER_PROJECTION_MAX_CONSECUTIVE_BUSY_PASSES": "16",
+            "IM_V2_USER_PROJECTION_BUSY_DRAIN_BUDGET_MS": "50",
             "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT": "16",
             "IM_V2_SYNC_DATABASE_WORK_LIMIT": "4",
             "IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED": "384",
@@ -609,6 +616,9 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_DURABLE_RETRY_MAX_ATTEMPTS": "10",
             "IM_V2_DURABLE_RETRY_JITTER_PERCENT": "20",
             "IM_V2_MAINTENANCE_POLL_INTERVAL_MS": "60000",
+            "IM_V2_BACKLOG_MAINTENANCE_IDLE_POLL_INTERVAL_MS": "1000",
+            "IM_V2_BACKLOG_MAINTENANCE_MAX_CONSECUTIVE_BUSY_PASSES": "4",
+            "IM_V2_BACKLOG_MAINTENANCE_BUSY_DRAIN_BUDGET_MS": "100",
             "IM_V2_MEDIA_WITHDRAWN_RETENTION_SECONDS": "2592000",
             "IM_V2_IDEMPOTENCY_RETENTION_SECONDS": "3888000",
             "IM_V2_METRICS_HOST": "127.0.0.1",

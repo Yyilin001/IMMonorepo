@@ -163,15 +163,72 @@ public enum V2SchemaReadiness {
                   ON namespace.oid = index_relation.relnamespace
                 WHERE namespace.nspname = \(bind: schema)
                   AND index_relation.relname IN (
-                      'fanout_deliveries_fresh_direct_target_lane_claim_idx',
+                      'fanout_deliveries_fresh_direct_user_microbatch_claim_idx',
                       'fanout_deliveries_fresh_generic_target_lane_claim_idx'
                   )
                   AND index_record.indisvalid
                   AND index_record.indisready
+            ) AND EXISTS (
+                SELECT 1
+                FROM pg_constraint AS constraint_record
+                JOIN pg_class AS relation
+                  ON relation.oid = constraint_record.conrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = \(bind: schema)
+                  AND relation.relname = 'fanout_plans'
+                  AND constraint_record.conname =
+                      'fanout_plans_direct_preplanned_shape_check'
+                  AND constraint_record.convalidated
+            ) AND (
+                SELECT COUNT(*) = 3
+                FROM pg_trigger AS trigger_record
+                JOIN pg_class AS relation
+                  ON relation.oid = trigger_record.tgrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = \(bind: schema)
+                  AND (
+                      (
+                          relation.relname = 'fanout_deliveries'
+                          AND trigger_record.tgname IN (
+                              'fanout_deliveries_fresh_direct_batch_validate',
+                              'fanout_deliveries_fresh_direct_immutable'
+                          )
+                      ) OR (
+                          relation.relname = 'fanout_plans'
+                          AND trigger_record.tgname =
+                              'fanout_plans_identity_immutable'
+                      )
+                  )
+                  AND trigger_record.tgenabled <> 'D'
+                  AND NOT trigger_record.tgisinternal
             ) AS exists
             """).first(decoding: ExistsRow.self), freshDeliveryContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(
                 "\(schema).fanout_deliveries[fresh-delivery-contract]"
+            )
+        }
+        guard let syncProjectionTriggerContract = try await sql.raw("""
+            SELECT COUNT(*) = 2
+                AND COUNT(*) FILTER (
+                    WHERE trigger_record.tgname IN (
+                        'user_sync_log_projection_effect_v4',
+                        'user_sync_log_snapshot_v4_projection'
+                    )
+                ) = 2 AS exists
+            FROM pg_trigger AS trigger_record
+            JOIN pg_class AS relation
+              ON relation.oid = trigger_record.tgrelid
+            JOIN pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = \(bind: schema)
+              AND relation.relname = 'user_sync_log'
+              AND trigger_record.tgenabled <> 'D'
+              AND NOT trigger_record.tgisinternal
+            """).first(decoding: ExistsRow.self), syncProjectionTriggerContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable(
+                "\(schema).user_sync_log[statement-projection-triggers]"
             )
         }
     }

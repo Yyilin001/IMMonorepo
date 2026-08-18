@@ -96,34 +96,44 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ControlPlaneHousekeepingError.corruptPersistenceState
             }
+            // `limit` is a transaction-wide row budget, not a per-table
+            // multiplier. Divide it fairly across every cleanup class so a
+            // single pass has predictable lock/WAL cost and, when the budget
+            // covers all categories, cold tables do not starve behind a
+            // continuously busy fan-out table.
+            var budget = ControlHousekeepingDeletionBudget(
+                total: limit,
+                categoryCount: 15
+            )
             var count = 0
             count += try await deleteSimple(
                 sql: sql, table: "media_scan_outbox", identity: "media_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
             count += try await deleteSimple(
                 sql: sql, table: "media_purge_outbox", identity: "media_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
             count += try await deleteSimple(
                 sql: sql, table: "content_review_jobs", identity: "message_id",
                 where: "state IN ('completed', 'superseded') AND completed_at <= ", order: "completed_at, message_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, source_event_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
+            let readReceiptPropagationLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT actor_user_id, operation_id
                     FROM im_v2.read_receipt_preference_propagation_outbox
                     WHERE state = 'completed' AND completed_at <= \(bind: cutoff)
                     ORDER BY completed_at, actor_user_id, operation_id
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: readReceiptPropagationLimit)
                     FOR UPDATE SKIP LOCKED
                 )
                 DELETE FROM im_v2.read_receipt_preference_propagation_outbox AS outbox
@@ -135,12 +145,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             count += try await deleteSimple(
                 sql: sql, table: "push_wake_outbox", identity: "dispatch_id",
                 where: "state IN ('sent', 'suppressed') AND created_at <= ", order: "created_at, dispatch_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
 
             // A terminal plan may have a very large audience. Every statement
             // below limits rows, not plans, so even one 100k-member room is
             // dismantled across predictable maintenance passes.
+            let deliveryLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT delivery.ctid
@@ -151,7 +162,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                       AND plan.terminal_at <= \(bind: cutoff)
                     ORDER BY plan.terminal_at, delivery.source_event_id,
                              delivery.target_user_id, delivery.projection_kind
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: deliveryLimit)
                     FOR UPDATE OF delivery SKIP LOCKED
                 )
                 DELETE FROM im_v2.fanout_deliveries AS delivery
@@ -159,6 +170,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 RETURNING 1 AS value
                 """).all(decoding: ControlHousekeepingDeletedRow.self).count
 
+            let inboxLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT inbox.ctid
@@ -169,7 +181,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                       AND plan.state = 'terminal' AND plan.terminal_at <= \(bind: cutoff)
                     ORDER BY plan.terminal_at, inbox.source_event_id,
                              inbox.target_user_id, inbox.projection_kind
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: inboxLimit)
                     FOR UPDATE OF inbox SKIP LOCKED
                 )
                 DELETE FROM im_v2.consumer_inbox AS inbox
@@ -177,6 +189,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 RETURNING 1 AS value
                 """).all(decoding: ControlHousekeepingDeletedRow.self).count
 
+            let completionUnitLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT unit.ctid
@@ -191,7 +204,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                             AND delivery.completion_unit_id = unit.completion_unit_id
                       )
                     ORDER BY plan.terminal_at, unit.source_event_id, unit.completion_unit_id
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: completionUnitLimit)
                     FOR UPDATE OF unit SKIP LOCKED
                 )
                 DELETE FROM im_v2.fanout_completion_units AS unit
@@ -199,6 +212,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 RETURNING 1 AS value
                 """).all(decoding: ControlHousekeepingDeletedRow.self).count
 
+            let planTargetLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT target.ctid
@@ -207,7 +221,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                       ON plan.source_event_id = target.source_event_id
                     WHERE plan.state = 'terminal' AND plan.terminal_at <= \(bind: cutoff)
                     ORDER BY plan.terminal_at, target.source_event_id, target.target_user_id
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: planTargetLimit)
                     FOR UPDATE OF target SKIP LOCKED
                 )
                 DELETE FROM im_v2.fanout_plan_targets AS target
@@ -218,9 +232,10 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             count += try await deleteSimple(
                 sql: sql, table: "room_outbox", identity: "source_event_id",
                 where: "state = 'terminal' AND terminal_at <= ", order: "terminal_at, source_event_id",
-                cutoff: cutoff, limit: limit
+                cutoff: cutoff, limit: budget.take()
             )
 
+            let planLimit = budget.take()
             count += try await sql.raw("""
                 WITH candidates AS (
                     SELECT plan.ctid
@@ -231,7 +246,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                       AND NOT EXISTS (SELECT 1 FROM im_v2.fanout_deliveries AS delivery WHERE delivery.source_event_id = plan.source_event_id)
                       AND NOT EXISTS (SELECT 1 FROM im_v2.fanout_plan_targets AS target WHERE target.source_event_id = plan.source_event_id)
                     ORDER BY plan.terminal_at, plan.source_event_id
-                    LIMIT \(bind: limit)
+                    LIMIT \(bind: planLimit)
                     FOR UPDATE OF plan SKIP LOCKED
                 )
                 DELETE FROM im_v2.fanout_plans AS plan
@@ -245,18 +260,18 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             let credentialReplays = try await deleteSimple(
                 sql: sql, table: "device_credential_operations", identity: "ctid",
                 where: "replay_expires_at <= ", order: "replay_expires_at, ctid",
-                cutoff: now, limit: limit
+                cutoff: now, limit: budget.take()
             )
             let connectionLeases = try await deleteSimple(
                 sql: sql, table: "user_live_presence_leases", identity: "connection_id",
                 where: "expires_at <= ", order: "expires_at, connection_id",
-                cutoff: now, limit: limit
+                cutoff: now, limit: budget.take()
             )
             let idempotencyRows = try await purgeIdempotencyResults(
                 sql: sql,
                 cutoff: now.addingTimeInterval(-idempotencyRetention),
                 rotationSeed: now,
-                limit: limit
+                limit: budget.take()
             )
             count += credentialReplays + connectionLeases + idempotencyRows
             return .init(
@@ -368,3 +383,25 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
 }
 
 private struct ControlHousekeepingDeletedRow: Decodable { let value: Int }
+
+private struct ControlHousekeepingDeletionBudget {
+    private var remaining: Int
+    private var remainingCategoryCount: Int
+
+    init(total: Int, categoryCount: Int) {
+        precondition(total > 0 && categoryCount > 0)
+        remaining = total
+        remainingCategoryCount = categoryCount
+    }
+
+    mutating func take() -> Int {
+        guard remaining > 0 else {
+            remainingCategoryCount = max(0, remainingCategoryCount - 1)
+            return 0
+        }
+        let allocation = max(1, remaining / max(1, remainingCategoryCount))
+        remaining -= allocation
+        remainingCategoryCount = max(0, remainingCategoryCount - 1)
+        return allocation
+    }
+}

@@ -179,18 +179,31 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                 )
                 SELECT source_event_id, projection_kind FROM removed
                 """).all(decoding: CompactedPayloadKeyRow.self)
-            var deletedPayloads = 0
-            for key in Set(deleted) {
-                deletedPayloads += try await sql.raw("""
+            let payloadKeys = Array(Set(deleted))
+            let deletedPayloads: Int
+            if payloadKeys.isEmpty {
+                deletedPayloads = 0
+            } else {
+                let sourceEventIDs = payloadKeys.map(\.sourceEventID)
+                let projectionKinds = payloadKeys.map(\.projectionKind)
+                deletedPayloads = try await sql.raw("""
+                    WITH removed_keys AS (
+                        SELECT DISTINCT key.source_event_id, key.projection_kind
+                        FROM unnest(
+                            \(bind: sourceEventIDs)::uuid[],
+                            \(bind: projectionKinds)::text[]
+                        ) AS key(source_event_id, projection_kind)
+                    )
                     DELETE FROM \(unsafeRaw: table("fanout_sync_payloads")) AS payload
-                    WHERE payload.source_event_id = \(bind: key.sourceEventID)
-                      AND payload.projection_kind = \(bind: key.projectionKind)
+                    USING removed_keys AS key
+                    WHERE payload.source_event_id = key.source_event_id
+                      AND payload.projection_kind = key.projection_kind
                       AND NOT EXISTS (
                           SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) AS log
                           WHERE log.source_event_id = payload.source_event_id
                             AND log.projection_kind = payload.projection_kind
                             AND log.payload_storage = 'fanout_shared'
-                      )
+                    )
                     RETURNING 1 AS value
                     """).all(decoding: CompactionExistsRow.self).count
             }

@@ -87,9 +87,8 @@ public protocol V2FanoutDeliveryStore: Sendable {
 }
 
 /// Optional claim capability for stores that can keep concurrent delivery
-/// workers disjoint. Recovery lanes partition by target user; the co-located
-/// fresh-direct path may instead partition by source event so both recipients
-/// share one payload-materialization transaction. Other stores retain the
+/// workers disjoint. Every lane partitions by target user so all writers of a
+/// user's monotonic sync sequence share the same lane. Other stores retain the
 /// original fenced `SKIP LOCKED` claim behavior.
 public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
     func claimPending(
@@ -232,6 +231,12 @@ public struct V2FanoutDeliveryWorker: Sendable {
     private let retryPolicy: V2DurableRetryPolicy
     private let claimScheduler: V2FanoutDeliveryClaimScheduler
     private let commitBatchSize: Int
+    /// Once any member has reached this attempt, an atomic batch failure is
+    /// bisected until healthy sub-batches can commit and a deterministic
+    /// poison record is isolated. Earlier failures retain the original batch
+    /// retry unit so transient database errors do not immediately amplify
+    /// transaction count.
+    private let batchFailureIsolationAttempt: Int
     /// Normally one: a durable batch's complete target/control protocol stays
     /// sequential unless the remote topology enables the measured two-batch
     /// overlap. Result processing remains in source-batch order and each
@@ -254,6 +259,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
         retryPolicy: V2DurableRetryPolicy = .standard,
         claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
         commitBatchSize: Int = 128,
+        batchFailureIsolationAttempt: Int = 2,
         maximumConcurrentCommitBatches: Int = 1,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -266,6 +272,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
             retryPolicy: retryPolicy,
             claimScheduler: claimScheduler,
             commitBatchSize: commitBatchSize,
+            batchFailureIsolationAttempt: batchFailureIsolationAttempt,
             maximumConcurrentCommitBatches: maximumConcurrentCommitBatches,
             now: now
         )
@@ -280,11 +287,13 @@ public struct V2FanoutDeliveryWorker: Sendable {
         retryPolicy: V2DurableRetryPolicy = .standard,
         claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
         commitBatchSize: Int = 128,
+        batchFailureIsolationAttempt: Int = 2,
         maximumConcurrentCommitBatches: Int = 1,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         precondition(
             leaseDuration > 0 && commitBatchSize > 0 &&
+                batchFailureIsolationAttempt > 0 &&
                 (1...2).contains(maximumConcurrentCommitBatches)
         )
         self.store = store
@@ -295,6 +304,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
         self.retryPolicy = retryPolicy
         self.claimScheduler = claimScheduler
         self.commitBatchSize = commitBatchSize
+        self.batchFailureIsolationAttempt = batchFailureIsolationAttempt
         self.maximumConcurrentCommitBatches = maximumConcurrentCommitBatches
         self.now = now
     }
@@ -315,11 +325,13 @@ public struct V2FanoutDeliveryWorker: Sendable {
         claimPartition: V2FanoutDeliveryClaimPartition?
     ) async throws -> V2FanoutDeliveryReport {
         precondition(limit > 0)
+        try Task.checkCancellation()
         let claimTime = now()
         let scheduledLanes = await claimScheduler.lanesForNextClaim()
         var freshDirectError: (any Error)?
         var leases: [V2FanoutDeliveryLease] = []
         for lane in scheduledLanes {
+            try Task.checkCancellation()
             if lane == .fresh,
                let freshDirectStore = store as? any V2FreshDirectFanoutDeliveryStore {
                 do {
@@ -334,6 +346,7 @@ public struct V2FanoutDeliveryWorker: Sendable {
                     )
                     if !commits.isEmpty {
                         for commit in commits {
+                            try Task.checkCancellation()
                             await liveNotifier?.notifySyncAvailable(
                                 userID: commit.targetUserID,
                                 eventID: commit.userSyncSequence,
@@ -347,6 +360,8 @@ public struct V2FanoutDeliveryWorker: Sendable {
                             releasedCount: 0
                         )
                     }
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     // Fall through to the lease-fenced path. A deterministic
                     // bad row then consumes retry policy and eventually pauses
@@ -358,9 +373,12 @@ public struct V2FanoutDeliveryWorker: Sendable {
                                 bucket: bucket, partition: claimPartition,
                                 now: claimTime, leaseDuration: leaseDuration,
                                 limit: limit
-                            )
+                        )
                         if !leases.isEmpty { break }
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
+                        try Task.checkCancellation()
                         freshDirectError = error
                     }
                 }
@@ -406,6 +424,8 @@ public struct V2FanoutDeliveryWorker: Sendable {
                     do {
                         try await store.handoff(lease, to: route)
                         staleRoute += 1
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         // A handoff is a per-lease durable update. Keep the
                         // other leases on the already acquired route snapshot
@@ -415,6 +435,8 @@ public struct V2FanoutDeliveryWorker: Sendable {
                         paused += outcome.paused
                     }
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 // A failed route lookup yields no trustworthy snapshot, so
                 // retry the complete bounded claim instead of using a mixed
@@ -426,39 +448,75 @@ public struct V2FanoutDeliveryWorker: Sendable {
         }
         let batches = committableLeases.chunked(into: commitBatchSize)
         for windowStart in stride(from: 0, to: batches.count, by: maximumConcurrentCommitBatches) {
+            try Task.checkCancellation()
             let windowEnd = Swift.min(windowStart + maximumConcurrentCommitBatches, batches.count)
-            let attempts = await withTaskGroup(of: V2FanoutBatchCommitAttempt.self, returning: [V2FanoutBatchCommitAttempt].self) { group in
+            let attempts = try await withThrowingTaskGroup(of: V2FanoutBatchCommitAttempt.self, returning: [V2FanoutBatchCommitAttempt].self) { group in
                 for index in windowStart..<windowEnd {
                     let batch = batches[index]
                     group.addTask {
+                        try Task.checkCancellation()
                         do {
                             let commits = try await self.store.commitBatch(batch, now: self.now())
                             guard commits.count == batch.count else {
                                 return .init(index: index, commits: nil)
                             }
                             return .init(index: index, commits: commits)
+                        } catch is CancellationError {
+                            throw CancellationError()
                         } catch {
+                            try Task.checkCancellation()
                             return .init(index: index, commits: nil)
                         }
                     }
                 }
                 var collected: [V2FanoutBatchCommitAttempt] = []
-                for await attempt in group { collected.append(attempt) }
+                for try await attempt in group { collected.append(attempt) }
                 return collected
             }
             for attempt in attempts.sorted(by: { $0.index < $1.index }) {
                 let batch = batches[attempt.index]
                 guard let commits = attempt.commits else {
-                    // A native batch transaction has rolled every member back.
-                    // Retrying the complete batch preserves that atomic boundary;
-                    // the inbox unique key remains the final idempotency fence for
-                    // a cross-store fallback that had already projected a target.
-                    let outcome = try await scheduleRetry(for: batch)
-                    released += outcome.released
-                    paused += outcome.paused
+                    if shouldIsolateFailedBatch(batch) {
+                        // The complete batch has already failed in this pass;
+                        // start with its halves instead of immediately issuing
+                        // the same known-failing transaction again.
+                        let resolutions = try await splitOrFail(batch)
+                        for resolution in resolutions {
+                            guard let isolatedCommits = resolution.commits else {
+                                let outcome = try await scheduleRetry(for: resolution.leases)
+                                released += outcome.released
+                                paused += outcome.paused
+                                continue
+                            }
+                            for (lease, commit) in zip(resolution.leases, isolatedCommits) {
+                                try Task.checkCancellation()
+                                switch commit {
+                                case .staleLease: stale += 1
+                                case .rerouted: staleRoute += 1
+                                case .committed(let sequence, _, _):
+                                    committed += 1
+                                    await liveNotifier?.notifySyncAvailable(
+                                        userID: lease.targetUserID,
+                                        eventID: sequence,
+                                        highWatermark: sequence
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        // A native batch transaction has rolled every member
+                        // back. Preserve that unit on an early/transient
+                        // failure; the inbox uniqueness key remains the final
+                        // idempotency fence for a cross-store fallback that
+                        // may already have projected a target.
+                        let outcome = try await scheduleRetry(for: batch)
+                        released += outcome.released
+                        paused += outcome.paused
+                    }
                     continue
                 }
                 for (lease, commit) in zip(batch, commits) {
+                    try Task.checkCancellation()
                     switch commit {
                     case .staleLease: stale += 1
                     case .rerouted:
@@ -474,10 +532,12 @@ public struct V2FanoutDeliveryWorker: Sendable {
     }
 
     private func scheduleRetry(for leases: [V2FanoutDeliveryLease]) async throws -> (released: Int, paused: Int) {
+        try Task.checkCancellation()
         var released = 0
         var paused = 0
         let failureTime = now()
         for lease in leases {
+            try Task.checkCancellation()
             let disposition = retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: failureTime)
             try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
             switch disposition {
@@ -487,10 +547,56 @@ public struct V2FanoutDeliveryWorker: Sendable {
         }
         return (released, paused)
     }
+
+    private func shouldIsolateFailedBatch(_ leases: [V2FanoutDeliveryLease]) -> Bool {
+        leases.count > 1 && leases.contains { $0.attempt >= batchFailureIsolationAttempt }
+    }
+
+    /// The caller reaches this only after the original atomic batch has
+    /// failed. Each successful sub-batch is therefore safe to terminalize;
+    /// failed singletons retain the ordinary durable retry/pause policy. A
+    /// cross-store implementation remains safe because projection and inbox
+    /// writes are idempotently fenced by the existing delivery identity.
+    private func isolateFailedBatch(
+        _ leases: [V2FanoutDeliveryLease]
+    ) async throws -> [V2FanoutBatchCommitResolution] {
+        try Task.checkCancellation()
+        do {
+            let commits = try await store.commitBatch(leases, now: now())
+            guard commits.count == leases.count else {
+                return try await splitOrFail(leases)
+            }
+            return [.init(leases: leases, commits: commits)]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return try await splitOrFail(leases)
+        }
+    }
+
+    private func splitOrFail(
+        _ leases: [V2FanoutDeliveryLease]
+    ) async throws -> [V2FanoutBatchCommitResolution] {
+        guard leases.count > 1 else {
+            return [.init(leases: leases, commits: nil)]
+        }
+        let splitIndex = leases.count / 2
+        let left = Array(leases[..<splitIndex])
+        let right = Array(leases[splitIndex...])
+        let leftResults = try await isolateFailedBatch(left)
+        let rightResults = try await isolateFailedBatch(right)
+        return leftResults + rightResults
+    }
 }
 
 private struct V2FanoutBatchCommitAttempt: Sendable {
     let index: Int
+    let commits: [V2FanoutDeliveryCommit]?
+}
+
+private struct V2FanoutBatchCommitResolution: Sendable {
+    let leases: [V2FanoutDeliveryLease]
     let commits: [V2FanoutDeliveryCommit]?
 }
 

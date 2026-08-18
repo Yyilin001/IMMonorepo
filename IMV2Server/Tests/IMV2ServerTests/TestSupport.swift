@@ -261,6 +261,7 @@ extension V2FanoutDeliveryWorker {
         retryPolicy: V2DurableRetryPolicy = .standard,
         claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
         commitBatchSize: Int = 128,
+        batchFailureIsolationAttempt: Int = 2,
         maximumConcurrentCommitBatches: Int = 1,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -273,6 +274,7 @@ extension V2FanoutDeliveryWorker {
             retryPolicy: retryPolicy,
             claimScheduler: claimScheduler,
             commitBatchSize: commitBatchSize,
+            batchFailureIsolationAttempt: batchFailureIsolationAttempt,
             maximumConcurrentCommitBatches: maximumConcurrentCommitBatches,
             now: now
         )

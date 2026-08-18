@@ -3,14 +3,23 @@ set -Eeuo pipefail
 
 action="${1:-}"
 profile_directory="${2:-}"
+baseline_directory="${3:-${IM_V2_PROFILE_BASELINE_DIRECTORY:-}}"
 database_url="${IM_V2_PROFILE_DATABASE_URL:-}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  printf 'usage:\n' >&2
+  printf '  IM_V2_PROFILE_DATABASE_URL=... %s baseline BASELINE_DIRECTORY\n' "$0" >&2
+  printf '  IM_V2_PROFILE_DATABASE_URL=... %s report REPORT_DIRECTORY BASELINE_DIRECTORY\n' "$0" >&2
+  printf '  IM_V2_PROFILE_DATABASE_URL=... IM_V2_PROFILE_DATABASE_IS_DISPOSABLE=1 %s reset\n' "$0" >&2
+}
 
 if [[ -z "${database_url}" ]]; then
   printf 'IM_V2_PROFILE_DATABASE_URL is required\n' >&2
   exit 1
 fi
-if [[ "${action}" != 'reset' && "${action}" != 'report' ]]; then
-  printf 'usage: IM_V2_PROFILE_DATABASE_URL=... %s reset|report [report-directory]\n' "$0" >&2
+if [[ "${action}" != 'baseline' && "${action}" != 'report' && "${action}" != 'reset' ]]; then
+  usage
   exit 1
 fi
 command -v psql >/dev/null 2>&1 || {
@@ -19,21 +28,43 @@ command -v psql >/dev/null 2>&1 || {
 }
 
 if [[ "${action}" == 'reset' ]]; then
+  if [[ "${IM_V2_PROFILE_DATABASE_IS_DISPOSABLE:-}" != '1' ]]; then
+    printf 'reset is destructive to shared PostgreSQL statistics and requires IM_V2_PROFILE_DATABASE_IS_DISPOSABLE=1\n' >&2
+    exit 1
+  fi
   psql "${database_url}" -v ON_ERROR_STOP=1 <<'SQL'
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 SELECT pg_stat_statements_reset();
 SELECT pg_stat_reset();
 SELECT pg_stat_reset_shared('wal');
 SQL
-  printf 'PostgreSQL profile counters reset\n'
+  printf 'Disposable PostgreSQL profile counters reset\n'
   exit 0
 fi
 
 if [[ -z "${profile_directory}" ]]; then
-  printf 'report-directory is required for report\n' >&2
+  usage
+  exit 1
+fi
+if [[ "${action}" == 'report' && -z "${baseline_directory}" ]]; then
+  printf 'BASELINE_DIRECTORY is required for a delta report\n' >&2
+  usage
+  exit 1
+fi
+if [[ -e "${profile_directory}" && -n "$(find "${profile_directory}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+  printf 'refusing to mix a profile with existing files: %s\n' "${profile_directory}" >&2
   exit 1
 fi
 mkdir -p "${profile_directory}"
+
+extension_available="$({
+  psql "${database_url}" -v ON_ERROR_STOP=1 -Atc \
+    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')"
+} 2>/dev/null)"
+if [[ "${extension_available}" != 't' ]]; then
+  printf 'pg_stat_statements must be installed before profiling\n' >&2
+  exit 1
+fi
 
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
 SELECT current_timestamp AS captured_at,
@@ -44,8 +75,27 @@ SELECT current_timestamp AS captured_at,
        current_setting('max_connections') AS max_connections,
        current_setting('shared_buffers') AS shared_buffers,
        current_setting('work_mem') AS work_mem,
-       current_setting('effective_cache_size') AS effective_cache_size
+       current_setting('effective_cache_size') AS effective_cache_size,
+       current_setting('wal_compression') AS wal_compression,
+       current_setting('checkpoint_timeout') AS checkpoint_timeout,
+       current_setting('checkpoint_completion_target') AS checkpoint_completion_target,
+       current_setting('max_wal_size') AS max_wal_size,
+       current_setting('min_wal_size') AS min_wal_size,
+       current_setting('autovacuum') AS autovacuum,
+       current_setting('autovacuum_max_workers') AS autovacuum_max_workers
 " > "${profile_directory}/settings.csv"
+
+psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
+SELECT 'database' AS counter, stats_reset
+FROM pg_stat_database WHERE datname = current_database()
+UNION ALL
+SELECT 'wal', stats_reset FROM pg_stat_wal
+UNION ALL
+SELECT 'statements', stats_reset FROM pg_stat_statements_info
+UNION ALL
+SELECT 'io', min(stats_reset) FROM pg_stat_io
+ORDER BY counter
+" > "${profile_directory}/counter_epochs.csv"
 
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
 SELECT datname, numbackends, xact_commit, xact_rollback,
@@ -58,8 +108,7 @@ WHERE datname = current_database()
 
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
 SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full,
-       wal_write, wal_sync, wal_write_time, wal_sync_time,
-       stats_reset
+       wal_write, wal_sync, wal_write_time, wal_sync_time
 FROM pg_stat_wal
 " > "${profile_directory}/wal.csv"
 
@@ -94,7 +143,6 @@ SELECT queryid, calls, rows,
 FROM pg_stat_statements
 WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ORDER BY total_exec_time DESC
-LIMIT 50
 " > "${profile_directory}/statements.csv"
 
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
@@ -110,4 +158,19 @@ WHERE schemaname = 'im_v2'
 ORDER BY total_bytes DESC
 " > "${profile_directory}/relations.csv"
 
-printf 'PostgreSQL profile written to %s\n' "${profile_directory}"
+if [[ "${action}" == 'baseline' ]]; then
+  printf 'PostgreSQL profile baseline written to %s; no server counters were reset\n' "${profile_directory}"
+  exit 0
+fi
+
+if [[ ! -d "${baseline_directory}" ]]; then
+  printf 'profile baseline does not exist: %s\n' "${baseline_directory}" >&2
+  exit 1
+fi
+command -v python3 >/dev/null 2>&1 || {
+  printf 'missing required command for profile delta: python3\n' >&2
+  exit 1
+}
+python3 "${script_directory}/compare_v2_postgres_profiles.py" \
+  "${baseline_directory}" "${profile_directory}"
+printf 'PostgreSQL profile and counter deltas written to %s\n' "${profile_directory}"

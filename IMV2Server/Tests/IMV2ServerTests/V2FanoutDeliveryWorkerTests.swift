@@ -92,6 +92,21 @@ struct V2FanoutDeliveryWorkerTests {
         #expect(await store.retryCount() == 1)
     }
 
+    @Test("fresh-direct cancellation escapes without recovery or retry writes")
+    func freshDirectCancellationDoesNotRecover() async throws {
+        let store = FreshDirectDeliveryStore(
+            lease: try fixtureLease(), freshCommits: [], cancelFresh: true
+        )
+        let worker = V2FanoutDeliveryWorker(store: store)
+
+        await #expect(throws: CancellationError.self) {
+            try await worker.runOnce(limit: 1)
+        }
+        #expect(await store.recoveryClaimCallCount() == 0)
+        #expect(await store.claimCallCount() == 0)
+        #expect(await store.retryCount() == 0)
+    }
+
     @Test("a stale lease is not retried or live-notified")
     func staleLeaseDoesNotNotify() async throws {
         let store = DeliveryStore(lease: try fixtureLease(), commit: .staleLease)
@@ -220,6 +235,40 @@ struct V2FanoutDeliveryWorkerTests {
         #expect((await notifier.hints()).map(\.eventID) == [901, 902, 905])
     }
 
+    @Test("batch cancellation escapes without scheduling durable retries")
+    func batchCancellationDoesNotRetry() async throws {
+        let leases = try fixtureLeases(count: 2)
+        let store = BatchDeliveryStore(leases: leases, cancelCommit: true)
+        let worker = V2FanoutDeliveryWorker(store: store, commitBatchSize: 2)
+
+        await #expect(throws: CancellationError.self) {
+            try await worker.runOnce(limit: 2)
+        }
+        #expect(await store.scheduledTargetUsers().isEmpty)
+    }
+
+    @Test("a repeated deterministic batch failure isolates only its poison lease")
+    func repeatedBatchFailureIsolatesPoisonLease() async throws {
+        let leases = try fixtureLeases(count: 4, attempt: 2)
+        let poison = leases[1]
+        let store = BatchDeliveryStore(
+            leases: leases, failingTargetUserID: poison.targetUserID
+        )
+        let notifier = RecordingNotifier()
+        let worker = V2FanoutDeliveryWorker(
+            store: store, liveNotifier: notifier, commitBatchSize: 4,
+            batchFailureIsolationAttempt: 2
+        )
+
+        #expect(try await worker.runOnce(limit: 4) == .init(
+            claimedCount: 4, committedCount: 3, staleCount: 0,
+            releasedCount: 1
+        ))
+        #expect(await store.batchSizes() == [4, 2, 1, 1, 2])
+        #expect(await store.scheduledTargetUsers() == [poison.targetUserID])
+        #expect((await notifier.hints()).map(\.eventID) == [901, 903, 904])
+    }
+
     private func fixtureLease(attempt: Int = 1) throws -> V2FanoutDeliveryLease {
         try .init(
             sourceEventID: .init("00000000-0000-0000-0000-000000000801"),
@@ -232,7 +281,7 @@ struct V2FanoutDeliveryWorkerTests {
         )
     }
 
-    private func fixtureLeases(count: Int) throws -> [V2FanoutDeliveryLease] {
+    private func fixtureLeases(count: Int, attempt: Int = 1) throws -> [V2FanoutDeliveryLease] {
         try (1...count).map { index in
             let suffix = String(format: "%012d", 900 + index)
             return .init(
@@ -241,7 +290,8 @@ struct V2FanoutDeliveryWorkerTests {
                 projectionKind: "message_created",
                 completionUnitID: try .init("00000000-0000-0000-0000-000000000803"),
                 observedRoute: try .init(bucket: "users-primary", observedRouterEpoch: 2),
-                claimToken: UUID(uuidString: "00000000-0000-0000-0000-000000000804")!
+                claimToken: UUID(uuidString: "00000000-0000-0000-0000-000000000804")!,
+                attempt: attempt
             )
         }
     }
@@ -254,14 +304,16 @@ private actor BatchDeliveryStore: V2FanoutDeliveryStore {
     private var scheduled: [UserID] = []
     private var failFirstBatch: Bool
     private let failingTargetUserID: UserID?
+    private let cancelCommit: Bool
 
     init(
         leases: [V2FanoutDeliveryLease], failFirstBatch: Bool = false,
-        failingTargetUserID: UserID? = nil
+        failingTargetUserID: UserID? = nil, cancelCommit: Bool = false
     ) {
         self.leases = leases
         self.failFirstBatch = failFirstBatch
         self.failingTargetUserID = failingTargetUserID
+        self.cancelCommit = cancelCommit
     }
 
     func claimPending(bucket _: String?, lane _: V2FanoutDeliveryClaimLane, now _: Date, leaseDuration _: TimeInterval, limit _: Int) -> [V2FanoutDeliveryLease] {
@@ -276,6 +328,7 @@ private actor BatchDeliveryStore: V2FanoutDeliveryStore {
 
     func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
         sizes.append(leases.count)
+        if cancelCommit { throw CancellationError() }
         if failFirstBatch {
             failFirstBatch = false
             throw DeliveryFailure.failed
@@ -307,6 +360,7 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
     private let lease: V2FanoutDeliveryLease
     private let freshCommits: [V2FreshDirectFanoutDeliveryCommit]
     private let failFresh: Bool
+    private let cancelFresh: Bool
     private let failGenericCommit: Bool
     private var didClaim = false
     private var fastCalls = 0
@@ -319,11 +373,13 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
         lease: V2FanoutDeliveryLease,
         freshCommits: [V2FreshDirectFanoutDeliveryCommit],
         failFresh: Bool = false,
+        cancelFresh: Bool = false,
         failGenericCommit: Bool = false
     ) {
         self.lease = lease
         self.freshCommits = freshCommits
         self.failFresh = failFresh
+        self.cancelFresh = cancelFresh
         self.failGenericCommit = failGenericCommit
     }
 
@@ -333,6 +389,7 @@ private actor FreshDirectDeliveryStore: V2FreshDirectFanoutDeliveryStore {
     ) throws -> [V2FreshDirectFanoutDeliveryCommit] {
         fastCalls += 1
         limits.append(limit)
+        if cancelFresh { throw CancellationError() }
         if failFresh { throw DeliveryFailure.failed }
         return freshCommits
     }

@@ -16,30 +16,35 @@ SET row_security = off;
 
 CREATE SCHEMA im_v2;
 
-CREATE FUNCTION im_v2.capture_user_projection_effect_v3() RETURNS trigger
+CREATE FUNCTION im_v2.capture_user_projection_effect_v4() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW.payload_storage = 'inline' AND NEW.projection_kind NOT IN
-        ('message', 'membership', 'moderation', 'room') THEN
-        INSERT INTO im_v2.user_projection_effects
-            (user_id, source_event_id, projection_kind,
-             user_sync_sequence, payload, created_at)
-        VALUES (NEW.user_id, NEW.source_event_id, NEW.projection_kind,
-                NEW.user_sync_sequence, NEW.payload, NEW.created_at)
-        ON CONFLICT (user_id, source_event_id, projection_kind) DO UPDATE
-        SET user_sync_sequence = EXCLUDED.user_sync_sequence,
-            payload = EXCLUDED.payload,
-            created_at = EXCLUDED.created_at
-        WHERE im_v2.user_projection_effects.user_sync_sequence =
-                  EXCLUDED.user_sync_sequence
-          AND im_v2.user_projection_effects.payload = EXCLUDED.payload
-          AND im_v2.user_projection_effects.created_at = EXCLUDED.created_at;
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'conflicting immutable user projection effect';
-        END IF;
+    INSERT INTO im_v2.user_projection_effects
+        (user_id, source_event_id, projection_kind,
+         user_sync_sequence, payload, created_at)
+    SELECT user_id, source_event_id, projection_kind,
+           user_sync_sequence, payload, created_at
+    FROM inserted_user_sync_rows
+    WHERE payload_storage = 'inline'
+      AND projection_kind NOT IN ('message', 'membership', 'moderation', 'room')
+    ON CONFLICT (user_id, source_event_id, projection_kind) DO NOTHING;
+
+    IF EXISTS (
+        SELECT 1
+        FROM inserted_user_sync_rows AS inserted
+        JOIN im_v2.user_projection_effects AS effect
+          USING (user_id, source_event_id, projection_kind)
+        WHERE inserted.payload_storage = 'inline'
+          AND inserted.projection_kind NOT IN
+              ('message', 'membership', 'moderation', 'room')
+          AND ROW(effect.user_sync_sequence, effect.payload, effect.created_at)
+              IS DISTINCT FROM
+              ROW(inserted.user_sync_sequence, inserted.payload, inserted.created_at)
+    ) THEN
+        RAISE EXCEPTION 'conflicting immutable user projection effect';
     END IF;
-    RETURN NEW;
+    RETURN NULL;
 END;
 $$;
 
@@ -70,20 +75,59 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.enqueue_user_projection_v3() RETURNS trigger
+CREATE FUNCTION im_v2.enqueue_user_projection_v4() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    INSERT INTO im_v2.user_projection_checkpoints (user_id, projected_sequence, updated_at)
-    VALUES (NEW.user_id, 0, NEW.created_at)
+    INSERT INTO im_v2.user_projection_checkpoints
+        (user_id, projected_sequence, updated_at)
+    SELECT user_id, 0, min(created_at)
+    FROM inserted_user_sync_rows
+    GROUP BY user_id
     ON CONFLICT (user_id) DO UPDATE SET updated_at = LEAST(
         im_v2.user_projection_checkpoints.updated_at,
         EXCLUDED.updated_at
-    );
+    )
+    WHERE im_v2.user_projection_checkpoints.updated_at > EXCLUDED.updated_at;
+
     INSERT INTO im_v2.user_sync_retention
         (user_id, compacted_through_sequence, updated_at)
-    VALUES (NEW.user_id, 0, NEW.created_at)
+    SELECT user_id, 0, min(created_at)
+    FROM inserted_user_sync_rows
+    GROUP BY user_id
     ON CONFLICT (user_id) DO NOTHING;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION im_v2.reject_fanout_plan_identity_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.source_event_id IS DISTINCT FROM OLD.source_event_id
+       OR NEW.target_rule IS DISTINCT FROM OLD.target_rule THEN
+        RAISE EXCEPTION 'fanout plan identity and target rule are immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION im_v2.reject_fresh_direct_delivery_identity_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.fresh_direct_eligible IS DISTINCT FROM OLD.fresh_direct_eligible THEN
+        RAISE EXCEPTION 'fresh direct eligibility is immutable';
+    END IF;
+    IF OLD.fresh_direct_eligible
+       AND (
+           NEW.source_event_id IS DISTINCT FROM OLD.source_event_id
+           OR NEW.target_user_id IS DISTINCT FROM OLD.target_user_id
+           OR NEW.projection_kind IS DISTINCT FROM OLD.projection_kind
+           OR NEW.completion_unit_id IS DISTINCT FROM OLD.completion_unit_id
+       ) THEN
+        RAISE EXCEPTION 'fresh direct delivery identity is immutable';
+    END IF;
     RETURN NEW;
 END;
 $$;
@@ -104,6 +148,50 @@ CREATE FUNCTION im_v2.reject_room_event_mutation() RETURNS trigger
     AS $$
 BEGIN
     RAISE EXCEPTION 'room events are append-only';
+END;
+$$;
+
+CREATE FUNCTION im_v2.validate_fresh_direct_delivery_batch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM inserted_fanout_deliveries
+        WHERE fresh_direct_eligible
+    ) THEN
+        RETURN NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT source_event_id
+        FROM inserted_fanout_deliveries
+        WHERE fresh_direct_eligible
+        GROUP BY source_event_id
+        HAVING count(*) <> 2
+            OR count(DISTINCT completion_unit_id) <> 1
+    ) OR EXISTS (
+        SELECT 1
+        FROM inserted_fanout_deliveries AS delivery
+        LEFT JOIN im_v2.fanout_plans AS plan
+          ON plan.source_event_id = delivery.source_event_id
+        LEFT JOIN im_v2.fanout_completion_units AS unit
+          ON unit.source_event_id = delivery.source_event_id
+         AND unit.completion_unit_id = delivery.completion_unit_id
+        WHERE delivery.fresh_direct_eligible
+          AND (
+              plan.source_event_id IS NULL
+              OR plan.target_rule->>'planning_strategy' <> 'direct_preplanned'
+              OR plan.state <> 'planned'
+              OR plan.target_count <> 2
+              OR plan.enumerated_target_count <> 2
+              OR unit.completion_unit_id IS NULL
+              OR unit.target_count <> 2
+              OR unit.target_boundary->>'audience_kind' <> 'direct_preplanned'
+          )
+    ) THEN
+        RAISE EXCEPTION 'invalid fresh direct delivery batch';
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -463,6 +551,7 @@ CREATE TABLE im_v2.fanout_plans (
     enumerated_target_count bigint DEFAULT 0 NOT NULL,
     CONSTRAINT fanout_plans_check CHECK (((enumerated_target_count >= 0) AND ((target_count IS NULL) OR (enumerated_target_count <= target_count)))),
     CONSTRAINT fanout_plans_committed_membership_revision_check CHECK ((committed_membership_revision >= 0)),
+    CONSTRAINT fanout_plans_direct_preplanned_shape_check CHECK ((((target_rule ->> 'planning_strategy'::text) IS DISTINCT FROM 'direct_preplanned'::text) OR ((state = ANY (ARRAY['planned'::text, 'terminal'::text])) AND (target_count = 2) AND (enumerated_target_count = 2) AND (reserved_fanout_cost = 2)))),
     CONSTRAINT fanout_plans_reserved_fanout_cost_check CHECK ((reserved_fanout_cost >= 0)),
     CONSTRAINT fanout_plans_source_room_sequence_check CHECK ((source_room_sequence > 0)),
     CONSTRAINT fanout_plans_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'terminal'::text]))),
@@ -2306,7 +2395,7 @@ CREATE INDEX fanout_deliveries_expired_lease_claim_idx ON im_v2.fanout_deliverie
 
 CREATE INDEX fanout_deliveries_fresh_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
 
-CREATE INDEX fanout_deliveries_fresh_direct_target_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE (fresh_direct_eligible AND (state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
+CREATE INDEX fanout_deliveries_fresh_direct_user_microbatch_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), target_user_id, source_event_id, projection_kind) WHERE (fresh_direct_eligible AND (state = 'pending'::text) AND (claim_token IS NULL) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL) AND (paused_at IS NULL) AND (retry_count = 0));
 
 CREATE INDEX fanout_deliveries_fresh_generic_target_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE ((NOT fresh_direct_eligible) AND (state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
 
@@ -2498,8 +2587,6 @@ CREATE INDEX user_projection_versions_message_inline_idx ON im_v2.user_projectio
 
 CREATE INDEX user_projection_versions_message_state_idx ON im_v2.user_projection_versions USING btree (message_state_id) WHERE (message_state_id IS NOT NULL);
 
-CREATE INDEX user_projection_versions_snapshot_scan_idx ON im_v2.user_projection_versions USING btree (user_id, projection_kind, entity_key, valid_from_sequence, valid_to_sequence);
-
 CREATE INDEX user_relationship_operations_cleanup_idx ON im_v2.user_relationship_operations USING btree (updated_at);
 
 CREATE INDEX user_room_preference_operations_cleanup_idx ON im_v2.user_room_preference_operations USING btree (updated_at);
@@ -2518,15 +2605,21 @@ CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx ON im_v2.user_sync_log 
 
 CREATE INDEX user_sync_retention_claim_idx ON im_v2.user_sync_retention USING btree (updated_at, user_id);
 
+CREATE TRIGGER fanout_deliveries_fresh_direct_batch_validate AFTER INSERT ON im_v2.fanout_deliveries REFERENCING NEW TABLE AS inserted_fanout_deliveries FOR EACH STATEMENT EXECUTE FUNCTION im_v2.validate_fresh_direct_delivery_batch();
+
+CREATE TRIGGER fanout_deliveries_fresh_direct_immutable BEFORE UPDATE OF source_event_id, target_user_id, projection_kind, completion_unit_id, fresh_direct_eligible ON im_v2.fanout_deliveries FOR EACH ROW EXECUTE FUNCTION im_v2.reject_fresh_direct_delivery_identity_mutation();
+
+CREATE TRIGGER fanout_plans_identity_immutable BEFORE UPDATE OF source_event_id, target_rule ON im_v2.fanout_plans FOR EACH ROW EXECUTE FUNCTION im_v2.reject_fanout_plan_identity_mutation();
+
 CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
 
 CREATE TRIGGER room_events_immutable BEFORE DELETE OR UPDATE ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_event_mutation();
 
 CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON im_v2.rooms FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_delivery_mode_mutation();
 
-CREATE TRIGGER user_sync_log_projection_effect_v3 AFTER INSERT ON im_v2.user_sync_log FOR EACH ROW EXECUTE FUNCTION im_v2.capture_user_projection_effect_v3();
+CREATE TRIGGER user_sync_log_projection_effect_v4 AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.capture_user_projection_effect_v4();
 
-CREATE TRIGGER user_sync_log_snapshot_v3_projection AFTER INSERT ON im_v2.user_sync_log FOR EACH ROW EXECUTE FUNCTION im_v2.enqueue_user_projection_v3();
+CREATE TRIGGER user_sync_log_snapshot_v4_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v4();
 
 ALTER TABLE ONLY im_v2.content_review_cases
     ADD CONSTRAINT content_review_cases_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE CASCADE;

@@ -62,6 +62,11 @@ store 内的 `message_projection_states`，用户行只保存 `message_state_id`
 4. inline/backfill 指标为零且稳定后切 `read=shared`；
 5. 回滚窗口结束后才可人工执行 contract SQL。contract 不是 current-2 启动前置。
 
+Snapshot keyset 的主键已覆盖 `user + kind + entity + valid_from` 排序前缀，读取 payload/source
+仍必须访问 heap；原额外 `user_projection_versions_snapshot_scan_idx` 不能形成 index-only read，
+却参与每个版本 INSERT/close，因此已由在线 migration 并发删除。shared/reference 压测必须使用
+`docker-compose.gateway-shared.yml`；仅有代码能力而仍运行 dual/body 配置不会获得正文去重收益。
+
 在上述用户投影 expand 之后，执行
 `2026-08-18-message-projection-room-event-storage-expand.sql`：增加物理存储标记、逻辑 view、
 append-only trigger 和 bounded compaction 索引。先部署能读逻辑 view 的 binary，再允许压缩；
