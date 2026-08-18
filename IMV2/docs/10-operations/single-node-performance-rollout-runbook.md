@@ -39,6 +39,7 @@
    `2026-08-18-user-sync-log-statement-triggers-expand.sql`、
    `2026-08-18-user-projection-ready-queue-expand.sql`、
    `2026-08-18-user-projection-ready-queue-v6-expand.sql`、
+   `2026-08-18-user-projection-ready-queue-v7-expand.sql`、
    `2026-08-18-fanout-direct-user-microbatch-expand.sql` 和
    `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`；新库直接安装 canonical
    schema。确认逻辑 view、validated storage constraint、append-only trigger 和索引存在后再部署 binary。
