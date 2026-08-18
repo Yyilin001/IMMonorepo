@@ -437,12 +437,16 @@ public struct PostgresV2FanoutDeliveryStore:
 
             // Stable target lanes keep users disjoint inside one process. A
             // second replica may own the same database lane, so elect users
-            // again with the same advisory key used by route migration. The
-            // non-blocking lock avoids turning overlapping batches into a
-            // convoy; unowned rows remain pending for a later pass.
+            // again with a delivery-only advisory key. Do not reuse the route
+            // cutover key for this exclusive ownership: Sync holds that key
+            // in shared mode, so reuse fragments batches and makes ordinary
+            // Sync wait behind a complete delivery transaction. Once a lane
+            // is owned, acquire the original route key in shared mode. Route
+            // cutover still waits for every old-owner commit, while Delivery
+            // and Sync no longer block one another during normal operation.
             // Foundation/V2Identifier canonicalizes UUID-backed IDs to the
-            // uppercase spelling. Preserve it here: advisory keys are lexical
-            // and must exactly match V2PostgresUserShardRouter cutover locks.
+            // uppercase spelling. Preserve it here because both key domains
+            // are lexical and must be stable across replicas.
             let lockUsers = candidateUsers.map { $0.targetUserID.uuidString }.sorted()
             let lockUsersJSON = try batchJSON(lockUsers)
             let userLocks = try await sql.raw("""
@@ -452,12 +456,29 @@ public struct PostgresV2FanoutDeliveryStore:
                         AS value(lock_user)
                     ORDER BY lock_user
                 )
-                SELECT lock_user,
-                       pg_try_advisory_xact_lock(
-                           hashtextextended(lock_user, 0)
-                       ) AS acquired
-                FROM requested
-                ORDER BY lock_user
+                , lane_ownership AS MATERIALIZED (
+                    SELECT lock_user,
+                           pg_try_advisory_xact_lock(
+                               hashtextextended(
+                                   'fanout-delivery-lane:' || lock_user, 0
+                               )
+                           ) AS acquired
+                    FROM requested
+                    ORDER BY lock_user
+                ), route_locks AS MATERIALIZED (
+                    SELECT pg_advisory_xact_lock_shared(
+                               hashtextextended(lock_user, 0)
+                           ) AS acquired
+                    FROM lane_ownership
+                    WHERE acquired
+                    ORDER BY lock_user
+                ), route_barrier AS MATERIALIZED (
+                    SELECT COUNT(*) AS acquired_count FROM route_locks
+                )
+                SELECT lane_ownership.lock_user, lane_ownership.acquired
+                FROM lane_ownership
+                CROSS JOIN route_barrier
+                ORDER BY lane_ownership.lock_user
                 """).all(decoding: FreshDirectUserLockRow.self)
             let ownedUserIDs = Set(
                 userLocks.lazy.filter(\.acquired).map(\.lockUser)

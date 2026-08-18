@@ -882,12 +882,85 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             let firstReplica = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
             let secondReplica = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
-            let firstMicrobatch = try await firstReplica.commitFreshDirectPreplanned(
-                bucket: "test-users", partition: nil,
-                now: now.addingTimeInterval(1), limit: 4
-            )
+            // Normal Sync holds the route-cutover barrier in shared mode.
+            // Hold it for every candidate user: delivery lane ownership must
+            // use an independent key, then coexist on the shared route key.
+            // Reusing the route key as an exclusive lane lock makes this
+            // deterministic microbatch return no work.
+            let routeReadGate = PostgreSQLTransactionGate()
+            let routeReader = Task {
+                try await app.db(.psql).transaction { transaction in
+                    guard let transactionSQL = transaction as? any SQLDatabase else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    for user in users.sorted(by: { $0.uuidString < $1.uuidString }) {
+                        try await transactionSQL.raw("""
+                            SELECT pg_advisory_xact_lock_shared(
+                                hashtextextended(\(bind: user.uuidString), 0)
+                            )
+                            """).run()
+                    }
+                    await routeReadGate.holdTransaction()
+                }
+            }
+            await routeReadGate.waitUntilHeld()
+            let firstMicrobatch: [V2FreshDirectFanoutDeliveryCommit]
+            do {
+                firstMicrobatch = try await firstReplica.commitFreshDirectPreplanned(
+                    bucket: "test-users", partition: nil,
+                    now: now.addingTimeInterval(1), limit: 4
+                )
+            } catch {
+                await routeReadGate.releaseTransaction()
+                _ = try? await routeReader.value
+                throw error
+            }
+            await routeReadGate.releaseTransaction()
+            try await routeReader.value
             #expect(firstMicrobatch.count == 4)
             #expect(Set(firstMicrobatch.map(\.targetUserID)).count == 4)
+
+            // The independent lane key must not weaken cutover fencing. An
+            // exclusive route migration lock still blocks the delivery until
+            // the migration transaction releases its barrier.
+            let routeCutoverGate = PostgreSQLTransactionGate()
+            let routeCutover = Task {
+                try await app.db(.psql).transaction { transaction in
+                    guard let transactionSQL = transaction as? any SQLDatabase else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    for user in users.sorted(by: { $0.uuidString < $1.uuidString }) {
+                        try await transactionSQL.raw("""
+                            SELECT pg_advisory_xact_lock(
+                                hashtextextended(\(bind: user.uuidString), 0)
+                            )
+                            """).run()
+                    }
+                    await routeCutoverGate.holdTransaction()
+                }
+            }
+            await routeCutoverGate.waitUntilHeld()
+            let cutoverFencedCommit = Task {
+                try await secondReplica.commitFreshDirectPreplanned(
+                    bucket: "test-users", partition: nil,
+                    now: now.addingTimeInterval(1), limit: 4
+                )
+            }
+            do {
+                try await waitForAdvisoryWaiters(1, on: sql)
+            } catch {
+                cutoverFencedCommit.cancel()
+                await routeCutoverGate.releaseTransaction()
+                _ = try? await routeCutover.value
+                _ = try? await cutoverFencedCommit.value
+                throw error
+            }
+            await routeCutoverGate.releaseTransaction()
+            try await routeCutover.value
+            let secondMicrobatch = try await cutoverFencedCommit.value
+            #expect(secondMicrobatch.count == 4)
+            #expect(Set(secondMicrobatch.map(\.targetUserID)).count == 4)
+
             var passCount = 0
             while true {
                 passCount += 1
