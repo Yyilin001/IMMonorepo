@@ -87,6 +87,7 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
             }
 
             try await sql.raw("INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at) VALUES (\(bind: userUUID), \(bind: command.operationID), \(bind: command.reason.rawValue), \(bind: operatorPrincipal), \(bind: occurredAt))").run()
+            try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at) VALUES (\(bind: userUUID), 2, \(bind: occurredAt)) ON CONFLICT (user_id) DO UPDATE SET revision = version.revision + 1, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_refresh_sessions SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_access_tokens SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()

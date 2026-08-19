@@ -75,6 +75,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                     (\(bind: pair.lower), \(bind: pair.higher), \(bind: createdRoomID), \(bind: now),
                      \(bind: actorID == pair.higher), \(bind: actorID == pair.lower))
                 """).run()
+            try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions (user_id) VALUES (\(bind: actorID)), (\(bind: targetID)) ON CONFLICT (user_id) DO NOTHING").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, createdAt: now, sql: sql)
@@ -102,6 +103,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 return .idempotent(permission: existing.permission, updatedAt: existing.updatedAt)
             }
             try await sql.raw("INSERT INTO im_v2.user_stranger_message_preferences (user_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_stranger_messages = EXCLUDED.allows_stranger_messages, updated_at = EXCLUDED.updated_at").run()
+            try await bumpDirectSendPolicyVersion(userID: actorID, now: now, sql: sql)
             try await sql.raw("INSERT INTO im_v2.stranger_message_preference_operations (actor_user_id, operation_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now))").run()
             guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
                 throw V2DirectMessagingStoreError.corruptPersistenceState
@@ -151,6 +153,16 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
 
     private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         try await sql.raw("INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: roomID), \(bind: createdAt))").run()
+    }
+
+    private func bumpDirectSendPolicyVersion(userID: UUID, now: Date, sql: any SQLDatabase) async throws {
+        try await sql.raw("""
+            INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at)
+            VALUES (\(bind: userID), 2, \(bind: now))
+            ON CONFLICT (user_id) DO UPDATE
+            SET revision = version.revision + 1,
+                updated_at = EXCLUDED.updated_at
+            """).run()
     }
 
     private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {

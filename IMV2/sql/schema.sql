@@ -500,7 +500,21 @@ CREATE TABLE im_v2.direct_room_pairs (
     higher_profile_visible_to_lower boolean DEFAULT false NOT NULL,
     lower_can_send boolean,
     higher_can_send boolean,
+    lower_has_replied boolean DEFAULT false NOT NULL,
+    higher_has_replied boolean DEFAULT false NOT NULL,
+    direct_policy_revision bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT direct_room_pairs_direct_policy_revision_check CHECK ((direct_policy_revision > 0)),
     CONSTRAINT direct_room_pairs_check CHECK ((lower_user_id < higher_user_id))
+);
+
+-- One durable revision per user for direct-message policy inputs that are not
+-- pair-local (account state and stranger-message preference). Gateway caches
+-- are only hints; these revisions are checked by the authoritative write.
+CREATE TABLE im_v2.user_direct_send_policy_versions (
+    user_id uuid NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_direct_send_policy_versions_revision_check CHECK ((revision > 0))
 );
 
 CREATE TABLE im_v2.durable_work_replay_audit (
@@ -2320,6 +2334,9 @@ ALTER TABLE ONLY im_v2.user_block_operations
 
 ALTER TABLE ONLY im_v2.user_blocks
     ADD CONSTRAINT user_blocks_pkey PRIMARY KEY (blocker_user_id, blocked_user_id);
+
+ALTER TABLE ONLY im_v2.user_direct_send_policy_versions
+    ADD CONSTRAINT user_direct_send_policy_versions_pkey PRIMARY KEY (user_id);
 
 ALTER TABLE ONLY im_v2.user_contact_alias_operations
     ADD CONSTRAINT user_contact_alias_operations_pkey PRIMARY KEY (owner_user_id, operation_id);

@@ -63,6 +63,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
                 result = (.none, nil)
             }
             try await sql.raw("INSERT INTO im_v2.user_relationship_operations (actor_user_id, operation_id, target_user_id, action, resulting_state, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: result.state.rawValue), \(bind: now))").run()
+            try await bumpDirectPairPolicyRevision(pair: pair, sql: sql)
             let sequences = try await reserveSyncSequences(
                 counts: [actorID: 1, targetID: 1], sql: sql
             )
@@ -107,6 +108,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             }
             let isBlocked = command.action == .block
             try await sql.raw("INSERT INTO im_v2.user_block_operations (actor_user_id, operation_id, target_user_id, action, is_blocked, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: isBlocked), \(bind: now))").run()
+            try await bumpDirectPairPolicyRevision(pair: pair, sql: sql)
             let sequences = try await reserveSyncSequences(
                 counts: relationshipWasRemoved
                     ? [actorID: 2, targetID: 1]
@@ -142,6 +144,16 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
 
     private func isBlocked(_ lhs: UUID, _ rhs: UUID, sql: any SQLDatabase) async throws -> Bool {
         try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_blocks WHERE (blocker_user_id = \(bind: lhs) AND blocked_user_id = \(bind: rhs)) OR (blocker_user_id = \(bind: rhs) AND blocked_user_id = \(bind: lhs))) AS value").first(decoding: SocialBooleanRow.self)?.value ?? true
+    }
+
+    private func bumpDirectPairPolicyRevision(
+        pair: (lower: UUID, higher: UUID, lockKey: String),
+        sql: any SQLDatabase
+    ) async throws {
+        // Send acceptance locks the same pair row. This serializes a social
+        // mutation with cached-policy admission and makes the revision a real
+        // fence instead of a best-effort invalidation hint.
+        try await sql.raw("UPDATE im_v2.direct_room_pairs SET direct_policy_revision = direct_policy_revision + 1 WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
     }
 
     private func appendRelationshipProjection(userID: UUID, sequence: Int64, targetID: UUID, requestedBy: UUID?, state: V2RelationshipState, sourceEventID: UUID, now: Date, sql: any SQLDatabase) async throws {
