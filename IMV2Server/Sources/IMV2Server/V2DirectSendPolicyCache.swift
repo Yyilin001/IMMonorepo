@@ -25,6 +25,10 @@ public actor V2DirectSendPolicyCache {
         public let recipientIsActive: Bool
         public let blocked: Bool
         public let isFriend: Bool
+        /// Monotonic, sender-specific state from `direct_room_pairs`. Once it
+        /// becomes true it never reverts, so it is safe to use only to avoid
+        /// an otherwise no-op reply-marker write on subsequent sends.
+        public let senderHasReplied: Bool
         public let recipientHasReplied: Bool
         public let allowsStrangers: Bool
         public let senderAccountKind: String?
@@ -44,6 +48,7 @@ public actor V2DirectSendPolicyCache {
             recipientIsActive: Bool,
             blocked: Bool,
             isFriend: Bool,
+            senderHasReplied: Bool,
             recipientHasReplied: Bool,
             allowsStrangers: Bool,
             senderAccountKind: String?,
@@ -62,6 +67,7 @@ public actor V2DirectSendPolicyCache {
             self.recipientIsActive = recipientIsActive
             self.blocked = blocked
             self.isFriend = isFriend
+            self.senderHasReplied = senderHasReplied
             self.recipientHasReplied = recipientHasReplied
             self.allowsStrangers = allowsStrangers
             self.senderAccountKind = senderAccountKind
@@ -70,6 +76,33 @@ public actor V2DirectSendPolicyCache {
             self.recipientAccountKind = recipientAccountKind
             self.recipientAccountStatus = recipientAccountStatus
             self.recipientAllowsCustomerMessages = recipientAllowsCustomerMessages
+        }
+
+        /// The accepted message and this cache publication happen on opposite
+        /// sides of the database commit. Therefore this refinement never
+        /// advertises an uncommitted reply marker. The pair revision changes
+        /// in the same mutation, so retain a usable revision fence as well.
+        func markingSenderHasReplied() -> Self {
+            .init(
+                recipientID: recipientID,
+                directPairRevision: directPairRevision + 1,
+                senderPolicyRevision: senderPolicyRevision,
+                recipientPolicyRevision: recipientPolicyRevision,
+                senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+                senderCanSend: senderCanSend,
+                recipientIsActive: recipientIsActive,
+                blocked: blocked,
+                isFriend: isFriend,
+                senderHasReplied: true,
+                recipientHasReplied: recipientHasReplied,
+                allowsStrangers: allowsStrangers,
+                senderAccountKind: senderAccountKind,
+                senderAccountStatus: senderAccountStatus,
+                senderAllowsServiceMessages: senderAllowsServiceMessages,
+                recipientAccountKind: recipientAccountKind,
+                recipientAccountStatus: recipientAccountStatus,
+                recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+            )
         }
     }
 

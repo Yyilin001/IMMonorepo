@@ -35,13 +35,30 @@ struct V2DirectSendPolicyCacheTests {
         #expect(await cache.value(for: second) != nil)
     }
 
-    private func makeEntry() -> V2DirectSendPolicyCache.Entry {
+    @Test("reply-marker refinement preserves the durable revision fence")
+    func replyMarkerRefinementAdvancesPairRevision() throws {
+        let entry = makeEntry(
+            directPairRevision: 41,
+            senderHasReplied: false
+        )
+        let refined = entry.markingSenderHasReplied()
+
+        #expect(refined.senderHasReplied)
+        #expect(refined.directPairRevision == 42)
+        #expect(refined.recipientID == entry.recipientID)
+        #expect(refined.recipientPolicyRevision == entry.recipientPolicyRevision)
+    }
+
+    private func makeEntry(
+        directPairRevision: Int64 = 1,
+        senderHasReplied: Bool = true
+    ) -> V2DirectSendPolicyCache.Entry {
         .init(
-            recipientID: UUID(), directPairRevision: 1,
+            recipientID: UUID(), directPairRevision: directPairRevision,
             senderPolicyRevision: 1, recipientPolicyRevision: 1,
             senderProfileVisibleToRecipient: true, senderCanSend: true,
             recipientIsActive: true, blocked: false, isFriend: true,
-            recipientHasReplied: true, allowsStrangers: true,
+            senderHasReplied: senderHasReplied, recipientHasReplied: true, allowsStrangers: true,
             senderAccountKind: nil, senderAccountStatus: nil,
             senderAllowsServiceMessages: nil, recipientAccountKind: nil,
             recipientAccountStatus: nil, recipientAllowsCustomerMessages: nil

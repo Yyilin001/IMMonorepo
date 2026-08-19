@@ -284,8 +284,13 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     sql: sql
                 )
             }
-            if directContext != nil {
-                _ = try await markDirectSenderHasReplied(
+            // The reply marker is monotonic. Once a sender has an accepted
+            // message we no longer issue a no-op UPDATE for every later send.
+            // The actual value comes from the transaction snapshot, never
+            // from the process-local cache.
+            var replyMarkerAdvanced = false
+            if let directContext, !directContext.senderHasReplied {
+                replyMarkerAdvanced = try await markDirectSenderHasReplied(
                     roomID: roomID,
                     senderID: senderID,
                     sql: sql
@@ -385,7 +390,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             return .init(
                 outcome: .accepted(acceptedMessage),
                 acceptedDirectProjectionShadows: acceptedDirectProjectionShadows,
-                directPolicyCacheUpdate: loadedContext.directPolicyCacheEntry(),
+                directPolicyCacheUpdate: replyMarkerAdvanced
+                    ? loadedContext.directPolicyCacheEntry()?.markingSenderHasReplied()
+                    : loadedContext.directPolicyCacheEntry(),
                 shardAdmissionCommandCredit: shardCreditToken
             )
             } catch {
@@ -599,6 +606,19 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
         sql: any SQLDatabase
     ) async throws -> MessageAcceptanceContextRow {
+        // A cached sender reply marker is only a performance hint. The
+        // durable direct-pair and policy-version rows remain locked until the
+        // message transaction commits, so a block or preference change either
+        // precedes this decision (revision mismatch -> database evaluation)
+        // or follows this accepted message. `senderHasReplied` is monotonic;
+        // a cache hit lets steady-state sends use compatible shared locks
+        // instead of the exclusive locks needed by a first reply-marker write.
+        let directPairLockClause = cachedDirectPolicy?.senderHasReplied == true
+            ? "FOR SHARE OF pair"
+            : "FOR UPDATE OF pair"
+        let directPolicyVersionLockClause = cachedDirectPolicy?.senderHasReplied == true
+            ? "FOR SHARE OF sender_version, recipient_version"
+            : "FOR KEY SHARE OF sender_version, recipient_version"
         let rows = try await sql.raw("""
             WITH locked_room AS MATERIALIZED (
                 SELECT room.room_kind, room.room_shard_id, room.room_sequence,
@@ -713,7 +733,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 WHERE room.room_kind = 'direct'
                   AND (pair.lower_user_id = \(bind: senderID)
                        OR pair.higher_user_id = \(bind: senderID))
-                FOR UPDATE OF pair
+                \(unsafeRaw: directPairLockClause)
             ), direct_policy_versions AS MATERIALIZED (
                 SELECT pair.*, sender_version.revision AS sender_policy_revision,
                        recipient_version.revision AS recipient_policy_revision
@@ -722,7 +742,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                   ON sender_version.user_id = \(bind: senderID)
                 JOIN im_v2.user_direct_send_policy_versions AS recipient_version
                   ON recipient_version.user_id = pair.recipient_user_id
-                FOR KEY SHARE OF sender_version, recipient_version
+                \(unsafeRaw: directPolicyVersionLockClause)
             ), special AS MATERIALIZED (
                 SELECT account.account_user_id, account.account_kind, account.status,
                        account.allows_customer_messages, account.allows_service_messages
@@ -743,6 +763,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                             THEN pair.lower_can_send
                             ELSE pair.higher_can_send
                        END AS sender_can_send,
+                       CASE WHEN pair.lower_user_id = \(bind: senderID)
+                            THEN pair.lower_has_replied
+                            ELSE pair.higher_has_replied
+                       END AS sender_has_replied,
                        CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
                                       AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
                                       AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
@@ -816,7 +840,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    policy.direct_policy_revision, policy.sender_policy_revision,
                    policy.recipient_policy_revision,
                    policy.sender_can_send, policy.recipient_is_active, policy.blocked,
-                   policy.is_friend, policy.recipient_has_replied, policy.allows_strangers,
+                   policy.is_friend, policy.sender_has_replied,
+                   policy.recipient_has_replied, policy.allows_strangers,
                    policy.sender_account_kind, policy.sender_account_status,
                    policy.sender_allows_service_messages, policy.recipient_account_kind,
                    policy.recipient_account_status, policy.recipient_allows_customer_messages
@@ -870,6 +895,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             requiresStrangerQuota: policy.senderAccountKind == nil && policy.recipientAccountKind == nil && !policy.isFriend && !policy.recipientHasReplied,
             senderProfileVisibleToRecipient: policy.senderProfileVisibleToRecipient,
             senderCanSend: policy.senderCanSend,
+            senderHasReplied: policy.senderHasReplied,
             supportAccountID: policy.recipientAccountKind == "customer_support" && policy.recipientAccountStatus == "active"
                 ? recipientID
                 : nil
@@ -1794,6 +1820,36 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     ) async throws {
         let message = writeSet.acceptedMessage
         let admission = writeSet.nextRoomState.admission
+        // The load test's dominant shape is a plain direct message. Keep the
+        // rich path below intact for review/media/mentions, but do not make a
+        // plain message pay for three empty data-modifying CTEs or rewrite
+        // room-admission fields that cannot change in direct room-log mode.
+        if !contentReviewMode.enqueuesJobs,
+           message.media.isEmpty,
+           message.mentions.isEmpty {
+            try await persistPlainRoomLogMessage(
+                message: message,
+                command: command,
+                room: room,
+                roomID: roomID,
+                messageID: messageID,
+                eventID: eventID,
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                roomSequence: roomSequence,
+                timelineSequence: timelineSequence,
+                commandWindowUsed: admission.commandWindow.used,
+                entitiesJSON: entitiesJSON,
+                mediaJSON: mediaJSON,
+                mediaPresentationsJSON: mediaPresentationsJSON,
+                mentionedUsersJSON: mentionedUsersJSON,
+                replyToMessageID: replyToMessageID,
+                forwardedFromMessageID: forwardedFromMessageID,
+                forwardedFromUserID: forwardedFromUserID,
+                sql: sql
+            )
+            return
+        }
         guard let mutation = try await sql.raw("""
             WITH room_update AS (
                 UPDATE im_v2.rooms
@@ -1893,6 +1949,105 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
               mutation.reviewCount == (contentReviewMode.enqueuesJobs ? 1 : 0),
               mutation.mediaCount == Int64(message.media.count),
               mutation.mentionCount == Int64(message.mentions.count),
+              mutation.eventCount == 1
+        else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+    }
+
+    /// The narrow direct room-log commit for a plain message. This remains a
+    /// single statement so the room sequence, admission debit, message and
+    /// recovery event cannot become externally visible independently.
+    private func persistPlainRoomLogMessage(
+        message: V2AcceptedMessageDraft,
+        command: V2SendMessageCommand,
+        room: RoomRow,
+        roomID: UUID,
+        messageID: UUID,
+        eventID: UUID,
+        senderID: UUID,
+        clientMessageID: UUID,
+        roomSequence: Int64,
+        timelineSequence: Int64,
+        commandWindowUsed: Int,
+        entitiesJSON: String,
+        mediaJSON: String,
+        mediaPresentationsJSON: String,
+        mentionedUsersJSON: String,
+        replyToMessageID: String,
+        forwardedFromMessageID: UUID?,
+        forwardedFromUserID: UUID?,
+        sql: any SQLDatabase
+    ) async throws {
+        guard let mutation = try await sql.raw("""
+            WITH room_update AS (
+                UPDATE im_v2.rooms
+                SET room_sequence = \(bind: roomSequence),
+                    timeline_sequence = \(bind: timelineSequence)
+                WHERE room_id = \(bind: roomID)
+                RETURNING room_id
+            ), admission_update AS (
+                UPDATE im_v2.room_admission AS admission
+                SET command_window_used = \(bind: commandWindowUsed)
+                FROM room_update
+                WHERE admission.room_id = room_update.room_id
+                RETURNING admission.room_id
+            ), message_insert AS (
+                INSERT INTO im_v2.messages
+                    (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
+                     client_message_id, text_body, rich_entities, reply_to_message_id,
+                     forwarded_from_message_id, forwarded_from_user_id, created_at)
+                SELECT \(bind: messageID), admission_update.room_id, \(bind: roomSequence),
+                       \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
+                       \(bind: message.text), \(bind: entitiesJSON)::jsonb,
+                       NULLIF(\(bind: replyToMessageID), '')::uuid,
+                       \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
+                       \(bind: message.createdAt)
+                FROM admission_update
+                RETURNING message_id, room_id
+            ), event_insert AS (
+                INSERT INTO im_v2.room_events
+                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
+                     committed_membership_revision, created_at)
+                SELECT \(bind: eventID), message_insert.room_id, \(bind: roomSequence),
+                       'message.accepted', \(bind: senderID),
+                       jsonb_build_object(
+                           'event_type', 'message.accepted',
+                           'message_id', \(bind: messageID.uuidString),
+                           'room_id', \(bind: roomID.uuidString),
+                           'room_sequence', \(bind: roomSequence),
+                           'timeline_sequence', \(bind: timelineSequence),
+                           'sender_user_id', \(bind: senderID.uuidString),
+                           'text', \(bind: message.text),
+                           'media_ids', \(bind: mediaJSON)::jsonb,
+                           'media_presentations', \(bind: mediaPresentationsJSON)::jsonb,
+                           'mention_user_ids', \(bind: mentionedUsersJSON)::jsonb,
+                           'mentions_everyone', FALSE,
+                           'entities', \(bind: entitiesJSON)::jsonb,
+                           'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
+                           'forwarded_from_message_id', NULLIF(\(bind: command.forwardedFrom?.messageID.rawValue ?? ""), ''),
+                           'forwarded_from_user_id', NULLIF(\(bind: command.forwardedFrom?.senderUserID.rawValue ?? ""), ''),
+                           'message_revision', 1,
+                           'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000))
+                       ),
+                       \(bind: room.membershipRevision), \(bind: message.createdAt)
+                FROM message_insert
+                RETURNING event_id
+            )
+            SELECT (SELECT count(*) FROM room_update) AS room_count,
+                   (SELECT count(*) FROM admission_update) AS admission_count,
+                   (SELECT count(*) FROM message_insert) AS message_count,
+                   0::bigint AS review_count,
+                   0::bigint AS media_count,
+                   0::bigint AS mention_count,
+                   (SELECT count(*) FROM event_insert) AS event_count
+            """).first(decoding: RoomLogMessageMutationRow.self),
+              mutation.roomCount == 1,
+              mutation.admissionCount == 1,
+              mutation.messageCount == 1,
+              mutation.reviewCount == 0,
+              mutation.mediaCount == 0,
+              mutation.mentionCount == 0,
               mutation.eventCount == 1
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -2218,6 +2373,7 @@ private struct MessageAcceptanceContextRow: Decodable {
     let recipientIsActive: Bool?
     let blocked: Bool?
     let isFriend: Bool?
+    let senderHasReplied: Bool?
     let recipientHasReplied: Bool?
     let allowsStrangers: Bool?
     let senderAccountKind: String?
@@ -2284,6 +2440,7 @@ private struct MessageAcceptanceContextRow: Decodable {
         case recipientIsActive = "recipient_is_active"
         case blocked
         case isFriend = "is_friend"
+        case senderHasReplied = "sender_has_replied"
         case recipientHasReplied = "recipient_has_replied"
         case allowsStrangers = "allows_strangers"
         case senderAccountKind = "sender_account_kind"
@@ -2384,7 +2541,7 @@ private struct MessageAcceptanceContextRow: Decodable {
     func directPolicySnapshot() throws -> DirectMessagePolicySnapshotRow {
         guard let recipientUserID, let senderProfileVisibleToRecipient,
               let recipientIsActive, let blocked, let isFriend,
-              let recipientHasReplied, let allowsStrangers
+              let senderHasReplied, let recipientHasReplied, let allowsStrangers
         else { throw V2RoomWriteStoreError.actorNotEligible }
         return .init(
             recipientUserID: recipientUserID,
@@ -2393,6 +2550,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             recipientIsActive: recipientIsActive,
             blocked: blocked,
             isFriend: isFriend,
+            senderHasReplied: senderHasReplied,
             recipientHasReplied: recipientHasReplied,
             allowsStrangers: allowsStrangers,
             senderAccountKind: senderAccountKind,
@@ -2409,7 +2567,7 @@ private struct MessageAcceptanceContextRow: Decodable {
               let recipientUserID, let directPolicyRevision,
               let senderPolicyRevision, let recipientPolicyRevision,
               let senderProfileVisibleToRecipient, let recipientIsActive,
-              let blocked, let isFriend, let recipientHasReplied,
+              let blocked, let isFriend, let senderHasReplied, let recipientHasReplied,
               let allowsStrangers
         else { return nil }
         return .init(
@@ -2422,6 +2580,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             recipientIsActive: recipientIsActive,
             blocked: blocked,
             isFriend: isFriend,
+            senderHasReplied: senderHasReplied,
             recipientHasReplied: recipientHasReplied,
             allowsStrangers: allowsStrangers,
             senderAccountKind: senderAccountKind,
@@ -2695,6 +2854,7 @@ private struct DirectMessageAcceptanceContext {
     let requiresStrangerQuota: Bool
     let senderProfileVisibleToRecipient: Bool
     let senderCanSend: Bool?
+    let senderHasReplied: Bool
     let supportAccountID: UUID?
 }
 private struct RoomWriteCommit {
@@ -2737,6 +2897,7 @@ private struct DirectMessagePolicySnapshotRow: Decodable {
     let recipientIsActive: Bool
     let blocked: Bool
     let isFriend: Bool
+    let senderHasReplied: Bool
     let recipientHasReplied: Bool
     let allowsStrangers: Bool
     let senderAccountKind: String?
@@ -2753,6 +2914,7 @@ private struct DirectMessagePolicySnapshotRow: Decodable {
         case recipientIsActive = "recipient_is_active"
         case blocked
         case isFriend = "is_friend"
+        case senderHasReplied = "sender_has_replied"
         case recipientHasReplied = "recipient_has_replied"
         case allowsStrangers = "allows_strangers"
         case senderAccountKind = "sender_account_kind"
