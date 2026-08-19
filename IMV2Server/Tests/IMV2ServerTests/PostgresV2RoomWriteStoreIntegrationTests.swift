@@ -8784,18 +8784,46 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(replayed == accepted)
 
+            // The first accepted message seeds the process-local direct-send
+            // policy cache. A later policy mutation must still be fenced by
+            // the durable user policy revision inside the write transaction;
+            // a stale cache entry must never authorize this send.
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID, actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000c004"),
+                text: "缓存回填后的第二条消息"
+            )) else {
+                Issue.record("expected second room-log acceptance")
+                return
+            }
+            _ = try await direct.setStrangerMessagePermission(
+                actorUserID: recipient,
+                operationID: try .init("00000000-0000-0000-0000-00000000c005"),
+                permission: .deny
+            )
+            let stalePolicyAttempt = try await messages.send(.init(
+                roomID: room.roomID, actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000c006"),
+                text: "策略变更后必须被拒绝"
+            ))
+            guard case .denied(let stalePolicyDenial) = stalePolicyAttempt else {
+                Issue.record("stale direct-send cache bypassed a policy change")
+                return
+            }
+            #expect(stalePolicyDenial.reason == .generic)
+
             let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
             let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)
             let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
-            #expect(senderPage.events.map(\.roomSequence) == [accepted.roomSequence])
+            #expect(senderPage.events.map(\.roomSequence) == [accepted.roomSequence, accepted.roomSequence + 1])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
             await #expect(throws: V2GroupEventLogError.actorNotMember) {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 1)
-            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
+            #expect(try await count("im_v2.messages", on: sql) == 2)
+            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 2)
             #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
             #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == 0)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
