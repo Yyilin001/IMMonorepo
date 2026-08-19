@@ -263,6 +263,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let messageProjectionWriteMode: V2MessageProjectionWriteMode
     public let messageProjectionReadMode: V2MessageProjectionReadMode
     public let directFanoutMode: V2DirectFanoutMode
+    /// Zero preserves exact per-message shard admission. A positive value is
+    /// an explicit, direct-room-log-only batch size for pre-charged command
+    /// credits; it is never enabled by a client request.
+    public let directRoomLogShardAdmissionCreditBatchSize: Int
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// Unreferenced immutable revisions remain recoverable for this grace.
     /// The default is seven days; deployments may lengthen it independently
@@ -449,6 +453,18 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")
         }
         directFanoutMode = parsedDirectFanoutMode
+        let rawDirectRoomLogShardCreditBatchSize = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE", environment: environment
+        ) ?? "0"
+        guard let parsedDirectRoomLogShardCreditBatchSize = Int(rawDirectRoomLogShardCreditBatchSize),
+              (0 ... 128).contains(parsedDirectRoomLogShardCreditBatchSize),
+              parsedDirectRoomLogShardCreditBatchSize == 0 || parsedDirectFanoutMode == .roomLog
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
+            )
+        }
+        directRoomLogShardAdmissionCreditBatchSize = parsedDirectRoomLogShardCreditBatchSize
         let rawFanoutPayloadWriteMode = Self.optional(
             "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment
         )?.lowercased() ?? V2FanoutPayloadWriteMode.body.rawValue

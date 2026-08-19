@@ -8754,12 +8754,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected direct room")
                 return
             }
+            let shardCredits = V2ShardAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 2
+            )
             let writer = PostgresV2RoomWriteStore(
                 database: app.db(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
                 shadowForwarder: SuccessfulProjectionShadowForwarder(),
                 contentReviewMode: .disabled,
-                directFanoutMode: .roomLog
+                directFanoutMode: .roomLog,
+                shardAdmissionCommandCreditPool: shardCredits
             )
             let messages = V2SendMessageService(
                 store: writer, capacityProfile: profile,
@@ -8831,6 +8835,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 0)
             #expect(try await count("im_v2.room_outbox", on: sql) == 0)
             #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
+            let creditedAdmission = try #require(try await sql.raw("""
+                SELECT command_window_used, fanout_window_used
+                FROM im_v2.shard_admission_pools
+                WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
+                """).first(decoding: CapacityRow.self))
+            // Two accepted commands consume one database batch, rather than
+            // two serialized tail increments. The durable counter remains
+            // conservatively equal to the reserved capacity.
+            #expect(creditedAdmission.commandWindowUsed == 2)
+            let creditSnapshot = await shardCredits.snapshot()
+            #expect(creditSnapshot.batchReservations == 1)
+            #expect(creditSnapshot.databaseCreditsReserved == 2)
+            #expect(creditSnapshot.committedCredits == 2)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
@@ -8838,6 +8855,97 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2GroupEventLogError.actorNotMember) {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
             }
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("direct room-log command credits are durable, bounded, and cannot oversell a shard window")
+    func directRoomLogCommandCreditsPreserveShardCapacity() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql, isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_201_000)
+            let leaseID = UUID(uuidString: "00000000-0000-0000-0000-00000000c101")!
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-credit-test', 'credit-test', \(bind: leaseID), 1,
+                        \(bind: now.addingTimeInterval(600)), 2, 10, 10, 10)
+                """).run()
+            let state = try ShardAdmissionState(
+                lease: .init(
+                    id: try .init(leaseID.uuidString), generation: 1,
+                    validUntil: now.addingTimeInterval(600),
+                    commandWindow: try .init(limit: 2),
+                    fanoutWindow: try .init(limit: 10),
+                    maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10
+                ),
+                outstandingFanoutUnits: 0, outstandingPlans: 0
+            )
+            let credits = V2ShardAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 2
+            )
+
+            for expectedEffectiveUsed in 0 ... 1 {
+                let acquisition = try await credits.acquire(
+                    roomShardID: "rooms-credit-test", capacityProfileID: "credit-test",
+                    shardState: state, now: now
+                )
+                guard case .granted(let token, let effective) = acquisition,
+                      let effectiveLease = effective.lease
+                else {
+                    Issue.record("expected a durable command credit")
+                    return
+                }
+                #expect(effectiveLease.commandWindow.used == expectedEffectiveUsed)
+                await credits.commit(token)
+            }
+            let exhausted = try await credits.acquire(
+                roomShardID: "rooms-credit-test", capacityProfileID: "credit-test",
+                shardState: state, now: now
+            )
+            guard case .rateLimited = exhausted else {
+                Issue.record("the credit pool oversold the command window")
+                return
+            }
+            let persisted = try #require(try await sql.raw("""
+                SELECT command_window_used, fanout_window_used
+                FROM im_v2.shard_admission_pools
+                WHERE room_shard_id = 'rooms-credit-test'
+                  AND capacity_profile_id = 'credit-test'
+                """).first(decoding: CapacityRow.self))
+            #expect(persisted.commandWindowUsed == 2)
+            #expect(await credits.snapshot() == .init(
+                activeCredits: 0, inFlightCredits: 0,
+                batchReservations: 1, databaseCreditsReserved: 2,
+                committedCredits: 2, returnedCredits: 0,
+                expiredCreditsDiscarded: 0, capacityRejections: 1
+            ))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()

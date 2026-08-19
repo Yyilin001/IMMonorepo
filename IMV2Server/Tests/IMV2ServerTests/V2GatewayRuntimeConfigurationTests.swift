@@ -20,6 +20,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.messageProjectionReadMode == .preferShared)
         #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
         #expect(defaults.directFanoutMode == .planner)
+        #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
@@ -44,6 +45,32 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(roomLog)
         ).directFanoutMode == .roomLog)
+
+        var credits = roomLog
+        credits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(credits)
+        ).directRoomLogShardAdmissionCreditBatchSize == 64)
+
+        var creditsOutsideRoomLog = runtimeValues
+        creditsOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(creditsOutsideRoomLog)
+            )
+        }
+
+        var oversizedCredits = roomLog
+        oversizedCredits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "129"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversizedCredits)
+            )
+        }
 
         var referencePayload = runtimeValues
         referencePayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "reference"

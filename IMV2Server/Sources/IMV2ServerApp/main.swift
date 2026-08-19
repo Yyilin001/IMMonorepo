@@ -271,6 +271,14 @@ enum IMV2ServerApp {
             }
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
+            let directRoomLogShardAdmissionCredits:
+                V2ShardAdmissionCommandCreditPool? =
+                configuration.directRoomLogShardAdmissionCreditBatchSize > 0
+                ? .init(
+                    database: database,
+                    batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize
+                )
+                : nil
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
                 source: V2AggregateDurableWorkMetricsSource(sources: [
                     PostgresV2DurableWorkMetricsSource(
@@ -295,7 +303,8 @@ enum IMV2ServerApp {
                 runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
                     databaseWorkAdmission: databaseWorkAdmission,
                     databasePools: databasePoolTopology,
-                    syncWakeCoalescer: syncWakeCoalescer
+                    syncWakeCoalescer: syncWakeCoalescer,
+                    shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits
                 )
             )
             let telemetry = V2CompositeTelemetrySink([
@@ -335,7 +344,8 @@ enum IMV2ServerApp {
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
                     directFanoutMode: configuration.directFanoutMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode
+                    payloadWriteMode: configuration.fanoutPayloadWriteMode,
+                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -472,7 +482,8 @@ enum IMV2ServerApp {
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
                     directFanoutMode: configuration.directFanoutMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode
+                    payloadWriteMode: configuration.fanoutPayloadWriteMode,
+                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits

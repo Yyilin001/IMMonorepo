@@ -41,6 +41,22 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let databaseWork: V2DatabaseWorkAdmissionSnapshot
     public let databasePools: V2DatabasePoolTopologySnapshot
     public let syncWake: V2SyncWakeCoalescerSnapshot
+    /// Present only when direct room-log command credit batching is enabled.
+    /// This is deliberately aggregate-only: shard IDs, room IDs and leases
+    /// must never become Prometheus labels.
+    public let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot?
+
+    public init(
+        databaseWork: V2DatabaseWorkAdmissionSnapshot,
+        databasePools: V2DatabasePoolTopologySnapshot,
+        syncWake: V2SyncWakeCoalescerSnapshot,
+        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil
+    ) {
+        self.databaseWork = databaseWork
+        self.databasePools = databasePools
+        self.syncWake = syncWake
+        self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
+    }
 }
 
 public protocol V2RuntimePressureMetricsSource: Sendable {
@@ -51,24 +67,29 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController
     private let databasePools: V2DatabasePoolTopologySnapshot
     private let syncWakeCoalescer: V2SyncWakeCoalescer
+    private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
 
     public init(
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
-        syncWakeCoalescer: V2SyncWakeCoalescer
+        syncWakeCoalescer: V2SyncWakeCoalescer,
+        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
+        self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
     }
 
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
+        let credits = await shardAdmissionCommandCredits?.snapshot()
         return await .init(
             databaseWork: databaseWork,
             databasePools: databasePools,
-            syncWake: syncWake
+            syncWake: syncWake,
+            shardAdmissionCommandCredits: credits
         )
     }
 }
@@ -164,5 +185,25 @@ public func v2RenderPrometheusRuntimePressureMetrics(
         "# TYPE im_v2_sync_wake_dropped_total counter",
         "im_v2_sync_wake_dropped_total \(snapshot.syncWake.droppedNotifications)",
     ])
+    if let credits = snapshot.shardAdmissionCommandCredits {
+        lines.append(contentsOf: [
+            "# HELP im_v2_shard_admission_command_credits Process-local, already durable-charged command-window credits for direct room-event-log sends.",
+            "# TYPE im_v2_shard_admission_command_credits gauge",
+            "im_v2_shard_admission_command_credits{state=\"available\"} \(credits.activeCredits)",
+            "im_v2_shard_admission_command_credits{state=\"in_flight\"} \(credits.inFlightCredits)",
+            "# HELP im_v2_shard_admission_command_credit_reservations_total Durable batch reservations of direct room-event-log command credits.",
+            "# TYPE im_v2_shard_admission_command_credit_reservations_total counter",
+            "im_v2_shard_admission_command_credit_reservations_total \(credits.batchReservations)",
+            "# HELP im_v2_shard_admission_command_credits_reserved_total Command-window credits durably charged in PostgreSQL batches.",
+            "# TYPE im_v2_shard_admission_command_credits_reserved_total counter",
+            "im_v2_shard_admission_command_credits_reserved_total \(credits.databaseCreditsReserved)",
+            "# HELP im_v2_shard_admission_command_credits_committed_total Credits consumed by committed message transactions.",
+            "# TYPE im_v2_shard_admission_command_credits_committed_total counter",
+            "im_v2_shard_admission_command_credits_committed_total \(credits.committedCredits)",
+            "# HELP im_v2_shard_admission_command_credit_rejections_total Requests rejected because the durable command window is full.",
+            "# TYPE im_v2_shard_admission_command_credit_rejections_total counter",
+            "im_v2_shard_admission_command_credit_rejections_total \(credits.capacityRejections)",
+        ])
+    }
     return lines.joined(separator: "\n") + "\n"
 }

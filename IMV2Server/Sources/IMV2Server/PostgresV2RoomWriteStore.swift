@@ -18,6 +18,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let directFanoutMode: V2DirectFanoutMode
     private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let directSendPolicyCache: V2DirectSendPolicyCache
+    private let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
 
     public init(
         database: any Database,
@@ -26,7 +27,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         contentReviewMode: V2ContentReviewMode,
         directFanoutMode: V2DirectFanoutMode = .planner,
         payloadWriteMode: V2FanoutPayloadWriteMode = .body,
-        directSendPolicyCache: V2DirectSendPolicyCache = .init()
+        directSendPolicyCache: V2DirectSendPolicyCache = .init(),
+        shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool? = nil
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
@@ -35,6 +37,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         self.directFanoutMode = directFanoutMode
         self.payloadWriteMode = payloadWriteMode
         self.directSendPolicyCache = directSendPolicyCache
+        self.shardAdmissionCommandCreditPool = shardAdmissionCommandCreditPool
     }
 
     public func accept(
@@ -50,6 +53,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         let commit: RoomWriteCommit
         do {
             commit = try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            var shardCreditToken: V2ShardAdmissionCommandCreditPool.Token?
+            do {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -196,12 +201,34 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 : []
             let roomState = try room.commandState(roomID: command.roomID, admission: admission)
             let shardState = try shard.admissionState()
+            let shardStateForReduction: ShardAdmissionState
+            if usesDirectRoomLog, let shardAdmissionCommandCreditPool {
+                switch try await shardAdmissionCommandCreditPool.acquire(
+                    roomShardID: room.roomShardID,
+                    capacityProfileID: room.capacityProfileID,
+                    shardState: shardState,
+                    now: now
+                ) {
+                case .granted(let token, let effectiveShardState):
+                    shardCreditToken = token
+                    shardStateForReduction = effectiveShardState
+                case .rateLimited:
+                    return .init(
+                        outcome: .rateLimited(retryAfterSeconds: capacityProfile.limits.retryAfterSeconds),
+                        acceptedDirectProjectionShadows: []
+                    )
+                case .unavailable(let reason):
+                    return .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
+                }
+            } else {
+                shardStateForReduction = shardState
+            }
             let result: V2SendMessageAcceptanceResult
             if usesDirectRoomLog {
                 result = try roomLogReduction(
                     command: command,
                     roomState: roomState,
-                    shardState: shardState,
+                    shardState: shardStateForReduction,
                     profile: capacityProfile.limits,
                     identifiers: identifiers,
                     reliableTargetCount: 0,
@@ -213,7 +240,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 result = try V2SendMessageReducer.reduce(
                     command: command,
                     roomState: roomState,
-                    shardState: shardState,
+                    shardState: shardStateForReduction,
                     profile: capacityProfile.limits,
                     identifiers: identifiers,
                     now: now
@@ -222,7 +249,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 result = try hybridReduction(
                     command: command,
                     roomState: roomState,
-                    shardState: shardState,
+                    shardState: shardStateForReduction,
                     profile: capacityProfile.limits,
                     identifiers: identifiers,
                     reliableTargetCount: hybridReliableTargets.count,
@@ -231,6 +258,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 }
             }
             guard case .accepted(let writeSet) = result else {
+                if let token = shardCreditToken, let shardAdmissionCommandCreditPool {
+                    await shardAdmissionCommandCreditPool.release(token, now: now)
+                    shardCreditToken = nil
+                }
                 return .init(
                     outcome: result.outcome(
                         mediaPresentations: mediaPresentations,
@@ -280,7 +311,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 createdAt: acceptedMessage.createdAt
             )
             let shardReservation = try shardAdmissionReservation(
-                from: shardState,
+                from: shardStateForReduction,
                 to: timelineWriteSet.nextShardState
             )
             try await persist(
@@ -336,18 +367,33 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // shard rows and multiplied foreground connection occupancy.
             // A rejection still throws inside this transaction, so all prior
             // message/fan-out writes roll back atomically.
-            try await reserveShardAdmission(
-                shardReservation,
-                room: room,
-                retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
-                now: now,
-                sql: sql
-            )
+            if shardCreditToken != nil {
+                guard shardReservation.commandDelta == 1,
+                      shardReservation.fanoutDelta == 0,
+                      shardReservation.outstandingUnitDelta == 0,
+                      shardReservation.outstandingPlanDelta == 0
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            } else {
+                try await reserveShardAdmission(
+                    shardReservation,
+                    room: room,
+                    retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
+                    now: now,
+                    sql: sql
+                )
+            }
             return .init(
                 outcome: .accepted(acceptedMessage),
                 acceptedDirectProjectionShadows: acceptedDirectProjectionShadows,
-                directPolicyCacheUpdate: loadedContext.directPolicyCacheEntry()
+                directPolicyCacheUpdate: loadedContext.directPolicyCacheEntry(),
+                shardAdmissionCommandCredit: shardCreditToken
             )
+            } catch {
+                if let shardCreditToken, let shardAdmissionCommandCreditPool {
+                    await shardAdmissionCommandCreditPool.release(shardCreditToken, now: now)
+                }
+                throw error
+            }
             }
         } catch let rejection as LateShardAdmissionRejection {
             switch rejection {
@@ -362,6 +408,10 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         }
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)
+        }
+        if let shardCreditToken = commit.shardAdmissionCommandCredit,
+           let shardAdmissionCommandCreditPool {
+            await shardAdmissionCommandCreditPool.commit(shardCreditToken)
         }
         try await shadowCommittedDirectProjectionsIfNeeded(command: command, commit: commit)
         return commit.outcome
@@ -2654,15 +2704,21 @@ private struct RoomWriteCommit {
     /// transaction; an empty array deliberately skips all post-commit reads.
     let acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?
     let directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry?
+    /// A command credit becomes committed only after this transaction returns
+    /// successfully from Fluent. All non-success paths return it to the local
+    /// pool from inside the retry closure.
+    let shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token?
 
     init(
         outcome: V2SendMessageOutcome,
         acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?,
-        directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry? = nil
+        directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry? = nil,
+        shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token? = nil
     ) {
         self.outcome = outcome
         self.acceptedDirectProjectionShadows = acceptedDirectProjectionShadows
         self.directPolicyCacheUpdate = directPolicyCacheUpdate
+        self.shardAdmissionCommandCredit = shardAdmissionCommandCredit
     }
 }
 private struct DirectProjectionShadowRequest {

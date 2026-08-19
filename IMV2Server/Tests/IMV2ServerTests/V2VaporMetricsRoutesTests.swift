@@ -97,6 +97,12 @@ struct V2VaporMetricsRoutesTests {
                 pendingUsers: 6, inFlightUsers: 2,
                 coalescedNotifications: 7, deliveredNotifications: 9,
                 droppedNotifications: 8
+            ),
+            shardAdmissionCommandCredits: .init(
+                activeCredits: 12, inFlightCredits: 3,
+                batchReservations: 4, databaseCreditsReserved: 64,
+                committedCredits: 51, returnedCredits: 2,
+                expiredCreditsDiscarded: 1, capacityRejections: 5
             )
         ))
         V2VaporMetricsRoutes.register(
@@ -115,6 +121,12 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_sync_wake_in_flight_users 2"))
             #expect(body.contains("im_v2_sync_wake_coalesced_total 7"))
             #expect(body.contains("im_v2_sync_wake_dropped_total 8"))
+            #expect(body.contains("im_v2_shard_admission_command_credits{state=\"available\"} 12"))
+            #expect(body.contains("im_v2_shard_admission_command_credits{state=\"in_flight\"} 3"))
+            #expect(body.contains("im_v2_shard_admission_command_credit_reservations_total 4"))
+            #expect(body.contains("im_v2_shard_admission_command_credits_reserved_total 64"))
+            #expect(body.contains("im_v2_shard_admission_command_credits_committed_total 51"))
+            #expect(body.contains("im_v2_shard_admission_command_credit_rejections_total 5"))
         }
     }
 
