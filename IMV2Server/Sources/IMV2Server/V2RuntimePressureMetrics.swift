@@ -45,17 +45,24 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// This is deliberately aggregate-only: shard IDs, room IDs and leases
     /// must never become Prometheus labels.
     public let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot?
+    /// Present only when ordered direct-room append batching is enabled. It
+    /// exposes process-local queue and timer facts, never room/user/request
+    /// identifiers, so an adaptive rollout can be verified without a SQL
+    /// inference or high-cardinality labels.
+    public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
 
     public init(
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWake: V2SyncWakeCoalescerSnapshot,
-        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil
+        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
+        directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil
     ) {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
         self.syncWake = syncWake
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
+        self.directRoomLogAppendBatching = directRoomLogAppendBatching
     }
 }
 
@@ -68,28 +75,33 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let databasePools: V2DatabasePoolTopologySnapshot
     private let syncWakeCoalescer: V2SyncWakeCoalescer
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
+    private let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher?
 
     public init(
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWakeCoalescer: V2SyncWakeCoalescer,
-        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil
+        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
+        directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
+        self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
     }
 
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
         let credits = await shardAdmissionCommandCredits?.snapshot()
+        let appendBatching = await directRoomLogAppendBatcher?.snapshot()
         return await .init(
             databaseWork: databaseWork,
             databasePools: databasePools,
             syncWake: syncWake,
-            shardAdmissionCommandCredits: credits
+            shardAdmissionCommandCredits: credits,
+            directRoomLogAppendBatching: appendBatching
         )
     }
 }
@@ -224,6 +236,29 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# HELP im_v2_shard_admission_command_credit_rejections_total Requests rejected because the durable command window is full.",
             "# TYPE im_v2_shard_admission_command_credit_rejections_total counter",
             "im_v2_shard_admission_command_credit_rejections_total \(credits.capacityRejections)",
+        ])
+    }
+    if let batching = snapshot.directRoomLogAppendBatching {
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_append_batch_pending_requests Process-local direct append requests waiting for an atomic batch.",
+            "# TYPE im_v2_direct_room_log_append_batch_pending_requests gauge",
+            "im_v2_direct_room_log_append_batch_pending_requests \(batching.pendingRequests)",
+            "# HELP im_v2_direct_room_log_append_batch_in_flight Batches currently holding one foreground database admission.",
+            "# TYPE im_v2_direct_room_log_append_batch_in_flight gauge",
+            "im_v2_direct_room_log_append_batch_in_flight \(batching.inFlightBatches)",
+            "# HELP im_v2_direct_room_log_append_batch_active_rooms Rooms currently serialized by an in-flight batch.",
+            "# TYPE im_v2_direct_room_log_append_batch_active_rooms gauge",
+            "im_v2_direct_room_log_append_batch_active_rooms \(batching.activeRooms)",
+            "# HELP im_v2_direct_room_log_append_batch_delayed_flushes_total Delayed append batch timers that actually fired by bounded delay mode.",
+            "# TYPE im_v2_direct_room_log_append_batch_delayed_flushes_total counter",
+            "im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"base\"} \(batching.baseDelayFlushes)",
+            "im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} \(batching.highActivityDelayFlushes)",
+            "# HELP im_v2_direct_room_log_append_batch_rejections_total Requests rejected because the bounded staging queue is full.",
+            "# TYPE im_v2_direct_room_log_append_batch_rejections_total counter",
+            "im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} \(batching.stagingQueueFullRejections)",
+            "# HELP im_v2_direct_room_log_append_batch_cancellations_total Staged requests removed before durable acceptance because their caller was cancelled.",
+            "# TYPE im_v2_direct_room_log_append_batch_cancellations_total counter",
+            "im_v2_direct_room_log_append_batch_cancellations_total \(batching.cancelledPendingRequests)",
         ])
     }
     return lines.joined(separator: "\n") + "\n"

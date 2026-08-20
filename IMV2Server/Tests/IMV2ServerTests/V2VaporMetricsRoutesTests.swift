@@ -113,6 +113,16 @@ struct V2VaporMetricsRoutesTests {
                 batchReservations: 4, databaseCreditsReserved: 64,
                 committedCredits: 51, returnedCredits: 2,
                 expiredCreditsDiscarded: 1, capacityRejections: 5
+            ),
+            directRoomLogAppendBatching: .init(
+                pendingRequests: 7,
+                inFlightBatches: 3,
+                activeRooms: 5,
+                stagingQueueFullRejections: 2,
+                cancelledPendingRequests: 1,
+                baseDelayFlushes: 11,
+                highActivityDelayFlushes: 13,
+                highActivityDelayScheduled: true
             )
         ))
         V2VaporMetricsRoutes.register(
@@ -123,6 +133,9 @@ struct V2VaporMetricsRoutesTests {
             let body = response.body.string
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_pending_requests 7"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} 13"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
             #expect(body.contains("im_v2_database_work_queued{class=\"sync\"} 1"))
             #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground_write\",reason=\"timeout\"} 3"))
             #expect(body.contains("im_v2_database_work_queue_wait_milliseconds_bucket{class=\"foreground_write\",le=\"25\"} 4"))

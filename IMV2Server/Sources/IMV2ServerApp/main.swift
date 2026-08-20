@@ -299,19 +299,6 @@ enum IMV2ServerApp {
                     configuration.metricsRefreshTimeoutMilliseconds
                 ) / 1_000
             )
-            V2VaporMetricsRoutes.register(
-                on: app,
-                telemetry: prometheusTelemetry,
-                connectionMetrics: connectionRegistry,
-                transportMetrics: transportMetrics,
-                durableWorkMetrics: durableWorkMetrics,
-                runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
-                    databaseWorkAdmission: databaseWorkAdmission,
-                    databasePools: databasePoolTopology,
-                    syncWakeCoalescer: syncWakeCoalescer,
-                    shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits
-                )
-            )
             let telemetry = V2CompositeTelemetrySink([
                 V2ApplicationTelemetrySink(
                     logger: app.logger,
@@ -387,6 +374,24 @@ enum IMV2ServerApp {
                         : nil
                 )
                 : nil
+            // Register after the optional append batcher exists so the
+            // loopback-only metrics endpoint can expose its aggregate queue
+            // and adaptive-timer facts. The application has not started its
+            // public listener yet, so this ordering changes no route timing.
+            V2VaporMetricsRoutes.register(
+                on: app,
+                telemetry: prometheusTelemetry,
+                connectionMetrics: connectionRegistry,
+                transportMetrics: transportMetrics,
+                durableWorkMetrics: durableWorkMetrics,
+                runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
+                    databaseWorkAdmission: databaseWorkAdmission,
+                    databasePools: databasePoolTopology,
+                    syncWakeCoalescer: syncWakeCoalescer,
+                    shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
+                    directRoomLogAppendBatcher: directRoomLogAppendBatcher
+                )
+            )
             let sendMessage = V2SendMessageService(
                 store: roomWriteStore,
                 capacityProfile: configuration.capacityProfile,
