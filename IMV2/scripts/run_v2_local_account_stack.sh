@@ -105,11 +105,21 @@ prune_unreferenced_local_build_stages
 # current. A retained database must already match the current contract; this
 # greenfield stack never upgrades it in place.
 compose up -d --wait --force-recreate postgres
-schema_is_current="$(
-  compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -tA \
-    < "${script_dir}/current_v2_schema_contract.sql" |
-    tr -d '[:space:]'
-)"
+# `pg_isready` can become true while the official PostgreSQL entrypoint is
+# still running its first-boot SQL files against the temporary server. Wait
+# for the full schema contract rather than treating transport readiness as
+# application readiness.
+schema_is_current=''
+for _ in {1..45}; do
+  if schema_is_current="$(
+    compose exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -tA \
+      < "${script_dir}/current_v2_schema_contract.sql" 2>/dev/null |
+      tr -d '[:space:]'
+  )" && [[ "${schema_is_current}" == 't' ]]; then
+    break
+  fi
+  sleep 1
+done
 test "${schema_is_current}" = 't' || {
   printf 'local PostgreSQL volume does not match the current canonical schema.\n' >&2
   printf 'Reset it explicitly with: docker compose --project-name %s --env-file %s --file %s down --volumes\n' \
