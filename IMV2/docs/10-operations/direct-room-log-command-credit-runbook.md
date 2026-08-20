@@ -84,13 +84,16 @@ already-open conversation. Its reservation is deliberately small and shares
 the same physical PostgreSQL foreground pool with message appends and room-log
 reads; it does **not** create extra database connections.
 
-For the 8-vCPU benchmark host, configure the 32 foreground permits as 20
-message writes, 4 control writes, and 8 interactive reads:
+For the 8-vCPU benchmark host, configure the 32 foreground permits as 16
+message writes, 4 control writes, and 12 interactive reads. The direct append
+batcher itself is capped at 8 concurrent transactions, so reserving more than
+16 message permits did not improve that hot path but could starve room-log
+pulls:
 
 ```
-IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT=20
+IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT=16
 IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT=4
-IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT=8
+IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT=12
 IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_MAX_QUEUED=1152
 ```
 
