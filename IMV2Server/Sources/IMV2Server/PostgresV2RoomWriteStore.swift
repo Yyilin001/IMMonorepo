@@ -1995,11 +1995,9 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         }
     }
 
-    /// The narrow direct room-log commit for a plain message. This remains a
-    /// single statement so the room sequence, admission debit, message and
-    /// recovery event cannot become externally visible independently. The
-    /// immutable event stores a content reference; its pull path reads the
-    /// matching version from the canonical message record or its snapshot.
+    /// Adapts the legacy single-command path to the same set-based append SQL
+    /// used by the ordered micro-batch.  A future batch supplies more than one
+    /// input only after it has locked and prevalidated each distinct room.
     private func persistPlainRoomLogMessage(
         message: V2AcceptedMessageDraft,
         room: RoomRow,
@@ -2018,22 +2016,103 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         persistsRoomAdmission: Bool,
         sql: any SQLDatabase
     ) async throws {
+        let replyToMessageUUID: UUID?
+        if replyToMessageID.isEmpty {
+            replyToMessageUUID = nil
+        } else {
+            guard let parsed = UUID(uuidString: replyToMessageID) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            replyToMessageUUID = parsed
+        }
+        try await persistPlainRoomLogMessages(
+            inputs: [.init(
+                ordinal: 0,
+                roomID: roomID,
+                messageID: messageID,
+                eventID: eventID,
+                senderID: senderID,
+                clientMessageID: clientMessageID,
+                roomSequence: roomSequence,
+                timelineSequence: timelineSequence,
+                commandWindowUsed: commandWindowUsed,
+                text: message.text,
+                entities: message.entities,
+                replyToMessageID: replyToMessageUUID,
+                forwardedFromMessageID: forwardedFromMessageID,
+                forwardedFromUserID: forwardedFromUserID,
+                membershipRevision: room.membershipRevision,
+                createdAtUnixSeconds: message.createdAt.timeIntervalSince1970
+            )],
+            persistsRoomAdmission: persistsRoomAdmission,
+            sql: sql
+        )
+    }
+
+    /// Appends one or more already-authorized plain direct messages in one
+    /// PostgreSQL statement. Inputs must contain at most one command for any
+    /// `room_id`; this keeps every room update deterministic and lets the
+    /// caller preserve FIFO by holding later commands for that room.
+    private func persistPlainRoomLogMessages(
+        inputs: [PlainRoomLogMessageInput],
+        persistsRoomAdmission: Bool,
+        sql: any SQLDatabase
+    ) async throws {
+        guard !inputs.isEmpty,
+              Set(inputs.map(\.roomID)).count == inputs.count,
+              Set(inputs.map(\.messageID)).count == inputs.count,
+              Set(inputs.map(\.eventID)).count == inputs.count,
+              inputs.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let inputsJSON = try roomWriteJSON(inputs)
+        let expectedCount = Int64(inputs.count)
         guard let mutation = try await sql.raw("""
-            WITH room_update AS (
-                UPDATE im_v2.rooms
-                SET room_sequence = \(bind: roomSequence),
-                    timeline_sequence = \(bind: timelineSequence)
-                WHERE room_id = \(bind: roomID)
-                RETURNING room_id
+            WITH input AS MATERIALIZED (
+                SELECT input.ordinal, input.room_id, input.message_id,
+                       input.event_id, input.sender_id, input.client_message_id,
+                       input.room_sequence, input.timeline_sequence,
+                       input.command_window_used, input.text_body,
+                       input.rich_entities, input.reply_to_message_id,
+                       input.forwarded_from_message_id,
+                       input.forwarded_from_user_id,
+                       input.membership_revision,
+                       input.created_at_unix_seconds,
+                       to_timestamp(input.created_at_unix_seconds) AS created_at
+                FROM jsonb_to_recordset(\(bind: inputsJSON)::jsonb) AS input(
+                    ordinal integer,
+                    room_id uuid,
+                    message_id uuid,
+                    event_id uuid,
+                    sender_id uuid,
+                    client_message_id uuid,
+                    room_sequence bigint,
+                    timeline_sequence bigint,
+                    command_window_used bigint,
+                    text_body text,
+                    rich_entities jsonb,
+                    reply_to_message_id uuid,
+                    forwarded_from_message_id uuid,
+                    forwarded_from_user_id uuid,
+                    membership_revision bigint,
+                    created_at_unix_seconds double precision
+                )
+            ), room_update AS (
+                UPDATE im_v2.rooms AS room
+                SET room_sequence = input.room_sequence,
+                    timeline_sequence = input.timeline_sequence
+                FROM input
+                WHERE room.room_id = input.room_id
+                RETURNING room.room_id
             ), admission_update AS (
                 UPDATE im_v2.room_admission AS admission
-                SET command_window_used = \(bind: commandWindowUsed)
-                FROM room_update
-                WHERE admission.room_id = room_update.room_id
+                SET command_window_used = input.command_window_used
+                FROM input
+                JOIN room_update ON room_update.room_id = input.room_id
+                WHERE admission.room_id = input.room_id
                   AND \(bind: persistsRoomAdmission)
                 RETURNING admission.room_id
             ), admission_passthrough AS (
-                SELECT room_id FROM room_update
+                SELECT room_update.room_id FROM room_update
                 WHERE NOT \(bind: persistsRoomAdmission)
             ), admission_gate AS (
                 SELECT room_id FROM admission_update
@@ -2044,29 +2123,31 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
                      client_message_id, text_body, rich_entities, reply_to_message_id,
                      forwarded_from_message_id, forwarded_from_user_id, created_at)
-                SELECT \(bind: messageID), admission_gate.room_id, \(bind: roomSequence),
-                       \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
-                       \(bind: message.text), \(bind: entitiesJSON)::jsonb,
-                       NULLIF(\(bind: replyToMessageID), '')::uuid,
-                       \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
-                       \(bind: message.createdAt)
-                FROM admission_gate
+                SELECT input.message_id, input.room_id, input.room_sequence,
+                       input.timeline_sequence, input.sender_id,
+                       input.client_message_id, input.text_body,
+                       input.rich_entities, input.reply_to_message_id,
+                       input.forwarded_from_message_id,
+                       input.forwarded_from_user_id, input.created_at
+                FROM input
+                JOIN admission_gate ON admission_gate.room_id = input.room_id
                 RETURNING message_id, room_id
             ), event_insert AS (
                 INSERT INTO im_v2.room_events
                     (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
                      committed_membership_revision, created_at)
-                SELECT \(bind: eventID), message_insert.room_id, \(bind: roomSequence),
-                       'message.accepted', \(bind: senderID),
+                SELECT input.event_id, message_insert.room_id,
+                       input.room_sequence, 'message.accepted', input.sender_id,
                        jsonb_build_object(
                            'event_type', 'message.accepted',
-                           'message_id', \(bind: messageID.uuidString),
+                           'message_id', input.message_id::text,
                            'payload_storage', 'message_reference_v1',
                            'message_revision', 1,
-                           'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000))
+                           'server_created_at_ms', floor(input.created_at_unix_seconds * 1000)::bigint
                        ),
-                       \(bind: room.membershipRevision), \(bind: message.createdAt)
-                FROM message_insert
+                       input.membership_revision, input.created_at
+                FROM input
+                JOIN message_insert ON message_insert.message_id = input.message_id
                 RETURNING event_id
             )
             SELECT (SELECT count(*) FROM room_update) AS room_count,
@@ -2077,13 +2158,13 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                    0::bigint AS mention_count,
                    (SELECT count(*) FROM event_insert) AS event_count
             """).first(decoding: RoomLogMessageMutationRow.self),
-              mutation.roomCount == 1,
-              mutation.admissionCount == 1,
-              mutation.messageCount == 1,
+              mutation.roomCount == expectedCount,
+              mutation.admissionCount == expectedCount,
+              mutation.messageCount == expectedCount,
               mutation.reviewCount == 0,
               mutation.mediaCount == 0,
               mutation.mentionCount == 0,
-              mutation.eventCount == 1
+              mutation.eventCount == expectedCount
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
@@ -2915,6 +2996,47 @@ private struct RoomLogMessageMutationRow: Decodable {
         case mediaCount = "media_count"
         case mentionCount = "mention_count"
         case eventCount = "event_count"
+    }
+}
+
+/// JSONB input for the set-based plain direct room-log append.  This is
+/// intentionally narrow: attachments, mentions and review jobs retain their
+/// dedicated path until their own batch write graph is designed and verified.
+private struct PlainRoomLogMessageInput: Encodable {
+    let ordinal: Int
+    let roomID: UUID
+    let messageID: UUID
+    let eventID: UUID
+    let senderID: UUID
+    let clientMessageID: UUID
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let commandWindowUsed: Int
+    let text: String
+    let entities: [V2MessageEntity]
+    let replyToMessageID: UUID?
+    let forwardedFromMessageID: UUID?
+    let forwardedFromUserID: UUID?
+    let membershipRevision: Int64
+    let createdAtUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case roomID = "room_id"
+        case messageID = "message_id"
+        case eventID = "event_id"
+        case senderID = "sender_id"
+        case clientMessageID = "client_message_id"
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+        case commandWindowUsed = "command_window_used"
+        case text = "text_body"
+        case entities = "rich_entities"
+        case replyToMessageID = "reply_to_message_id"
+        case forwardedFromMessageID = "forwarded_from_message_id"
+        case forwardedFromUserID = "forwarded_from_user_id"
+        case membershipRevision = "membership_revision"
+        case createdAtUnixSeconds = "created_at_unix_seconds"
     }
 }
 
