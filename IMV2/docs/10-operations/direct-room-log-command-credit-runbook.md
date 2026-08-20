@@ -31,6 +31,26 @@ test. The accepted range is 1...128; 0 is the default and disables the
 feature. Start at 32. A larger value reduces SQL further, but increases the
 conservative unused quota after a process crash or a lease rollover.
 
+## Ordered append micro-batch
+
+`IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE` is a separate, default-off write
+optimization. It coalesces up to 2...32 already-established, plain direct
+messages for distinct rooms into one PostgreSQL transaction and one set-based
+append statement. It requires `room_log` and a nonzero shard-credit batch
+size. Start with:
+
+```
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=16
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
+```
+
+The extra delay is bounded to 1...10 ms. A request with media, mentions,
+reply/forward state, content review, stranger quota consumption, an initial
+reply marker, profile/capability mutation, a duplicate room in the batch, or
+an existing operation transparently falls back to the ordinary transaction.
+No client-visible ACK is sent until the selected append batch commits. Set the
+append batch size to `0` to roll it back without a schema or data change.
+
 ## Safety model
 
 Before the gateway issues a local credit, it atomically increments the
@@ -75,7 +95,9 @@ Scrape the loopback /metrics endpoint. When enabled, observe:
 
 For a controlled A/B run, reset the disposable message data and
 pg_stat_statements, hold connections, message rate, payload size, and gateway
-count constant, then compare a setting of 0 with the same deployment at 32.
+count constant, then compare append size `0` with 8, 16, and 32 at a 1--2ms
+delay. Preserve the shard-credit size while doing this; otherwise two write
+optimizations change at the same time.
 
 The shard-admission update/query count should approach one reservation per 32
 accepted direct-room-log commands (per shard), not one tail update per
