@@ -337,9 +337,11 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.userProjectionConcurrency == 2)
         #expect(configuration.userProjectionMaximumConsecutiveBusyPasses == 16)
         #expect(configuration.userProjectionBusyDrainBudgetMilliseconds == 50)
-        #expect(configuration.foregroundDatabaseWorkLimit == 16)
+        #expect(configuration.foregroundWriteDatabaseWorkLimit == 12)
+        #expect(configuration.interactiveReadDatabaseWorkLimit == 4)
         #expect(configuration.syncDatabaseWorkLimit == 4)
-        #expect(configuration.foregroundDatabaseWorkMaximumQueued == 384)
+        #expect(configuration.foregroundWriteDatabaseWorkMaximumQueued == 288)
+        #expect(configuration.interactiveReadDatabaseWorkMaximumQueued == 96)
         #expect(configuration.syncDatabaseWorkMaximumQueued == 128)
         #expect(configuration.databaseWorkAdmissionTimeoutMilliseconds == 200)
         #expect(configuration.databaseWorkAdmissionEnabled)
@@ -626,9 +628,11 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_USER_PROJECTION_CONCURRENCY": "2",
             "IM_V2_USER_PROJECTION_MAX_CONSECUTIVE_BUSY_PASSES": "16",
             "IM_V2_USER_PROJECTION_BUSY_DRAIN_BUDGET_MS": "50",
-            "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT": "16",
+            "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT": "12",
+            "IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT": "4",
             "IM_V2_SYNC_DATABASE_WORK_LIMIT": "4",
-            "IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED": "384",
+            "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED": "288",
+            "IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED": "96",
             "IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED": "128",
             "IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS": "200",
             "IM_V2_DATABASE_WORK_ADMISSION_ENABLED": "true",

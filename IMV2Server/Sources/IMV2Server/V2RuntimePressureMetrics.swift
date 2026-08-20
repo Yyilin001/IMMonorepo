@@ -169,6 +169,27 @@ public func v2RenderPrometheusRuntimePressureMetrics(
         )
     }
     lines.append(contentsOf: [
+        "# HELP im_v2_database_work_queue_wait_milliseconds Time requests spent waiting in the process-local database admission queue by reserved class.",
+        "# TYPE im_v2_database_work_queue_wait_milliseconds histogram",
+    ])
+    for workClass in V2DatabaseWorkClass.allCases {
+        let wait = snapshot.databaseWork.value(for: workClass).queueWait
+        for bucket in V2DatabaseWorkAdmissionWaitBucket.allCases {
+            lines.append(
+                "im_v2_database_work_queue_wait_milliseconds_bucket{class=\"\(workClass.rawValue)\",le=\"\(bucket.rawValue)\"} \(wait.count(atOrBelow: bucket))"
+            )
+        }
+        lines.append(
+            "im_v2_database_work_queue_wait_milliseconds_bucket{class=\"\(workClass.rawValue)\",le=\"+Inf\"} \(wait.samples)"
+        )
+        lines.append(
+            "im_v2_database_work_queue_wait_milliseconds_sum{class=\"\(workClass.rawValue)\"} \(wait.sumMilliseconds)"
+        )
+        lines.append(
+            "im_v2_database_work_queue_wait_milliseconds_count{class=\"\(workClass.rawValue)\"} \(wait.samples)"
+        )
+    }
+    lines.append(contentsOf: [
         "# HELP im_v2_sync_wake_pending_users Users waiting for the next coalescer flush.",
         "# TYPE im_v2_sync_wake_pending_users gauge",
         "im_v2_sync_wake_pending_users \(snapshot.syncWake.pendingUsers)",

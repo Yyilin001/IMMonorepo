@@ -31,14 +31,17 @@
 
 同库 Delivery 必须继续通过 Delivery control store 在一笔事务中提交 Inbox、sequence、Sync Log 和 completion 状态；不能为了“拆池”破坏原子性。Sync 使用 Sync control router 获取相同 advisory route fence，Maintenance/Projection 使用各自的数据库句柄。
 
-### 2. 前台和 Sync 使用独立过载准入
+### 2. 前台写入、交互读取和 Sync 使用独立过载准入
 
-`V2DatabaseWorkAdmissionController` 在 Fluent pool timeout 之前提供两个 O(1) FIFO 短队列：
+`V2DatabaseWorkAdmissionController` 在 Fluent pool timeout 之前提供三个 O(1) FIFO 短队列：
 
-- foreground 与 Sync 各自有独立 in-flight 上限；
-- 两类各自拥有等待数硬上限，并共享显式等待超时；
+- durable foreground write、interactive read（含 `GroupEventPull`）与 Sync 各自有独立 in-flight 上限；
+- 三类各自拥有等待数硬上限，并共享显式等待超时；
+- write/read 上限之和仍不得超过同一个 foreground PostgreSQL pool；这只隔离延迟和拒绝面，不增加数据库连接或宣称提高总吞吐；
 - 超限返回可重试 `SERVER_BUSY`，不占用数据库连接；
 - 客户端取消会移除等待者，不遗留 continuation 或 detached task。
+
+每类同时导出固定 bucket 的 queue-wait histogram，便于区分“SQL 变慢”与“SQL 尚未执行、已在本机排队”。所有标签均为固定 class/bucket，不包含 room、user 或 request 身份。
 
 产品/滥用限流仍是 `RATE_LIMITED`，不能与本机资源过载混用。
 

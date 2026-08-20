@@ -234,10 +234,15 @@ enum IMV2ServerApp {
                     : connectionRegistry
             let databaseWorkAdmission = V2DatabaseWorkAdmissionController(
                 policy: .init(
-                    maximumForegroundInFlight: configuration.foregroundDatabaseWorkLimit,
+                    maximumForegroundWriteInFlight:
+                        configuration.foregroundWriteDatabaseWorkLimit,
+                    maximumInteractiveReadInFlight:
+                        configuration.interactiveReadDatabaseWorkLimit,
                     maximumSyncInFlight: configuration.syncDatabaseWorkLimit,
-                    maximumForegroundQueued:
-                        configuration.foregroundDatabaseWorkMaximumQueued,
+                    maximumForegroundWriteQueued:
+                        configuration.foregroundWriteDatabaseWorkMaximumQueued,
+                    maximumInteractiveReadQueued:
+                        configuration.interactiveReadDatabaseWorkMaximumQueued,
                     maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
                     timeout: .milliseconds(
                         configuration.databaseWorkAdmissionTimeoutMilliseconds

@@ -203,9 +203,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let userProjectionBusyDrainBudgetMilliseconds: Int
     /// Process-local database admission bounds reject overload before a
     /// request spends the much longer Fluent pool timeout waiting for a slot.
-    public let foregroundDatabaseWorkLimit: Int
+    /// Durable foreground mutations reserve capacity independently from
+    /// interactive reads. Their sum is validated against the same physical
+    /// foreground pool; this is admission isolation, not additional database
+    /// connections.
+    public let foregroundWriteDatabaseWorkLimit: Int
+    public let interactiveReadDatabaseWorkLimit: Int
     public let syncDatabaseWorkLimit: Int
-    public let foregroundDatabaseWorkMaximumQueued: Int
+    public let foregroundWriteDatabaseWorkMaximumQueued: Int
+    public let interactiveReadDatabaseWorkMaximumQueued: Int
     public let syncDatabaseWorkMaximumQueued: Int
     public let databaseWorkAdmissionTimeoutMilliseconds: Int
     public let databaseWorkAdmissionEnabled: Bool
@@ -380,14 +386,22 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximum: 60_000,
             environment: environment
         )
-        foregroundDatabaseWorkLimit = try Self.boundedPositive(
-            "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
+        foregroundWriteDatabaseWorkLimit = try Self.boundedPositive(
+            "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
+        )
+        interactiveReadDatabaseWorkLimit = try Self.boundedPositive(
+            "IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
         )
         syncDatabaseWorkLimit = try Self.boundedPositive(
             "IM_V2_SYNC_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
         )
-        foregroundDatabaseWorkMaximumQueued = try Self.boundedPositive(
-            "IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED",
+        foregroundWriteDatabaseWorkMaximumQueued = try Self.boundedPositive(
+            "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED",
+            maximum: 1_000_000,
+            environment: environment
+        )
+        interactiveReadDatabaseWorkMaximumQueued = try Self.boundedPositive(
+            "IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED",
             maximum: 1_000_000,
             environment: environment
         )
@@ -581,11 +595,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 : databasePolicy.maximumConnectionsPerEventLoop
         )
         if databaseWorkloadPoolIsolationEnabled {
-            guard foregroundDatabaseWorkLimit <= foregroundPoolCapacity,
+            guard foregroundWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit <= foregroundPoolCapacity,
                   syncDatabaseWorkLimit <= syncPoolCapacity
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
                 )
             }
             let projectionPoolCapacity = databasePolicy.eventLoopThreads *
@@ -615,11 +629,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             // Admission must end before Fluent's pool wait. Keep the two
             // admitted lanes within the one shared physical pool; the
             // remaining connections stay available to durable workers.
-            guard foregroundDatabaseWorkLimit + syncDatabaseWorkLimit <=
+            guard foregroundWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit +
+                    syncDatabaseWorkLimit <=
                     foregroundPoolCapacity
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_FOREGROUND_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
                 )
             }
         }

@@ -4,32 +4,41 @@ import Testing
 
 @Suite("V2 database work admission")
 struct V2DatabaseWorkAdmissionTests {
-    @Test("foreground and Sync own independent queue reservations")
+    @Test("foreground writes, interactive reads and Sync own independent queue reservations")
     func isolatesWorkClassQueues() async throws {
         let controller = makeController(timeout: .seconds(1))
-        #expect(await controller.acquire(.foreground) == .admitted)
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
         #expect(await controller.acquire(.sync) == .admitted)
 
-        let queuedForeground = Task { await controller.acquire(.foreground) }
+        let queuedForegroundWrite = Task { await controller.acquire(.foregroundWrite) }
+        let queuedInteractiveRead = Task { await controller.acquire(.interactiveRead) }
         let queuedSync = Task { await controller.acquire(.sync) }
         try await Task.sleep(for: .milliseconds(20))
-        #expect(await controller.snapshot().foregroundQueued == 1)
+        #expect(await controller.snapshot().foregroundWriteQueued == 1)
+        #expect(await controller.snapshot().interactiveReadQueued == 1)
         #expect(await controller.snapshot().syncQueued == 1)
 
-        // Filling one lane does not consume the other lane's queue budget.
-        #expect(await controller.acquire(.foreground) == .rejected(.queueFull))
+        // Filling one lane does not consume either other lane's queue budget.
+        #expect(await controller.acquire(.foregroundWrite) == .rejected(.queueFull))
+        #expect(await controller.acquire(.interactiveRead) == .rejected(.queueFull))
         #expect(await controller.acquire(.sync) == .rejected(.queueFull))
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
         await controller.release(.sync)
-        #expect(await queuedForeground.value == .admitted)
+        #expect(await queuedForegroundWrite.value == .admitted)
+        #expect(await queuedInteractiveRead.value == .admitted)
         #expect(await queuedSync.value == .admitted)
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
         await controller.release(.sync)
 
         let snapshot = await controller.snapshot()
-        #expect(snapshot.foreground.queueFullRejections == 1)
+        #expect(snapshot.foregroundWrite.queueFullRejections == 1)
+        #expect(snapshot.interactiveRead.queueFullRejections == 1)
         #expect(snapshot.sync.queueFullRejections == 1)
-        #expect(snapshot.foreground.admittedRequests == 2)
+        #expect(snapshot.foregroundWrite.admittedRequests == 2)
+        #expect(snapshot.interactiveRead.admittedRequests == 2)
         #expect(snapshot.sync.admittedRequests == 2)
         #expect(snapshot.queued == 0)
     }
@@ -37,30 +46,30 @@ struct V2DatabaseWorkAdmissionTests {
     @Test("a queued request acquires after the older permit releases")
     func releasesToQueuedRequest() async throws {
         let controller = makeController(timeout: .milliseconds(200))
-        #expect(await controller.acquire(.foreground) == .admitted)
-        let queued = Task { await controller.acquire(.foreground) }
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        let queued = Task { await controller.acquire(.foregroundWrite) }
         try await Task.sleep(for: .milliseconds(20))
         #expect(await controller.snapshot().queued == 1)
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
         #expect(await queued.value == .admitted)
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
     }
 
     @Test("cancelling a queued request removes it without recording overload")
     func cancellationRemovesWaiter() async throws {
         let controller = makeController(timeout: .seconds(1))
-        #expect(await controller.acquire(.foreground) == .admitted)
-        let queued = Task { await controller.acquire(.foreground) }
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        let queued = Task { await controller.acquire(.foregroundWrite) }
         try await Task.sleep(for: .milliseconds(20))
-        #expect(await controller.snapshot().foregroundQueued == 1)
+        #expect(await controller.snapshot().foregroundWriteQueued == 1)
         queued.cancel()
         #expect(await queued.value == .cancelled)
         let snapshot = await controller.snapshot()
-        #expect(snapshot.foregroundInFlight == 1)
-        #expect(snapshot.foregroundQueued == 0)
-        #expect(snapshot.foreground.cancelledRequests == 1)
+        #expect(snapshot.foregroundWriteInFlight == 1)
+        #expect(snapshot.foregroundWriteQueued == 0)
+        #expect(snapshot.foregroundWrite.cancelledRequests == 1)
         #expect(snapshot.rejectedRequests == 0)
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
     }
 
     @Test("timeout and queue-full rejections remain distinct counters")
@@ -81,32 +90,34 @@ struct V2DatabaseWorkAdmissionTests {
     @Test("one lane grants queued work in FIFO order")
     func grantsInFIFOOrder() async throws {
         let controller = V2DatabaseWorkAdmissionController(policy: .init(
-            maximumForegroundInFlight: 1,
+            maximumForegroundWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1,
             maximumSyncInFlight: 1,
-            maximumForegroundQueued: 16,
+            maximumForegroundWriteQueued: 16,
+            maximumInteractiveReadQueued: 1,
             maximumSyncQueued: 1,
             timeout: .seconds(2)
         ))
-        #expect(await controller.acquire(.foreground) == .admitted)
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
         let order = AdmissionOrderRecorder()
         var tasks: [Task<Void, Never>] = []
         for index in 0..<16 {
             tasks.append(Task {
-                let result = await controller.acquire(.foreground)
+                let result = await controller.acquire(.foregroundWrite)
                 if result == .admitted {
                     await order.append(index)
-                    await controller.release(.foreground)
+                    await controller.release(.foregroundWrite)
                 }
             })
-            while await controller.snapshot().foregroundQueued != index + 1 {
+            while await controller.snapshot().foregroundWriteQueued != index + 1 {
                 await Task.yield()
             }
         }
 
-        await controller.release(.foreground)
+        await controller.release(.foregroundWrite)
         for task in tasks { await task.value }
         #expect(await order.values() == Array(0..<16))
-        let snapshot = await controller.snapshot().foreground
+        let snapshot = await controller.snapshot().foregroundWrite
         #expect(snapshot.inFlight == 0)
         #expect(snapshot.queued == 0)
         #expect(snapshot.admittedRequests == 17)
@@ -115,32 +126,34 @@ struct V2DatabaseWorkAdmissionTests {
     @Test("cancellation racing permit release neither leaks nor overspends permits")
     func cancellationReleaseRaceIsBalanced() async throws {
         let controller = V2DatabaseWorkAdmissionController(policy: .init(
-            maximumForegroundInFlight: 4,
+            maximumForegroundWriteInFlight: 4,
+            maximumInteractiveReadInFlight: 1,
             maximumSyncInFlight: 1,
-            maximumForegroundQueued: 512,
+            maximumForegroundWriteQueued: 512,
+            maximumInteractiveReadQueued: 1,
             maximumSyncQueued: 1,
             timeout: .seconds(3)
         ))
         for _ in 0..<4 {
-            #expect(await controller.acquire(.foreground) == .admitted)
+            #expect(await controller.acquire(.foregroundWrite) == .admitted)
         }
         let tasks = (0..<256).map { _ in
             Task {
-                let result = await controller.acquire(.foreground)
+                let result = await controller.acquire(.foregroundWrite)
                 if result == .admitted {
-                    await controller.release(.foreground)
+                    await controller.release(.foregroundWrite)
                 }
                 return result
             }
         }
-        while await controller.snapshot().foregroundQueued != tasks.count {
+        while await controller.snapshot().foregroundWriteQueued != tasks.count {
             await Task.yield()
         }
 
         for index in stride(from: 0, to: tasks.count, by: 2) {
             tasks[index].cancel()
         }
-        for _ in 0..<4 { await controller.release(.foreground) }
+        for _ in 0..<4 { await controller.release(.foregroundWrite) }
         var results: [V2DatabaseWorkAdmissionResult] = []
         results.reserveCapacity(tasks.count)
         for task in tasks {
@@ -150,7 +163,7 @@ struct V2DatabaseWorkAdmissionTests {
         let admitted = results.filter { $0 == .admitted }.count
         let cancelled = results.filter { $0 == .cancelled }.count
         #expect(admitted + cancelled == tasks.count)
-        let snapshot = await controller.snapshot().foreground
+        let snapshot = await controller.snapshot().foregroundWrite
         #expect(snapshot.inFlight == 0)
         #expect(snapshot.queued == 0)
         #expect(snapshot.admittedRequests == UInt64(4 + admitted))
@@ -162,9 +175,11 @@ struct V2DatabaseWorkAdmissionTests {
         timeout: Duration
     ) -> V2DatabaseWorkAdmissionController {
         V2DatabaseWorkAdmissionController(policy: .init(
-            maximumForegroundInFlight: 1,
+            maximumForegroundWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1,
             maximumSyncInFlight: 1,
-            maximumForegroundQueued: 1,
+            maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1,
             maximumSyncQueued: 1,
             timeout: timeout
         ))

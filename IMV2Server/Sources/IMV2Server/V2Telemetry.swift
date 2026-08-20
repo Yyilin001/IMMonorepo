@@ -176,6 +176,8 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Equatable, Sendable
     case syncSnapshot = "sync_snapshot"
     case snapshotPagePull = "snapshot_page_pull"
     case snapshotAck = "snapshot_ack"
+    case listRoomMembers = "list_room_members"
+    case groupEventPull = "group_event_pull"
     case groupEventSubscribe = "group_event_subscribe"
     case groupEventUnsubscribe = "group_event_unsubscribe"
     case unsupported = "unsupported"
@@ -418,6 +420,8 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .syncSnapshot: .syncSnapshot
     case .snapshotPagePull: .snapshotPagePull
     case .snapshotAck: .snapshotAck
+    case .listRoomMembers: .listRoomMembers
+    case .groupEventPull: .groupEventPull
     case .groupEventSubscribe: .groupEventSubscribe
     case .groupEventUnsubscribe: .groupEventUnsubscribe
     default: .unsupported

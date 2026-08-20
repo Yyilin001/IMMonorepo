@@ -304,13 +304,25 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         switch envelope.body {
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
+        case .listRoomMembers,
+             .groupEventPull,
+             .groupEventSubscribe,
+             .listReadReceiptReaders,
+             .getLiveActivityPreferences,
+             .subscribePresence,
+             .subscribeTyping:
+            // These commands authoritatively read persisted state, but they
+            // never mutate it. Keep their bounded waiting separate from
+            // writes so an active room-log catch-up cannot starve message
+            // acceptance. Authorization remains in each domain service.
+            return .interactiveRead
         case .groupEventUnsubscribe, .unsubscribePresence, .unsubscribeTyping:
             // These commands only release process-local subscription state or
             // return a static success envelope. They must remain available to
             // shed resources while PostgreSQL is overloaded.
             return nil
         default:
-            return .foreground
+            return .foregroundWrite
         }
     }
 

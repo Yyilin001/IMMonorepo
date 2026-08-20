@@ -75,7 +75,7 @@ services:
       # Four event loops expose a 64-connection Gateway ceiling. The role
       # values below are retained for controlled isolation A/B runs, but the
       # default shared topology lets a hot class borrow idle capacity. The
-      # foreground/Sync admission limits below reserve 16 shared slots for
+      # write/read/Sync admission limits below reserve 16 shared slots for
       # durable workers before Fluent pool wait. PostgreSQL max_connections
       # must separately include Account, Operator and operational headroom.
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 16
@@ -88,7 +88,12 @@ services:
       # workload proves a role split improves both foreground and convergence
       # SLOs. The role budgets above remain an explicit rollback experiment.
       IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "false"
-      IM_V2_FOREGROUND_DATABASE_WORK_LIMIT: 32
+      # Writes have a larger reservation than room-log and other interactive
+      # reads. Their sum remains 32, so this cannot create more PostgreSQL
+      # work than the prior foreground limit; it only prevents read storms
+      # from exhausting send capacity.
+      IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT: 24
+      IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT: 8
       IM_V2_SYNC_DATABASE_WORK_LIMIT: 16
       IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE: 256
       IM_V2_MAX_DELIVERY_CONCURRENCY: 8

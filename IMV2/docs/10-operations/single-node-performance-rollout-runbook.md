@@ -9,9 +9,9 @@
 | --- | ---: |
 | 共享 pool ceiling / event loop | 16 |
 | workload pool isolation | `false` |
-| foreground admitted in-flight | 32 |
+| foreground write / interactive read admitted in-flight | 24 / 8 |
 | Sync admitted in-flight | 16 |
-| foreground / Sync 短队列 | 384 / 128 |
+| foreground write / interactive read / Sync 短队列 | 288 / 96 / 128 |
 | Projection concurrency / unique user schema | 2 |
 | Delivery concurrency ceiling / foreground-safe level | 8 / 4 |
 | Projection busy-drain pass / time budget | 16 / 50 ms |
@@ -26,9 +26,9 @@
 
 以上 Gateway 总连接 ceiling 为 `4 × 16 = 64`，但连接按需建立。Account、Operator 也各自按其 EventLoop 数乘每 loop ceiling 计算，不能再按一个长期 `app.db` 句柄估算。其他环境必须把所有进程、物理数据库 URL 和运维连接预算相加；不要让理论最大值等于 PostgreSQL `max_connections`。
 
-配置中保留的 foreground/Sync/Delivery/Projection/Maintenance 每-loop 数值只在显式启用 workload isolation 时生效。当前默认不启用；固定角色池在相同负载下不能借用空闲连接，曾出现总吞吐回退。若实验启用，多个 schema 共用同一数据库 URL 时，Projection pool 至少覆盖每个 schema 的 `projector concurrency + 1 snapshot builder`。
+配置中保留的 foreground/Sync/Delivery/Projection/Maintenance 每-loop 数值只在显式启用 workload isolation 时生效。当前默认不启用；固定角色池在相同负载下不能借用空闲连接，曾出现总吞吐回退。写入和交互读取是同一 foreground pool 上的两个准入预算，二者的 in-flight 和队列分别受限，不能相加后超过 pool；若实验启用，多个 schema 共用同一数据库 URL 时，Projection pool 至少覆盖每个 schema 的 `projector concurrency + 1 snapshot builder`。
 
-表中 `512 / 200 ms` 是正常业务流量的起始保护值。压测工具若在连接完成后一次释放 1,000 个初始化命令和 Full Sync，可仅在 load-test Compose overlay 中保持 foreground/Sync in-flight 不变，将短队列临时调为 2,048、等待时间调为 5,000 ms。这样仍限制数据库并发，只吸收已知的有界测试突发；不能把这组值直接当作生产默认值。
+表中 `288 / 96 / 128 / 200 ms` 是正常业务流量的起始保护值。压测工具若在连接完成后一次释放 1,000 个初始化命令和 Full Sync，可仅在 load-test Compose overlay 中保持 write/read/Sync in-flight 不变，将短队列临时调为 `1,152 / 384 / 1,536`、等待时间调为 5,000 ms。这样仍限制数据库并发，只吸收已知的有界测试突发；不能把这组值直接当作生产默认值。
 
 单机吞吐上限测试可以在 load-test overlay 中暂时关闭 workload pool isolation，让空闲角色把连接借给当前热点角色；admission、worker concurrency 和队列上限仍须开启。该结果代表吞吐 ceiling，不代表具备故障隔离的生产 SLO。若共享池下出现 Sync/foreground 相互饿死，应恢复上述固定角色预算。
 
@@ -65,6 +65,7 @@
 - `im_v2_database_work_queued{class=...}`：连续 1 分钟大于 0 告警；
 - `im_v2_database_work_rejections_total{class=...,reason=...}`：5 分钟增量大于总命令 0.5% 告警，并区分 queue-full 与 timeout；
 - `im_v2_database_work_cancellations_total{class=...}`：客户端取消单独计数，不属于过载；
+- `im_v2_database_work_queue_wait_milliseconds{class=...}`：先看 write 与 interactive-read 的 P95；它升高而 PostgreSQL SQL mean 未升高时，说明瓶颈是前台准入/数据库竞争，不应仅靠加大队列掩盖；
 - `im_v2_database_pool_event_loop_handles{pool=...}` 与 `im_v2_database_pool_connection_ceiling{pool=...}`：必须与部署预算一致；
 - `im_v2_sync_wake_pending_users`：持续接近 ceiling 告警；
 - `im_v2_sync_wake_in_flight_users`、`im_v2_sync_wake_delivered_total`：判断 downstream 是否停滞；

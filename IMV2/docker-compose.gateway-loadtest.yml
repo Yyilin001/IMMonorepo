@@ -41,13 +41,14 @@ services:
       IM_V2_USER_COMMAND_BURST: 1024
       # The benchmark deliberately releases as many as 1,000 idempotent
       # open-direct-room commands in one second after connection ramp-up. Keep
-      # the server override's foreground/Sync in-flight limits (32/16), but
+      # the server override's write/read/Sync in-flight limits (24/8/16), but
       # give that bounded burst a larger queue and deadline so the benchmark
       # measures steady-state database capacity instead of the normal 200 ms
       # overload policy. Initial Sync pull/ack traffic can briefly exceed one
       # request per client, so its test-only queue uses the same 1,536 bound;
       # the 16-request in-flight limit still protects PostgreSQL.
-      IM_V2_FOREGROUND_DATABASE_WORK_MAX_QUEUED: 1536
+      IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED: 1152
+      IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED: 384
       IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED: 1536
       IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS: 5000
       # Measure the single-node throughput ceiling with one shared 64-slot

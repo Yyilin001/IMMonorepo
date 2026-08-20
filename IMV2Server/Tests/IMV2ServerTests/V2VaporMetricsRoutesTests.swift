@@ -79,10 +79,20 @@ struct V2VaporMetricsRoutesTests {
         let telemetry = V2PrometheusTelemetrySink()
         let source = RuntimePressureMetricsProbe(snapshot: .init(
             databaseWork: .init(
-                foreground: .init(
+                foregroundWrite: .init(
                     inFlight: 4, queued: 3, admittedRequests: 20,
                     queueFullRejections: 2, timeoutRejections: 3,
-                    cancelledRequests: 1
+                    cancelledRequests: 1,
+                    queueWait: .init(
+                        samples: 5,
+                        sumMilliseconds: 75,
+                        cumulativeBuckets: [.milliseconds25: 4, .milliseconds50: 5]
+                    )
+                ),
+                interactiveRead: .init(
+                    inFlight: 1, queued: 2, admittedRequests: 12,
+                    queueFullRejections: 4, timeoutRejections: 0,
+                    cancelledRequests: 0
                 ),
                 sync: .init(
                     inFlight: 2, queued: 1, admittedRequests: 10,
@@ -111,9 +121,13 @@ struct V2VaporMetricsRoutesTests {
 
         try await app.testing().test(.GET, "metrics") { response async throws in
             let body = response.body.string
-            #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground\"} 4"))
+            #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
+            #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
             #expect(body.contains("im_v2_database_work_queued{class=\"sync\"} 1"))
-            #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground\",reason=\"timeout\"} 3"))
+            #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground_write\",reason=\"timeout\"} 3"))
+            #expect(body.contains("im_v2_database_work_queue_wait_milliseconds_bucket{class=\"foreground_write\",le=\"25\"} 4"))
+            #expect(body.contains("im_v2_database_work_queue_wait_milliseconds_bucket{class=\"foreground_write\",le=\"+Inf\"} 5"))
+            #expect(body.contains("im_v2_database_work_queue_wait_milliseconds_sum{class=\"foreground_write\"} 75"))
             #expect(body.contains("im_v2_database_pool_event_loop_handles{pool=\"shared\"} 4"))
             #expect(body.contains("im_v2_sync_wake_delivered_total 9"))
             #expect(body.contains("im_v2_database_pool_connection_ceiling{pool=\"shared\"} 64"))
