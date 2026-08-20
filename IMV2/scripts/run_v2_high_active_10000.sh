@@ -17,6 +17,12 @@ repo_root="$(cd "${script_directory}/../.." && pwd)"
 scenario_path="${repo_root}/IMV2/load-scenarios/high-active-10000.json"
 runner="${script_directory}/run_v2_gateway_load_guarded.sh"
 summarizer="${script_directory}/summarize_v2_high_active_10000.sh"
+ramp_per_second="${IM_V2_HIGH_ACTIVE_RAMP_PER_SECOND:-150}"
+
+[[ "${ramp_per_second}" =~ ^[1-9][0-9]*$ ]] && (( ramp_per_second <= 1000 )) || {
+  printf 'IM_V2_HIGH_ACTIVE_RAMP_PER_SECOND must be an integer from 1 through 1000\n' >&2
+  exit 64
+}
 
 [[ -f "${ca_path}" && -f "${credentials_a}" && -f "${credentials_b}" && -f "${scenario_path}" ]] || {
   printf 'missing CA, credential, or scenario file\n' >&2
@@ -48,7 +54,7 @@ run_worker() {
     --report "${report_directory}/worker-${worker}.json" \
     --revision "${revision}-worker-${worker}" \
     --connections 5000 \
-    --ramp-per-second 150 \
+    --ramp-per-second "${ramp_per_second}" \
     --ramp-batch-size 50 \
     --workload-ramp-per-second 100 \
     --hold-seconds 60 \

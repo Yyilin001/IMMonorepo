@@ -64,6 +64,11 @@ mkdir -p /tmp/imv2-high-active-reports
   /tmp/imv2-high-active-reports <revision>
 ```
 
+默认每个 worker 以 150 次 TLS 连接/秒爬坡（总计 300 次/秒），用于同时测量上线
+风暴。若该阶段本身成为独立瓶颈，可设置
+`IM_V2_HIGH_ACTIVE_RAMP_PER_SECOND=50`，以总计 100 次/秒建立 10,000 条连接；报告
+必须保留该值，且不能把慢爬坡的成功解读为上线风暴也通过。
+
 脚本会并发启动两个 5,000 连接 worker，并将每个阶段速率缩放为 50%；因此两者的
 和才是上表速率。所有 direct room 在计时前完成预热；预热失败或工作负载错误率超过
 0.1% 会停止测试。成功结束后自动生成 `summary.json`：它只在两个 worker 都达到
