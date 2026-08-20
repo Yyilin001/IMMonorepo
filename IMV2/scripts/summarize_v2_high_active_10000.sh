@@ -8,8 +8,14 @@ fi
 
 report_directory="$1"
 summary_path="$2"
+expected_connections="${IM_V2_HIGH_ACTIVE_EXPECTED_CONNECTIONS:-10000}"
 worker_a="${report_directory}/worker-a.json"
 worker_b="${report_directory}/worker-b.json"
+
+[[ "${expected_connections}" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'IM_V2_HIGH_ACTIVE_EXPECTED_CONNECTIONS must be a positive integer\n' >&2
+  exit 64
+}
 
 command -v jq >/dev/null 2>&1 || {
   printf 'missing required command: jq\n' >&2
@@ -23,7 +29,7 @@ command -v jq >/dev/null 2>&1 || {
 mkdir -p "$(dirname "${summary_path}")"
 umask 077
 
-jq -es '
+jq -es --argjson expectedConnections "${expected_connections}" '
   def total($field): map(.[$field] // 0) | add;
   def maximum($path): map(getpath($path) // 0) | max;
   def ratio($numerator; $denominator):
@@ -58,6 +64,7 @@ jq -es '
   | {
       scenarioName: ([.[].scenarioName] | unique),
       workers: length,
+      expectedConnections: $expectedConnections,
       requestedConnections: $requested,
       authenticated: total("authenticated"),
       peakActive: $peakActive,
@@ -90,8 +97,8 @@ jq -es '
       executionGates: {
         expectedScenario: (all(.[]; .scenarioName == "high-active-10000-v1")),
         twoWorkers: (length == 2),
-        requestedTenThousand: ($requested == 10000),
-        reachedTenThousandPeak: ($peakActive == 10000),
+        requestedExpectedConnections: ($requested == $expectedConnections),
+        reachedExpectedConnectionsPeak: ($peakActive == $expectedConnections),
         noTerminalError: (all(.[]; .terminalError == null)),
         workloadFailureAtMostPointOnePercent: (ratio($workloadFailed; ($directAttempts + $messagesSent + $syncPullsSent)) <= 0.001)
       }
@@ -101,8 +108,8 @@ jq -es '
 jq -e '
   .executionGates.expectedScenario
   and .executionGates.twoWorkers
-  and .executionGates.requestedTenThousand
-  and .executionGates.reachedTenThousandPeak
+  and .executionGates.requestedExpectedConnections
+  and .executionGates.reachedExpectedConnectionsPeak
   and .executionGates.noTerminalError
   and .executionGates.workloadFailureAtMostPointOnePercent
 ' "${summary_path}" >/dev/null || {

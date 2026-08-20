@@ -18,9 +18,14 @@ scenario_path="${repo_root}/IMV2/load-scenarios/high-active-10000.json"
 runner="${script_directory}/run_v2_gateway_load_guarded.sh"
 summarizer="${script_directory}/summarize_v2_high_active_10000.sh"
 ramp_per_second="${IM_V2_HIGH_ACTIVE_RAMP_PER_SECOND:-150}"
+connections_per_worker="${IM_V2_HIGH_ACTIVE_CONNECTIONS_PER_WORKER:-5000}"
 
 [[ "${ramp_per_second}" =~ ^[1-9][0-9]*$ ]] && (( ramp_per_second <= 1000 )) || {
   printf 'IM_V2_HIGH_ACTIVE_RAMP_PER_SECOND must be an integer from 1 through 1000\n' >&2
+  exit 64
+}
+[[ "${connections_per_worker}" =~ ^[1-9][0-9]*$ ]] && (( connections_per_worker <= 5000 )) || {
+  printf 'IM_V2_HIGH_ACTIVE_CONNECTIONS_PER_WORKER must be an integer from 1 through 5000\n' >&2
   exit 64
 }
 
@@ -53,7 +58,7 @@ run_worker() {
     --credentials "${credentials}" \
     --report "${report_directory}/worker-${worker}.json" \
     --revision "${revision}-worker-${worker}" \
-    --connections 5000 \
+    --connections "${connections_per_worker}" \
     --ramp-per-second "${ramp_per_second}" \
     --ramp-batch-size 50 \
     --workload-ramp-per-second 100 \
@@ -84,5 +89,6 @@ trap cleanup INT TERM
 
 wait "${worker_a_pid}"
 wait "${worker_b_pid}"
-"${summarizer}" "${report_directory}" "${report_directory}/summary.json"
+IM_V2_HIGH_ACTIVE_EXPECTED_CONNECTIONS="$(( connections_per_worker * 2 ))" \
+  "${summarizer}" "${report_directory}" "${report_directory}/summary.json"
 printf 'high-active 10000 scenario completed; reports: %s\n' "${report_directory}"
