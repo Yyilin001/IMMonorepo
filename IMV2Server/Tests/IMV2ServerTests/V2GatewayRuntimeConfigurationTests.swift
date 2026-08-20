@@ -80,6 +80,22 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 16)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
 
+        var highActivityAppendBatch = appendBatch
+        highActivityAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "20"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(highActivityAppendBatch)
+        ).directRoomLogAppendBatchMaximumDelayMilliseconds == 20)
+
+        var excessiveAppendBatchDelay = appendBatch
+        excessiveAppendBatchDelay["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "26"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(excessiveAppendBatchDelay)
+            )
+        }
+
         var appendBatchWithoutCredits = roomLog
         appendBatchWithoutCredits["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "16"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(

@@ -535,7 +535,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
         ) ?? "2"
         guard let parsedDirectRoomLogAppendBatchDelay = Int(rawDirectRoomLogAppendBatchDelay),
-              (1 ... 10).contains(parsedDirectRoomLogAppendBatchDelay)
+              // A bounded high-activity profile may trade a small, explicit
+              // amount of queueing for fewer room-log transactions.  Keep a
+              // hard interactive ceiling: this is not a general retry or
+              // backoff knob and must never grow without a latency review.
+              (1 ... 25).contains(parsedDirectRoomLogAppendBatchDelay)
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"
