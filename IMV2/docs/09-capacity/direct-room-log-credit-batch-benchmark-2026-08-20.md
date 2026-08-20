@@ -45,6 +45,15 @@ The batch arm exported 24,213 committed credits, 24,352 reserved credits, and
 between reserved and committed credits is bounded, conservative headroom from
 active batches; it is expected and is not a lost message.
 
+## Steady-state regression command
+
+`direct-1500-steady-900.json` separates the one-time connection/direct-room
+warmup from the hot message phase. It is the correct follow-up workload when
+testing the durable message path at 1,500 connected devices: the generator
+waits until all 4,500 direct-room opens have completed, then runs exactly 60
+seconds at 900 sends/s and 900 room-log reads/s. This prevents control-plane
+room creation from being mistaken for a steady messaging capacity limit.
+
 ## WAL and group-commit observations
 
 The batch-0 profile recorded 39,305 WAL writes and 38,061 WAL syncs during its
