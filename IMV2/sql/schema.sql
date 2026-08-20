@@ -2575,8 +2575,6 @@ CREATE INDEX messages_forwarded_from_idx ON im_v2.messages USING btree (forwarde
 
 CREATE INDEX messages_reply_to_message_idx ON im_v2.messages USING btree (reply_to_message_id) WHERE (reply_to_message_id IS NOT NULL);
 
-CREATE INDEX messages_room_sender_idx ON im_v2.messages USING btree (room_id, sender_user_id);
-
 CREATE INDEX moderation_audit_retention_idx ON im_v2.moderation_audit_entries USING btree (retain_until);
 
 CREATE INDEX moderation_operations_cleanup_idx ON im_v2.moderation_operations USING btree (created_at);

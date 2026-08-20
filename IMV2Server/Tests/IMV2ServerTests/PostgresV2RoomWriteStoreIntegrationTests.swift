@@ -46,6 +46,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT to_regclass('im_v2.user_sync_log_nonfanout_identity_idx') IS NOT NULL AS exists
                 """).first(decoding: ExistsRow.self))
             #expect(nonFanoutSyncIdentityIndexExists.exists)
+            // The message table's room-sequence uniqueness indexes already
+            // cover the only room-only existence probe.  A second
+            // `(room_id, sender_user_id)` btree would add write amplification
+            // to every accepted message without a selective read consumer.
+            let redundantMessageRoomSenderIndexIsAbsent = try #require(
+                try await sql.raw("""
+                    SELECT to_regclass('im_v2.messages_room_sender_idx') IS NULL AS exists
+                    """).first(decoding: ExistsRow.self)
+            )
+            #expect(redundantMessageRoomSenderIndexIsAbsent.exists)
             let projectionReadyOrderIndexExists = try #require(try await sql.raw("""
                 SELECT to_regclass(
                     'im_v2.user_projection_checkpoints_ready_order_idx'

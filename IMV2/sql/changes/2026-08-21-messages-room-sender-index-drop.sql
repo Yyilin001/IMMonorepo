@@ -1,0 +1,11 @@
+-- Run this change outside an explicit transaction.  The narrower
+-- `messages_room_sender_idx (room_id, sender_user_id)` has no consumer that
+-- constrains `sender_user_id`: the only production query asks whether a room
+-- has any message.  Both unique room-sequence indexes already have `room_id`
+-- as their leading column and satisfy that existence probe.
+--
+-- Keeping the extra index made every accepted message update one additional
+-- btree while providing no selective read path.  CONCURRENTLY keeps the
+-- migration non-blocking for foreground sends; a cancelled invocation is
+-- safely repeatable because of IF EXISTS.
+DROP INDEX CONCURRENTLY IF EXISTS im_v2.messages_room_sender_idx;
