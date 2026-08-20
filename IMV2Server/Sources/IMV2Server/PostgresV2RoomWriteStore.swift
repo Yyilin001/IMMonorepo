@@ -196,17 +196,15 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             commits.reserveCapacity(orderedRequests.count)
             do {
                 let sql = try sqlDatabase(from: transaction)
-                // Each advisory lock remains a separate statement by design:
-                // it establishes the post-lock snapshot needed to observe a
-                // concurrent idempotent result. The following preflight then
-                // locks and reads every distinct room in one set-based query.
-                for item in orderedRequests {
-                    try await acquireMessageOperationLock(
-                        senderID: item.senderID,
-                        clientMessageID: try uuid(item.request.command.clientMessageID),
-                        sql: sql
-                    )
-                }
+                // The recursive CTE acquires precisely the same advisory
+                // locks in the already-established room order, but avoids one
+                // SQL round trip per input.  It is intentionally separate
+                // from the following preflight statement: PostgreSQL fixes a
+                // statement snapshot before evaluating the CTE, whereas the
+                // preflight must begin *after every* operation fence has been
+                // acquired in order to observe a concurrently committed
+                // idempotent result.
+                try await acquireMessageOperationLocks(orderedRequests, sql: sql)
                 let contexts = try await loadPlainDirectRoomLogBatchContexts(
                     orderedRequests,
                     sql: sql
@@ -1010,6 +1008,59 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     ) async throws {
         let key = "v2-message-operation:" + senderID.uuidString + ":" + clientMessageID.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+
+    /// Acquires a whole already-sorted micro-batch of idempotency fences in
+    /// one statement.  The recursive dependency is deliberate: it makes the
+    /// locking order explicit to PostgreSQL, rather than relying on an
+    /// incidental executor order for a set-returning query.  The caller must
+    /// issue its authoritative preflight as the *next* statement so it gets
+    /// a fresh post-lock snapshot.
+    private func acquireMessageOperationLocks(
+        _ ordered: [OrderedRoomWriteRequest],
+        sql: any SQLDatabase
+    ) async throws {
+        guard !ordered.isEmpty,
+              ordered.enumerated().allSatisfy({ $0.offset == $0.element.preflightOrdinal })
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let inputs = try ordered.enumerated().map { ordinal, item in
+            MessageOperationLockInput(
+                ordinal: ordinal,
+                senderID: item.senderID,
+                clientMessageID: try uuid(item.request.command.clientMessageID)
+            )
+        }
+        let inputsJSON = try roomWriteJSON(inputs)
+        let expectedCount = Int64(inputs.count)
+        guard let row = try await sql.raw("""
+            WITH RECURSIVE input AS MATERIALIZED (
+                SELECT input.ordinal,
+                       hashtextextended(
+                           'v2-message-operation:' || input.sender_id::text || ':' || input.client_message_id::text,
+                           0
+                       ) AS lock_key
+                FROM jsonb_to_recordset(\(bind: inputsJSON)::jsonb) AS input(
+                    ordinal integer,
+                    sender_id uuid,
+                    client_message_id uuid
+                )
+            ), locked(ordinal, lock_acquired) AS (
+                SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
+                FROM input
+                WHERE input.ordinal = 0
+
+                UNION ALL
+
+                SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
+                FROM locked AS previous
+                JOIN input
+                  ON input.ordinal = previous.ordinal + 1
+            )
+            SELECT count(*)::bigint AS acquired_count
+            FROM locked
+            """).first(decoding: MessageOperationLockBatchRow.self),
+              row.acquiredCount == expectedCount
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }
 
     /// Batch variant of the direct room-log preflight. The process-local
@@ -3651,6 +3702,30 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
         case senderID = "sender_id"
         case clientMessageID = "client_message_id"
         case nowUnixSeconds = "now_unix_seconds"
+    }
+}
+
+/// One row of the ordered idempotency-fence batch.  It intentionally keeps
+/// the original ordinal even though `OrderedRoomWriteRequest` happens to
+/// carry it too: the SQL recursive edge is the durable assertion that no
+/// command can be skipped or reordered while taking advisory locks.
+private struct MessageOperationLockInput: Encodable {
+    let ordinal: Int
+    let senderID: UUID
+    let clientMessageID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case senderID = "sender_id"
+        case clientMessageID = "client_message_id"
+    }
+}
+
+private struct MessageOperationLockBatchRow: Decodable {
+    let acquiredCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case acquiredCount = "acquired_count"
     }
 }
 
