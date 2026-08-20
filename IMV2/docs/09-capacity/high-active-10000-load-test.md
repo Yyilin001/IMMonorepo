@@ -27,7 +27,21 @@ room，room-log 读取不会退化为仅发送者自读。
 ## 准备
 
 1. 仅使用可清理的压测账号和数据库；不要把凭证提交到仓库。
-2. 两份 JSONL 各含 5,000 个不同设备。现有造号脚本每份上限正好为 5,000。
+2. 两份 JSONL 各含 5,000 个不同设备。现有造号脚本每份上限正好为 5,000；在
+   压测专用账号服务已放宽创建限额时，以最多 16 个并发请求生成两份：
+
+```bash
+IM_V2_LOAD_CREDENTIAL_PREPARE_PARALLELISM=16 \
+IM_V2_LOAD_CURL_RESOLVE=localhost:443:<gateway-ip> \
+  ./IMV2/scripts/prepare_v2_gateway_load_credentials.sh \
+  https://localhost <ca-path> 5000 <credentials-a.jsonl>
+IM_V2_LOAD_CREDENTIAL_PREPARE_PARALLELISM=16 \
+IM_V2_LOAD_CURL_RESOLVE=localhost:443:<gateway-ip> \
+  ./IMV2/scripts/prepare_v2_gateway_load_credentials.sh \
+  https://localhost <ca-path> 5000 <credentials-b.jsonl>
+```
+
+   两次生成必须顺序执行，避免在同一个压测机上把账号创建流量意外放大为 32 并发。
 3. 在测试开始前刷新两份凭证，refresh token 会轮换，原文件保留为回滚输入：
 
 ```bash

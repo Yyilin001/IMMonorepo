@@ -11,6 +11,16 @@ ca_path="$2"
 input_path="$3"
 output_path="${4:-}"
 parallelism="${IM_V2_LOAD_CREDENTIAL_REFRESH_PARALLELISM:-16}"
+curl_resolve="${IM_V2_LOAD_CURL_RESOLVE:-}"
+curl_options=()
+
+if [[ -n "${curl_resolve}" ]]; then
+  [[ "${curl_resolve}" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}:[0-9A-Fa-f:.]+$ ]] || {
+    printf 'IM_V2_LOAD_CURL_RESOLVE must have host:port:address form\n' >&2
+    exit 64
+  }
+  curl_options+=(--resolve "${curl_resolve}")
+fi
 
 [[ -f "${ca_path}" && -f "${input_path}" ]] || {
   printf 'CA or input credential file does not exist\n' >&2
@@ -45,7 +55,7 @@ refresh_one() {
   local operation_id payload issued
   operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   payload="$(printf '%s' "${record}" | jq -ce --arg operationID "${operation_id}" '{userID,deviceID,refreshCredential,operationID:$operationID}')"
-  issued="$(printf '%s' "${payload}" | curl --silent --show-error --fail \
+  issued="$(printf '%s' "${payload}" | curl "${curl_options[@]}" --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \
