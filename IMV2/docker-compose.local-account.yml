@@ -10,7 +10,11 @@ services:
       POSTGRES_PASSWORD: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
     volumes:
       - v2-local-account-postgres:/var/lib/postgresql/data
-      - ./sql:/docker-entrypoint-initdb.d:ro
+      # Mount the canonical initialization files explicitly. Mounting the
+      # whole directory makes a fresh cluster depend on the lexical ordering
+      # of any stale deployment-side SQL artifacts.
+      - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
