@@ -112,7 +112,15 @@ for ((index = existing_count; index < credential_count; index += 1)); do
     pids=()
   fi
 done
-for pid in "${pids[@]}"; do wait "${pid}"; done
+# macOS ships Bash 3.2.  Under `set -u`, assigning `pids=()` after a
+# full parallel batch leaves an empty indexed array unset, so expanding
+# `${pids[@]}` here aborts when the requested count is an exact multiple of
+# the parallelism (including a one-account smoke check).  The defaulted
+# expansion keeps the final drain a no-op in that case.
+for pid in "${pids[@]:-}"; do
+  [[ -n "${pid}" ]] || continue
+  wait "${pid}"
+done
 
 for ((index = existing_count; index < credential_count; index += 1)); do
   [[ -s "${temporary_directory}/${index}" ]] || {
