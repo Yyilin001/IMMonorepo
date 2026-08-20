@@ -9,8 +9,8 @@ services:
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: "16"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: "2"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS: "20"
-      # Two arrivals inside 20 ms identifies sustained aggregate traffic soon
-      # enough that the 2 ms base timer has not already fragmented most
-      # batches. Isolated sends continue to use the base delay.
-      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS: "2"
-      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS: "20"
+      # A one-second, 20-request threshold filters event-loop microbursts but
+      # enters high-activity mode within about 22 ms at the 900 msg/s test
+      # load. Isolated and low-rate sends continue to use the base delay.
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS: "20"
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS: "1000"
