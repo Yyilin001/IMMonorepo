@@ -6,14 +6,15 @@ services:
   gateway:
     environment:
       IM_V2_DIRECT_FANOUT_MODE: room_log
-      # The direct room event is the authoritative delivery record. User and
-      # device limits, durable shard admission, stranger quota and direct
-      # policy locks remain enforced; avoid rewriting the otherwise idle
-      # room-local command counter for every ordinary direct message.
-      IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: shard_only
+      # A clean, same-host A/B found that bypassing this per-room counter did
+      # not improve the real room-log workload. Keep the proven room-local
+      # admission path as the deployment default; `shard_only` remains an
+      # explicitly opt-in experiment guarded by the runtime configuration.
+      IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: room
       # Reserve shard command-window capacity in bounded durable batches for
       # the fixed-audience direct room-log path. PostgreSQL remains the
       # authority; an interrupted process can only leave up to 31 already
       # charged credits unused for its current shard/lease. This removes the
-      # per-message shard admission update without weakening message commits.
-      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "32"
+      # The credit batch is meaningful only for the opt-in shard_only path.
+      # Keep it disabled with the default room admission mode.
+      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "0"

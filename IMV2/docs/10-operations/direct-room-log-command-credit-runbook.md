@@ -5,6 +5,12 @@ write path. It removes most of the serialized per-message updates to the
 shard admission pool; it does not change message durability, authorization,
 idempotency, or the command-window limit.
 
+It is **not** the deployment default. A clean, same-host 1,500-connection
+room-log A/B measured worse message and room-log P95 with `shard_only`; see
+[the benchmark](../09-capacity/direct-room-log-admission-mode-ab-2026-08-21.md).
+Use the normal `room` mode and a batch size of `0` unless conducting a new,
+controlled experiment.
+
 ## Preconditions
 
 - IM_V2_DIRECT_FANOUT_MODE=room_log
