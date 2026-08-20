@@ -8763,6 +8763,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 shadowForwarder: SuccessfulProjectionShadowForwarder(),
                 contentReviewMode: .disabled,
                 directFanoutMode: .roomLog,
+                directRoomLogAdmissionMode: .shardOnly,
                 shardAdmissionCommandCreditPool: shardCredits
             )
             let messages = V2SendMessageService(
@@ -8810,6 +8811,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     shadowForwarder: SuccessfulProjectionShadowForwarder(),
                     contentReviewMode: .enabled,
                     directFanoutMode: .roomLog,
+                    directRoomLogAdmissionMode: .shardOnly,
                     shardAdmissionCommandCreditPool: shardCredits
                 ),
                 capacityProfile: profile,
@@ -8901,6 +8903,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 0)
             #expect(try await count("im_v2.room_outbox", on: sql) == 0)
             #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
+            // Shard-only admission deliberately leaves the room-local
+            // command window unchanged. The durable shard credit is the
+            // command-capacity authority for these direct room-log sends.
+            let roomAdmission = try #require(try await sql.raw("""
+                SELECT command_window_used, fanout_window_used
+                FROM im_v2.room_admission
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).first(decoding: CapacityRow.self))
+            #expect(roomAdmission.commandWindowUsed == 0)
+            #expect(roomAdmission.fanoutWindowUsed == 0)
             let creditedAdmission = try #require(try await sql.raw("""
                 SELECT command_window_used, fanout_window_used
                 FROM im_v2.shard_admission_pools

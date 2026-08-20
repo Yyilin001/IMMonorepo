@@ -349,6 +349,7 @@ enum IMV2ServerApp {
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
                     directFanoutMode: configuration.directFanoutMode,
+                    directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                     payloadWriteMode: configuration.fanoutPayloadWriteMode,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
                 ),
@@ -487,6 +488,7 @@ enum IMV2ServerApp {
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
                     directFanoutMode: configuration.directFanoutMode,
+                    directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                     payloadWriteMode: configuration.fanoutPayloadWriteMode,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
                 ),

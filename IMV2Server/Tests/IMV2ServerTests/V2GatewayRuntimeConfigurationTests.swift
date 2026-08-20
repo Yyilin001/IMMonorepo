@@ -20,6 +20,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.messageProjectionReadMode == .preferShared)
         #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
         #expect(defaults.directFanoutMode == .planner)
+        #expect(defaults.directRoomLogAdmissionMode == .room)
         #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
@@ -45,6 +46,22 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(roomLog)
         ).directFanoutMode == .roomLog)
+
+        var shardOnlyAdmission = roomLog
+        shardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(shardOnlyAdmission)
+        ).directRoomLogAdmissionMode == .shardOnly)
+
+        var shardOnlyAdmissionOutsideRoomLog = runtimeValues
+        shardOnlyAdmissionOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(shardOnlyAdmissionOutsideRoomLog)
+            )
+        }
 
         var credits = roomLog
         credits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"

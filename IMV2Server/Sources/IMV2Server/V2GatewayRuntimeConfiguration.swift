@@ -47,6 +47,20 @@ public enum V2DirectFanoutMode: String, Equatable, Sendable {
     case roomLog = "room_log"
 }
 
+/// Controls which durable command-rate fence applies to ordinary direct
+/// messages when their canonical delivery record is the room event log.
+/// This is deployment policy, never client input.
+///
+/// `room` preserves the original per-room command window. `shardOnly` keeps
+/// the durable shard command window, gateway user/device rate limits, direct
+/// policy checks and stranger quota, but does not rewrite the otherwise idle
+/// per-room command counter for every direct message. It is intentionally
+/// valid only together with `V2DirectFanoutMode.roomLog`.
+public enum V2DirectRoomLogAdmissionMode: String, Equatable, Sendable {
+    case room
+    case shardOnly = "shard_only"
+}
+
 /// Controls whether an accepted-message incremental sync body is retained in
 /// the fan-out payload table or represented by its immutable message-state
 /// reference. Readers always support both forms so this can be rolled out
@@ -269,6 +283,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let messageProjectionWriteMode: V2MessageProjectionWriteMode
     public let messageProjectionReadMode: V2MessageProjectionReadMode
     public let directFanoutMode: V2DirectFanoutMode
+    /// A direct room-log-only deployment fence. The default retains exact
+    /// legacy room admission semantics.
+    public let directRoomLogAdmissionMode: V2DirectRoomLogAdmissionMode
     /// Zero preserves exact per-message shard admission. A positive value is
     /// an explicit, direct-room-log-only batch size for pre-charged command
     /// credits; it is never enabled by a client request.
@@ -467,6 +484,18 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")
         }
         directFanoutMode = parsedDirectFanoutMode
+        let rawDirectRoomLogAdmissionMode = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE", environment: environment
+        )?.lowercased() ?? V2DirectRoomLogAdmissionMode.room.rawValue
+        guard let parsedDirectRoomLogAdmissionMode = V2DirectRoomLogAdmissionMode(
+            rawValue: rawDirectRoomLogAdmissionMode
+        ), parsedDirectRoomLogAdmissionMode == .room || parsedDirectFanoutMode == .roomLog
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
+            )
+        }
+        directRoomLogAdmissionMode = parsedDirectRoomLogAdmissionMode
         let rawDirectRoomLogShardCreditBatchSize = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE", environment: environment
         ) ?? "0"

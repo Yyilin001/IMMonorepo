@@ -16,6 +16,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private let shadowForwarder: any V2UserShardProjectionShadowing
     private let contentReviewMode: V2ContentReviewMode
     private let directFanoutMode: V2DirectFanoutMode
+    private let directRoomLogAdmissionMode: V2DirectRoomLogAdmissionMode
     private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let directSendPolicyCache: V2DirectSendPolicyCache
     private let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
@@ -26,6 +27,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         shadowForwarder: any V2UserShardProjectionShadowing,
         contentReviewMode: V2ContentReviewMode,
         directFanoutMode: V2DirectFanoutMode = .planner,
+        directRoomLogAdmissionMode: V2DirectRoomLogAdmissionMode = .room,
         payloadWriteMode: V2FanoutPayloadWriteMode = .body,
         directSendPolicyCache: V2DirectSendPolicyCache = .init(),
         shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool? = nil
@@ -35,6 +37,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         self.shadowForwarder = shadowForwarder
         self.contentReviewMode = contentReviewMode
         self.directFanoutMode = directFanoutMode
+        self.directRoomLogAdmissionMode = directRoomLogAdmissionMode
         self.payloadWriteMode = payloadWriteMode
         self.directSendPolicyCache = directSendPolicyCache
         self.shardAdmissionCommandCreditPool = shardAdmissionCommandCreditPool
@@ -81,6 +84,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             // record; per-user Delivery/Inbox rows would only duplicate that
             // fact. This is deployment policy, not client input.
             let usesDirectRoomLog = room.kind == "direct" && directFanoutMode == .roomLog
+            let usesDirectRoomLogShardAdmission = usesDirectRoomLog
+                && directRoomLogAdmissionMode == .shardOnly
 
             // A completed command must replay its canonical result even if a
             // later membership change removes the sender. Otherwise a lost
@@ -225,15 +230,26 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
             }
             let result: V2SendMessageAcceptanceResult
             if usesDirectRoomLog {
-                result = try roomLogReduction(
-                    command: command,
-                    roomState: roomState,
-                    shardState: shardStateForReduction,
-                    profile: capacityProfile.limits,
-                    identifiers: identifiers,
-                    reliableTargetCount: 0,
-                    now: now
-                )
+                result = if usesDirectRoomLogShardAdmission {
+                    try directRoomLogShardOnlyReduction(
+                        command: command,
+                        roomState: roomState,
+                        shardState: shardStateForReduction,
+                        profile: capacityProfile.limits,
+                        identifiers: identifiers,
+                        now: now
+                    )
+                } else {
+                    try roomLogReduction(
+                        command: command,
+                        roomState: roomState,
+                        shardState: shardStateForReduction,
+                        profile: capacityProfile.limits,
+                        identifiers: identifiers,
+                        reliableTargetCount: 0,
+                        now: now
+                    )
+                }
             } else {
                 switch room.deliveryMode {
                 case .standardFanout:
@@ -1287,6 +1303,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 replyToMessageID: replyToMessageID,
                 forwardedFromMessageID: forwardedFromMessageID,
                 forwardedFromUserID: forwardedFromUserID,
+                persistsRoomAdmission: directRoomLogAdmissionMode == .room,
                 sql: sql
             )
             return
@@ -1816,6 +1833,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         replyToMessageID: String,
         forwardedFromMessageID: UUID?,
         forwardedFromUserID: UUID?,
+        persistsRoomAdmission: Bool,
         sql: any SQLDatabase
     ) async throws {
         let message = writeSet.acceptedMessage
@@ -1842,6 +1860,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 replyToMessageID: replyToMessageID,
                 forwardedFromMessageID: forwardedFromMessageID,
                 forwardedFromUserID: forwardedFromUserID,
+                persistsRoomAdmission: persistsRoomAdmission,
                 sql: sql
             )
             return
@@ -1863,19 +1882,27 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                     shard_lease_generation = \(bind: shardLeaseGeneration)
                 FROM room_update
                 WHERE admission.room_id = room_update.room_id
+                  AND \(bind: persistsRoomAdmission)
                 RETURNING admission.room_id
+            ), admission_passthrough AS (
+                SELECT room_id FROM room_update
+                WHERE NOT \(bind: persistsRoomAdmission)
+            ), admission_gate AS (
+                SELECT room_id FROM admission_update
+                UNION ALL
+                SELECT room_id FROM admission_passthrough
             ), message_insert AS (
                 INSERT INTO im_v2.messages
                     (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
                      client_message_id, text_body, rich_entities, reply_to_message_id,
                      forwarded_from_message_id, forwarded_from_user_id, created_at)
-                SELECT \(bind: messageID), admission_update.room_id, \(bind: roomSequence),
+                SELECT \(bind: messageID), admission_gate.room_id, \(bind: roomSequence),
                        \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
                        \(bind: message.text), \(bind: entitiesJSON)::jsonb,
                        NULLIF(\(bind: replyToMessageID), '')::uuid,
                        \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
                        \(bind: message.createdAt)
-                FROM admission_update
+                FROM admission_gate
                 RETURNING message_id, room_id
             ), review_insert AS (
                 INSERT INTO im_v2.content_review_jobs
@@ -1932,7 +1959,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 RETURNING event_id
             )
             SELECT (SELECT count(*) FROM room_update) AS room_count,
-                   (SELECT count(*) FROM admission_update) AS admission_count,
+                   (SELECT count(*) FROM admission_gate) AS admission_count,
                    (SELECT count(*) FROM message_insert) AS message_count,
                    (SELECT count(*) FROM review_insert) AS review_count,
                    (SELECT count(*) FROM media_insert) AS media_count,
@@ -1971,6 +1998,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         replyToMessageID: String,
         forwardedFromMessageID: UUID?,
         forwardedFromUserID: UUID?,
+        persistsRoomAdmission: Bool,
         sql: any SQLDatabase
     ) async throws {
         guard let mutation = try await sql.raw("""
@@ -1985,19 +2013,27 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 SET command_window_used = \(bind: commandWindowUsed)
                 FROM room_update
                 WHERE admission.room_id = room_update.room_id
+                  AND \(bind: persistsRoomAdmission)
                 RETURNING admission.room_id
+            ), admission_passthrough AS (
+                SELECT room_id FROM room_update
+                WHERE NOT \(bind: persistsRoomAdmission)
+            ), admission_gate AS (
+                SELECT room_id FROM admission_update
+                UNION ALL
+                SELECT room_id FROM admission_passthrough
             ), message_insert AS (
                 INSERT INTO im_v2.messages
                     (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
                      client_message_id, text_body, rich_entities, reply_to_message_id,
                      forwarded_from_message_id, forwarded_from_user_id, created_at)
-                SELECT \(bind: messageID), admission_update.room_id, \(bind: roomSequence),
+                SELECT \(bind: messageID), admission_gate.room_id, \(bind: roomSequence),
                        \(bind: timelineSequence), \(bind: senderID), \(bind: clientMessageID),
                        \(bind: message.text), \(bind: entitiesJSON)::jsonb,
                        NULLIF(\(bind: replyToMessageID), '')::uuid,
                        \(bind: forwardedFromMessageID), \(bind: forwardedFromUserID),
                        \(bind: message.createdAt)
-                FROM admission_update
+                FROM admission_gate
                 RETURNING message_id, room_id
             ), event_insert AS (
                 INSERT INTO im_v2.room_events
@@ -2017,7 +2053,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 RETURNING event_id
             )
             SELECT (SELECT count(*) FROM room_update) AS room_count,
-                   (SELECT count(*) FROM admission_update) AS admission_count,
+                   (SELECT count(*) FROM admission_gate) AS admission_count,
                    (SELECT count(*) FROM message_insert) AS message_count,
                    0::bigint AS review_count,
                    0::bigint AS media_count,
@@ -2224,6 +2260,81 @@ private func roomLogReduction(
             nextShardState: nextShard
         ))
     }
+}
+
+/// Direct room-log delivery has a fixed two-user audience and does not create
+/// a fan-out plan or outstanding-work reservation. In `shard_only` mode its
+/// command budget is therefore the durable shard budget already used by the
+/// admission-credit pool. The room admission value is carried forward
+/// unchanged solely because the generic acceptance transaction still models
+/// the next room sequence and admission state together.
+///
+/// Authorization is deliberately outside this helper and remains checked
+/// against locked room, membership, direct-pair, policy-version and stranger
+/// quota state by `PostgresV2RoomWriteStore.accept` before this reduction.
+private func directRoomLogShardOnlyReduction(
+    command: V2SendMessageCommand,
+    roomState: V2RoomCommandState,
+    shardState: ShardAdmissionState,
+    profile: RoomCapacityProfile,
+    identifiers: V2AcceptanceIdentifiers,
+    now: Date
+) throws -> V2SendMessageAcceptanceResult {
+    guard let lease = shardState.lease else { return .unavailable(.missingShardLease) }
+    guard lease.isValid(at: now) else { return .unavailable(.expiredShardLease) }
+    guard lease.commandWindow.canReserve(1) else {
+        return .rateLimited(retryAfterSeconds: profile.retryAfterSeconds)
+    }
+
+    let nextLease = try ShardAdmissionLease(
+        id: lease.id,
+        generation: lease.generation,
+        validUntil: lease.validUntil,
+        commandWindow: lease.commandWindow.reserving(1),
+        fanoutWindow: lease.fanoutWindow,
+        maxOutstandingFanoutUnits: lease.maxOutstandingFanoutUnits,
+        maxOutstandingPlans: lease.maxOutstandingPlans
+    )
+    let nextShard = try ShardAdmissionState(
+        lease: nextLease,
+        outstandingFanoutUnits: shardState.outstandingFanoutUnits,
+        outstandingPlans: shardState.outstandingPlans
+    )
+    let accepted = V2AcceptedMessageDraft(
+        messageID: identifiers.messageID,
+        roomID: command.roomID,
+        roomSequence: roomState.nextRoomSequence,
+        senderUserID: command.senderUserID,
+        clientMessageID: command.clientMessageID,
+        text: command.text,
+        media: command.media,
+        mentions: command.mentions,
+        entities: command.entities,
+        replyTo: command.replyTo,
+        createdAt: now
+    )
+    let nextRoom = V2RoomCommandState(
+        roomID: roomState.roomID,
+        nextRoomSequence: roomState.nextRoomSequence + 1,
+        admission: roomState.admission
+    )
+    return .accepted(.init(
+        acceptedMessage: accepted,
+        eventID: identifiers.eventID,
+        fanoutPlan: .init(
+            id: identifiers.planID,
+            sourceEventID: identifiers.eventID,
+            roomID: command.roomID,
+            roomSequence: accepted.roomSequence,
+            reservation: .init(
+                cost: try .init(targetCount: 0),
+                shardLeaseID: lease.id,
+                shardLeaseGeneration: lease.generation
+            )
+        ),
+        nextRoomState: nextRoom,
+        nextShardState: nextShard
+    ))
 }
 
 // Kept as a narrow semantic wrapper while group hybrid still has explicit

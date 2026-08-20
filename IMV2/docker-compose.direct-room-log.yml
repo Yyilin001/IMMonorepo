@@ -6,6 +6,11 @@ services:
   gateway:
     environment:
       IM_V2_DIRECT_FANOUT_MODE: room_log
+      # The direct room event is the authoritative delivery record. User and
+      # device limits, durable shard admission, stranger quota and direct
+      # policy locks remain enforced; avoid rewriting the otherwise idle
+      # room-local command counter for every ordinary direct message.
+      IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: shard_only
       # Reserve shard command-window capacity in bounded durable batches for
       # the fixed-audience direct room-log path. PostgreSQL remains the
       # authority; an interrupted process can only leave up to 31 already
