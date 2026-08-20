@@ -85,6 +85,23 @@ public actor V2SendMessageAdmissionBatcher {
             let result: Result<[V2SendMessageOutcome], any Error>
             do {
                 result = .success(try await store.acceptAtomically(requests: batch.map(\.request)))
+            } catch V2AtomicRoomWriteBatchError.unsupportedRequestShape {
+                // The durable batch has rolled back before committing any
+                // record.  Preserve normal per-command behavior for a rich or
+                // policy-changing request rather than turning an optimisation
+                // miss into a client-visible failure for unrelated commands.
+                do {
+                    result = .success(try await batch.asyncMap { pending in
+                        try await store.accept(
+                            command: pending.request.command,
+                            capacityProfile: pending.request.capacityProfile,
+                            identifiers: pending.request.identifiers,
+                            now: pending.request.now
+                        )
+                    })
+                } catch {
+                    result = .failure(error)
+                }
             } catch {
                 result = .failure(error)
             }
@@ -112,5 +129,18 @@ public actor V2SendMessageAdmissionBatcher {
             batch.forEach { $0.continuation.resume(throwing: error) }
         }
         startNextBatchIfPossible()
+    }
+}
+
+private extension Array {
+    func asyncMap<Result: Sendable>(
+        _ transform: (Element) async throws -> Result
+    ) async throws -> [Result] {
+        var values: [Result] = []
+        values.reserveCapacity(count)
+        for value in self {
+            values.append(try await transform(value))
+        }
+        return values
     }
 }

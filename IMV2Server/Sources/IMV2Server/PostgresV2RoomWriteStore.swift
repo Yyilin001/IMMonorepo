@@ -10,7 +10,7 @@ import SQLKit
 /// atomic increment as the final statement in the transaction. This preserves
 /// exact capacity and lease fencing without holding the shared shard row while
 /// policy checks and durable message writes run.
-public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
+public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let database: any Database
     private let strangerMessagePolicy: V2StrangerMessagePolicy
     private let shadowForwarder: any V2UserShardProjectionShadowing
@@ -106,6 +106,310 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 return .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
             }
         }
+    }
+
+    /// Commits a bounded group of ordinary direct room-log messages together.
+    ///
+    /// This deliberately accepts only the steady-state, plain-message shape:
+    /// it has no attachments, mention fan-out, reply/forward dependency,
+    /// stranger quota mutation, first-reply marker, support-session mutation,
+    /// or profile/capability projection.  Any other shape aborts before the
+    /// append CTE and the batcher retries every original command through the
+    /// established single-command transaction.  That conservative fallback is
+    /// what makes this an optimisation rather than a second authorization
+    /// implementation.
+    public func acceptAtomically(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome] {
+        guard requests.count >= 2,
+              directFanoutMode == .roomLog,
+              !contentReviewMode.enqueuesJobs,
+              shardAdmissionCommandCreditPool != nil,
+              requests.allSatisfy(Self.isPlainDirectRoomLogBatchShape)
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+
+        var ordered: [OrderedRoomWriteRequest] = []
+        ordered.reserveCapacity(requests.count)
+        for (originalIndex, request) in requests.enumerated() {
+            let roomID = try uuid(request.command.roomID)
+            let senderID = try uuid(request.command.senderUserID)
+            let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
+            ordered.append(.init(
+                originalIndex: originalIndex,
+                request: request,
+                roomID: roomID,
+                senderID: senderID,
+                cacheKey: cacheKey,
+                cachedDirectPolicy: await directSendPolicyCache.value(for: cacheKey)
+            ))
+        }
+        // The set-based SQL updates one row per room.  Holding a later same-
+        // room command for a future batch would preserve FIFO but requires a
+        // per-room scheduler; until that scheduler exists, decline the whole
+        // mixed batch and preserve the established sequential behavior.
+        guard Set(ordered.map(\.roomID)).count == ordered.count else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        // Every transaction acquires room rows in the same order.  Preserve
+        // arrival order for commands sharing a room, since their sequence is
+        // an observable part of the room-log contract.
+        ordered.sort {
+            $0.roomID.uuidString == $1.roomID.uuidString
+                ? $0.originalIndex < $1.originalIndex
+                : $0.roomID.uuidString < $1.roomID.uuidString
+        }
+        let orderedRequests = ordered
+
+        let committed = try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            var prepared: [PreparedDirectRoomLogAppend] = []
+            var commits: [OrderedRoomWriteCommit] = []
+            prepared.reserveCapacity(orderedRequests.count)
+            commits.reserveCapacity(orderedRequests.count)
+            do {
+                for item in orderedRequests {
+                    let result = try await prepareDirectRoomLogAppend(
+                        item,
+                        transaction: transaction
+                    )
+                    switch result {
+                    case .append(let append):
+                        prepared.append(append)
+                        commits.append(.init(
+                            originalIndex: item.originalIndex,
+                            cacheKey: item.cacheKey,
+                            commit: append.commit
+                        ))
+                    case .outcome(let commit):
+                        commits.append(.init(
+                            originalIndex: item.originalIndex,
+                            cacheKey: item.cacheKey,
+                            commit: commit
+                        ))
+                    }
+                }
+                if !prepared.isEmpty {
+                    try await persistPlainRoomLogMessages(
+                        inputs: prepared.enumerated().map { ordinal, append in
+                            append.input.withOrdinal(ordinal)
+                        },
+                        persistsRoomAdmission: directRoomLogAdmissionMode == .room,
+                        sql: try sqlDatabase(from: transaction)
+                    )
+                }
+                guard commits.count == orderedRequests.count else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return commits
+            } catch {
+                for append in prepared {
+                    if let token = append.commit.shardAdmissionCommandCredit,
+                       let shardAdmissionCommandCreditPool {
+                        await shardAdmissionCommandCreditPool.release(token, now: append.now)
+                    }
+                }
+                throw error
+            }
+        }
+
+        var outcomes = Array<V2SendMessageOutcome?>(repeating: nil, count: requests.count)
+        for item in committed {
+            outcomes[item.originalIndex] = try await finalizeCommittedAcceptance(
+                command: requests[item.originalIndex].command,
+                cacheKey: item.cacheKey,
+                commit: item.commit
+            )
+        }
+        guard outcomes.allSatisfy({ $0 != nil }) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return outcomes.compactMap { $0 }
+    }
+
+    private static func isPlainDirectRoomLogBatchShape(
+        _ request: V2RoomWriteRequest
+    ) -> Bool {
+        let command = request.command
+        return command.media.isEmpty
+            && command.mentions.isEmpty
+            && command.replyTo == nil
+            && command.forwardedFrom == nil
+    }
+
+    private func sqlDatabase(from transaction: any Database) throws -> any SQLDatabase {
+        guard let sql = transaction as? any SQLDatabase else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return sql
+    }
+
+    private func prepareDirectRoomLogAppend(
+        _ item: OrderedRoomWriteRequest,
+        transaction: any Database
+    ) async throws -> DirectRoomLogBatchPreparation {
+        let request = item.request
+        let command = request.command
+        let sql = try sqlDatabase(from: transaction)
+        let clientMessageID = try uuid(command.clientMessageID)
+        try await acquireMessageOperationLock(
+            senderID: item.senderID,
+            clientMessageID: clientMessageID,
+            sql: sql
+        )
+        let loadedContext = try await loadMessageAcceptanceContext(
+            roomID: item.roomID,
+            senderID: item.senderID,
+            clientMessageID: clientMessageID,
+            now: request.now,
+            cachedDirectPolicy: item.cachedDirectPolicy,
+            sql: sql
+        )
+        let room = loadedContext.room
+        guard room.kind == "direct",
+              room.capacityProfileID == request.capacityProfile.id,
+              room.frozenAt == nil,
+              try loadedContext.existingOperation() == nil
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        let admissionSnapshot = try loadedContext.admissionSnapshot()
+        let admission = admissionSnapshot.room
+        let shard = admissionSnapshot.shard
+        guard admission.shardLeaseID == shard.leaseID,
+              admission.shardLeaseGeneration == shard.generation,
+              admissionSnapshot.senderIsActive == true,
+              let role = admissionSnapshot.actorRole,
+              V2RoomMembershipRole(rawValue: role) != nil,
+              admissionSnapshot.muted == false
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        let directContext = try directMessageContext(from: loadedContext.directPolicySnapshot())
+        guard directContext.restriction == nil,
+              !directContext.requiresStrangerQuota,
+              directContext.senderProfileVisibleToRecipient,
+              directContext.senderCanSend == true,
+              directContext.senderHasReplied,
+              directContext.supportAccountID == nil,
+              let shardAdmissionCommandCreditPool
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+
+        let roomState = try room.commandState(roomID: command.roomID, admission: admission)
+        let shardState = try shard.admissionState()
+        let shardStateForReduction: ShardAdmissionState
+        let shardCreditToken: V2ShardAdmissionCommandCreditPool.Token
+        switch try await shardAdmissionCommandCreditPool.acquire(
+            roomShardID: room.roomShardID,
+            capacityProfileID: room.capacityProfileID,
+            shardState: shardState,
+            now: request.now
+        ) {
+        case .granted(let token, let effectiveShardState):
+            shardCreditToken = token
+            shardStateForReduction = effectiveShardState
+        case .rateLimited:
+            return .outcome(.init(
+                outcome: .rateLimited(retryAfterSeconds: request.capacityProfile.limits.retryAfterSeconds),
+                acceptedDirectProjectionShadows: []
+            ))
+        case .unavailable(let reason):
+            return .outcome(.init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: []))
+        }
+        do {
+            let result = directRoomLogAdmissionMode == .shardOnly
+                ? try directRoomLogShardOnlyReduction(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardStateForReduction,
+                    profile: request.capacityProfile.limits,
+                    identifiers: request.identifiers,
+                    now: request.now
+                )
+                : try roomLogReduction(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardStateForReduction,
+                    profile: request.capacityProfile.limits,
+                    identifiers: request.identifiers,
+                    reliableTargetCount: 0,
+                    now: request.now
+                )
+            guard case .accepted(let writeSet) = result else {
+                await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
+                return .outcome(.init(
+                    outcome: result.outcome(usesRoomEventLog: true),
+                    acceptedDirectProjectionShadows: []
+                ))
+            }
+            let timelineWriteSet = try withTimelineSequence(
+                writeSet,
+                timelineSequence: unsigned(room.timelineSequence + 1)
+            )
+            let shardReservation = try shardAdmissionReservation(
+                from: shardStateForReduction,
+                to: timelineWriteSet.nextShardState
+            )
+            guard shardReservation.commandDelta == 1,
+                  shardReservation.fanoutDelta == 0,
+                  shardReservation.outstandingUnitDelta == 0,
+                  shardReservation.outstandingPlanDelta == 0
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
+                mediaPresentations: [],
+                usesRoomEventLog: true
+            )
+            let input = try plainRoomLogMessageInput(
+                writeSet: timelineWriteSet,
+                room: room,
+                roomID: item.roomID,
+                senderID: item.senderID,
+                clientMessageID: clientMessageID
+            )
+            return .append(.init(
+                input: input,
+                now: request.now,
+                commit: .init(
+                    outcome: .accepted(acceptedMessage),
+                    acceptedDirectProjectionShadows: [],
+                    directPolicyCacheUpdate: loadedContext.directPolicyCacheEntry(),
+                    shardAdmissionCommandCredit: shardCreditToken
+                )
+            ))
+        } catch {
+            await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
+            throw error
+        }
+    }
+
+    private func plainRoomLogMessageInput(
+        writeSet: V2MessageAcceptanceTransaction,
+        room: RoomRow,
+        roomID: UUID,
+        senderID: UUID,
+        clientMessageID: UUID
+    ) throws -> PlainRoomLogMessageInput {
+        let message = writeSet.acceptedMessage
+        return try .init(
+            ordinal: 0,
+            roomID: roomID,
+            messageID: uuid(message.messageID),
+            eventID: uuid(writeSet.eventID),
+            senderID: senderID,
+            clientMessageID: clientMessageID,
+            roomSequence: signed(message.roomSequence),
+            timelineSequence: signed(message.timelineSequence),
+            commandWindowUsed: writeSet.nextRoomState.admission.commandWindow.used,
+            text: message.text,
+            entities: message.entities,
+            replyToMessageID: nil,
+            forwardedFromMessageID: nil,
+            forwardedFromUserID: nil,
+            membershipRevision: room.membershipRevision,
+            createdAtUnixSeconds: message.createdAt.timeIntervalSince1970
+        )
     }
 
     private func acceptInTransaction(
@@ -3083,6 +3387,53 @@ private struct PlainRoomLogMessageInput: Encodable {
         case membershipRevision = "membership_revision"
         case createdAtUnixSeconds = "created_at_unix_seconds"
     }
+
+    func withOrdinal(_ ordinal: Int) -> Self {
+        .init(
+            ordinal: ordinal,
+            roomID: roomID,
+            messageID: messageID,
+            eventID: eventID,
+            senderID: senderID,
+            clientMessageID: clientMessageID,
+            roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
+            commandWindowUsed: commandWindowUsed,
+            text: text,
+            entities: entities,
+            replyToMessageID: replyToMessageID,
+            forwardedFromMessageID: forwardedFromMessageID,
+            forwardedFromUserID: forwardedFromUserID,
+            membershipRevision: membershipRevision,
+            createdAtUnixSeconds: createdAtUnixSeconds
+        )
+    }
+}
+
+private struct OrderedRoomWriteRequest {
+    let originalIndex: Int
+    let request: V2RoomWriteRequest
+    let roomID: UUID
+    let senderID: UUID
+    let cacheKey: V2DirectSendPolicyCache.Key
+    let cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+}
+
+private struct OrderedRoomWriteCommit {
+    let originalIndex: Int
+    let cacheKey: V2DirectSendPolicyCache.Key
+    let commit: RoomWriteCommit
+}
+
+private enum DirectRoomLogBatchPreparation {
+    case append(PreparedDirectRoomLogAppend)
+    case outcome(RoomWriteCommit)
+}
+
+private struct PreparedDirectRoomLogAppend {
+    let input: PlainRoomLogMessageInput
+    let now: Date
+    let commit: RoomWriteCommit
 }
 
 private struct MessageRow: Decodable {

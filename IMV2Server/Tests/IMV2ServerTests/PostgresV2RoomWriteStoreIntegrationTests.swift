@@ -8802,6 +8802,89 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
 
+            // The micro-batch is intentionally restricted to an already
+            // established direct conversation: first sends mutate policy
+            // state and therefore retain the ordinary transaction.  Once both
+            // conversations are warm, two distinct-room appends share the
+            // actual set-based SQL statement and one durable commit.
+            guard case .opened(let secondRoom) = try await direct.open(
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-00000000c005"),
+                targetUserID: try .init(memberThreeUUID.uuidString)
+            ) else {
+                Issue.record("expected second direct room")
+                return
+            }
+            guard case .accepted = try await messages.send(.init(
+                roomID: secondRoom.roomID,
+                actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000c020"),
+                text: "建立第二个会话"
+            )) else {
+                Issue.record("expected second-room seed acceptance")
+                return
+            }
+            // Friend relationships make the two established conversations
+            // eligible without changing their room-event history.  The test
+            // removes them immediately after the append so the stale-policy
+            // assertion below retains its original stranger semantics.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_relationships
+                    (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at)
+                VALUES
+                    (\(bind: senderUUID), \(bind: memberTwoUUID), 'accepted', \(bind: senderUUID), \(bind: now)),
+                    (\(bind: senderUUID), \(bind: memberThreeUUID), 'accepted', \(bind: senderUUID), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                UPDATE im_v2.direct_room_pairs
+                SET direct_policy_revision = direct_policy_revision + 1
+                WHERE room_id IN (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
+                                  \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
+                """).run()
+            let batched = try await writer.acceptAtomically(requests: [
+                .init(
+                    command: try .init(
+                        roomID: room.roomID,
+                        senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c007"),
+                        text: "第一条批量消息",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c008"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c009"),
+                        planID: .init("00000000-0000-0000-0000-00000000c010")
+                    ),
+                    now: now
+                ),
+                .init(
+                    command: try .init(
+                        roomID: secondRoom.roomID,
+                        senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c011"),
+                        text: "第二条批量消息",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c012"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c013"),
+                        planID: .init("00000000-0000-0000-0000-00000000c014")
+                    ),
+                    now: now
+                ),
+            ])
+            #expect(batched.allSatisfy {
+                if case .accepted(let message) = $0 { return message.usesRoomEventLog }
+                return false
+            })
+            try await sql.raw("""
+                DELETE FROM im_v2.user_relationships
+                WHERE lower_user_id = \(bind: senderUUID)
+                  AND higher_user_id IN (\(bind: memberTwoUUID), \(bind: memberThreeUUID))
+                """).run()
+
             // Rich messages retain the existing CTE: the plain-message fast
             // path must never silently skip a required moderation record.
             let reviewingMessages = V2SendMessageService(
@@ -8850,7 +8933,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(senderPage.events.map(\.roomSequence) == [
                 accepted.roomSequence,
                 accepted.roomSequence + 1,
-                accepted.roomSequence + 2
+                accepted.roomSequence + 2,
+                accepted.roomSequence + 3
             ])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
@@ -8894,8 +8978,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 3)
-            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 3)
+            #expect(try await count("im_v2.messages", on: sql) == 6)
+            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 6)
             #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
             #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == 0)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
@@ -8918,14 +9002,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
                 """).first(decoding: CapacityRow.self))
-            // Three accepted commands consume two database batches, rather
-            // than three serialized tail increments. The durable counter remains
-            // conservatively equal to the reserved capacity.
-            #expect(creditedAdmission.commandWindowUsed == 4)
+            // Six accepted commands consume three database credit batches;
+            // the two room-log appends in the micro-batch still preserve the
+            // same conservatively durable command capacity.
+            #expect(creditedAdmission.commandWindowUsed == 6)
             let creditSnapshot = await shardCredits.snapshot()
-            #expect(creditSnapshot.batchReservations == 2)
-            #expect(creditSnapshot.databaseCreditsReserved == 4)
-            #expect(creditSnapshot.committedCredits == 3)
+            #expect(creditSnapshot.batchReservations == 3)
+            #expect(creditSnapshot.databaseCreditsReserved == 6)
+            #expect(creditSnapshot.committedCredits == 6)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()

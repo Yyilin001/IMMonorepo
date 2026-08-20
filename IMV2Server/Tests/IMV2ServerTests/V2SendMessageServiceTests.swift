@@ -185,15 +185,55 @@ struct V2SendMessageServiceTests {
         #expect(await store.normalAcceptCallCount() == 0)
         #expect(await store.batches().count == 1)
     }
+
+    @Test("an unsupported batch shape falls back without exposing an optimisation failure")
+    func admissionBatchingFallsBackToOrdinaryAcceptance() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore(shouldDeclineBatch: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000131")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000132")
+
+        async let first = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000133"),
+            text: "rich one"
+        ))
+        async let second = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000134"),
+            text: "rich two"
+        ))
+
+        #expect(try await [first, second] == [
+            .unavailable(.missingShardLease),
+            .unavailable(.missingShardLease),
+        ])
+        #expect(await store.batches().count == 1)
+        #expect(await store.normalAcceptCallCount() == 2)
+    }
 }
 
 private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     private let shouldFail: Bool
+    private let shouldDeclineBatch: Bool
     private var recordedBatches: [[ClientMessageID]] = []
     private var normalCalls = 0
 
-    init(shouldFail: Bool = false) {
+    init(shouldFail: Bool = false, shouldDeclineBatch: Bool = false) {
         self.shouldFail = shouldFail
+        self.shouldDeclineBatch = shouldDeclineBatch
     }
 
     func accept(
@@ -208,6 +248,9 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
 
     func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
         recordedBatches.append(requests.map(\.command.clientMessageID))
+        if shouldDeclineBatch {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
         if shouldFail {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }

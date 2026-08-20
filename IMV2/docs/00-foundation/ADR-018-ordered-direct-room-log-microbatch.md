@@ -25,13 +25,15 @@ Planner、Delivery、Inbox、用户投影与 Sync Log 的逐消息重复写入�
 
 PostgreSQL 实现必须遵守：
 
-1. 先按 `room_id` 分组，保持同一房间的到达顺序；一个 SQL batch 对同一房间至多取一个可持久化
-   command，其余命令留到下一轮，避免同一 `rooms` 行被无定义地重复 `UPDATE`。
+1. 一个 SQL batch 对同一房间至多取一个可持久化 command，避免同一 `rooms` 行被无定义地重复
+   `UPDATE`。当前实现发现重复 room 时整批在写前回退单条路径；后续可加 per-room scheduler，把较晚
+   command 留到下一轮以提高命中率。
 2. 批内房间组按稳定 `room_id` 顺序取得 message-operation / room 锁，避免多房间事务与另一个批次
    形成 A→B / B→A 死锁；每个命令的 `(sender_id, client_message_id)` 唯一事实仍是幂等栅栏。
 3. 逐条执行 member revision、冻结、block、陌生人额度、媒体、mention、reply 与 capacity 检查。
    任何有额外持久副作用（审核、陌生人额度消费、首次 reply 标记、profile/capability mutation）或
-   业务拒绝的命令回退原单条事务，不能让其污染普通批。
+   既有 operation 的命令回退原单条事务，不能让其污染普通批。无副作用的 capacity rejection 可作为
+   batch 内独立 outcome 返回。
 4. 合格命令只通过一个 JSONB/`UNNEST` 输入的 CTE 完成 `rooms`、`room_admission`、`messages` 和
    `room_events` 写入。写入 input ordinal 与 accepted outcome 一一对应；结果计数不足或多余一律
    回滚并作为 `corruptPersistenceState` 处理。
@@ -50,9 +52,10 @@ PostgreSQL 实现必须遵守：
 
 1. 已完成：领域层 immutable batch request、原子 Store 协议与 FIFO bounded batcher；没有原子 Store
    时不会启用。
-2. 实施中：抽取 direct 普通文本的预检/持久化参数，加入单条与多条都使用的 batch CTE，并以真实
-   PostgreSQL 集成测试验证重试、顺序、幂等、权限变更和错误计数。
-3. 验证后：增加部署开关，先以 batch size 1 验证等价，再依次测试 8、16、32 和 1--2ms delay。
+2. 已完成：抽取 direct 普通文本的预检/持久化参数，加入 JSONB set-based CTE；真实 PostgreSQL
+   集成测试覆盖两个已建立 direct room 的原子 append，以及富消息/策略副作用的单条回退。
+3. 实施中：增加部署开关和批处理命中指标；从同一干净数据集依次测试关闭、8、16、32 和 1--2ms
+   delay。该实现不支持 batch size 1，关闭即是等价 baseline。
 
 将开关设为 `0` 或移除 batcher 即回退到当前单条事务；数据格式没有变化，不要求迁移或删除数据。
 

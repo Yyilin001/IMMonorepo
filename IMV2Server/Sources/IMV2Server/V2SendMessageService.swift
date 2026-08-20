@@ -123,6 +123,16 @@ public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
     ) async throws -> [V2SendMessageOutcome]
 }
 
+/// A batch implementation may decline a shape that cannot preserve the
+/// ordinary command semantics in a shared transaction (for example a command
+/// with attachments or a room that requires a policy side effect).  The
+/// batcher then retries the original immutable requests through the ordinary
+/// per-command path.  This is distinct from a storage error: it is never
+/// exposed to a client and never acknowledges a partial batch.
+public enum V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
+    case unsupportedRequestShape
+}
+
 public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case roomNotFound
     case actorNotEligible

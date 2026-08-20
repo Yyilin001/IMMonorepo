@@ -22,6 +22,8 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directFanoutMode == .planner)
         #expect(defaults.directRoomLogAdmissionMode == .room)
         #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
+        #expect(defaults.directRoomLogAppendBatchSize == 0)
+        #expect(defaults.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
@@ -68,6 +70,35 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(credits)
         ).directRoomLogShardAdmissionCreditBatchSize == 64)
+
+        var appendBatch = credits
+        appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "16"
+        appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "2"
+        let appendBatchConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(appendBatch)
+        )
+        #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 16)
+        #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
+
+        var appendBatchWithoutCredits = roomLog
+        appendBatchWithoutCredits["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "16"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(appendBatchWithoutCredits)
+            )
+        }
+
+        var oversizedAppendBatch = credits
+        oversizedAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "33"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversizedAppendBatch)
+            )
+        }
 
         var creditsOutsideRoomLog = runtimeValues
         creditsOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"

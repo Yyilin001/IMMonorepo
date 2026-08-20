@@ -342,19 +342,33 @@ enum IMV2ServerApp {
                     routeFence: maintenanceUserShardRouter,
                     coLocatedControlBuckets: coLocatedControlBuckets
                 )
+            let roomWriteStore = PostgresV2RoomWriteStore(
+                database: database,
+                strangerMessagePolicy: configuration.strangerMessagePolicy,
+                shadowForwarder: userShardShadowForwarder,
+                contentReviewMode: configuration.contentReviewMode,
+                directFanoutMode: configuration.directFanoutMode,
+                directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
+                payloadWriteMode: configuration.fanoutPayloadWriteMode,
+                shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
+            )
+            let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? =
+                configuration.directRoomLogAppendBatchSize > 0
+                ? .init(
+                    store: roomWriteStore,
+                    configuration: .init(
+                        maximumBatchSize: configuration.directRoomLogAppendBatchSize,
+                        maximumDelay: .milliseconds(
+                            configuration.directRoomLogAppendBatchMaximumDelayMilliseconds
+                        )
+                    )
+                )
+                : nil
             let sendMessage = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(
-                    database: database,
-                    strangerMessagePolicy: configuration.strangerMessagePolicy,
-                    shadowForwarder: userShardShadowForwarder,
-                    contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
-                ),
+                store: roomWriteStore,
                 capacityProfile: configuration.capacityProfile,
-                limits: configuration.messageLimits
+                limits: configuration.messageLimits,
+                batcher: directRoomLogAppendBatcher
             )
             let membership = V2RoomMembershipService(
                 store: PostgresV2RoomMembershipStore(database: database),

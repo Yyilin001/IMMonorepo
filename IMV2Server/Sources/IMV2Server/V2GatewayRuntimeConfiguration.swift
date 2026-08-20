@@ -290,6 +290,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// an explicit, direct-room-log-only batch size for pre-charged command
     /// credits; it is never enabled by a client request.
     public let directRoomLogShardAdmissionCreditBatchSize: Int
+    /// Zero keeps direct room-log appends one command per transaction.  A
+    /// positive value enables only the deliberately narrow, ordered plain
+    /// direct-message micro-batch; non-eligible commands transparently use
+    /// the established single-command write path.
+    public let directRoomLogAppendBatchSize: Int
+    /// Maximum extra server-side queueing time for an append micro-batch.
+    /// This has meaning only when `directRoomLogAppendBatchSize` is positive.
+    public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// Unreferenced immutable revisions remain recoverable for this grace.
     /// The default is seven days; deployments may lengthen it independently
@@ -508,6 +516,32 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directRoomLogShardAdmissionCreditBatchSize = parsedDirectRoomLogShardCreditBatchSize
+        let rawDirectRoomLogAppendBatchSize = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE", environment: environment
+        ) ?? "0"
+        guard let parsedDirectRoomLogAppendBatchSize = Int(rawDirectRoomLogAppendBatchSize),
+              parsedDirectRoomLogAppendBatchSize == 0 || (2 ... 32).contains(parsedDirectRoomLogAppendBatchSize),
+              parsedDirectRoomLogAppendBatchSize == 0 || (
+                  parsedDirectFanoutMode == .roomLog
+                      && parsedDirectRoomLogShardCreditBatchSize > 0
+              )
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"
+            )
+        }
+        directRoomLogAppendBatchSize = parsedDirectRoomLogAppendBatchSize
+        let rawDirectRoomLogAppendBatchDelay = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
+        ) ?? "2"
+        guard let parsedDirectRoomLogAppendBatchDelay = Int(rawDirectRoomLogAppendBatchDelay),
+              (1 ... 10).contains(parsedDirectRoomLogAppendBatchDelay)
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"
+            )
+        }
+        directRoomLogAppendBatchMaximumDelayMilliseconds = parsedDirectRoomLogAppendBatchDelay
         let rawFanoutPayloadWriteMode = Self.optional(
             "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment
         )?.lowercased() ?? V2FanoutPayloadWriteMode.body.rawValue
