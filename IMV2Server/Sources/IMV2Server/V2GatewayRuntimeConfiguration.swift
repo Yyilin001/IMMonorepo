@@ -217,14 +217,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let userProjectionBusyDrainBudgetMilliseconds: Int
     /// Process-local database admission bounds reject overload before a
     /// request spends the much longer Fluent pool timeout waiting for a slot.
-    /// Durable foreground mutations reserve capacity independently from
-    /// interactive reads. Their sum is validated against the same physical
-    /// foreground pool; this is admission isolation, not additional database
-    /// connections.
+    /// Durable message writes, control-plane writes, and interactive reads
+    /// reserve capacity independently. Their sum is validated against the
+    /// same physical foreground pool; this is admission isolation, not
+    /// additional database connections.
     public let foregroundWriteDatabaseWorkLimit: Int
+    public let foregroundControlWriteDatabaseWorkLimit: Int
     public let interactiveReadDatabaseWorkLimit: Int
     public let syncDatabaseWorkLimit: Int
     public let foregroundWriteDatabaseWorkMaximumQueued: Int
+    public let foregroundControlWriteDatabaseWorkMaximumQueued: Int
     public let interactiveReadDatabaseWorkMaximumQueued: Int
     public let syncDatabaseWorkMaximumQueued: Int
     public let databaseWorkAdmissionTimeoutMilliseconds: Int
@@ -421,6 +423,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         foregroundWriteDatabaseWorkLimit = try Self.boundedPositive(
             "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
         )
+        foregroundControlWriteDatabaseWorkLimit = try Self.nonNegativeWithDefault(
+            "IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT",
+            defaultValue: 0,
+            maximum: 100_000,
+            environment: environment
+        )
         interactiveReadDatabaseWorkLimit = try Self.boundedPositive(
             "IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT", maximum: 100_000, environment: environment
         )
@@ -429,6 +437,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         )
         foregroundWriteDatabaseWorkMaximumQueued = try Self.boundedPositive(
             "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED",
+            maximum: 1_000_000,
+            environment: environment
+        )
+        foregroundControlWriteDatabaseWorkMaximumQueued = try Self.nonNegativeWithDefault(
+            "IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_MAX_QUEUED",
+            defaultValue: 0,
             maximum: 1_000_000,
             environment: environment
         )
@@ -712,11 +726,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 : databasePolicy.maximumConnectionsPerEventLoop
         )
         if databaseWorkloadPoolIsolationEnabled {
-            guard foregroundWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit <= foregroundPoolCapacity,
+            guard foregroundWriteDatabaseWorkLimit + foregroundControlWriteDatabaseWorkLimit +
+                    interactiveReadDatabaseWorkLimit <= foregroundPoolCapacity,
                   syncDatabaseWorkLimit <= syncPoolCapacity
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
                 )
             }
             let projectionPoolCapacity = databasePolicy.eventLoopThreads *
@@ -746,12 +761,13 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             // Admission must end before Fluent's pool wait. Keep the two
             // admitted lanes within the one shared physical pool; the
             // remaining connections stay available to durable workers.
-            guard foregroundWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit +
+            guard foregroundWriteDatabaseWorkLimit + foregroundControlWriteDatabaseWorkLimit +
+                    interactiveReadDatabaseWorkLimit +
                     syncDatabaseWorkLimit <=
                     foregroundPoolCapacity
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
+                    "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
                 )
             }
         }
@@ -908,6 +924,19 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let result = try positive(key, environment: environment)
         guard result <= maximum else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return result
+    }
+
+    private static func nonNegativeWithDefault(
+        _ key: String,
+        defaultValue: Int,
+        maximum: Int,
+        environment: any V2RuntimeEnvironment
+    ) throws -> Int {
+        guard let raw = optional(key, environment: environment) else { return defaultValue }
+        guard let value = Int(raw), (0...maximum).contains(value) else {
+            throw V2GatewayRuntimeConfigurationError.invalid(key)
+        }
+        return value
     }
 
     private static func nonNegative(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int64 {

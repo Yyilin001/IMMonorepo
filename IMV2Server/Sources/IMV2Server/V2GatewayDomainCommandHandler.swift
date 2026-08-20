@@ -149,9 +149,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
+    private let controlWriteAdmissionEnabled: Bool
     private let now: @Sendable () -> Date
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, now: @escaping @Sendable () -> Date = Date.init) {
         self.sendMessage = sendMessage
         self.membership = membership
         self.withdrawal = withdrawal
@@ -172,6 +173,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.now = now
     }
 
@@ -196,6 +198,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+        controlWriteAdmissionEnabled: Bool = false,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.sendMessage = sendMessage
@@ -218,6 +221,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.now = now
     }
 
@@ -305,6 +309,11 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         switch envelope.body {
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
+        case .openDirectRoom where controlWriteAdmissionEnabled:
+            // Opening a relationship/room is a durable control-plane write,
+            // not an event append. It must never exhaust the reservation used
+            // by sends in conversations that are already open.
+            return .foregroundControlWrite
         case .listRoomMembers,
              .groupEventPull,
              .groupEventSubscribe,

@@ -239,6 +239,54 @@ struct V2DatabaseWorkAdmissionTests {
         await controller.release(.foregroundWrite)
     }
 
+    @Test("queued message acceptance wins its reservation over direct-room control work")
+    func messageReservationWinsOverControlPlaneBurst() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 2,
+            maximumForegroundControlWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 4,
+            maximumForegroundControlWriteQueued: 4,
+            maximumInteractiveReadQueued: 4,
+            maximumSyncQueued: 1,
+            timeout: .seconds(1)
+        ))
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.foregroundControlWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
+
+        let queuedControl = Task { await controller.acquire(.foregroundControlWrite) }
+        let queuedMessage = Task { await controller.acquire(.foregroundWrite) }
+        while true {
+            let snapshot = await controller.snapshot()
+            if snapshot.foregroundControlWriteQueued == 1,
+               snapshot.foregroundWriteQueued == 1 {
+                break
+            }
+            await Task.yield()
+        }
+
+        // The released permit must restore the queued message's write
+        // reservation before another direct-room operation can borrow it.
+        await controller.release(.foregroundWrite)
+        #expect(await queuedMessage.value == .admitted)
+        #expect(await controller.snapshot().foregroundControlWriteQueued == 1)
+
+        await controller.release(.foregroundWrite)
+        #expect(await queuedControl.value == .admitted)
+
+        await controller.release(.foregroundWrite)
+        await controller.release(.foregroundControlWrite)
+        await controller.release(.foregroundControlWrite)
+        await controller.release(.interactiveRead)
+        let snapshot = await controller.snapshot()
+        #expect(snapshot.foregroundWrite.inFlight == 0)
+        #expect(snapshot.foregroundControlWrite.inFlight == 0)
+        #expect(snapshot.foregroundControlWrite.rejectedRequests == 0)
+    }
+
     private func makeController(
         timeout: Duration
     ) -> V2DatabaseWorkAdmissionController {

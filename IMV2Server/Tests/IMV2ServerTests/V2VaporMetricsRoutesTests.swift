@@ -132,6 +132,7 @@ struct V2VaporMetricsRoutesTests {
         try await app.testing().test(.GET, "metrics") { response async throws in
             let body = response.body.string
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
+            #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_control_write\"} 0"))
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_pending_requests 7"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} 13"))

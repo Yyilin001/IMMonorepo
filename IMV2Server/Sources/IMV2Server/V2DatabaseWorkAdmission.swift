@@ -5,6 +5,11 @@ public enum V2DatabaseWorkClass: String, CaseIterable, Sendable {
     /// intentionally independent from interactive reads so a burst of room
     /// log pulls cannot consume every send permit.
     case foregroundWrite = "foreground_write"
+    /// Control-plane mutations such as opening a direct room. They are
+    /// durable writes, but are not on the already-open conversation's send
+    /// hot path. Keeping them separate prevents a connection-time creation
+    /// burst from consuming the message-acceptance reservation.
+    case foregroundControlWrite = "foreground_control_write"
     /// Foreground reads whose response is needed for an already-open UI, such
     /// as a room-log pull. They remain bounded so they cannot turn a delayed
     /// client into unbounded PostgreSQL work.
@@ -58,33 +63,41 @@ public enum V2DatabaseWorkAdmissionResult: Equatable, Sendable {
 
 public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
     public let maximumForegroundWriteInFlight: Int
+    public let maximumForegroundControlWriteInFlight: Int
     public let maximumInteractiveReadInFlight: Int
     public let maximumSyncInFlight: Int
     public let maximumForegroundWriteQueued: Int
+    public let maximumForegroundControlWriteQueued: Int
     public let maximumInteractiveReadQueued: Int
     public let maximumSyncQueued: Int
     public let timeout: Duration
 
     public init(
         maximumForegroundWriteInFlight: Int,
+        maximumForegroundControlWriteInFlight: Int = 0,
         maximumInteractiveReadInFlight: Int,
         maximumSyncInFlight: Int,
         maximumForegroundWriteQueued: Int,
+        maximumForegroundControlWriteQueued: Int = 0,
         maximumInteractiveReadQueued: Int,
         maximumSyncQueued: Int,
         timeout: Duration
     ) {
         precondition(maximumForegroundWriteInFlight > 0)
+        precondition(maximumForegroundControlWriteInFlight >= 0)
         precondition(maximumInteractiveReadInFlight > 0)
         precondition(maximumSyncInFlight > 0)
         precondition(maximumForegroundWriteQueued > 0)
+        precondition(maximumForegroundControlWriteQueued >= 0)
         precondition(maximumInteractiveReadQueued > 0)
         precondition(maximumSyncQueued > 0)
         precondition(timeout > .zero)
         self.maximumForegroundWriteInFlight = maximumForegroundWriteInFlight
+        self.maximumForegroundControlWriteInFlight = maximumForegroundControlWriteInFlight
         self.maximumInteractiveReadInFlight = maximumInteractiveReadInFlight
         self.maximumSyncInFlight = maximumSyncInFlight
         self.maximumForegroundWriteQueued = maximumForegroundWriteQueued
+        self.maximumForegroundControlWriteQueued = maximumForegroundControlWriteQueued
         self.maximumInteractiveReadQueued = maximumInteractiveReadQueued
         self.maximumSyncQueued = maximumSyncQueued
         self.timeout = timeout
@@ -126,35 +139,63 @@ public struct V2DatabaseWorkAdmissionClassSnapshot: Equatable, Sendable {
         let sum = queueFullRejections.addingReportingOverflow(timeoutRejections)
         return sum.overflow ? .max : sum.partialValue
     }
+
+    public static let empty = Self(
+        inFlight: 0,
+        queued: 0,
+        admittedRequests: 0,
+        queueFullRejections: 0,
+        timeoutRejections: 0,
+        cancelledRequests: 0
+    )
 }
 
 public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
     public let foregroundWrite: V2DatabaseWorkAdmissionClassSnapshot
+    public let foregroundControlWrite: V2DatabaseWorkAdmissionClassSnapshot
     public let interactiveRead: V2DatabaseWorkAdmissionClassSnapshot
     public let sync: V2DatabaseWorkAdmissionClassSnapshot
 
+    public init(
+        foregroundWrite: V2DatabaseWorkAdmissionClassSnapshot,
+        foregroundControlWrite: V2DatabaseWorkAdmissionClassSnapshot = .empty,
+        interactiveRead: V2DatabaseWorkAdmissionClassSnapshot,
+        sync: V2DatabaseWorkAdmissionClassSnapshot
+    ) {
+        self.foregroundWrite = foregroundWrite
+        self.foregroundControlWrite = foregroundControlWrite
+        self.interactiveRead = interactiveRead
+        self.sync = sync
+    }
+
     public var foregroundWriteInFlight: Int { foregroundWrite.inFlight }
+    public var foregroundControlWriteInFlight: Int { foregroundControlWrite.inFlight }
     public var interactiveReadInFlight: Int { interactiveRead.inFlight }
     public var syncInFlight: Int { sync.inFlight }
     public var foregroundWriteQueued: Int { foregroundWrite.queued }
+    public var foregroundControlWriteQueued: Int { foregroundControlWrite.queued }
     public var interactiveReadQueued: Int { interactiveRead.queued }
     public var syncQueued: Int { sync.queued }
     /// Aggregate foreground pressure used by durable workers to back off. It
     /// intentionally includes both client-visible write and interactive-read
     /// lanes: either consumes the shared PostgreSQL foreground pool.
     public var foregroundInFlight: Int {
-        foregroundWrite.inFlight + interactiveRead.inFlight
+        foregroundWrite.inFlight + foregroundControlWrite.inFlight + interactiveRead.inFlight
     }
     public var foregroundQueued: Int {
-        foregroundWrite.queued + interactiveRead.queued
+        foregroundWrite.queued + foregroundControlWrite.queued + interactiveRead.queued
     }
     public var queued: Int { foregroundWrite.queued + interactiveRead.queued + sync.queued }
     public var rejectedRequests: UInt64 {
         let foreground = foregroundWrite.rejectedRequests.addingReportingOverflow(
-            interactiveRead.rejectedRequests
+            foregroundControlWrite.rejectedRequests
         )
         guard !foreground.overflow else { return .max }
-        let total = foreground.partialValue.addingReportingOverflow(sync.rejectedRequests)
+        let foregroundWithReads = foreground.partialValue.addingReportingOverflow(
+            interactiveRead.rejectedRequests
+        )
+        guard !foregroundWithReads.overflow else { return .max }
+        let total = foregroundWithReads.partialValue.addingReportingOverflow(sync.rejectedRequests)
         return total.overflow ? .max : total.partialValue
     }
 
@@ -163,6 +204,7 @@ public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
     ) -> V2DatabaseWorkAdmissionClassSnapshot {
         switch workClass {
         case .foregroundWrite: foregroundWrite
+        case .foregroundControlWrite: foregroundControlWrite
         case .interactiveRead: interactiveRead
         case .sync: sync
         }
@@ -170,11 +212,11 @@ public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
 }
 
 /// A bounded process-local queue in front of the more expensive Fluent pool
-/// wait. Foreground writes and interactive reads own independent queue
-/// budgets and reservation targets, while sharing one work-conserving
-/// foreground capacity. An idle reservation can therefore be borrowed by the
-/// busy class, but a queued peer class receives the next released foreground
-/// permit. Sync remains independent.
+/// wait. Message writes, control-plane writes, and interactive reads own
+/// independent queue budgets and reservation targets while sharing one
+/// work-conserving foreground capacity. An idle reservation can therefore be
+/// borrowed by the busy class, but a queued peer class receives the next
+/// released foreground permit. Sync remains independent.
 ///
 /// Each lane is an intrusive doubly linked FIFO stored inside the actor. Grant,
 /// timeout and cancellation are therefore O(1), including under the 2,000+
@@ -208,12 +250,13 @@ public actor V2DatabaseWorkAdmissionController {
     private let policy: V2DatabaseWorkAdmissionPolicy
     private let clock = ContinuousClock()
     private var foregroundWrite = Lane()
+    private var foregroundControlWrite = Lane()
     private var interactiveRead = Lane()
     private var sync = Lane()
     private var waiters: [UUID: Waiter] = [:]
-    /// Alternating only breaks ties after reservation demand has been
-    /// satisfied. It prevents a steady write stream from repeatedly taking a
-    /// newly released borrowed permit ahead of an equally eligible read.
+    /// Rotating only breaks ties after reservation demand has been
+    /// satisfied. It prevents one foreground lane from repeatedly taking a
+    /// newly released borrowed permit ahead of an equally eligible peer.
     private var nextForegroundTieBreak: V2DatabaseWorkClass = .foregroundWrite
 
     public init(policy: V2DatabaseWorkAdmissionPolicy) {
@@ -251,7 +294,7 @@ public actor V2DatabaseWorkAdmissionController {
         precondition(lane(for: workClass).inFlight > 0)
         mutateLane(for: workClass) { $0.inFlight -= 1 }
         switch workClass {
-        case .foregroundWrite, .interactiveRead:
+        case .foregroundWrite, .foregroundControlWrite, .interactiveRead:
             grantNextForegroundIfPossible()
         case .sync:
             grantNextIfPossible(.sync)
@@ -261,6 +304,7 @@ public actor V2DatabaseWorkAdmissionController {
     public func snapshot() -> V2DatabaseWorkAdmissionSnapshot {
         .init(
             foregroundWrite: snapshot(foregroundWrite),
+            foregroundControlWrite: snapshot(foregroundControlWrite),
             interactiveRead: snapshot(interactiveRead),
             sync: snapshot(sync)
         )
@@ -370,62 +414,82 @@ public actor V2DatabaseWorkAdmissionController {
         case .foregroundWrite:
             guard foregroundInFlight < foregroundCapacity else { return false }
             // A write keeps its own reservation. Above it, write work can use
-            // otherwise idle read capacity only while no read is queued.
+            // otherwise idle peer capacity only while no peer is queued.
             return foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight ||
-                interactiveRead.queued == 0
+                !hasQueuedForegroundPeer(of: .foregroundWrite)
+        case .foregroundControlWrite:
+            guard foregroundInFlight < foregroundCapacity else { return false }
+            return foregroundControlWrite.inFlight < policy.maximumForegroundControlWriteInFlight ||
+                !hasQueuedForegroundPeer(of: .foregroundControlWrite)
         case .interactiveRead:
             guard foregroundInFlight < foregroundCapacity else { return false }
             // Symmetric borrowing prevents a large send burst from leaving
             // room-log recovery permanently under-provisioned.
             return interactiveRead.inFlight < policy.maximumInteractiveReadInFlight ||
-                foregroundWrite.queued == 0
+                !hasQueuedForegroundPeer(of: .interactiveRead)
         case .sync:
             return sync.inFlight < policy.maximumSyncInFlight
         }
     }
 
     private var foregroundCapacity: Int {
-        policy.maximumForegroundWriteInFlight + policy.maximumInteractiveReadInFlight
+        policy.maximumForegroundWriteInFlight +
+            policy.maximumForegroundControlWriteInFlight +
+            policy.maximumInteractiveReadInFlight
     }
 
     private var foregroundInFlight: Int {
-        foregroundWrite.inFlight + interactiveRead.inFlight
+        foregroundWrite.inFlight + foregroundControlWrite.inFlight + interactiveRead.inFlight
     }
 
     private func nextForegroundWorkClass() -> V2DatabaseWorkClass? {
-        let writeQueued = foregroundWrite.head != nil
-        let readQueued = interactiveRead.head != nil
-        guard writeQueued || readQueued else { return nil }
+        let queued = foregroundWorkClasses.filter { lane(for: $0).head != nil }
+        guard !queued.isEmpty else { return nil }
+        let belowReservation = queued.filter {
+            foregroundInFlight(for: $0) < foregroundReservation(for: $0)
+        }
+        return nextForegroundTieBreakClass(
+            candidates: belowReservation.isEmpty ? queued : belowReservation
+        )
+    }
 
-        let writeBelowReservation = writeQueued &&
-            foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight
-        let readBelowReservation = readQueued &&
-            interactiveRead.inFlight < policy.maximumInteractiveReadInFlight
+    private let foregroundWorkClasses: [V2DatabaseWorkClass] = [
+        .foregroundWrite,
+        .foregroundControlWrite,
+        .interactiveRead
+    ]
 
-        switch (writeBelowReservation, readBelowReservation) {
-        case (true, false):
-            return .foregroundWrite
-        case (false, true):
-            return .interactiveRead
-        case (true, true), (false, false):
-            return nextForegroundTieBreakClass(
-                writeQueued: writeQueued,
-                readQueued: readQueued
-            )
+    private func nextForegroundTieBreakClass(
+        candidates: [V2DatabaseWorkClass]
+    ) -> V2DatabaseWorkClass {
+        precondition(!candidates.isEmpty)
+        let start = foregroundWorkClasses.firstIndex(of: nextForegroundTieBreak) ?? 0
+        for offset in 0..<foregroundWorkClasses.count {
+            let candidate = foregroundWorkClasses[(start + offset) % foregroundWorkClasses.count]
+            if candidates.contains(candidate) {
+                let next = (foregroundWorkClasses.firstIndex(of: candidate)! + 1) % foregroundWorkClasses.count
+                nextForegroundTieBreak = foregroundWorkClasses[next]
+                return candidate
+            }
+        }
+        preconditionFailure("foreground admission candidates must be known classes")
+    }
+
+    private func foregroundInFlight(for workClass: V2DatabaseWorkClass) -> Int {
+        lane(for: workClass).inFlight
+    }
+
+    private func foregroundReservation(for workClass: V2DatabaseWorkClass) -> Int {
+        switch workClass {
+        case .foregroundWrite: policy.maximumForegroundWriteInFlight
+        case .foregroundControlWrite: policy.maximumForegroundControlWriteInFlight
+        case .interactiveRead: policy.maximumInteractiveReadInFlight
+        case .sync: preconditionFailure("Sync does not share foreground capacity")
         }
     }
 
-    private func nextForegroundTieBreakClass(
-        writeQueued: Bool,
-        readQueued: Bool
-    ) -> V2DatabaseWorkClass {
-        if !writeQueued { return .interactiveRead }
-        if !readQueued { return .foregroundWrite }
-        let selected = nextForegroundTieBreak
-        nextForegroundTieBreak = selected == .foregroundWrite
-            ? .interactiveRead
-            : .foregroundWrite
-        return selected
+    private func hasQueuedForegroundPeer(of workClass: V2DatabaseWorkClass) -> Bool {
+        foregroundWorkClasses.contains { $0 != workClass && lane(for: $0).queued > 0 }
     }
 
     private func admit(_ workClass: V2DatabaseWorkClass) {
@@ -438,6 +502,7 @@ public actor V2DatabaseWorkAdmissionController {
     private func maximumQueued(for workClass: V2DatabaseWorkClass) -> Int {
         switch workClass {
         case .foregroundWrite: policy.maximumForegroundWriteQueued
+        case .foregroundControlWrite: policy.maximumForegroundControlWriteQueued
         case .interactiveRead: policy.maximumInteractiveReadQueued
         case .sync: policy.maximumSyncQueued
         }
@@ -446,6 +511,7 @@ public actor V2DatabaseWorkAdmissionController {
     private func lane(for workClass: V2DatabaseWorkClass) -> Lane {
         switch workClass {
         case .foregroundWrite: foregroundWrite
+        case .foregroundControlWrite: foregroundControlWrite
         case .interactiveRead: interactiveRead
         case .sync: sync
         }
@@ -457,6 +523,7 @@ public actor V2DatabaseWorkAdmissionController {
     ) {
         switch workClass {
         case .foregroundWrite: mutation(&foregroundWrite)
+        case .foregroundControlWrite: mutation(&foregroundControlWrite)
         case .interactiveRead: mutation(&interactiveRead)
         case .sync: mutation(&sync)
         }

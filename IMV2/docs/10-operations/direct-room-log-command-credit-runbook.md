@@ -76,6 +76,29 @@ transaction, rather than consuming one admission permit for every request
 waiting to form that batch. This preserves the normal database overload
 backpressure while permitting one WAL commit to cover several requests.
 
+## Control-plane admission isolation
+
+`open_direct_room` uses the separate `foreground_control_write` admission
+lane. It is a durable mutation, but it is not the hot path for messages in an
+already-open conversation. Its reservation is deliberately small and shares
+the same physical PostgreSQL foreground pool with message appends and room-log
+reads; it does **not** create extra database connections.
+
+For the 8-vCPU benchmark host, configure the 32 foreground permits as 20
+message writes, 4 control writes, and 8 interactive reads:
+
+```
+IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT=20
+IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT=4
+IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT=8
+IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_MAX_QUEUED=1152
+```
+
+This makes a direct-room creation surge wait in its own bounded queue instead
+of stealing the message reservation. It does not promise that cold-start room
+creation is fast; measure that phase separately, then begin the steady
+message workload only after warmup completes.
+
 A request with media, mentions,
 reply/forward state, content review, stranger quota consumption, an initial
 reply marker, profile/capability mutation, a duplicate room in the batch, or

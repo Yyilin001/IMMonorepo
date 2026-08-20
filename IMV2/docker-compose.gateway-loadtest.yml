@@ -48,6 +48,7 @@ services:
       # request per client, so its test-only queue uses the same 1,536 bound;
       # the 16-request in-flight limit still protects PostgreSQL.
       IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED: 1152
+      IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_MAX_QUEUED: 1152
       IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED: 384
       IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED: 1536
       IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS: 5000

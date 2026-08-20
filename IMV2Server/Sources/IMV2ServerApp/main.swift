@@ -236,11 +236,15 @@ enum IMV2ServerApp {
                 policy: .init(
                     maximumForegroundWriteInFlight:
                         configuration.foregroundWriteDatabaseWorkLimit,
+                    maximumForegroundControlWriteInFlight:
+                        configuration.foregroundControlWriteDatabaseWorkLimit,
                     maximumInteractiveReadInFlight:
                         configuration.interactiveReadDatabaseWorkLimit,
                     maximumSyncInFlight: configuration.syncDatabaseWorkLimit,
                     maximumForegroundWriteQueued:
                         configuration.foregroundWriteDatabaseWorkMaximumQueued,
+                    maximumForegroundControlWriteQueued:
+                        configuration.foregroundControlWriteDatabaseWorkMaximumQueued,
                     maximumInteractiveReadQueued:
                         configuration.interactiveReadDatabaseWorkMaximumQueued,
                     maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
@@ -574,7 +578,9 @@ enum IMV2ServerApp {
                 telemetry: telemetry,
                 databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
                     ? databaseWorkAdmission
-                    : nil
+                    : nil,
+                controlWriteAdmissionEnabled:
+                    configuration.foregroundControlWriteDatabaseWorkLimit > 0
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(
                 database: deliveryDatabase,
