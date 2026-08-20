@@ -170,9 +170,11 @@ public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
 }
 
 /// A bounded process-local queue in front of the more expensive Fluent pool
-/// wait. Foreground writes, interactive reads and Sync own independent
-/// in-flight and queue budgets, so a room-log pull or reconnect storm cannot
-/// consume the send queue reservation.
+/// wait. Foreground writes and interactive reads own independent queue
+/// budgets and reservation targets, while sharing one work-conserving
+/// foreground capacity. An idle reservation can therefore be borrowed by the
+/// busy class, but a queued peer class receives the next released foreground
+/// permit. Sync remains independent.
 ///
 /// Each lane is an intrusive doubly linked FIFO stored inside the actor. Grant,
 /// timeout and cancellation are therefore O(1), including under the 2,000+
@@ -209,6 +211,10 @@ public actor V2DatabaseWorkAdmissionController {
     private var interactiveRead = Lane()
     private var sync = Lane()
     private var waiters: [UUID: Waiter] = [:]
+    /// Alternating only breaks ties after reservation demand has been
+    /// satisfied. It prevents a steady write stream from repeatedly taking a
+    /// newly released borrowed permit ahead of an equally eligible read.
+    private var nextForegroundTieBreak: V2DatabaseWorkClass = .foregroundWrite
 
     public init(policy: V2DatabaseWorkAdmissionPolicy) {
         self.policy = policy
@@ -218,10 +224,7 @@ public actor V2DatabaseWorkAdmissionController {
         _ workClass: V2DatabaseWorkClass
     ) async -> V2DatabaseWorkAdmissionResult {
         if canAcquire(workClass), lane(for: workClass).queued == 0 {
-            mutateLane(for: workClass) { lane in
-                lane.inFlight += 1
-                lane.admittedRequests = saturatingIncrement(lane.admittedRequests)
-            }
+            admit(workClass)
             return .admitted
         }
         guard lane(for: workClass).queued < maximumQueued(for: workClass) else {
@@ -247,7 +250,12 @@ public actor V2DatabaseWorkAdmissionController {
     public func release(_ workClass: V2DatabaseWorkClass) {
         precondition(lane(for: workClass).inFlight > 0)
         mutateLane(for: workClass) { $0.inFlight -= 1 }
-        grantNextIfPossible(workClass)
+        switch workClass {
+        case .foregroundWrite, .interactiveRead:
+            grantNextForegroundIfPossible()
+        case .sync:
+            grantNextIfPossible(.sync)
+        }
     }
 
     public func snapshot() -> V2DatabaseWorkAdmissionSnapshot {
@@ -299,10 +307,23 @@ public actor V2DatabaseWorkAdmissionController {
         guard canAcquire(workClass), let waiterID = lane(for: workClass).head,
               let waiter = removeWaiter(waiterID)
         else { return }
-        mutateLane(for: workClass) { lane in
-            lane.inFlight += 1
-            lane.admittedRequests = saturatingIncrement(lane.admittedRequests)
-        }
+        admit(workClass)
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(returning: .admitted)
+    }
+
+    /// Grants the foreground permit released by either a write or a read.
+    /// Reservations win over borrowing; once both reservations are satisfied,
+    /// tie-breaking alternates between the two FIFO lane heads. This is
+    /// intentionally work-conserving, not a preemptive scheduler: already
+    /// admitted database operations are never cancelled merely to rebalance.
+    private func grantNextForegroundIfPossible() {
+        guard foregroundInFlight < foregroundCapacity,
+              let workClass = nextForegroundWorkClass(),
+              let waiterID = lane(for: workClass).head,
+              let waiter = removeWaiter(waiterID)
+        else { return }
+        admit(workClass)
         waiter.timeoutTask?.cancel()
         waiter.continuation.resume(returning: .admitted)
     }
@@ -347,11 +368,70 @@ public actor V2DatabaseWorkAdmissionController {
     private func canAcquire(_ workClass: V2DatabaseWorkClass) -> Bool {
         switch workClass {
         case .foregroundWrite:
-            foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight
+            guard foregroundInFlight < foregroundCapacity else { return false }
+            // A write keeps its own reservation. Above it, write work can use
+            // otherwise idle read capacity only while no read is queued.
+            return foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight ||
+                interactiveRead.queued == 0
         case .interactiveRead:
-            interactiveRead.inFlight < policy.maximumInteractiveReadInFlight
+            guard foregroundInFlight < foregroundCapacity else { return false }
+            // Symmetric borrowing prevents a large send burst from leaving
+            // room-log recovery permanently under-provisioned.
+            return interactiveRead.inFlight < policy.maximumInteractiveReadInFlight ||
+                foregroundWrite.queued == 0
         case .sync:
-            sync.inFlight < policy.maximumSyncInFlight
+            return sync.inFlight < policy.maximumSyncInFlight
+        }
+    }
+
+    private var foregroundCapacity: Int {
+        policy.maximumForegroundWriteInFlight + policy.maximumInteractiveReadInFlight
+    }
+
+    private var foregroundInFlight: Int {
+        foregroundWrite.inFlight + interactiveRead.inFlight
+    }
+
+    private func nextForegroundWorkClass() -> V2DatabaseWorkClass? {
+        let writeQueued = foregroundWrite.head != nil
+        let readQueued = interactiveRead.head != nil
+        guard writeQueued || readQueued else { return nil }
+
+        let writeBelowReservation = writeQueued &&
+            foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight
+        let readBelowReservation = readQueued &&
+            interactiveRead.inFlight < policy.maximumInteractiveReadInFlight
+
+        switch (writeBelowReservation, readBelowReservation) {
+        case (true, false):
+            return .foregroundWrite
+        case (false, true):
+            return .interactiveRead
+        case (true, true), (false, false):
+            return nextForegroundTieBreakClass(
+                writeQueued: writeQueued,
+                readQueued: readQueued
+            )
+        }
+    }
+
+    private func nextForegroundTieBreakClass(
+        writeQueued: Bool,
+        readQueued: Bool
+    ) -> V2DatabaseWorkClass {
+        if !writeQueued { return .interactiveRead }
+        if !readQueued { return .foregroundWrite }
+        let selected = nextForegroundTieBreak
+        nextForegroundTieBreak = selected == .foregroundWrite
+            ? .interactiveRead
+            : .foregroundWrite
+        return selected
+    }
+
+    private func admit(_ workClass: V2DatabaseWorkClass) {
+        mutateLane(for: workClass) { lane in
+            lane.inFlight += 1
+            lane.admittedRequests = saturatingIncrement(lane.admittedRequests)
         }
     }
 

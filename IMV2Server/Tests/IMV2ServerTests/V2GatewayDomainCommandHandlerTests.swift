@@ -19,6 +19,7 @@ struct V2GatewayDomainCommandHandlerTests {
             timeout: .milliseconds(5)
         ))
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        #expect(await admission.acquire(.interactiveRead) == .admitted)
         let telemetry = V2InMemoryTelemetrySink()
         let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
@@ -44,9 +45,11 @@ struct V2GatewayDomainCommandHandlerTests {
         else {
             Issue.record("expected a privacy-safe server-busy metric")
             await admission.release(.foregroundWrite)
+            await admission.release(.interactiveRead)
             return
         }
         await admission.release(.foregroundWrite)
+        await admission.release(.interactiveRead)
     }
 
     @Test("room-log pulls use the interactive-read reservation instead of send capacity")
@@ -61,6 +64,7 @@ struct V2GatewayDomainCommandHandlerTests {
             maximumSyncQueued: 1,
             timeout: .milliseconds(5)
         ))
+        #expect(await admission.acquire(.foregroundWrite) == .admitted)
         #expect(await admission.acquire(.interactiveRead) == .admitted)
         let queuedRead = Task { await admission.acquire(.interactiveRead) }
         while await admission.snapshot().interactiveReadQueued == 0 {
@@ -90,6 +94,7 @@ struct V2GatewayDomainCommandHandlerTests {
             await admission.release(.interactiveRead)
             _ = await queuedRead.value
             await admission.release(.interactiveRead)
+            await admission.release(.foregroundWrite)
             return
         }
         let snapshot = await admission.snapshot()
@@ -98,6 +103,7 @@ struct V2GatewayDomainCommandHandlerTests {
         await admission.release(.interactiveRead)
         #expect(await queuedRead.value == .admitted)
         await admission.release(.interactiveRead)
+        await admission.release(.foregroundWrite)
     }
 
     @Test("cancelling admission wait propagates cancellation instead of server busy")
@@ -113,6 +119,7 @@ struct V2GatewayDomainCommandHandlerTests {
             timeout: .seconds(1)
         ))
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        #expect(await admission.acquire(.interactiveRead) == .admitted)
         let handler = makeGatewayDomainCommandHandler(
             sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
                 seed: [(fixture.roomState, fixture.shardState)],
@@ -140,6 +147,7 @@ struct V2GatewayDomainCommandHandlerTests {
         }
         #expect(await admission.snapshot().foregroundWrite.cancelledRequests == 1)
         await admission.release(.foregroundWrite)
+        await admission.release(.interactiveRead)
     }
 
     @Test("process-local unsubscribe remains available during database overload")

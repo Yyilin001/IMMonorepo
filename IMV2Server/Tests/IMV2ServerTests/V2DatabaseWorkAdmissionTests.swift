@@ -47,18 +47,21 @@ struct V2DatabaseWorkAdmissionTests {
     func releasesToQueuedRequest() async throws {
         let controller = makeController(timeout: .milliseconds(200))
         #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
         let queued = Task { await controller.acquire(.foregroundWrite) }
         try await Task.sleep(for: .milliseconds(20))
         #expect(await controller.snapshot().queued == 1)
         await controller.release(.foregroundWrite)
         #expect(await queued.value == .admitted)
         await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
     }
 
     @Test("cancelling a queued request removes it without recording overload")
     func cancellationRemovesWaiter() async throws {
         let controller = makeController(timeout: .seconds(1))
         #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
         let queued = Task { await controller.acquire(.foregroundWrite) }
         try await Task.sleep(for: .milliseconds(20))
         #expect(await controller.snapshot().foregroundWriteQueued == 1)
@@ -70,6 +73,7 @@ struct V2DatabaseWorkAdmissionTests {
         #expect(snapshot.foregroundWrite.cancelledRequests == 1)
         #expect(snapshot.rejectedRequests == 0)
         await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
     }
 
     @Test("timeout and queue-full rejections remain distinct counters")
@@ -99,6 +103,7 @@ struct V2DatabaseWorkAdmissionTests {
             timeout: .seconds(2)
         ))
         #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
         let order = AdmissionOrderRecorder()
         var tasks: [Task<Void, Never>] = []
         for index in 0..<16 {
@@ -121,6 +126,7 @@ struct V2DatabaseWorkAdmissionTests {
         #expect(snapshot.inFlight == 0)
         #expect(snapshot.queued == 0)
         #expect(snapshot.admittedRequests == 17)
+        await controller.release(.interactiveRead)
     }
 
     @Test("cancellation racing permit release neither leaks nor overspends permits")
@@ -137,6 +143,7 @@ struct V2DatabaseWorkAdmissionTests {
         for _ in 0..<4 {
             #expect(await controller.acquire(.foregroundWrite) == .admitted)
         }
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
         let tasks = (0..<256).map { _ in
             Task {
                 let result = await controller.acquire(.foregroundWrite)
@@ -169,6 +176,67 @@ struct V2DatabaseWorkAdmissionTests {
         #expect(snapshot.admittedRequests == UInt64(4 + admitted))
         #expect(snapshot.cancelledRequests == UInt64(cancelled))
         #expect(snapshot.rejectedRequests == 0)
+        await controller.release(.interactiveRead)
+    }
+
+    @Test("idle interactive-read reservation is borrowed by foreground writes")
+    func foregroundWriteBorrowsIdleInteractiveReadCapacity() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 2,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 4,
+            maximumInteractiveReadQueued: 4,
+            maximumSyncQueued: 1,
+            timeout: .seconds(1)
+        ))
+
+        for _ in 0..<3 {
+            #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        }
+        #expect(await controller.snapshot().foregroundWriteInFlight == 3)
+        #expect(await controller.snapshot().interactiveReadInFlight == 0)
+
+        let queuedRead = Task { await controller.acquire(.interactiveRead) }
+        while await controller.snapshot().interactiveReadQueued != 1 { await Task.yield() }
+        await controller.release(.foregroundWrite)
+        #expect(await queuedRead.value == .admitted)
+        let snapshot = await controller.snapshot()
+        #expect(snapshot.foregroundWriteInFlight == 2)
+        #expect(snapshot.interactiveReadInFlight == 1)
+        await controller.release(.foregroundWrite)
+        await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
+    }
+
+    @Test("queued peer reservation receives the next borrowed foreground permit")
+    func queuedPeerReservationWinsNextReleasedPermit() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 2,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 4,
+            maximumInteractiveReadQueued: 4,
+            maximumSyncQueued: 1,
+            timeout: .seconds(1)
+        ))
+
+        for _ in 0..<3 {
+            #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        }
+        let queuedRead = Task { await controller.acquire(.interactiveRead) }
+        while await controller.snapshot().interactiveReadQueued != 1 { await Task.yield() }
+        let queuedWrite = Task { await controller.acquire(.foregroundWrite) }
+        while await controller.snapshot().foregroundWriteQueued != 1 { await Task.yield() }
+
+        await controller.release(.foregroundWrite)
+        #expect(await queuedRead.value == .admitted)
+        #expect(await controller.snapshot().foregroundWriteQueued == 1)
+        await controller.release(.interactiveRead)
+        #expect(await queuedWrite.value == .admitted)
+        await controller.release(.foregroundWrite)
+        await controller.release(.foregroundWrite)
+        await controller.release(.foregroundWrite)
     }
 
     private func makeController(

@@ -35,9 +35,9 @@
 
 `V2DatabaseWorkAdmissionController` 在 Fluent pool timeout 之前提供三个 O(1) FIFO 短队列：
 
-- durable foreground write、interactive read（含 `GroupEventPull`）与 Sync 各自有独立 in-flight 上限；
+- durable foreground write、interactive read（含 `GroupEventPull`）与 Sync 各自有独立 queue 与 in-flight reservation；write/read 在同一个 foreground capacity 内工作保守地借用空闲保留额，已排队的对端在下一次 permit 释放时优先获得该 permit；
 - 三类各自拥有等待数硬上限，并共享显式等待超时；
-- write/read 上限之和仍不得超过同一个 foreground PostgreSQL pool；这只隔离延迟和拒绝面，不增加数据库连接或宣称提高总吞吐；
+- write/read reservation 之和仍不得超过同一个 foreground PostgreSQL pool；这只隔离延迟和拒绝面，不增加数据库连接或宣称提高总吞吐；
 - 超限返回可重试 `SERVER_BUSY`，不占用数据库连接；
 - 客户端取消会移除等待者，不遗留 continuation 或 detached task。
 

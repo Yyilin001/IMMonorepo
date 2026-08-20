@@ -22,6 +22,14 @@ if [[ -n "${curl_resolve}" ]]; then
   curl_options+=(--resolve "${curl_resolve}")
 fi
 
+curl_request() {
+  if (( ${#curl_options[@]} > 0 )); then
+    curl "${curl_options[@]}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 [[ -f "${ca_path}" && -f "${input_path}" ]] || {
   printf 'CA or input credential file does not exist\n' >&2
   exit 66
@@ -55,7 +63,7 @@ refresh_one() {
   local operation_id payload issued
   operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   payload="$(printf '%s' "${record}" | jq -ce --arg operationID "${operation_id}" '{userID,deviceID,refreshCredential,operationID:$operationID}')"
-  issued="$(printf '%s' "${payload}" | curl "${curl_options[@]}" --silent --show-error --fail \
+  issued="$(printf '%s' "${payload}" | curl_request --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \

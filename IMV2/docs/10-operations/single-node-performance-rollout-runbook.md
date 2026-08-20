@@ -9,7 +9,7 @@
 | --- | ---: |
 | 共享 pool ceiling / event loop | 16 |
 | workload pool isolation | `false` |
-| foreground write / interactive read admitted in-flight | 24 / 8 |
+| foreground write / interactive read reservation（共享 foreground ceiling 32） | 24 / 8 |
 | Sync admitted in-flight | 16 |
 | foreground write / interactive read / Sync 短队列 | 288 / 96 / 128 |
 | Projection concurrency / unique user schema | 2 |
@@ -26,7 +26,7 @@
 
 以上 Gateway 总连接 ceiling 为 `4 × 16 = 64`，但连接按需建立。Account、Operator 也各自按其 EventLoop 数乘每 loop ceiling 计算，不能再按一个长期 `app.db` 句柄估算。其他环境必须把所有进程、物理数据库 URL 和运维连接预算相加；不要让理论最大值等于 PostgreSQL `max_connections`。
 
-配置中保留的 foreground/Sync/Delivery/Projection/Maintenance 每-loop 数值只在显式启用 workload isolation 时生效。当前默认不启用；固定角色池在相同负载下不能借用空闲连接，曾出现总吞吐回退。写入和交互读取是同一 foreground pool 上的两个准入预算，二者的 in-flight 和队列分别受限，不能相加后超过 pool；若实验启用，多个 schema 共用同一数据库 URL 时，Projection pool 至少覆盖每个 schema 的 `projector concurrency + 1 snapshot builder`。
+配置中保留的 foreground/Sync/Delivery/Projection/Maintenance 每-loop 数值只在显式启用 workload isolation 时生效。当前默认不启用；固定角色池在相同负载下不能借用空闲连接，曾出现总吞吐回退。写入和交互读取在同一 foreground pool 上各有 24/8 的准入保留额：空闲保留额可被另一类暂借，但一旦对端出现排队，后续释放的 permit 优先归还给对端；两个保留额之和仍不得超过 foreground pool。若实验启用，多个 schema 共用同一数据库 URL 时，Projection pool 至少覆盖每个 schema 的 `projector concurrency + 1 snapshot builder`。
 
 表中 `288 / 96 / 128 / 200 ms` 是正常业务流量的起始保护值。压测工具若在连接完成后一次释放 1,000 个初始化命令和 Full Sync，可仅在 load-test Compose overlay 中保持 write/read/Sync in-flight 不变，将短队列临时调为 `1,152 / 384 / 1,536`、等待时间调为 5,000 ms。这样仍限制数据库并发，只吸收已知的有界测试突发；不能把这组值直接当作生产默认值。
 

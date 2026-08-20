@@ -22,6 +22,14 @@ if [[ -n "${curl_resolve}" ]]; then
   curl_options+=(--resolve "${curl_resolve}")
 fi
 
+curl_request() {
+  if (( ${#curl_options[@]} > 0 )); then
+    curl "${curl_options[@]}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 [[ "${credential_count}" =~ ^[1-9][0-9]*$ ]] || {
   printf 'credential-count must be a positive integer\n' >&2
   exit 64
@@ -73,7 +81,7 @@ prepare_one() {
     --arg deviceID "${device_id}" \
     --arg publicHandle "${public_handle}" \
     '{accountHandle:$accountHandle,password:$password,deviceID:$deviceID,publicHandle:$publicHandle,displayName:"Load Test"}')"
-  assertion="$(printf '%s' "${assertion_payload}" | curl "${curl_options[@]}" --silent --show-error --fail \
+  assertion="$(printf '%s' "${assertion_payload}" | curl_request --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \
@@ -85,7 +93,7 @@ prepare_one() {
     --arg deviceID "${device_id}" \
     --arg operationID "${operation_id}" \
     '{accountAssertion:$accountAssertion,deviceID:$deviceID,operationID:$operationID,deviceName:"Load Generator",platform:"macOS"}')"
-  issued="$(printf '%s' "${issue_payload}" | curl "${curl_options[@]}" --silent --show-error --fail \
+  issued="$(printf '%s' "${issue_payload}" | curl_request --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \
