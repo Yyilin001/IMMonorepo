@@ -116,6 +116,7 @@ struct V2SendMessageServiceTests {
             now: { Date(timeIntervalSince1970: 1_750_000_000) }
         )
         let roomID = try RoomID("00000000-0000-0000-0000-000000000111")
+        let secondRoomID = try RoomID("00000000-0000-0000-0000-000000000115")
         let senderID = try UserID("00000000-0000-0000-0000-000000000112")
         let firstID = try ClientMessageID("00000000-0000-0000-0000-000000000113")
         let secondID = try ClientMessageID("00000000-0000-0000-0000-000000000114")
@@ -127,7 +128,7 @@ struct V2SendMessageServiceTests {
             text: "one"
         ))
         async let second = service.send(.init(
-            roomID: roomID,
+            roomID: secondRoomID,
             actorUserID: senderID,
             clientMessageID: secondID,
             text: "two"
@@ -159,6 +160,7 @@ struct V2SendMessageServiceTests {
             batcher: batcher
         )
         let roomID = try RoomID("00000000-0000-0000-0000-000000000121")
+        let secondRoomID = try RoomID("00000000-0000-0000-0000-000000000125")
         let senderID = try UserID("00000000-0000-0000-0000-000000000122")
 
         async let first = captureSendOutcome { try await service.send(.init(
@@ -168,7 +170,7 @@ struct V2SendMessageServiceTests {
             text: "one"
         )) }
         async let second = captureSendOutcome { try await service.send(.init(
-            roomID: roomID,
+            roomID: secondRoomID,
             actorUserID: senderID,
             clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000124"),
             text: "two"
@@ -201,6 +203,7 @@ struct V2SendMessageServiceTests {
             batcher: batcher
         )
         let roomID = try RoomID("00000000-0000-0000-0000-000000000131")
+        let secondRoomID = try RoomID("00000000-0000-0000-0000-000000000135")
         let senderID = try UserID("00000000-0000-0000-0000-000000000132")
 
         async let first = service.send(.init(
@@ -210,7 +213,7 @@ struct V2SendMessageServiceTests {
             text: "rich one"
         ))
         async let second = service.send(.init(
-            roomID: roomID,
+            roomID: secondRoomID,
             actorUserID: senderID,
             clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000134"),
             text: "rich two"
@@ -222,6 +225,55 @@ struct V2SendMessageServiceTests {
         ])
         #expect(await store.batches().count == 1)
         #expect(await store.normalAcceptCallCount() == 2)
+    }
+
+    @Test("independent room batches use bounded parallelism")
+    func admissionBatchingUsesBoundedParallelismAcrossIndependentRooms() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = ConcurrentAtomicBatchTestStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .seconds(5),
+                maximumInFlightBatches: 2
+            )
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000141")
+
+        async let first = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000142"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000143"),
+            text: "one"
+        ))
+        async let second = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000144"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000145"),
+            text: "two"
+        ))
+        async let third = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000146"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000147"),
+            text: "three"
+        ))
+        async let fourth = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000148"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000149"),
+            text: "four"
+        ))
+
+        _ = try await [first, second, third, fourth]
+        #expect(await store.maximumInFlightBatchCount() == 2)
     }
 }
 
@@ -261,6 +313,30 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
 
     func normalAcceptCallCount() -> Int { normalCalls }
     func batches() -> [[ClientMessageID]] { recordedBatches }
+}
+
+private actor ConcurrentAtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
+    private var inFlightBatchCount = 0
+    private var maximumInFlightBatchCountValue = 0
+
+    func accept(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) -> V2SendMessageOutcome {
+        .unavailable(.missingShardLease)
+    }
+
+    func acceptAtomically(requests: [V2RoomWriteRequest]) async throws -> [V2SendMessageOutcome] {
+        inFlightBatchCount += 1
+        maximumInFlightBatchCountValue = max(maximumInFlightBatchCountValue, inFlightBatchCount)
+        try await Task.sleep(for: .milliseconds(50))
+        inFlightBatchCount -= 1
+        return requests.map { _ in .rateLimited(retryAfterSeconds: 1) }
+    }
+
+    func maximumInFlightBatchCount() -> Int { maximumInFlightBatchCountValue }
 }
 
 private func captureSendOutcome(

@@ -360,6 +360,10 @@ enum IMV2ServerApp {
                         maximumBatchSize: configuration.directRoomLogAppendBatchSize,
                         maximumDelay: .milliseconds(
                             configuration.directRoomLogAppendBatchMaximumDelayMilliseconds
+                        ),
+                        maximumInFlightBatches: min(
+                            8,
+                            configuration.foregroundWriteDatabaseWorkLimit
                         )
                     )
                 )

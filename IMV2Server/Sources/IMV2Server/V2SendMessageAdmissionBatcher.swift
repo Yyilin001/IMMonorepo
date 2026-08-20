@@ -1,22 +1,30 @@
 import Foundation
+import IMV2Core
 
 /// Bounded, FIFO batching boundary for command acceptance.
 ///
 /// The batcher owns no room state and never acknowledges a command before its
 /// `V2AtomicRoomWriteBatchStore` reports the whole batch committed.  A future
-/// PostgreSQL implementation must retain per-room order inside the SQL batch;
-/// this actor retains arrival order between batches and limits the additional
-/// queueing delay.
+/// PostgreSQL implementation must retain per-room order inside the SQL batch.
+/// Independent rooms may run in parallel, but no room is admitted to a second
+/// in-flight batch until the first has committed or failed.
 public actor V2SendMessageAdmissionBatcher {
     public struct Configuration: Equatable, Sendable {
         public let maximumBatchSize: Int
         public let maximumDelay: Duration
+        public let maximumInFlightBatches: Int
 
-        public init(maximumBatchSize: Int, maximumDelay: Duration) {
+        public init(
+            maximumBatchSize: Int,
+            maximumDelay: Duration,
+            maximumInFlightBatches: Int = 1
+        ) {
             precondition((2 ... 128).contains(maximumBatchSize))
             precondition(maximumDelay > .zero)
+            precondition((1 ... 128).contains(maximumInFlightBatches))
             self.maximumBatchSize = maximumBatchSize
             self.maximumDelay = maximumDelay
+            self.maximumInFlightBatches = maximumInFlightBatches
         }
     }
 
@@ -29,7 +37,8 @@ public actor V2SendMessageAdmissionBatcher {
     private let configuration: Configuration
     private var pending: [Pending] = []
     private var flushTask: Task<Void, Never>?
-    private var batchInFlight = false
+    private var inFlightBatchCount = 0
+    private var activeRoomIDs: Set<RoomID> = []
 
     public init(
         store: any V2AtomicRoomWriteBatchStore,
@@ -53,7 +62,7 @@ public actor V2SendMessageAdmissionBatcher {
             if pending.count >= configuration.maximumBatchSize {
                 flushTask?.cancel()
                 flushTask = nil
-                startNextBatchIfPossible()
+                startAvailableBatchesIfPossible()
             }
         }
     }
@@ -72,15 +81,46 @@ public actor V2SendMessageAdmissionBatcher {
 
     private func delayedFlushFired() {
         flushTask = nil
-        startNextBatchIfPossible()
+        startAvailableBatchesIfPossible()
     }
 
-    private func startNextBatchIfPossible() {
-        guard !batchInFlight, !pending.isEmpty else { return }
-        batchInFlight = true
-        let count = min(pending.count, configuration.maximumBatchSize)
-        let batch = Array(pending.prefix(count))
-        pending.removeFirst(count)
+    private func startAvailableBatchesIfPossible() {
+        while inFlightBatchCount < configuration.maximumInFlightBatches {
+            guard let batch = dequeueNextBatch() else { return }
+            let batchRoomIDs = Set(batch.map(\.request.command.roomID))
+            inFlightBatchCount += 1
+            activeRoomIDs.formUnion(batchRoomIDs)
+            start(batch: batch, roomIDs: batchRoomIDs)
+        }
+    }
+
+    /// A command cannot overtake an earlier command for the same room.  We
+    /// may, however, skip a blocked room to fill a batch with independent
+    /// rooms; this avoids turning the actor itself into a global write lock.
+    private func dequeueNextBatch() -> [Pending]? {
+        guard !pending.isEmpty else { return nil }
+
+        var selected: [Pending] = []
+        var selectedRoomIDs = activeRoomIDs
+        var remaining: [Pending] = []
+        selected.reserveCapacity(configuration.maximumBatchSize)
+        remaining.reserveCapacity(pending.count)
+
+        for item in pending {
+            guard selected.count < configuration.maximumBatchSize,
+                  selectedRoomIDs.insert(item.request.command.roomID).inserted
+            else {
+                remaining.append(item)
+                continue
+            }
+            selected.append(item)
+        }
+        guard !selected.isEmpty else { return nil }
+        pending = remaining
+        return selected
+    }
+
+    private func start(batch: [Pending], roomIDs: Set<RoomID>) {
         Task { [store] in
             let result: Result<[V2SendMessageOutcome], any Error>
             do {
@@ -105,21 +145,24 @@ public actor V2SendMessageAdmissionBatcher {
             } catch {
                 result = .failure(error)
             }
-            self.complete(batch: batch, result: result)
+            self.complete(batch: batch, roomIDs: roomIDs, result: result)
         }
     }
 
     private func complete(
         batch: [Pending],
+        roomIDs: Set<RoomID>,
         result: Result<[V2SendMessageOutcome], any Error>
     ) {
-        batchInFlight = false
+        precondition(inFlightBatchCount > 0)
+        inFlightBatchCount -= 1
+        activeRoomIDs.subtract(roomIDs)
         switch result {
         case .success(let outcomes):
             guard outcomes.count == batch.count else {
                 let error = V2RoomWriteStoreError.corruptPersistenceState
                 batch.forEach { $0.continuation.resume(throwing: error) }
-                startNextBatchIfPossible()
+                startAvailableBatchesIfPossible()
                 return
             }
             zip(batch, outcomes).forEach { pending, outcome in
@@ -128,7 +171,7 @@ public actor V2SendMessageAdmissionBatcher {
         case .failure(let error):
             batch.forEach { $0.continuation.resume(throwing: error) }
         }
-        startNextBatchIfPossible()
+        startAvailableBatchesIfPossible()
     }
 }
 
