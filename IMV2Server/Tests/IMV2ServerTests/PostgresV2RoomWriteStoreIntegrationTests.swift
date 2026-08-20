@@ -8864,6 +8864,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             // The accepted event must continue to expose its original body
             // after a later message revision changes the mutable row.
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("""
+                    UPDATE im_v2.messages
+                    SET text_body = '没有 revision 的非法修改'
+                    WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                    """).run()
+            }
             try await sql.raw("""
                 UPDATE im_v2.messages
                 SET text_body = '已编辑的当前内容', rich_entities = '[]'::jsonb,

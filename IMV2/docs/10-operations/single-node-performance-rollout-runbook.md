@@ -44,7 +44,8 @@
    `2026-08-18-fanout-direct-user-microbatch-expand.sql`、
    `2026-08-18-fanout-autovacuum-expand.sql` 和
    `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`、
-   `2026-08-20-direct-room-log-content-reference-expand.sql`；新库直接安装 canonical
+   `2026-08-20-direct-room-log-content-reference-expand.sql`、
+   `2026-08-20-direct-room-log-content-reference-integrity-expand.sql`；新库直接安装 canonical
    schema。确认逻辑 view、validated storage constraint、append-only trigger、
    `message_content_versions` 与其 revision snapshot trigger 存在后再部署 binary。该表是
    plain direct room-log 正文引用的历史版本围栏，不能跳过。

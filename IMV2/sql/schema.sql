@@ -1063,6 +1063,13 @@ CREATE FUNCTION im_v2.snapshot_message_content_before_revision_change() RETURNS 
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF (NEW.text_body IS DISTINCT FROM OLD.text_body
+        OR NEW.rich_entities IS DISTINCT FROM OLD.rich_entities)
+       AND NEW.content_revision = OLD.content_revision THEN
+        RAISE EXCEPTION 'message content updates must advance content_revision'
+            USING ERRCODE = '23514';
+    END IF;
+
     IF NEW.content_revision <> OLD.content_revision THEN
         INSERT INTO im_v2.message_content_versions
             (message_id, message_revision, text_body, rich_entities, archived_at)
@@ -1075,7 +1082,7 @@ END;
 $$;
 
 CREATE TRIGGER messages_snapshot_content_before_revision_change
-    BEFORE UPDATE OF content_revision ON im_v2.messages
+    BEFORE UPDATE OF text_body, rich_entities, content_revision ON im_v2.messages
     FOR EACH ROW EXECUTE FUNCTION im_v2.snapshot_message_content_before_revision_change();
 
 CREATE TABLE im_v2.moderation_audit_entries (
