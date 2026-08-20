@@ -52,6 +52,56 @@ struct V2GatewayDomainCommandHandlerTests {
         await admission.release(.interactiveRead)
     }
 
+    @Test("a batch-owned send skips per-request gateway admission and maps overload to server busy")
+    func batchOwnedSendUsesItsOwnDatabaseAdmissionBoundary() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 2,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .milliseconds(5)
+        ))
+        // One of two write permits is occupied. A correct handler leaves the
+        // remaining permit for the batcher; a handler that admits once here
+        // and once in the batcher would return SERVER_BUSY instead.
+        #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        let store = GatewayAtomicBatchStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(1)),
+            databaseWorkAdmission: admission
+        )
+        let sendMessage = V2SendMessageService(
+            store: store,
+            capacityProfile: try .init(id: "standard", limits: fixture.profile),
+            limits: try .init(maxUTF8Bytes: 16),
+            batcher: batcher,
+            now: { fixture.now }
+        )
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: sendMessage,
+            sync: fixture.syncService(),
+            databaseWorkAdmission: admission
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "hello"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "RATE_LIMITED")
+        #expect(response.error.retryable)
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.foregroundWrite.admittedRequests == 2)
+        #expect(snapshot.foregroundWrite.inFlight == 1)
+        await admission.release(.foregroundWrite)
+    }
+
     @Test("room-log pulls use the interactive-read reservation instead of send capacity")
     func groupEventPullUsesInteractiveReadAdmission() async throws {
         let fixture = try GatewayDomainFixture()
@@ -735,6 +785,23 @@ private struct GatewayAcceptedMessageStore: V2RoomWriteStore {
         now _: Date
     ) async throws -> V2SendMessageOutcome {
         outcome
+    }
+}
+
+private struct GatewayAtomicBatchStore: V2AtomicRoomWriteBatchStore {
+    func accept(
+        command _: V2SendMessageCommand,
+        capacityProfile _: V2CapacityProfile,
+        identifiers _: V2AcceptanceIdentifiers,
+        now _: Date
+    ) async throws -> V2SendMessageOutcome {
+        .rateLimited(retryAfterSeconds: 1)
+    }
+
+    func acceptAtomically(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome] {
+        requests.map { _ in .rateLimited(retryAfterSeconds: 1) }
     }
 }
 

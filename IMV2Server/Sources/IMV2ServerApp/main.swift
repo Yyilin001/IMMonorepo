@@ -364,8 +364,13 @@ enum IMV2ServerApp {
                         maximumInFlightBatches: min(
                             8,
                             configuration.foregroundWriteDatabaseWorkLimit
-                        )
-                    )
+                        ),
+                        maximumPendingRequests:
+                            configuration.foregroundWriteDatabaseWorkMaximumQueued
+                    ),
+                    databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
+                        ? databaseWorkAdmission
+                        : nil
                 )
                 : nil
             let sendMessage = V2SendMessageService(

@@ -170,6 +170,14 @@ public struct V2SendMessageService: Sendable {
     private let idFactory: V2AcceptanceIDFactory
     private let now: @Sendable () -> Date
 
+    /// When enabled, the batcher takes foreground-write admission immediately
+    /// around its actual database work. The gateway command boundary must not
+    /// also reserve one permit per waiting message, otherwise a batching wait
+    /// consumes the whole foreground lane before a transaction starts.
+    var managesForegroundWriteAdmission: Bool {
+        batcher?.managesForegroundWriteAdmission ?? false
+    }
+
     public init(
         store: any V2RoomWriteStore,
         capacityProfile: V2CapacityProfile,

@@ -228,7 +228,8 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         do {
             let response: IMV2Envelope
             if let databaseWorkAdmission,
-               let workClass = databaseWorkClass(for: envelope) {
+               let workClass = databaseWorkClass(for: envelope),
+               !sendMessageManagesDatabaseAdmission(for: envelope) {
                 switch await databaseWorkAdmission.acquire(workClass) {
                 case .admitted:
                     break
@@ -324,6 +325,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         default:
             return .foregroundWrite
         }
+    }
+
+    private func sendMessageManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
+        guard sendMessage.managesForegroundWriteAdmission else { return false }
+        guard case .sendMessage = envelope.body else { return false }
+        return true
     }
 
     private func handleWithoutTelemetry(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
@@ -547,7 +554,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         let entities = try request.content.entities.map(v2MessageEntity)
         try V2RichMessageContent.validate(text: text, entities: entities)
         let replyTo = try request.content.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(request.content.replyToMessageID))
-        let outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo))
+        let outcome: V2SendMessageOutcome
+        do {
+            outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo))
+        } catch V2SendMessageAdmissionBatcherError.serverBusy {
+            return errorEnvelope(code: "SERVER_BUSY", retryable: true)
+        }
         switch outcome {
         case .accepted(let message):
             if message.groupDeliveryMode != nil || message.usesRoomEventLog {

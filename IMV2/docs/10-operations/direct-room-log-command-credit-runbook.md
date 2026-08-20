@@ -37,17 +37,27 @@ conservative unused quota after a process crash or a lease rollover.
 optimization. It coalesces up to 2...32 already-established, plain direct
 messages for distinct rooms into one PostgreSQL transaction and one set-based
 append statement. It requires `room_log` and a nonzero shard-credit batch
-size. Start with:
+size. The batch staging queue is bounded by
+`IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED`; it must never be made
+unbounded to increase apparent throughput. Start with:
 
 ```
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=16
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
 ```
 
-The extra delay is bounded to 1...10 ms. A request with media, mentions,
+The extra delay is bounded to 1...10 ms. The batcher takes one
+foreground-write database admission immediately around each actual atomic
+transaction, rather than consuming one admission permit for every request
+waiting to form that batch. This preserves the normal database overload
+backpressure while permitting one WAL commit to cover several requests.
+
+A request with media, mentions,
 reply/forward state, content review, stranger quota consumption, an initial
 reply marker, profile/capability mutation, a duplicate room in the batch, or
 an existing operation transparently falls back to the ordinary transaction.
+Each fallback has its own bounded foreground admission and outcome; one
+fallback failure must not fail another request in the same staging batch.
 No client-visible ACK is sent until the selected append batch commits. Set the
 append batch size to `0` to roll it back without a schema or data change.
 

@@ -145,6 +145,101 @@ struct V2SendMessageServiceTests {
         #expect(Set(batches[0]) == Set([firstID, secondID]))
     }
 
+    @Test("one atomic batch owns one foreground database admission")
+    func admissionBatchingOwnsOneDatabasePermitPerAtomicBatch() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 4,
+            maximumInteractiveReadQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .seconds(1)
+        ))
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            databaseWorkAdmission: admission
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000152")
+        async let first = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000151"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000153"),
+            text: "one"
+        ))
+        async let second = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000154"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000155"),
+            text: "two"
+        ))
+
+        _ = try await [first, second]
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.foregroundWrite.admittedRequests == 1)
+        #expect(snapshot.foregroundWrite.inFlight == 0)
+        #expect(await store.batches().count == 1)
+    }
+
+    @Test("batch staging queue is bounded and pending cancellation removes its request")
+    func admissionBatchingBoundsAndCancelsStagedRequests() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .seconds(5),
+                maximumPendingRequests: 1
+            )
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000162")
+        let waiting = Task {
+            try await service.send(.init(
+                roomID: try RoomID("00000000-0000-0000-0000-000000000161"),
+                actorUserID: senderID,
+                clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000163"),
+                text: "one"
+            ))
+        }
+        while await batcher.snapshot().pendingRequests != 1 {
+            await Task.yield()
+        }
+        await #expect(throws: V2SendMessageAdmissionBatcherError.serverBusy) {
+            try await service.send(.init(
+                roomID: try RoomID("00000000-0000-0000-0000-000000000164"),
+                actorUserID: senderID,
+                clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000165"),
+                text: "two"
+            ))
+        }
+        #expect(await batcher.snapshot().stagingQueueFullRejections == 1)
+
+        waiting.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await waiting.value
+        }
+        while await batcher.snapshot().pendingRequests != 0 {
+            await Task.yield()
+        }
+        #expect(await batcher.snapshot().cancelledPendingRequests == 1)
+    }
+
     @Test("an atomic batch failure is returned to each waiting command")
     func admissionBatchingPropagatesAtomicFailure() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -227,6 +322,52 @@ struct V2SendMessageServiceTests {
         #expect(await store.normalAcceptCallCount() == 2)
     }
 
+    @Test("fallback returns each independent command's own result")
+    func admissionBatchingFallbackDoesNotSpreadOneCommandFailure() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let failedID = try ClientMessageID("00000000-0000-0000-0000-000000000174")
+        let store = AtomicBatchTestStore(
+            shouldDeclineBatch: true,
+            failingNormalClientMessageIDs: [failedID]
+        )
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000171")
+        async let first = captureSendOutcome { try await service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000172"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000173"),
+            text: "one"
+        )) }
+        async let second = captureSendOutcome { try await service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000175"),
+            actorUserID: senderID,
+            clientMessageID: failedID,
+            text: "two"
+        )) }
+
+        let firstResult = await first
+        guard case .success(let firstOutcome) = firstResult else {
+            Issue.record("the unrelated fallback command must complete")
+            return
+        }
+        #expect(firstOutcome == .unavailable(.missingShardLease))
+        let secondResult = await second
+        guard case .failure(let error) = secondResult else {
+            Issue.record("the failing command must keep its own error")
+            return
+        }
+        #expect(error as? V2RoomWriteStoreError == .actorNotEligible)
+    }
+
     @Test("independent room batches use bounded parallelism")
     func admissionBatchingUsesBoundedParallelismAcrossIndependentRooms() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -280,12 +421,18 @@ struct V2SendMessageServiceTests {
 private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     private let shouldFail: Bool
     private let shouldDeclineBatch: Bool
+    private let failingNormalClientMessageIDs: Set<ClientMessageID>
     private var recordedBatches: [[ClientMessageID]] = []
     private var normalCalls = 0
 
-    init(shouldFail: Bool = false, shouldDeclineBatch: Bool = false) {
+    init(
+        shouldFail: Bool = false,
+        shouldDeclineBatch: Bool = false,
+        failingNormalClientMessageIDs: Set<ClientMessageID> = []
+    ) {
         self.shouldFail = shouldFail
         self.shouldDeclineBatch = shouldDeclineBatch
+        self.failingNormalClientMessageIDs = failingNormalClientMessageIDs
     }
 
     func accept(
@@ -295,6 +442,9 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         now: Date
     ) throws -> V2SendMessageOutcome {
         normalCalls += 1
+        if failingNormalClientMessageIDs.contains(command.clientMessageID) {
+            throw V2RoomWriteStoreError.actorNotEligible
+        }
         return .unavailable(.missingShardLease)
     }
 
