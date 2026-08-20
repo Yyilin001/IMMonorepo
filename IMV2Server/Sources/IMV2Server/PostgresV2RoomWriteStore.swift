@@ -1829,7 +1829,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
            message.mentions.isEmpty {
             try await persistPlainRoomLogMessage(
                 message: message,
-                command: command,
                 room: room,
                 roomID: roomID,
                 messageID: messageID,
@@ -1840,9 +1839,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 timelineSequence: timelineSequence,
                 commandWindowUsed: admission.commandWindow.used,
                 entitiesJSON: entitiesJSON,
-                mediaJSON: mediaJSON,
-                mediaPresentationsJSON: mediaPresentationsJSON,
-                mentionedUsersJSON: mentionedUsersJSON,
                 replyToMessageID: replyToMessageID,
                 forwardedFromMessageID: forwardedFromMessageID,
                 forwardedFromUserID: forwardedFromUserID,
@@ -1957,10 +1953,11 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
 
     /// The narrow direct room-log commit for a plain message. This remains a
     /// single statement so the room sequence, admission debit, message and
-    /// recovery event cannot become externally visible independently.
+    /// recovery event cannot become externally visible independently. The
+    /// immutable event stores a content reference; its pull path reads the
+    /// matching version from the canonical message record or its snapshot.
     private func persistPlainRoomLogMessage(
         message: V2AcceptedMessageDraft,
-        command: V2SendMessageCommand,
         room: RoomRow,
         roomID: UUID,
         messageID: UUID,
@@ -1971,9 +1968,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         timelineSequence: Int64,
         commandWindowUsed: Int,
         entitiesJSON: String,
-        mediaJSON: String,
-        mediaPresentationsJSON: String,
-        mentionedUsersJSON: String,
         replyToMessageID: String,
         forwardedFromMessageID: UUID?,
         forwardedFromUserID: UUID?,
@@ -2014,19 +2008,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                        jsonb_build_object(
                            'event_type', 'message.accepted',
                            'message_id', \(bind: messageID.uuidString),
-                           'room_id', \(bind: roomID.uuidString),
-                           'room_sequence', \(bind: roomSequence),
-                           'timeline_sequence', \(bind: timelineSequence),
-                           'sender_user_id', \(bind: senderID.uuidString),
-                           'text', \(bind: message.text),
-                           'media_ids', \(bind: mediaJSON)::jsonb,
-                           'media_presentations', \(bind: mediaPresentationsJSON)::jsonb,
-                           'mention_user_ids', \(bind: mentionedUsersJSON)::jsonb,
-                           'mentions_everyone', FALSE,
-                           'entities', \(bind: entitiesJSON)::jsonb,
-                           'reply_to_message_id', NULLIF(\(bind: replyToMessageID), ''),
-                           'forwarded_from_message_id', NULLIF(\(bind: command.forwardedFrom?.messageID.rawValue ?? ""), ''),
-                           'forwarded_from_user_id', NULLIF(\(bind: command.forwardedFrom?.senderUserID.rawValue ?? ""), ''),
+                           'payload_storage', 'message_reference_v1',
                            'message_revision', 1,
                            'server_created_at_ms', \(bind: Int64(message.createdAt.timeIntervalSince1970 * 1_000))
                        ),

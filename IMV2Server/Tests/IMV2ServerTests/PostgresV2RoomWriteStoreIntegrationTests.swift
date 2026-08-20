@@ -8852,6 +8852,35 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             ])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
+            let acceptedEventID = try #require(UUID(uuidString: senderPage.events.first?.sourceEventID.rawValue ?? ""))
+            let compactEvent = try #require(try await sql.raw("""
+                SELECT payload->>'payload_storage' AS payload_storage,
+                       payload ? 'text' AS stores_text
+                FROM im_v2.room_events
+                WHERE event_id = \(bind: acceptedEventID)
+                """).first(decoding: CompactDirectRoomEventRow.self))
+            #expect(compactEvent.payloadStorage == "message_reference_v1")
+            #expect(compactEvent.storesText == false)
+
+            // The accepted event must continue to expose its original body
+            // after a later message revision changes the mutable row.
+            try await sql.raw("""
+                UPDATE im_v2.messages
+                SET text_body = '已编辑的当前内容', rich_entities = '[]'::jsonb,
+                    content_revision = 2
+                WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                """).run()
+            let recoveredAfterRevision = try await roomLog.pull(
+                roomID: room.roomID, actorUserID: senderID,
+                afterRoomSequence: 0, pageSize: 10
+            )
+            let originalPayload = String(
+                data: try #require(recoveredAfterRevision.events.first?.payload),
+                encoding: .utf8
+            )
+            #expect(originalPayload?.contains("只写一次的私聊") == true)
+            #expect(originalPayload?.contains("已编辑的当前内容") == false)
+            #expect(try await count("im_v2.message_content_versions", on: sql) == 1)
             await #expect(throws: V2GroupEventLogError.actorNotMember) {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
@@ -12062,6 +12091,14 @@ private struct MediaReferenceAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey { case messageID = "message_id", mediaID = "media_id", ordinal }
 }
 private struct MediaEventContainsRow: Decodable { let contains: Bool }
+private struct CompactDirectRoomEventRow: Decodable {
+    let payloadStorage: String
+    let storesText: Bool
+    enum CodingKeys: String, CodingKey {
+        case payloadStorage = "payload_storage"
+        case storesText = "stores_text"
+    }
+}
 private struct MentionAssertionRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "mentioned_user_id" } }
 private struct ModerationEventAssertionRow: Decodable { let eventType: String; let messageID: String; enum CodingKeys: String, CodingKey { case eventType = "event_type", messageID = "message_id" } }
 private struct ModerationAuditAssertionRow: Decodable { let action: String; let reasonCode: String; enum CodingKeys: String, CodingKey { case action; case reasonCode = "reason_code" } }

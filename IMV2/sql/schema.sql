@@ -1045,6 +1045,39 @@ CREATE TABLE im_v2.messages (
     CONSTRAINT messages_timeline_sequence_positive CHECK ((timeline_sequence > 0))
 );
 
+-- Accepted room-log events may reference this immutable snapshot after a
+-- message is revised. The trigger below captures the prior revision inside
+-- the same transaction as the mutation, so historical event pulls never
+-- observe a later message body.
+CREATE TABLE im_v2.message_content_versions (
+    message_id uuid NOT NULL,
+    message_revision bigint NOT NULL,
+    text_body text NOT NULL,
+    rich_entities jsonb NOT NULL,
+    archived_at timestamp with time zone NOT NULL,
+    CONSTRAINT message_content_versions_message_revision_check CHECK ((message_revision > 0)),
+    CONSTRAINT message_content_versions_rich_entities_array CHECK ((jsonb_typeof(rich_entities) = 'array'::text))
+);
+
+CREATE FUNCTION im_v2.snapshot_message_content_before_revision_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.content_revision <> OLD.content_revision THEN
+        INSERT INTO im_v2.message_content_versions
+            (message_id, message_revision, text_body, rich_entities, archived_at)
+        VALUES
+            (OLD.message_id, OLD.content_revision, OLD.text_body, OLD.rich_entities, now())
+        ON CONFLICT (message_id, message_revision) DO NOTHING;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER messages_snapshot_content_before_revision_change
+    BEFORE UPDATE OF content_revision ON im_v2.messages
+    FOR EACH ROW EXECUTE FUNCTION im_v2.snapshot_message_content_before_revision_change();
+
 CREATE TABLE im_v2.moderation_audit_entries (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -2155,6 +2188,9 @@ ALTER TABLE ONLY im_v2.message_withdrawal_operations
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
 
+ALTER TABLE ONLY im_v2.message_content_versions
+    ADD CONSTRAINT message_content_versions_pkey PRIMARY KEY (message_id, message_revision);
+
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_room_id_room_sequence_key UNIQUE (room_id, room_sequence);
 
@@ -2856,6 +2892,9 @@ ALTER TABLE ONLY im_v2.messages
 
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
+
+ALTER TABLE ONLY im_v2.message_content_versions
+    ADD CONSTRAINT message_content_versions_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.moderation_audit_entries
     ADD CONSTRAINT moderation_audit_entries_actor_user_id_operation_id_fkey FOREIGN KEY (actor_user_id, operation_id) REFERENCES im_v2.moderation_operations(actor_user_id, operation_id);

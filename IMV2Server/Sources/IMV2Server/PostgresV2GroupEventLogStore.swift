@@ -16,31 +16,109 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
               let actorUUID = UUID(uuidString: actorUserID.rawValue),
               afterRoomSequence <= UInt64(Int64.max)
         else { throw V2GroupEventLogError.corruptPersistenceState }
-        _ = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
 
         let rows = try await sql.raw("""
-            SELECT event_id, room_sequence, event_type, payload::text AS payload_json
-            FROM im_v2.room_events AS event
-            WHERE event.room_id = \(bind: roomUUID)
-              AND event.room_sequence > \(bind: Int64(afterRoomSequence))
-              AND EXISTS (
-                  SELECT 1 FROM im_v2.room_memberships AS membership
-                  WHERE membership.room_id = event.room_id
-                    AND membership.user_id = \(bind: actorUUID)
-                    AND membership.joined_revision <= event.committed_membership_revision
-                    AND (membership.left_revision IS NULL OR membership.left_revision > event.committed_membership_revision)
-              )
-            ORDER BY event.room_sequence
-            LIMIT \(bind: pageSize + 1)
+            WITH room AS MATERIALIZED (
+                SELECT rooms.room_sequence, rooms.room_kind,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_memberships AS membership
+                           WHERE membership.room_id = rooms.room_id
+                             AND membership.user_id = \(bind: actorUUID)
+                             AND membership.joined_revision <= rooms.membership_revision
+                             AND (membership.left_revision IS NULL OR membership.left_revision > rooms.membership_revision)
+                       ) AS actor_is_active_member
+                FROM im_v2.rooms AS rooms
+                WHERE rooms.room_id = \(bind: roomUUID)
+            ), visible_events AS MATERIALIZED (
+                SELECT event.event_id, event.room_sequence, event.event_type,
+                       event.payload
+                FROM room
+                JOIN im_v2.room_events AS event ON TRUE
+                WHERE room.room_kind IN ('group', 'direct')
+                  AND room.actor_is_active_member
+                  AND event.room_id = \(bind: roomUUID)
+                  AND event.room_sequence > \(bind: Int64(afterRoomSequence))
+                  AND EXISTS (
+                      SELECT 1 FROM im_v2.room_memberships AS membership
+                      WHERE membership.room_id = event.room_id
+                        AND membership.user_id = \(bind: actorUUID)
+                        AND membership.joined_revision <= event.committed_membership_revision
+                        AND (membership.left_revision IS NULL OR membership.left_revision > event.committed_membership_revision)
+                  )
+                ORDER BY event.room_sequence
+                LIMIT \(bind: pageSize + 1)
+            )
+            SELECT room.room_kind, room.actor_is_active_member,
+                   event.event_id, event.room_sequence, event.event_type,
+                   CASE
+                       WHEN event.event_type = 'message.accepted'
+                        AND event.payload->>'payload_storage' = 'message_reference_v1'
+                       THEN jsonb_build_object(
+                           'event_type', 'message.accepted',
+                           'message_id', message.message_id::text,
+                           'room_id', message.room_id::text,
+                           'room_sequence', event.room_sequence,
+                           'timeline_sequence', message.timeline_sequence,
+                           'sender_user_id', message.sender_user_id::text,
+                           'text', COALESCE(snapshot.text_body, message.text_body),
+                           'media_ids', '[]'::jsonb,
+                           'media_presentations', '[]'::jsonb,
+                           'mention_user_ids', '[]'::jsonb,
+                           'mentions_everyone', FALSE,
+                           'entities', COALESCE(snapshot.rich_entities, message.rich_entities),
+                           'reply_to_message_id', message.reply_to_message_id::text,
+                           'forwarded_from_message_id', message.forwarded_from_message_id::text,
+                           'forwarded_from_user_id', message.forwarded_from_user_id::text,
+                           'message_revision', (event.payload->>'message_revision')::bigint,
+                           'server_created_at_ms',
+                               (event.payload->>'server_created_at_ms')::bigint
+                       )
+                       ELSE event.payload
+                   END::text AS payload_json,
+                   CASE
+                       WHEN event.event_type = 'message.accepted'
+                        AND event.payload->>'payload_storage' = 'message_reference_v1'
+                       THEN message.message_id IS NOT NULL
+                            AND (
+                                snapshot.message_id IS NOT NULL
+                                OR message.content_revision = (event.payload->>'message_revision')::bigint
+                            )
+                       ELSE TRUE
+                   END AS payload_is_complete
+            FROM room
+            LEFT JOIN visible_events AS event ON TRUE
+            LEFT JOIN im_v2.messages AS message
+              ON event.event_type = 'message.accepted'
+             AND event.payload->>'payload_storage' = 'message_reference_v1'
+             AND message.message_id = (event.payload->>'message_id')::uuid
+             AND message.room_id = \(bind: roomUUID)
+             AND message.room_sequence = event.room_sequence
+            LEFT JOIN im_v2.message_content_versions AS snapshot
+              ON snapshot.message_id = message.message_id
+             AND snapshot.message_revision = (event.payload->>'message_revision')::bigint
+            ORDER BY event.room_sequence NULLS LAST
             """).all(decoding: GroupEventLogRow.self)
-        let hasMore = rows.count > pageSize
-        let pageRows = hasMore ? Array(rows.prefix(pageSize)) : rows
+        guard let room = rows.first else { throw V2GroupEventLogError.roomNotFound }
+        guard room.roomKind == "group" || room.roomKind == "direct" else {
+            throw V2GroupEventLogError.roomNotFound
+        }
+        guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
+
+        let eventRows = rows.compactMap { $0.eventID == nil ? nil : $0 }
+        let hasMore = eventRows.count > pageSize
+        let pageRows = hasMore ? Array(eventRows.prefix(pageSize)) : eventRows
         let entries: [V2GroupEventLogEntry] = try pageRows.map { row in
-            guard let payload = row.payloadJSON.data(using: .utf8) else { throw V2GroupEventLogError.corruptPersistenceState }
+            guard let eventID = row.eventID,
+                  let roomSequence = row.roomSequence,
+                  let eventType = row.eventType,
+                  let payloadJSON = row.payloadJSON,
+                  row.payloadIsComplete,
+                  let payload = payloadJSON.data(using: .utf8)
+            else { throw V2GroupEventLogError.corruptPersistenceState }
             return V2GroupEventLogEntry(
-                sourceEventID: try EventID(row.eventID.uuidString),
-                roomSequence: try groupEventUnsigned(row.roomSequence),
-                projectionKind: groupEventProjectionKind(for: row.eventType),
+                sourceEventID: try EventID(eventID.uuidString),
+                roomSequence: try groupEventUnsigned(roomSequence),
+                projectionKind: groupEventProjectionKind(for: eventType),
                 payload: payload
             )
         }
@@ -104,15 +182,21 @@ private struct GroupEventLogRoomRow: Decodable {
 }
 
 private struct GroupEventLogRow: Decodable {
-    let eventID: UUID
-    let roomSequence: Int64
-    let eventType: String
-    let payloadJSON: String
+    let roomKind: String
+    let actorIsActiveMember: Bool
+    let eventID: UUID?
+    let roomSequence: Int64?
+    let eventType: String?
+    let payloadJSON: String?
+    let payloadIsComplete: Bool
     enum CodingKeys: String, CodingKey {
+        case roomKind = "room_kind"
+        case actorIsActiveMember = "actor_is_active_member"
         case eventID = "event_id"
         case roomSequence = "room_sequence"
         case eventType = "event_type"
         case payloadJSON = "payload_json"
+        case payloadIsComplete = "payload_is_complete"
     }
 }
 

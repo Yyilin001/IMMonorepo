@@ -43,8 +43,11 @@
    `2026-08-18-user-projection-ready-queue-v7-expand.sql`、
    `2026-08-18-fanout-direct-user-microbatch-expand.sql`、
    `2026-08-18-fanout-autovacuum-expand.sql` 和
-   `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`；新库直接安装 canonical
-   schema。确认逻辑 view、validated storage constraint、append-only trigger 和索引存在后再部署 binary。
+   `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`、
+   `2026-08-20-direct-room-log-content-reference-expand.sql`；新库直接安装 canonical
+   schema。确认逻辑 view、validated storage constraint、append-only trigger、
+   `message_content_versions` 与其 revision snapshot trigger 存在后再部署 binary。该表是
+   plain direct room-log 正文引用的历史版本围栏，不能跳过。
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
