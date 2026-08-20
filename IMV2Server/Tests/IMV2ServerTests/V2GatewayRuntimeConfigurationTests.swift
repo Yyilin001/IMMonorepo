@@ -24,6 +24,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
         #expect(defaults.directRoomLogAppendBatchSize == 0)
         #expect(defaults.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
+        #expect(defaults.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == nil)
+        #expect(defaults.directRoomLogAppendBatchHighActivityMinimumRequests == nil)
+        #expect(defaults.directRoomLogAppendBatchHighActivityWindowMilliseconds == nil)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
@@ -85,6 +88,50 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(highActivityAppendBatch)
         ).directRoomLogAppendBatchMaximumDelayMilliseconds == 20)
+
+        var adaptiveHighActivityAppendBatch = appendBatch
+        adaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
+        ] = "20"
+        adaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS"
+        ] = "8"
+        adaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
+        ] = "20"
+        let adaptiveHighActivityConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(adaptiveHighActivityAppendBatch)
+        )
+        #expect(adaptiveHighActivityConfiguration
+            .directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == 20)
+        #expect(adaptiveHighActivityConfiguration
+            .directRoomLogAppendBatchHighActivityMinimumRequests == 8)
+        #expect(adaptiveHighActivityConfiguration
+            .directRoomLogAppendBatchHighActivityWindowMilliseconds == 20)
+
+        var incompleteAdaptiveHighActivityAppendBatch = appendBatch
+        incompleteAdaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
+        ] = "20"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(incompleteAdaptiveHighActivityAppendBatch)
+            )
+        }
+
+        var nonIncreasingAdaptiveHighActivityAppendBatch = adaptiveHighActivityAppendBatch
+        nonIncreasingAdaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
+        ] = "2"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(nonIncreasingAdaptiveHighActivityAppendBatch)
+            )
+        }
 
         var excessiveAppendBatchDelay = appendBatch
         excessiveAppendBatchDelay["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "26"

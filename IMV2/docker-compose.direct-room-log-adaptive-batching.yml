@@ -1,0 +1,13 @@
+# Opt-in high-activity profile for the already-enabled direct room-log path.
+# It deliberately keeps the normal interactive wait at 2 ms and extends only
+# batches scheduled after a bounded, monotonic sustained-arrival observation.
+# Apply together with docker-compose.direct-room-log.yml and only after a
+# controlled A/B proves the configured workload benefits.
+services:
+  gateway:
+    environment:
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: "16"
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: "2"
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS: "20"
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS: "8"
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS: "20"

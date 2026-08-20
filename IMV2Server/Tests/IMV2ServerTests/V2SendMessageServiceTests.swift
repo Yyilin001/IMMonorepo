@@ -145,6 +145,68 @@ struct V2SendMessageServiceTests {
         #expect(Set(batches[0]) == Set([firstID, secondID]))
     }
 
+    @Test("adaptive batching keeps the short delay until sustained arrivals are observed")
+    func admissionBatchingUsesHighActivityDelayOnlyAfterArrivalThreshold() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .seconds(5),
+                adaptiveDelayPolicy: .init(
+                    highActivityMaximumDelay: .seconds(6),
+                    minimumRequestsInWindow: 2,
+                    observationWindow: .seconds(1)
+                )
+            )
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000192")
+
+        async let first = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000191"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000193"),
+            text: "one"
+        ))
+        async let second = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000194"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000195"),
+            text: "two"
+        ))
+        _ = try await [first, second]
+        #expect(await batcher.snapshot().baseDelayFlushes == 0)
+        #expect(await batcher.snapshot().highActivityDelayFlushes == 0)
+
+        let waiting = Task {
+            try await service.send(.init(
+                roomID: try RoomID("00000000-0000-0000-0000-000000000196"),
+                actorUserID: senderID,
+                clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000197"),
+                text: "three"
+            ))
+        }
+        while await batcher.snapshot().pendingRequests != 1 {
+            await Task.yield()
+        }
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.highActivityDelayScheduled)
+        #expect(snapshot.baseDelayFlushes == 0)
+        #expect(snapshot.highActivityDelayFlushes == 0)
+
+        waiting.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await waiting.value
+        }
+    }
+
     @Test("one atomic batch owns one foreground database admission")
     func admissionBatchingOwnsOneDatabasePermitPerAtomicBatch() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)

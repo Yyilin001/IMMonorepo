@@ -298,6 +298,13 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// Maximum extra server-side queueing time for an append micro-batch.
     /// This has meaning only when `directRoomLogAppendBatchSize` is positive.
     public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
+    /// Optional sustained-arrival policy for append micro-batches. The base
+    /// delay remains the interactive default; this longer cap is selected
+    /// only after the bounded detector sees enough arrivals in its configured
+    /// monotonic observation window.
+    public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
+    public let directRoomLogAppendBatchHighActivityMinimumRequests: Int?
+    public let directRoomLogAppendBatchHighActivityWindowMilliseconds: Int?
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// Unreferenced immutable revisions remain recoverable for this grace.
     /// The default is seven days; deployments may lengthen it independently
@@ -546,6 +553,49 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directRoomLogAppendBatchMaximumDelayMilliseconds = parsedDirectRoomLogAppendBatchDelay
+        let rawHighActivityAppendDelay = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS",
+            environment: environment
+        )
+        let rawHighActivityAppendMinimumRequests = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS",
+            environment: environment
+        )
+        let rawHighActivityAppendWindow = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS",
+            environment: environment
+        )
+        let highActivityAppendValues = [
+            rawHighActivityAppendDelay,
+            rawHighActivityAppendMinimumRequests,
+            rawHighActivityAppendWindow,
+        ]
+        if highActivityAppendValues.allSatisfy({ $0 == nil }) {
+            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = nil
+            directRoomLogAppendBatchHighActivityMinimumRequests = nil
+            directRoomLogAppendBatchHighActivityWindowMilliseconds = nil
+        } else {
+            guard parsedDirectRoomLogAppendBatchSize > 0,
+                  let rawHighActivityAppendDelay,
+                  let rawHighActivityAppendMinimumRequests,
+                  let rawHighActivityAppendWindow,
+                  let parsedHighActivityAppendDelay = Int(rawHighActivityAppendDelay),
+                  let parsedHighActivityAppendMinimumRequests = Int(rawHighActivityAppendMinimumRequests),
+                  let parsedHighActivityAppendWindow = Int(rawHighActivityAppendWindow),
+                  parsedHighActivityAppendDelay > parsedDirectRoomLogAppendBatchDelay,
+                  parsedHighActivityAppendDelay <= 25,
+                  parsedHighActivityAppendMinimumRequests >= 2,
+                  parsedHighActivityAppendMinimumRequests <= foregroundWriteDatabaseWorkMaximumQueued,
+                  (1 ... 1_000).contains(parsedHighActivityAppendWindow)
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
+                )
+            }
+            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = parsedHighActivityAppendDelay
+            directRoomLogAppendBatchHighActivityMinimumRequests = parsedHighActivityAppendMinimumRequests
+            directRoomLogAppendBatchHighActivityWindowMilliseconds = parsedHighActivityAppendWindow
+        }
         let rawFanoutPayloadWriteMode = Self.optional(
             "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment
         )?.lowercased() ?? V2FanoutPayloadWriteMode.body.rawValue

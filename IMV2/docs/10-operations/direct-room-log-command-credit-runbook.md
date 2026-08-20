@@ -46,7 +46,31 @@ IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=16
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
 ```
 
-The extra delay is bounded to 1...10 ms. The batcher takes one
+The base delay is bounded to 1...25 ms. Keep the normal interactive base at
+2 ms: a permanently larger value trades every isolated send's latency for
+batch fill and should be used only as an explicitly measured experiment.
+
+For a high-activity deployment, use the bounded adaptive policy rather than
+applying a 20 ms delay to every send:
+
+```
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS=20
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS=8
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS=20
+```
+
+The three `HIGH_ACTIVITY` values are all-or-nothing. The high delay must be
+strictly greater than the base delay, the request threshold is at least two
+and no larger than the bounded foreground staging queue, and the observation
+window is 1...1,000 ms. Arrival measurement uses a process-local monotonic
+clock and retains no more than the threshold number of samples. It controls
+only a newly scheduled underfilled batch: it cannot reorder a room, extend a
+timer beyond its selected cap, bypass a database permit, or acknowledge a
+message before the atomic write commits. Clearing all three values restores
+the exact fixed-delay behaviour without a migration.
+
+The batcher takes one
 foreground-write database admission immediately around each actual atomic
 transaction, rather than consuming one admission permit for every request
 waiting to form that batch. This preserves the normal database overload
@@ -105,9 +129,13 @@ Scrape the loopback /metrics endpoint. When enabled, observe:
 
 For a controlled A/B run, reset the disposable message data and
 pg_stat_statements, hold connections, message rate, payload size, and gateway
-count constant, then compare append size `0` with 8, 16, and 32 at a 1--2ms
-delay. Preserve the shard-credit size while doing this; otherwise two write
-optimizations change at the same time.
+count constant. First compare append size `0` with 8, 16, and 32 at a 1--2ms
+base delay. Then compare the fixed base profile with the adaptive profile
+using identical base delay, batch size, high-delay threshold, and observation
+window. Preserve the shard-credit size while doing this; otherwise two write
+optimizations change at the same time. Record message p50/p95/p99, accepted
+rate, `pg_stat_statements` calls/mean time for the append CTE, WAL bytes per
+accepted fact, and database admission queue peaks.
 
 The shard-admission update/query count should approach one reservation per 32
 accepted direct-room-log commands (per shard), not one tail update per

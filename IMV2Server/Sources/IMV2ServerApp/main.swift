@@ -361,6 +361,20 @@ enum IMV2ServerApp {
                         maximumDelay: .milliseconds(
                             configuration.directRoomLogAppendBatchMaximumDelayMilliseconds
                         ),
+                        adaptiveDelayPolicy: {
+                            guard let highActivityDelay = configuration
+                                .directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds,
+                                  let minimumRequests = configuration
+                                .directRoomLogAppendBatchHighActivityMinimumRequests,
+                                  let windowMilliseconds = configuration
+                                .directRoomLogAppendBatchHighActivityWindowMilliseconds
+                            else { return nil }
+                            return .init(
+                                highActivityMaximumDelay: .milliseconds(highActivityDelay),
+                                minimumRequestsInWindow: minimumRequests,
+                                observationWindow: .milliseconds(windowMilliseconds)
+                            )
+                        }(),
                         maximumInFlightBatches: min(
                             8,
                             configuration.foregroundWriteDatabaseWorkLimit
