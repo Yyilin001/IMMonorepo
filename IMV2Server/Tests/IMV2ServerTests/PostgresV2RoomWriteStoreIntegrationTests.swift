@@ -56,6 +56,21 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     """).first(decoding: ExistsRow.self)
             )
             #expect(redundantMessageRoomSenderIndexIsAbsent.exists)
+            // A message accepted at a room sequence is represented by exactly
+            // one `message.accepted` room event in the same transaction. The
+            // room-event uniqueness constraint owns that invariant, while the
+            // message table retains only its timeline-order index for reads.
+            let redundantMessageRoomSequenceConstraintIsAbsent = try #require(
+                try await sql.raw("""
+                    SELECT NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'messages_room_id_room_sequence_key'
+                          AND conrelid = 'im_v2.messages'::regclass
+                    ) AS exists
+                    """).first(decoding: ExistsRow.self)
+            )
+            #expect(redundantMessageRoomSequenceConstraintIsAbsent.exists)
             let projectionReadyOrderIndexExists = try #require(try await sql.raw("""
                 SELECT to_regclass(
                     'im_v2.user_projection_checkpoints_ready_order_idx'

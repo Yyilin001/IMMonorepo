@@ -2199,9 +2199,6 @@ ALTER TABLE ONLY im_v2.message_content_versions
     ADD CONSTRAINT message_content_versions_pkey PRIMARY KEY (message_id, message_revision);
 
 ALTER TABLE ONLY im_v2.messages
-    ADD CONSTRAINT messages_room_id_room_sequence_key UNIQUE (room_id, room_sequence);
-
-ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_room_timeline_sequence_key UNIQUE (room_id, timeline_sequence);
 
 ALTER TABLE ONLY im_v2.messages
