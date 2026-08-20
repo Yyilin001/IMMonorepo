@@ -7,7 +7,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// deployment prerequisite instead of discovering a missing table after a TLS
 /// listener is already accepting authenticated traffic.
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-2"
+    public static let currentSchemaID = "im-v2-current-3"
     private static let requiredTables = [
         "schema_contract", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
@@ -132,6 +132,54 @@ public enum V2SchemaReadiness {
             """).first(decoding: ExistsRow.self), messageStateStorageContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(
                 "\(schema).message_projection_states[room-event-storage]"
+            )
+        }
+        // Plain direct-room appends may use `messages` as the durable event
+        // source.  Keep this explicit even though the schema-contract bump is
+        // last in the migration: it turns a partially applied/manual schema
+        // change into a startup failure instead of a silently incomplete room
+        // log.
+        guard let directMessageEventSourceContract = try await sql.raw("""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE column_name IN (
+                        'accepted_event_id',
+                        'accepted_event_storage',
+                        'accepted_membership_revision'
+                    )
+                ) = 3
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_constraint AS constraint_record
+                    JOIN pg_class AS relation
+                      ON relation.oid = constraint_record.conrelid
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND relation.relname = 'messages'
+                      AND constraint_record.conname =
+                          'messages_accepted_event_storage_check'
+                      AND constraint_record.convalidated
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM pg_index AS index_record
+                    JOIN pg_class AS index_relation
+                      ON index_relation.oid = index_record.indexrelid
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = index_relation.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_relation.relname =
+                          'messages_direct_event_cursor_idx'
+                      AND index_record.indisvalid
+                      AND index_record.indisready
+                ) AS exists
+            FROM information_schema.columns
+            WHERE table_schema = \(bind: schema)
+              AND table_name = 'messages'
+            """).first(decoding: ExistsRow.self), directMessageEventSourceContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable(
+                "\(schema).messages[direct-event-source]"
             )
         }
         guard let freshDeliveryContract = try await sql.raw("""

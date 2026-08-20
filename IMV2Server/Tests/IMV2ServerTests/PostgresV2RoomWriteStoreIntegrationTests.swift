@@ -8981,14 +8981,22 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
             let acceptedEventID = try #require(UUID(uuidString: senderPage.events.first?.sourceEventID.rawValue ?? ""))
-            let compactEvent = try #require(try await sql.raw("""
-                SELECT payload->>'payload_storage' AS payload_storage,
-                       payload ? 'text' AS stores_text
-                FROM im_v2.room_events
-                WHERE event_id = \(bind: acceptedEventID)
-                """).first(decoding: CompactDirectRoomEventRow.self))
-            #expect(compactEvent.payloadStorage == "message_reference_v1")
-            #expect(compactEvent.storesText == false)
+            let directMessageEvent = try #require(try await sql.raw("""
+                SELECT accepted_event_id, accepted_event_storage,
+                       accepted_membership_revision
+                FROM im_v2.messages
+                WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                """).first(decoding: DirectMessageRowEventRow.self))
+            #expect(directMessageEvent.acceptedEventID == acceptedEventID)
+            #expect(directMessageEvent.acceptedEventStorage == "message_row")
+            // Direct-room creation commits its initial membership revision
+            // before the first accepted message. The row-source event must
+            // retain that exact historical fence rather than assuming zero.
+            #expect(directMessageEvent.acceptedMembershipRevision == 1)
+            #expect(try await count(
+                "im_v2.room_events WHERE event_id = '\(acceptedEventID.uuidString)'",
+                on: sql
+            ) == 0)
 
             // The accepted event must continue to expose its original body
             // after a later message revision changes the mutable row.
@@ -9021,7 +9029,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
 
             #expect(try await count("im_v2.messages", on: sql) == 8)
-            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 8)
+            // Seven ordinary direct messages are materialized from the
+            // message row itself. The reviewed message intentionally retains
+            // the complete room-event write graph.
+            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
             #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
             #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == 0)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
@@ -12236,12 +12247,14 @@ private struct MediaReferenceAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey { case messageID = "message_id", mediaID = "media_id", ordinal }
 }
 private struct MediaEventContainsRow: Decodable { let contains: Bool }
-private struct CompactDirectRoomEventRow: Decodable {
-    let payloadStorage: String
-    let storesText: Bool
+private struct DirectMessageRowEventRow: Decodable {
+    let acceptedEventID: UUID
+    let acceptedEventStorage: String
+    let acceptedMembershipRevision: Int64
     enum CodingKeys: String, CodingKey {
-        case payloadStorage = "payload_storage"
-        case storesText = "stores_text"
+        case acceptedEventID = "accepted_event_id"
+        case acceptedEventStorage = "accepted_event_storage"
+        case acceptedMembershipRevision = "accepted_membership_revision"
     }
 }
 private struct MentionAssertionRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "mentioned_user_id" } }

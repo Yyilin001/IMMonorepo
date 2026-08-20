@@ -979,7 +979,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
               let roomID = UUID(uuidString: message.roomID.rawValue),
               let senderID = UUID(uuidString: message.senderUserID.rawValue),
               let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self),
-              let event = try await sql.raw("SELECT event_id FROM im_v2.room_events WHERE room_id = \(bind: roomID) AND room_sequence = \(bind: try signed(message.roomSequence)) AND event_type = 'message.accepted'").first(decoding: DirectMessageEventRow.self)
+              let event = try await sql.raw("""
+                  SELECT COALESCE(event.event_id, message.accepted_event_id) AS event_id
+                  FROM im_v2.messages AS message
+                  LEFT JOIN im_v2.room_events AS event
+                    ON event.room_id = message.room_id
+                   AND event.room_sequence = message.room_sequence
+                   AND event.event_type = 'message.accepted'
+                  WHERE message.message_id = \(bind: try uuid(message.messageID))
+                    AND message.room_id = \(bind: roomID)
+                  """).first(decoding: DirectMessageEventRow.self)
         else { return }
         let recipientID: UUID
         if pair.lowerUserID == senderID { recipientID = pair.higherUserID }
@@ -2746,33 +2755,19 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 INSERT INTO im_v2.messages
                     (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,
                      client_message_id, text_body, rich_entities, reply_to_message_id,
-                     forwarded_from_message_id, forwarded_from_user_id, created_at)
+                     forwarded_from_message_id, forwarded_from_user_id, created_at,
+                     accepted_event_id, accepted_event_storage,
+                     accepted_membership_revision)
                 SELECT input.message_id, input.room_id, input.room_sequence,
                        input.timeline_sequence, input.sender_id,
                        input.client_message_id, input.text_body,
                        input.rich_entities, input.reply_to_message_id,
                        input.forwarded_from_message_id,
-                       input.forwarded_from_user_id, input.created_at
+                       input.forwarded_from_user_id, input.created_at,
+                       input.event_id, 'message_row', input.membership_revision
                 FROM input
                 JOIN admission_gate ON admission_gate.room_id = input.room_id
                 RETURNING message_id, room_id
-            ), event_insert AS (
-                INSERT INTO im_v2.room_events
-                    (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
-                     committed_membership_revision, created_at)
-                SELECT input.event_id, message_insert.room_id,
-                       input.room_sequence, 'message.accepted', input.sender_id,
-                       jsonb_build_object(
-                           'event_type', 'message.accepted',
-                           'message_id', input.message_id::text,
-                           'payload_storage', 'message_reference_v1',
-                           'message_revision', 1,
-                           'server_created_at_ms', floor(input.created_at_unix_seconds * 1000)::bigint
-                       ),
-                       input.membership_revision, input.created_at
-                FROM input
-                JOIN message_insert ON message_insert.message_id = input.message_id
-                RETURNING event_id
             )
             SELECT (SELECT count(*) FROM room_update) AS room_count,
                    (SELECT count(*) FROM admission_gate) AS admission_count,
@@ -2780,7 +2775,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                    0::bigint AS review_count,
                    0::bigint AS media_count,
                    0::bigint AS mention_count,
-                   (SELECT count(*) FROM event_insert) AS event_count
+                   -- A plain direct accepted event is now materialized by
+                   -- the message row itself.  Keep this cardinality fence so
+                   -- callers still reject a partial set append.
+                   (SELECT count(*) FROM message_insert) AS event_count
             """).first(decoding: RoomLogMessageMutationRow.self),
               mutation.roomCount == expectedCount,
               mutation.admissionCount == expectedCount,
