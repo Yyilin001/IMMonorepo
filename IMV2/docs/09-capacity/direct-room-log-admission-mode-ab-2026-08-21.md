@@ -25,15 +25,21 @@ This is a disposable, same-host experiment. It decides the default for the
 | Heartbeat P95 | 270 ms | 285 ms | +5.6% worse |
 | Workload failures | 0 | 0 | unchanged |
 
+A third clean arm with `room` and a shard-credit batch size of `0` reached
+only 3,768 ACKs before the foreground failure guard stopped it on 194
+retryable `room_event: SERVER_BUSY` rejections (message P95 1,040 ms). It is
+not a full-duration comparison, but it confirms that the credit batch is a
+separate, valuable optimization and must not be disabled with `shard_only`.
+
 ## Decision
 
-Do **not** deploy `shard_only` or its shard-credit batch as the default. The
-feature preserves the intended authorization and durability invariants, but
-it does not remove the locked-room pre-read, canonical message/event append,
-event indexes, or synchronous WAL commit. On this representative test it
-made the end-to-end path slower. Keep the runtime guard and integration test
-for controlled research only; use `room` with a credit batch size of `0` for
-the default direct room-log deployment.
+Do **not** deploy `shard_only` as the default. The feature preserves the
+intended authorization and durability invariants, but it does not remove the
+locked-room pre-read, canonical message/event append, event indexes, or
+synchronous WAL commit. On this representative test it made the end-to-end
+path slower. Keep the runtime guard and integration test for controlled
+research only; use `room` with a credit batch size of `32` for the default
+direct room-log deployment.
 
 The next experiment must target a larger mandatory unit of work: an ordered,
 bounded micro-batch that durably appends several canonical events in one

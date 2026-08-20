@@ -5,25 +5,26 @@ write path. It removes most of the serialized per-message updates to the
 shard admission pool; it does not change message durability, authorization,
 idempotency, or the command-window limit.
 
-It is **not** the deployment default. A clean, same-host 1,500-connection
-room-log A/B measured worse message and room-log P95 with `shard_only`; see
-[the benchmark](../09-capacity/direct-room-log-admission-mode-ab-2026-08-21.md).
-Use the normal `room` mode and a batch size of `0` unless conducting a new,
+`shard_only` is **not** the deployment default. A clean, same-host
+1,500-connection room-log A/B measured worse message and room-log P95 with
+that mode; see [the benchmark](../09-capacity/direct-room-log-admission-mode-ab-2026-08-21.md).
+Use the normal `room` mode with a batch size of `32` unless conducting a new,
 controlled experiment.
 
 ## Preconditions
 
 - IM_V2_DIRECT_FANOUT_MODE=room_log
-- IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=shard_only
+- IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room or shard_only
 - One gateway replica for the benchmark. Credits are process-local, so each
   replica may retain at most one partially unused batch per active shard.
 - PostgreSQL remains healthy and is the only authority for admission.
 
 `IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room` is the default and preserves the
-legacy per-room command window. `shard_only` is the direct-room-log-only
-optimization: the durable shard command window becomes the command-capacity
-authority for ordinary direct messages, and the per-room counter is no longer
-rewritten. It is rejected at startup outside `room_log` mode.
+per-room command window while batching the durable shard admission reserve.
+`shard_only` is the direct-room-log-only experiment: the durable shard command
+window becomes the command-capacity authority for ordinary direct messages,
+and the per-room counter is no longer rewritten. It is rejected at startup
+outside `room_log` mode and is not the default after the A/B regression.
 
 Set IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=32 for the initial load
 test. The accepted range is 1...128; 0 is the default and disables the

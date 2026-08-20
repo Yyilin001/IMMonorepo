@@ -15,6 +15,7 @@ services:
       # the fixed-audience direct room-log path. PostgreSQL remains the
       # authority; an interrupted process can only leave up to 31 already
       # charged credits unused for its current shard/lease. This removes the
-      # The credit batch is meaningful only for the opt-in shard_only path.
-      # Keep it disabled with the default room admission mode.
-      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "0"
+      # Keep the proven durable shard-credit batch. It removes the
+      # per-message shard admission update while room-local admission remains
+      # authoritative for the default path.
+      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "32"
