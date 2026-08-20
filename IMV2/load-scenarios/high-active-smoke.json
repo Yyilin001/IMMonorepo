@@ -1,0 +1,21 @@
+{
+  "name": "high-active-smoke-v1",
+  "seed": 20260820,
+  "roomWarmupTimeoutSeconds": 60,
+  "personas": [
+    { "name": "reader", "share": 0.45, "sendWeight": 0.1, "roomLogReadWeight": 4.0, "syncPullWeight": 1.0 },
+    { "name": "regular", "share": 0.35, "sendWeight": 1.0, "roomLogReadWeight": 1.5, "syncPullWeight": 0.5 },
+    { "name": "high_frequency", "share": 0.15, "sendWeight": 4.0, "roomLogReadWeight": 2.0, "syncPullWeight": 0.5 },
+    { "name": "heavy", "share": 0.05, "sendWeight": 10.0, "roomLogReadWeight": 3.0, "syncPullWeight": 1.0 }
+  ],
+  "phases": [
+    {
+      "name": "smoke",
+      "durationSeconds": 10,
+      "messagesPerSecond": 8,
+      "roomLogReadsPerSecond": 12,
+      "syncPullsPerSecond": 2,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}

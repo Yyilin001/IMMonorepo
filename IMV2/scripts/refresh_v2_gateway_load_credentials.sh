@@ -1,68 +1,84 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ "$#" -ne 3 ]]; then
-  printf 'usage: %s <account-base-url> <ca-path> <credentials-jsonl>\n' "$0" >&2
+if [[ "$#" -ne 3 && "$#" -ne 4 ]]; then
+  printf 'usage: %s <account-base-url> <ca-path> <credentials-jsonl> [output-jsonl]\n' "$0" >&2
   exit 64
 fi
 
 account_base_url="${1%/}"
 ca_path="$2"
-credentials_path="$3"
-refresh_pacing_seconds="${IM_V2_LOAD_CREDENTIAL_REFRESH_PACING_SECONDS:-0.3}"
+input_path="$3"
+output_path="${4:-}"
+parallelism="${IM_V2_LOAD_CREDENTIAL_REFRESH_PARALLELISM:-16}"
 
-[[ -f "${ca_path}" ]] || {
-  printf 'CA file does not exist: %s\n' "${ca_path}" >&2
+[[ -f "${ca_path}" && -f "${input_path}" ]] || {
+  printf 'CA or input credential file does not exist\n' >&2
   exit 66
 }
-[[ -s "${credentials_path}" ]] || {
-  printf 'credential file is missing or empty: %s\n' "${credentials_path}" >&2
-  exit 66
+[[ "${parallelism}" =~ ^[1-9][0-9]*$ ]] && (( parallelism <= 64 )) || {
+  printf 'IM_V2_LOAD_CREDENTIAL_REFRESH_PARALLELISM must be 1...64\n' >&2
+  exit 64
 }
 
 umask 077
-credential_directory="$(cd "$(dirname "${credentials_path}")" && pwd)"
-temporary_path="$(mktemp "${credential_directory}/.credentials-refresh.XXXXXX")"
+temporary_directory="$(mktemp -d)"
+replace_input=0
+if [[ -z "${output_path}" ]]; then
+  credential_directory="$(cd "$(dirname "${input_path}")" && pwd)"
+  output_path="$(mktemp "${credential_directory}/.credentials-refresh.XXXXXX")"
+  replace_input=1
+else
+  mkdir -p "$(dirname "${output_path}")"
+fi
 cleanup() {
-  rm -f "${temporary_path}"
+  rm -rf -- "${temporary_directory}"
+  if (( replace_input == 1 )); then rm -f -- "${output_path}"; fi
 }
 trap cleanup EXIT INT TERM
+: > "${output_path}"
+chmod 600 "${output_path}"
 
-total="$(awk 'NF { count += 1 } END { print count + 0 }' "${credentials_path}")"
-completed=0
-while IFS= read -r credential; do
-  [[ -n "${credential}" ]] || continue
-  user_id="$(jq -er '.userID' <<<"${credential}")"
-  device_id="$(jq -er '.deviceID' <<<"${credential}")"
-  refresh_credential="$(jq -er '.refreshCredential' <<<"${credential}")"
+refresh_one() {
+  local record="$1"
+  local destination="$2"
+  local operation_id payload issued
   operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-
-  refreshed="$(curl --silent --show-error --fail \
+  payload="$(printf '%s' "${record}" | jq -ce --arg operationID "${operation_id}" '{userID,deviceID,refreshCredential,operationID:$operationID}')"
+  issued="$(printf '%s' "${payload}" | curl --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \
-    --data "$(jq -cn \
-      --arg userID "${user_id}" \
-      --arg deviceID "${device_id}" \
-      --arg refreshCredential "${refresh_credential}" \
-      --arg operationID "${operation_id}" \
-      '{userID:$userID,deviceID:$deviceID,refreshCredential:$refreshCredential,operationID:$operationID}')" \
+    --data-binary @- \
     "${account_base_url}/v2/device-credentials/refresh")"
-
-  printf '%s\n' "$(printf '%s' "${refreshed}" | jq -ce '{userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential}')" >> "${temporary_path}"
-  completed=$((completed + 1))
-  if (( completed % 25 == 0 || completed == total )); then
-    printf 'credentials refreshed: %d/%d\n' "${completed}" "${total}"
-  fi
-  sleep "${refresh_pacing_seconds}"
-done < "${credentials_path}"
-
-[[ "${completed}" -eq "${total}" ]] || {
-  printf 'credential refresh count mismatch: %d/%d\n' "${completed}" "${total}" >&2
-  exit 65
+  printf '%s\n' "$(printf '%s' "${issued}" | jq -ce '{userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential}')" > "${destination}"
 }
 
-chmod 600 "${temporary_path}"
-mv "${temporary_path}" "${credentials_path}"
-trap - EXIT INT TERM
-printf 'credential refresh complete: %d records\n' "${total}"
+declare -a pids=()
+line_number=0
+while IFS= read -r record || [[ -n "${record}" ]]; do
+  [[ -n "${record}" ]] || continue
+  refresh_one "${record}" "${temporary_directory}/${line_number}" &
+  pids+=("$!")
+  line_number=$((line_number + 1))
+  if (( ${#pids[@]} >= parallelism )); then
+    for pid in "${pids[@]}"; do wait "${pid}"; done
+    pids=()
+  fi
+done < "${input_path}"
+for pid in "${pids[@]}"; do wait "${pid}"; done
+
+for ((index = 0; index < line_number; index += 1)); do
+  [[ -s "${temporary_directory}/${index}" ]] || {
+    printf 'credential refresh did not produce record %d\n' "${index}" >&2
+    exit 1
+  }
+  < "${temporary_directory}/${index}" tr -d '\n' >> "${output_path}"
+  printf '\n' >> "${output_path}"
+done
+
+if (( replace_input == 1 )); then
+  mv "${output_path}" "${input_path}"
+fi
+
+printf 'credential refresh complete: %d records\n' "${line_number}"

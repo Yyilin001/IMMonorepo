@@ -1,0 +1,69 @@
+{
+  "name": "high-active-10000-v1",
+  "seed": 20260820,
+  "roomWarmupTimeoutSeconds": 360,
+  "personas": [
+    {
+      "name": "reader",
+      "share": 0.45,
+      "sendWeight": 0.1,
+      "roomLogReadWeight": 4.0,
+      "syncPullWeight": 1.0
+    },
+    {
+      "name": "regular_sender",
+      "share": 0.35,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 1.5,
+      "syncPullWeight": 0.5
+    },
+    {
+      "name": "high_frequency_sender",
+      "share": 0.15,
+      "sendWeight": 4.0,
+      "roomLogReadWeight": 2.0,
+      "syncPullWeight": 0.5
+    },
+    {
+      "name": "heavy_sender",
+      "share": 0.05,
+      "sendWeight": 10.0,
+      "roomLogReadWeight": 3.0,
+      "syncPullWeight": 1.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "high_activity_baseline",
+      "durationSeconds": 600,
+      "messagesPerSecond": 250,
+      "roomLogReadsPerSecond": 500,
+      "syncPullsPerSecond": 40,
+      "reconnectPercentPerMinute": 0.2
+    },
+    {
+      "name": "evening_peak",
+      "durationSeconds": 600,
+      "messagesPerSecond": 400,
+      "roomLogReadsPerSecond": 800,
+      "syncPullsPerSecond": 70,
+      "reconnectPercentPerMinute": 0.0
+    },
+    {
+      "name": "burst_peak",
+      "durationSeconds": 300,
+      "messagesPerSecond": 650,
+      "roomLogReadsPerSecond": 1300,
+      "syncPullsPerSecond": 100,
+      "reconnectPercentPerMinute": 0.0
+    },
+    {
+      "name": "recovery",
+      "durationSeconds": 900,
+      "messagesPerSecond": 250,
+      "roomLogReadsPerSecond": 500,
+      "syncPullsPerSecond": 40,
+      "reconnectPercentPerMinute": 0.0
+    }
+  ]
+}

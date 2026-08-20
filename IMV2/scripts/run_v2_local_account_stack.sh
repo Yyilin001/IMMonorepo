@@ -93,9 +93,9 @@ cleanup_local_build() {
 }
 trap cleanup_local_build EXIT
 mkdir -p "${build_context}/IMV2" "${build_context}/IMV2Core" "${build_context}/IMV2Server"
-rsync -a --exclude '.build' --exclude '.swiftpm' --exclude '.DS_Store' \
+rsync -a --exclude '.build*' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Core/" "${build_context}/IMV2Core/"
-rsync -a --exclude '.build' --exclude '.swiftpm' --exclude '.DS_Store' \
+rsync -a --exclude '.build*' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Server/" "${build_context}/IMV2Server/"
 cp "${v2_dir}/Dockerfile.account" "${build_context}/IMV2/Dockerfile.account"
 docker build --tag imv2localaccount-v2server --file "${build_context}/IMV2/Dockerfile.account" "${build_context}"

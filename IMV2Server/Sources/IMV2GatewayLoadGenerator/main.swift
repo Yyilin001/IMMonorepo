@@ -15,7 +15,14 @@ import IMV2Server
 enum IMV2GatewayLoadGenerator {
     static func main() async {
         do {
-            let configuration = try LoadConfiguration(arguments: Array(CommandLine.arguments.dropFirst()))
+            let arguments = Array(CommandLine.arguments.dropFirst())
+            if arguments.count == 2, arguments[0] == "--validate-scenario" {
+                let scenario = try LoadScenario.load(path: arguments[1])
+                let totalSeconds = scenario.phases.reduce(0) { $0 + $1.durationSeconds }
+                print("scenario valid name=\(scenario.name) personas=\(scenario.personas.count) phases=\(scenario.phases.count) duration_seconds=\(totalSeconds)")
+                return
+            }
+            let configuration = try LoadConfiguration(arguments: arguments)
             let credentials = try LoadCredential.load(from: configuration.credentialsPath)
             guard credentials.count >= configuration.connections else {
                 throw LoadError.insufficientCredentials(required: configuration.connections, available: credentials.count)
@@ -59,6 +66,8 @@ private struct LoadConfiguration: Sendable {
     let heartbeatSeconds: Int
     let maximumRSSMegabytes: Int
     let maximumFailurePercent: Double
+    let scenario: LoadScenario?
+    let scenarioRateScale: Double
 
     init(arguments: [String]) throws {
         var values: [String: String] = [:]
@@ -93,7 +102,7 @@ private struct LoadConfiguration: Sendable {
             values["--workload-ramp-per-second"] ?? String(rampPerSecond),
             range: 1...1_000
         )
-        holdSeconds = try Self.integer(values["--hold-seconds"] ?? "60", range: 10...600)
+        holdSeconds = try Self.integer(values["--hold-seconds"] ?? "60", range: 10...28_800)
         eventLoops = try Self.integer(values["--event-loops"] ?? "2", range: 1...4)
         heartbeatSeconds = try Self.integer(values["--heartbeat-seconds"] ?? "30", range: 10...50)
         messagesPerSecond = try Self.integer(values["--messages-per-second"] ?? "0", range: 0...1_000)
@@ -111,7 +120,17 @@ private struct LoadConfiguration: Sendable {
               maximumFailurePercent >= 0, maximumFailurePercent <= 100
         else { throw LoadError.invalidArguments }
         self.maximumFailurePercent = maximumFailurePercent
-        guard messagesPerSecond == 0 || targetOffset + targetsPerConnection - 1 < connections else {
+        if let scenarioPath = values["--scenario"] {
+            scenario = try LoadScenario.load(path: scenarioPath)
+        } else {
+            scenario = nil
+        }
+        guard let scenarioRateScale = Double(values["--scenario-rate-scale"] ?? "1"),
+              scenarioRateScale > 0, scenarioRateScale <= 1
+        else { throw LoadError.invalidArguments }
+        self.scenarioRateScale = scenarioRateScale
+        guard (messagesPerSecond == 0 && scenario == nil)
+                  || targetOffset + targetsPerConnection - 1 < connections else {
             throw LoadError.invalidArguments
         }
     }
@@ -119,6 +138,58 @@ private struct LoadConfiguration: Sendable {
     private static func integer(_ raw: String, range: ClosedRange<Int>) throws -> Int {
         guard let value = Int(raw), range.contains(value) else { throw LoadError.invalidArguments }
         return value
+    }
+}
+
+/// A reproducible, weighted workload.  The scenario controls *which* of the
+/// connected devices act; the CLI still controls the transport endpoint and
+/// the number of devices assigned to this worker.  Multiple workers therefore
+/// use the same scenario with a proportional `--scenario-rate-scale`.
+private struct LoadScenario: Decodable, Sendable {
+    struct Persona: Decodable, Sendable {
+        let name: String
+        let share: Double
+        let sendWeight: Double
+        let roomLogReadWeight: Double
+        let syncPullWeight: Double
+    }
+
+    struct Phase: Decodable, Sendable {
+        let name: String
+        let durationSeconds: Int
+        let messagesPerSecond: Double
+        let roomLogReadsPerSecond: Double
+        let syncPullsPerSecond: Double
+        let reconnectPercentPerMinute: Double
+    }
+
+    let name: String
+    let seed: UInt64
+    let roomWarmupTimeoutSeconds: Int
+    let personas: [Persona]
+    let phases: [Phase]
+
+    static func load(path: String) throws -> Self {
+        let scenario = try JSONDecoder().decode(Self.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        guard !scenario.name.isEmpty,
+              scenario.roomWarmupTimeoutSeconds > 0,
+              !scenario.personas.isEmpty,
+              !scenario.phases.isEmpty
+        else { throw LoadError.invalidScenario("missing required scenario fields") }
+        let share = scenario.personas.reduce(0) { $0 + $1.share }
+        guard abs(share - 1) < 0.000_001,
+              scenario.personas.allSatisfy({
+                  !$0.name.isEmpty && $0.share >= 0 && $0.sendWeight >= 0
+                      && $0.roomLogReadWeight >= 0 && $0.syncPullWeight >= 0
+              }),
+              scenario.personas.contains(where: { $0.sendWeight > 0 }),
+              scenario.phases.allSatisfy({
+                  !$0.name.isEmpty && $0.durationSeconds > 0 && $0.messagesPerSecond >= 0
+                      && $0.roomLogReadsPerSecond >= 0 && $0.syncPullsPerSecond >= 0
+                      && $0.reconnectPercentPerMinute >= 0 && $0.reconnectPercentPerMinute <= 100
+              })
+        else { throw LoadError.invalidScenario("invalid persona weights or phase rates") }
+        return scenario
     }
 }
 
@@ -156,6 +227,7 @@ private final class LoadStatistics: @unchecked Sendable {
         var active = 0
         var peakActive = 0
         var disconnected = 0
+        var plannedReconnects = 0
         var heartbeatSent = 0
         var heartbeatAcknowledged = 0
         var heartbeatMissed = 0
@@ -173,11 +245,11 @@ private final class LoadStatistics: @unchecked Sendable {
         var roomEventPullsSent = 0
         var roomEventPagesReceived = 0
         var roomEventRecordsReceived = 0
-        var authenticationMilliseconds: [Double] = []
-        var heartbeatMilliseconds: [Double] = []
-        var messageMilliseconds: [Double] = []
-        var syncPullMilliseconds: [Double] = []
-        var roomEventPullMilliseconds: [Double] = []
+        var authenticationLatency = LatencyHistogram()
+        var heartbeatLatency = LatencyHistogram()
+        var messageLatency = LatencyHistogram()
+        var syncPullLatency = LatencyHistogram()
+        var roomEventPullLatency = LatencyHistogram()
         var maximumRSSBytes: UInt64 = 0
     }
 
@@ -197,7 +269,7 @@ private final class LoadStatistics: @unchecked Sendable {
             state.authenticated += 1
             state.active += 1
             state.peakActive = max(state.peakActive, state.active)
-            state.authenticationMilliseconds.append(milliseconds)
+            state.authenticationLatency.record(milliseconds)
         }
     }
     func recordDisconnected() {
@@ -206,11 +278,12 @@ private final class LoadStatistics: @unchecked Sendable {
             state.active = max(0, state.active - 1)
         }
     }
+    func recordPlannedReconnect() { lock.withLock { state.plannedReconnects += 1 } }
     func recordHeartbeatSent() { lock.withLock { state.heartbeatSent += 1 } }
     func recordHeartbeatAcknowledged(milliseconds: Double) {
         lock.withLock {
             state.heartbeatAcknowledged += 1
-            state.heartbeatMilliseconds.append(milliseconds)
+            state.heartbeatLatency.record(milliseconds)
         }
     }
     func recordHeartbeatMissed() { lock.withLock { state.heartbeatMissed += 1 } }
@@ -227,7 +300,7 @@ private final class LoadStatistics: @unchecked Sendable {
     func recordMessageAcknowledged(milliseconds: Double) {
         lock.withLock {
             state.messagesAcknowledged += 1
-            state.messageMilliseconds.append(milliseconds)
+            state.messageLatency.record(milliseconds)
         }
     }
     func recordMessageSkipped() { lock.withLock { state.messagesSkipped += 1 } }
@@ -236,7 +309,7 @@ private final class LoadStatistics: @unchecked Sendable {
         lock.withLock {
             state.syncBatchesReceived += 1
             state.syncRecordsReceived += records
-            state.syncPullMilliseconds.append(milliseconds)
+            state.syncPullLatency.record(milliseconds)
         }
     }
     func recordSyncAcknowledged() { lock.withLock { state.syncAcknowledged += 1 } }
@@ -245,7 +318,7 @@ private final class LoadStatistics: @unchecked Sendable {
         lock.withLock {
             state.roomEventPagesReceived += 1
             state.roomEventRecordsReceived += records
-            state.roomEventPullMilliseconds.append(milliseconds)
+            state.roomEventPullLatency.record(milliseconds)
         }
     }
     func recordRSS(_ bytes: UInt64) { lock.withLock { state.maximumRSSBytes = max(state.maximumRSSBytes, bytes) } }
@@ -273,8 +346,9 @@ private struct LoadRun {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: configuration.eventLoops)
         let statistics = LoadStatistics()
         let startedAt = Date()
-        var channels: [Channel] = []
+        var slots: [LoadConnectionSlot] = []
         var terminalError: Error?
+        var scenarioPhases: [ScenarioPhaseReport] = []
 
         do {
             var offset = 0
@@ -284,24 +358,27 @@ private struct LoadRun {
                 let batchStart = NIODeadline.now()
                 let futures = batch.enumerated().map { localIndex, credential in
                     let connectionIndex = offset + localIndex
-                    let targetUserIDs = configuration.messagesPerSecond > 0
-                        ? (configuration.targetOffset..<(configuration.targetOffset + configuration.targetsPerConnection)).map {
-                            credentials[(connectionIndex + $0) % credentials.count].userID
-                        }
-                        : []
+                    let slot = LoadConnectionSlot(
+                        credential: credential,
+                        targetUserIDs: targetUserIDs(for: connectionIndex),
+                        connectionIndex: connectionIndex
+                    )
                     return connect(
                         credential: credential,
-                        targetUserIDs: targetUserIDs,
+                        targetUserIDs: slot.targetUserIDs,
                         connectionIndex: connectionIndex,
                         group: group,
                         sslContext: sslContext,
                         statistics: statistics
-                    )
+                    ).map { channel in
+                        slot.replace(channel)
+                        return slot
+                    }
                 }
                 let results = try await EventLoopFuture.whenAllComplete(futures, on: group.next()).get()
                 for result in results {
                     switch result {
-                    case .success(let channel): channels.append(channel)
+                    case .success(let slot): slots.append(slot)
                     case .failure(let error): statistics.recordFailure(error)
                     }
                 }
@@ -319,25 +396,34 @@ private struct LoadRun {
                 }
             }
 
-            if configuration.messagesPerSecond > 0 {
-                try await startWorkloads(channels: channels)
+            if configuration.messagesPerSecond > 0 || configuration.scenario != nil {
+                try await startWorkloads(channels: slots.compactMap(\.channel))
             }
-
-            for second in 1...configuration.holdSeconds {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                try enforceGuards(statistics: statistics)
-                if second.isMultiple(of: 10) || second == configuration.holdSeconds {
-                    let snapshot = statistics.snapshot()
-                    print("hold second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
+            if let scenario = configuration.scenario {
+                try await waitForRoomWarmup(scenario: scenario, statistics: statistics)
+                scenarioPhases = try await runScenario(
+                    scenario,
+                    slots: slots,
+                    group: group,
+                    sslContext: sslContext,
+                    statistics: statistics
+                )
+            } else {
+                for second in 1...configuration.holdSeconds {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    try enforceGuards(statistics: statistics)
+                    if second.isMultiple(of: 10) || second == configuration.holdSeconds {
+                        printHold(second: second, statistics: statistics)
+                    }
                 }
             }
         } catch {
             terminalError = error
         }
 
-        await close(channels: channels)
+        await close(channels: slots.compactMap(\.channel))
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), terminalError: terminalError)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), scenarioPhases: scenarioPhases, terminalError: terminalError)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -404,7 +490,7 @@ private struct LoadRun {
         guard snapshot.attempted == 0 || Double(snapshot.failed) / Double(snapshot.attempted) * 100 <= configuration.maximumFailurePercent else {
             throw LoadError.failureGuardTriggered(failed: snapshot.failed, attempted: snapshot.attempted)
         }
-        let unexpectedDisconnects = max(0, snapshot.authenticated - snapshot.active)
+        let unexpectedDisconnects = max(0, snapshot.authenticated - snapshot.active - snapshot.plannedReconnects)
         guard snapshot.authenticated == 0 || Double(unexpectedDisconnects) / Double(snapshot.authenticated) * 100 <= configuration.maximumFailurePercent else {
             throw LoadError.connectionLossGuardTriggered(
                 disconnected: unexpectedDisconnects,
@@ -415,6 +501,132 @@ private struct LoadRun {
         guard workloadAttempted == 0 || Double(snapshot.workloadFailed) / Double(workloadAttempted) * 100 <= configuration.maximumFailurePercent else {
             throw LoadError.workloadFailureGuardTriggered(failed: snapshot.workloadFailed, attempted: workloadAttempted)
         }
+    }
+
+    private func waitForRoomWarmup(scenario: LoadScenario, statistics: LoadStatistics) async throws {
+        let required = configuration.connections * configuration.targetsPerConnection
+        for second in 0...scenario.roomWarmupTimeoutSeconds {
+            try enforceGuards(statistics: statistics)
+            let snapshot = statistics.snapshot()
+            if snapshot.directRoomOpened >= required {
+                print("scenario room warmup complete opened=\(snapshot.directRoomOpened) required=\(required)")
+                return
+            }
+            if second.isMultiple(of: 10) {
+                print("scenario room warmup second=\(second) opened=\(snapshot.directRoomOpened) required=\(required) active=\(snapshot.active)")
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw LoadError.roomWarmupTimedOut(opened: statistics.snapshot().directRoomOpened, required: required)
+    }
+
+    private func runScenario(
+        _ scenario: LoadScenario,
+        slots: [LoadConnectionSlot],
+        group: MultiThreadedEventLoopGroup,
+        sslContext: NIOSSLContext,
+        statistics: LoadStatistics
+    ) async throws -> [ScenarioPhaseReport] {
+        let assignments = ScenarioAssignments(
+            scenario: scenario,
+            slots: slots,
+            totalConnections: configuration.connections
+        )
+        var random = ScenarioRandom(seed: scenario.seed)
+        var reports: [ScenarioPhaseReport] = []
+        for phase in scenario.phases {
+            let started = statistics.snapshot()
+            var messageCarry = 0.0
+            var roomLogCarry = 0.0
+            var syncCarry = 0.0
+            var reconnectCarry = 0.0
+            let messageRate = phase.messagesPerSecond * configuration.scenarioRateScale
+            let roomLogRate = phase.roomLogReadsPerSecond * configuration.scenarioRateScale
+            let syncRate = phase.syncPullsPerSecond * configuration.scenarioRateScale
+            print("scenario phase=\(phase.name) seconds=\(phase.durationSeconds) messages_per_second=\(messageRate) room_log_reads_per_second=\(roomLogRate) sync_pulls_per_second=\(syncRate)")
+            for tick in 0..<(phase.durationSeconds * 10) {
+                messageCarry += messageRate / 10
+                roomLogCarry += roomLogRate / 10
+                syncCarry += syncRate / 10
+                reconnectCarry += phase.reconnectPercentPerMinute / 100 * Double(slots.count) / 600
+                let messageCount = Int(messageCarry.rounded(.down))
+                let roomLogCount = Int(roomLogCarry.rounded(.down))
+                let syncCount = Int(syncCarry.rounded(.down))
+                let reconnectCount = Int(reconnectCarry.rounded(.down))
+                messageCarry -= Double(messageCount)
+                roomLogCarry -= Double(roomLogCount)
+                syncCarry -= Double(syncCount)
+                reconnectCarry -= Double(reconnectCount)
+                for _ in 0..<messageCount { assignments.pick(kind: .send, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent()) }
+                for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
+                for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
+                for _ in 0..<reconnectCount {
+                    if let slot = assignments.pickSlot(random: &random) {
+                        try await reconnect(slot: slot, group: group, sslContext: sslContext, statistics: statistics)
+                    }
+                }
+                try await Task.sleep(nanoseconds: 100_000_000)
+                if tick.isMultiple(of: 100) {
+                    try enforceGuards(statistics: statistics)
+                    printScenarioProgress(phase: phase.name, second: tick / 10, statistics: statistics)
+                }
+            }
+            try enforceGuards(statistics: statistics)
+            reports.append(.init(phase: phase, rateScale: configuration.scenarioRateScale, started: started, ended: statistics.snapshot()))
+        }
+        return reports
+    }
+
+    private func targetUserIDs(for connectionIndex: Int) -> [String] {
+        guard configuration.messagesPerSecond > 0 || configuration.scenario != nil else { return [] }
+        if configuration.scenario != nil {
+            // Scenario peers are symmetric: a passive recipient has the same
+            // room ID in its local set and can therefore perform a real room
+            // log pull for traffic sent by its neighbour.  The legacy fixed
+            // workload remains forward-only for backwards-compatible baselines.
+            let offsets = (1...configuration.targetsPerConnection).map { ordinal -> Int in
+                let magnitude = (ordinal + 1) / 2
+                return ordinal.isMultiple(of: 2) ? -magnitude : magnitude
+            }
+            return offsets.map { offset in
+                credentials[(connectionIndex + offset + credentials.count) % credentials.count].userID
+            }
+        }
+        return (configuration.targetOffset..<(configuration.targetOffset + configuration.targetsPerConnection)).map {
+            credentials[(connectionIndex + $0) % credentials.count].userID
+        }
+    }
+
+    private func reconnect(
+        slot: LoadConnectionSlot,
+        group: MultiThreadedEventLoopGroup,
+        sslContext: NIOSSLContext,
+        statistics: LoadStatistics
+    ) async throws {
+        if let current = slot.channel {
+            statistics.recordPlannedReconnect()
+            _ = try? await current.close().get()
+        }
+        let channel = try await connect(
+            credential: slot.credential,
+            targetUserIDs: slot.targetUserIDs,
+            connectionIndex: slot.connectionIndex,
+            group: group,
+            sslContext: sslContext,
+            statistics: statistics
+        ).get()
+        slot.replace(channel)
+        channel.pipeline.fireUserInboundEventTriggered(StartWorkloadEvent())
+    }
+
+    private func printHold(second: Int, statistics: LoadStatistics) {
+        let snapshot = statistics.snapshot()
+        print("hold second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
+    }
+
+    private func printScenarioProgress(phase: String, second: Int, statistics: LoadStatistics) {
+        let snapshot = statistics.snapshot()
+        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_records=\(snapshot.roomEventRecordsReceived) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
     }
 
     private func startWorkloads(channels: [Channel]) async throws {
@@ -447,6 +659,152 @@ private struct LoadRun {
 }
 
 private struct StartWorkloadEvent: Sendable {}
+private struct ScenarioSendEvent: Sendable {}
+private struct ScenarioRoomLogReadEvent: Sendable {}
+private struct ScenarioSyncPullEvent: Sendable {}
+
+private enum ScenarioAction {
+    case send
+    case roomLogRead
+    case syncPull
+}
+
+private final class LoadConnectionSlot: @unchecked Sendable {
+    let credential: LoadCredential
+    let targetUserIDs: [String]
+    let connectionIndex: Int
+    private let lock = NIOLock()
+    private var currentChannel: Channel?
+
+    init(credential: LoadCredential, targetUserIDs: [String], connectionIndex: Int) {
+        self.credential = credential
+        self.targetUserIDs = targetUserIDs
+        self.connectionIndex = connectionIndex
+    }
+
+    var channel: Channel? { lock.withLock { currentChannel } }
+
+    func replace(_ channel: Channel) {
+        lock.withLock { currentChannel = channel }
+    }
+}
+
+/// Fixed cumulative weights make a scenario deterministic for a seed and do
+/// not retain a task per connection.  A single scheduler selects individual
+/// channels at each 100ms tick, which models a sparse active subset instead of
+/// making every connection emit at a uniform interval.
+private struct ScenarioAssignments {
+    private struct Entry {
+        let cumulativeWeight: Double
+        let slot: LoadConnectionSlot
+    }
+
+    private let sends: [Entry]
+    private let roomLogReads: [Entry]
+    private let syncPulls: [Entry]
+    private let reconnectCandidates: [LoadConnectionSlot]
+
+    init(scenario: LoadScenario, slots: [LoadConnectionSlot], totalConnections: Int) {
+        precondition(slots.count <= totalConnections)
+        var random = ScenarioRandom(seed: scenario.seed)
+        var sendEntries: [(Double, LoadConnectionSlot)] = []
+        var roomLogEntries: [(Double, LoadConnectionSlot)] = []
+        var syncEntries: [(Double, LoadConnectionSlot)] = []
+        let personas = Self.shuffledPersonas(total: totalConnections, scenario: scenario, random: &random)
+        for (index, slot) in slots.enumerated() {
+            let persona = personas[index]
+            if persona.sendWeight > 0 { sendEntries.append((persona.sendWeight, slot)) }
+            if persona.roomLogReadWeight > 0 { roomLogEntries.append((persona.roomLogReadWeight, slot)) }
+            if persona.syncPullWeight > 0 { syncEntries.append((persona.syncPullWeight, slot)) }
+        }
+        sends = Self.entries(sendEntries)
+        roomLogReads = Self.entries(roomLogEntries)
+        syncPulls = Self.entries(syncEntries)
+        reconnectCandidates = slots
+    }
+
+    func pick(kind: ScenarioAction, random: inout ScenarioRandom) -> Channel? {
+        let entries: [Entry]
+        switch kind {
+        case .send: entries = sends
+        case .roomLogRead: entries = roomLogReads
+        case .syncPull: entries = syncPulls
+        }
+        guard let total = entries.last?.cumulativeWeight, total > 0 else { return nil }
+        let target = random.nextUnit() * total
+        var lower = 0
+        var upper = entries.count - 1
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if entries[middle].cumulativeWeight < target { lower = middle + 1 }
+            else { upper = middle }
+        }
+        return entries[lower].slot.channel
+    }
+
+    func pickSlot(random: inout ScenarioRandom) -> LoadConnectionSlot? {
+        guard !reconnectCandidates.isEmpty else { return nil }
+        return reconnectCandidates[min(reconnectCandidates.count - 1, Int(random.nextUnit() * Double(reconnectCandidates.count)))]
+    }
+
+    private static func entries(_ raw: [(Double, LoadConnectionSlot)]) -> [Entry] {
+        var total = 0.0
+        return raw.map { weight, slot in
+            total += weight
+            return .init(cumulativeWeight: total, slot: slot)
+        }
+    }
+
+    private static func shuffledPersonas(
+        total: Int,
+        scenario: LoadScenario,
+        random: inout ScenarioRandom
+    ) -> [LoadScenario.Persona] {
+        // Allocate by largest remainder before shuffling.  This makes the
+        // configured mix exact whenever the shares and worker size permit it
+        // (all 5,000-connection production workers do), without clustering
+        // adjacent direct-message peers into the same persona.
+        let quotas = scenario.personas.map { $0.share * Double(total) }
+        var counts = quotas.map { Int($0.rounded(.down)) }
+        var remaining = total - counts.reduce(0, +)
+        let priority = quotas.indices.sorted {
+            let left = quotas[$0] - Double(counts[$0])
+            let right = quotas[$1] - Double(counts[$1])
+            return left == right ? $0 < $1 : left > right
+        }
+        for index in priority where remaining > 0 {
+            counts[index] += 1
+            remaining -= 1
+        }
+
+        var assignments: [LoadScenario.Persona] = []
+        assignments.reserveCapacity(total)
+        for (index, persona) in scenario.personas.enumerated() {
+            assignments.append(contentsOf: repeatElement(persona, count: counts[index]))
+        }
+        guard assignments.count > 1 else { return assignments }
+        for index in stride(from: assignments.count - 1, through: 1, by: -1) {
+            let swapIndex = min(index, Int(random.nextUnit() * Double(index + 1)))
+            assignments.swapAt(index, swapIndex)
+        }
+        return assignments
+    }
+}
+
+private struct ScenarioRandom {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed == 0 ? 0x9E3779B97F4A7C15 : seed }
+
+    mutating func nextUnit() -> Double {
+        state &+= 0x9E3779B97F4A7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
+        value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+        value ^= value >> 31
+        return Double(value >> 11) * (1.0 / Double(1 << 53))
+    }
+}
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
@@ -707,18 +1065,45 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        guard event is StartWorkloadEvent else {
-            context.fireUserInboundEventTriggered(event)
-            return
-        }
-        guard case .authenticated = stage, !workloadStarted, context.channel.isActive else { return }
-        workloadStarted = true
-        do {
-            for targetUserID in targetUserIDs {
-                try sendOpenDirectRoom(targetUserID: targetUserID, context: context)
+        switch event {
+        case is StartWorkloadEvent:
+            guard case .authenticated = stage, !workloadStarted, context.channel.isActive else { return }
+            workloadStarted = true
+            do {
+                for targetUserID in targetUserIDs {
+                    try sendOpenDirectRoom(targetUserID: targetUserID, context: context)
+                }
+            } catch {
+                failAuthentication(error, context: context)
             }
-        } catch {
-            failAuthentication(error, context: context)
+        case is ScenarioSendEvent:
+            guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
+            do { try sendMessage(context: context) }
+            catch {
+                statistics.recordWorkloadFailure(kind: "message", code: "CLIENT_WRITE_FAILURE")
+                context.close(promise: nil)
+            }
+        case is ScenarioRoomLogReadEvent:
+            guard case .authenticated = stage, workloadStarted, context.channel.isActive,
+                  !directRoomIDs.isEmpty
+            else { return }
+            let roomID = directRoomIDs[nextRoomIndex % directRoomIDs.count]
+            nextRoomIndex += 1
+            do { try sendRoomEventPullIfNeeded(roomID: roomID, context: context) }
+            catch {
+                statistics.recordWorkloadFailure(kind: "room_event", code: "CLIENT_WRITE_FAILURE")
+                context.close(promise: nil)
+            }
+        case is ScenarioSyncPullEvent:
+            guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
+            syncRequested = true
+            do { try startSyncIfNeeded(context: context) }
+            catch {
+                statistics.recordWorkloadFailure(kind: "sync", code: "CLIENT_WRITE_FAILURE")
+                context.close(promise: nil)
+            }
+        default:
+            context.fireUserInboundEventTriggered(event)
         }
     }
 
@@ -942,6 +1327,7 @@ private struct LoadReport: Encodable {
     let connectionFailuresByError: [String: Int]
     let peakActive: Int
     let disconnected: Int
+    let plannedReconnects: Int
     let heartbeatSent: Int
     let heartbeatAcknowledged: Int
     let heartbeatMissed: Int
@@ -965,9 +1351,12 @@ private struct LoadReport: Encodable {
     let messageLatency: Percentiles
     let syncPullLatency: Percentiles
     let roomEventPullLatency: Percentiles
+    let scenarioName: String?
+    let scenarioRateScale: Double?
+    let scenarioPhases: [ScenarioPhaseReport]
     let terminalError: String?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, terminalError: Error?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, scenarioPhases: [ScenarioPhaseReport], terminalError: Error?) {
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -992,6 +1381,7 @@ private struct LoadReport: Encodable {
         connectionFailuresByError = state.connectionFailuresByError
         peakActive = state.peakActive
         disconnected = state.disconnected
+        plannedReconnects = state.plannedReconnects
         heartbeatSent = state.heartbeatSent
         heartbeatAcknowledged = state.heartbeatAcknowledged
         heartbeatMissed = state.heartbeatMissed
@@ -1010,16 +1400,84 @@ private struct LoadReport: Encodable {
         roomEventPagesReceived = state.roomEventPagesReceived
         roomEventRecordsReceived = state.roomEventRecordsReceived
         maximumRSSMegabytes = Double(state.maximumRSSBytes) / 1_048_576
-        authenticationLatency = .init(samples: state.authenticationMilliseconds)
-        heartbeatLatency = .init(samples: state.heartbeatMilliseconds)
-        messageLatency = .init(samples: state.messageMilliseconds)
-        syncPullLatency = .init(samples: state.syncPullMilliseconds)
-        roomEventPullLatency = .init(samples: state.roomEventPullMilliseconds)
+        authenticationLatency = state.authenticationLatency.percentiles
+        heartbeatLatency = state.heartbeatLatency.percentiles
+        messageLatency = state.messageLatency.percentiles
+        syncPullLatency = state.syncPullLatency.percentiles
+        roomEventPullLatency = state.roomEventPullLatency.percentiles
+        scenarioName = configuration.scenario?.name
+        scenarioRateScale = configuration.scenario.map { _ in configuration.scenarioRateScale }
+        self.scenarioPhases = scenarioPhases
         self.terminalError = terminalError.map(String.init(describing:))
     }
 
     var summary: String {
         "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+    }
+}
+
+private struct ScenarioPhaseReport: Encodable {
+    let name: String
+    let durationSeconds: Int
+    let requestedMessagesPerSecond: Double
+    let requestedRoomLogReadsPerSecond: Double
+    let requestedSyncPullsPerSecond: Double
+    let messagesSent: Int
+    let messagesAcknowledged: Int
+    let messagesSkipped: Int
+    let roomEventPullsSent: Int
+    let roomEventRecordsReceived: Int
+    let syncPullsSent: Int
+    let syncRecordsReceived: Int
+    let workloadFailed: Int
+
+    init(phase: LoadScenario.Phase, rateScale: Double, started: LoadStatistics.State, ended: LoadStatistics.State) {
+        name = phase.name
+        durationSeconds = phase.durationSeconds
+        requestedMessagesPerSecond = phase.messagesPerSecond * rateScale
+        requestedRoomLogReadsPerSecond = phase.roomLogReadsPerSecond * rateScale
+        requestedSyncPullsPerSecond = phase.syncPullsPerSecond * rateScale
+        messagesSent = ended.messagesSent - started.messagesSent
+        messagesAcknowledged = ended.messagesAcknowledged - started.messagesAcknowledged
+        messagesSkipped = ended.messagesSkipped - started.messagesSkipped
+        roomEventPullsSent = ended.roomEventPullsSent - started.roomEventPullsSent
+        roomEventRecordsReceived = ended.roomEventRecordsReceived - started.roomEventRecordsReceived
+        syncPullsSent = ended.syncPullsSent - started.syncPullsSent
+        syncRecordsReceived = ended.syncRecordsReceived - started.syncRecordsReceived
+        workloadFailed = ended.workloadFailed - started.workloadFailed
+    }
+}
+
+/// A bounded one-millisecond histogram avoids retaining millions of samples
+/// during an hours-long test.  Values above ten seconds share an overflow
+/// bucket; `maximum` still records their true largest value.
+private struct LatencyHistogram: Sendable {
+    private static let maximumBucketMilliseconds = 10_000
+    private var buckets = Array(repeating: 0, count: maximumBucketMilliseconds + 1)
+    private(set) var count = 0
+    private(set) var maximum = 0.0
+
+    mutating func record(_ milliseconds: Double) {
+        guard milliseconds.isFinite, milliseconds >= 0 else { return }
+        let bucket = min(Self.maximumBucketMilliseconds, Int(milliseconds.rounded(.down)))
+        buckets[bucket] += 1
+        count += 1
+        maximum = max(maximum, milliseconds)
+    }
+
+    var percentiles: Percentiles {
+        .init(histogram: self)
+    }
+
+    func percentile(_ target: Double) -> Double {
+        guard count > 0 else { return 0 }
+        let rank = min(count, max(1, Int((Double(count) * target).rounded(.up))))
+        var cumulative = 0
+        for (bucket, samples) in buckets.enumerated() {
+            cumulative += samples
+            if cumulative >= rank { return Double(bucket) }
+        }
+        return Double(Self.maximumBucketMilliseconds)
     }
 }
 
@@ -1030,24 +1488,18 @@ private struct Percentiles: Encodable {
     let p99: Double
     let maximum: Double
 
-    init(samples: [Double]) {
-        let sorted = samples.sorted()
-        count = sorted.count
-        p50 = Self.value(sorted, percentile: 0.50)
-        p95 = Self.value(sorted, percentile: 0.95)
-        p99 = Self.value(sorted, percentile: 0.99)
-        maximum = sorted.last ?? 0
-    }
-
-    private static func value(_ sorted: [Double], percentile: Double) -> Double {
-        guard !sorted.isEmpty else { return 0 }
-        let index = min(sorted.count - 1, Int((Double(sorted.count - 1) * percentile).rounded(.up)))
-        return (sorted[index] * 100).rounded() / 100
+    init(histogram: LatencyHistogram) {
+        count = histogram.count
+        p50 = histogram.percentile(0.50)
+        p95 = histogram.percentile(0.95)
+        p99 = histogram.percentile(0.99)
+        maximum = (histogram.maximum * 100).rounded() / 100
     }
 }
 
 private enum LoadError: Error, CustomStringConvertible {
     case invalidArguments
+    case invalidScenario(String)
     case invalidCredentialFile
     case insufficientCredentials(required: Int, available: Int)
     case unexpectedResponse
@@ -1057,11 +1509,13 @@ private enum LoadError: Error, CustomStringConvertible {
     case failureGuardTriggered(failed: Int, attempted: Int)
     case connectionLossGuardTriggered(disconnected: Int, authenticated: Int)
     case workloadFailureGuardTriggered(failed: Int, attempted: Int)
+    case roomWarmupTimedOut(opened: Int, required: Int)
 
     var description: String {
         switch self {
         case .invalidArguments:
             return "invalid arguments; required: --host --ca-path --credentials --report"
+        case .invalidScenario(let reason): return "invalid scenario: \(reason)"
         case .invalidCredentialFile: return "credential file is empty, duplicated, or malformed"
         case .insufficientCredentials(let required, let available): return "insufficient credentials: required \(required), available \(available)"
         case .unexpectedResponse: return "gateway returned an unexpected protocol response"
@@ -1072,6 +1526,7 @@ private enum LoadError: Error, CustomStringConvertible {
         case .failureGuardTriggered(let failed, let attempted): return "connection failure guard triggered: \(failed)/\(attempted)"
         case .connectionLossGuardTriggered(let disconnected, let authenticated): return "active connection loss guard triggered: \(disconnected)/\(authenticated)"
         case .workloadFailureGuardTriggered(let failed, let attempted): return "message workload failure guard triggered: \(failed)/\(attempted)"
+        case .roomWarmupTimedOut(let opened, let required): return "room warmup timed out: opened \(opened)/\(required)"
         }
     }
 }
