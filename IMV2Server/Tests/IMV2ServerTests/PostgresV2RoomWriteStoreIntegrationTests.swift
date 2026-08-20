@@ -8841,6 +8841,22 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 WHERE room_id IN (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
                                   \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
                 """).run()
+            // The direct-policy revisions above intentionally invalidate the
+            // old cache entries. Warm both independently first, then the
+            // atomic pair below proves that the set preflight only activates
+            // after it can verify fresh durable revision fences.
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID, actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000c021"),
+                text: "关系变更后的缓存回填"
+            )), case .accepted = try await messages.send(.init(
+                roomID: secondRoom.roomID, actorUserID: senderID,
+                clientMessageID: try .init("00000000-0000-0000-0000-00000000c022"),
+                text: "第二个会话的缓存回填"
+            )) else {
+                Issue.record("expected post-revision cache warm acceptance")
+                return
+            }
             let batched = try await writer.acceptAtomically(requests: [
                 .init(
                     command: try .init(
@@ -8934,7 +8950,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 accepted.roomSequence,
                 accepted.roomSequence + 1,
                 accepted.roomSequence + 2,
-                accepted.roomSequence + 3
+                accepted.roomSequence + 3,
+                accepted.roomSequence + 4
             ])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
@@ -8978,8 +8995,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 6)
-            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 6)
+            #expect(try await count("im_v2.messages", on: sql) == 8)
+            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 8)
             #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
             #expect(try await count("im_v2.fanout_sync_payloads", on: sql) == 0)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
@@ -9002,14 +9019,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
                 """).first(decoding: CapacityRow.self))
-            // Six accepted commands consume three database credit batches;
+            // Eight accepted commands consume four database credit batches;
             // the two room-log appends in the micro-batch still preserve the
             // same conservatively durable command capacity.
-            #expect(creditedAdmission.commandWindowUsed == 6)
+            #expect(creditedAdmission.commandWindowUsed == 8)
             let creditSnapshot = await shardCredits.snapshot()
-            #expect(creditSnapshot.batchReservations == 3)
-            #expect(creditSnapshot.databaseCreditsReserved == 6)
-            #expect(creditSnapshot.committedCredits == 6)
+            #expect(creditSnapshot.batchReservations == 4)
+            #expect(creditSnapshot.databaseCreditsReserved == 8)
+            #expect(creditSnapshot.committedCredits == 8)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()

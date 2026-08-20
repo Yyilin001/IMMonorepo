@@ -142,7 +142,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 roomID: roomID,
                 senderID: senderID,
                 cacheKey: cacheKey,
-                cachedDirectPolicy: await directSendPolicyCache.value(for: cacheKey)
+                cachedDirectPolicy: await directSendPolicyCache.value(for: cacheKey),
+                preflightOrdinal: -1
             ))
         }
         // The set-based SQL updates one row per room.  Holding a later same-
@@ -150,6 +151,22 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         // per-room scheduler; until that scheduler exists, decline the whole
         // mixed batch and preserve the established sequential behavior.
         guard Set(ordered.map(\.roomID)).count == ordered.count else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        // The set preflight below retains all authoritative locks and revision
+        // checks, but deliberately relies on an already-established direct
+        // policy cache entry for the expensive derived policy fields. A cache
+        // miss, or a first-reply command that could mutate a pair, continues
+        // through the established single-command transaction.
+        guard ordered.allSatisfy({ item in
+            guard let policy = item.cachedDirectPolicy else { return false }
+            // Special-account state carries its own lifecycle rules. Keep it
+            // on the single-command path until it has an equally complete
+            // set-based authorization graph.
+            return policy.senderHasReplied
+                && policy.senderAccountKind == nil
+                && policy.recipientAccountKind == nil
+        }) else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
         // Every transaction acquires room rows in the same order.  Preserve
@@ -160,7 +177,17 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 ? $0.originalIndex < $1.originalIndex
                 : $0.roomID.uuidString < $1.roomID.uuidString
         }
-        let orderedRequests = ordered
+        let orderedRequests = ordered.enumerated().map { ordinal, item in
+            OrderedRoomWriteRequest(
+                originalIndex: item.originalIndex,
+                request: item.request,
+                roomID: item.roomID,
+                senderID: item.senderID,
+                cacheKey: item.cacheKey,
+                cachedDirectPolicy: item.cachedDirectPolicy,
+                preflightOrdinal: ordinal
+            )
+        }
 
         let committed = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             var prepared: [PreparedDirectRoomLogAppend] = []
@@ -168,10 +195,29 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             prepared.reserveCapacity(orderedRequests.count)
             commits.reserveCapacity(orderedRequests.count)
             do {
+                let sql = try sqlDatabase(from: transaction)
+                // Each advisory lock remains a separate statement by design:
+                // it establishes the post-lock snapshot needed to observe a
+                // concurrent idempotent result. The following preflight then
+                // locks and reads every distinct room in one set-based query.
                 for item in orderedRequests {
+                    try await acquireMessageOperationLock(
+                        senderID: item.senderID,
+                        clientMessageID: try uuid(item.request.command.clientMessageID),
+                        sql: sql
+                    )
+                }
+                let contexts = try await loadPlainDirectRoomLogBatchContexts(
+                    orderedRequests,
+                    sql: sql
+                )
+                guard contexts.count == orderedRequests.count else {
+                    throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+                }
+                for (item, context) in zip(orderedRequests, contexts) {
                     let result = try await prepareDirectRoomLogAppend(
                         item,
-                        transaction: transaction
+                        preflight: context
                     )
                     switch result {
                     case .append(let append):
@@ -246,34 +292,25 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
 
     private func prepareDirectRoomLogAppend(
         _ item: OrderedRoomWriteRequest,
-        transaction: any Database
+        preflight: PlainDirectRoomLogBatchPreflightRow
     ) async throws -> DirectRoomLogBatchPreparation {
         let request = item.request
         let command = request.command
-        let sql = try sqlDatabase(from: transaction)
         let clientMessageID = try uuid(command.clientMessageID)
-        try await acquireMessageOperationLock(
-            senderID: item.senderID,
-            clientMessageID: clientMessageID,
-            sql: sql
-        )
-        let loadedContext = try await loadMessageAcceptanceContext(
-            roomID: item.roomID,
-            senderID: item.senderID,
-            clientMessageID: clientMessageID,
-            now: request.now,
-            cachedDirectPolicy: item.cachedDirectPolicy,
-            sql: sql
-        )
-        let room = loadedContext.room
-        guard room.kind == "direct",
-              room.capacityProfileID == request.capacityProfile.id,
-              room.frozenAt == nil,
-              try loadedContext.existingOperation() == nil
+        guard preflight.ordinal == item.preflightOrdinal,
+              let cachedDirectPolicy = item.cachedDirectPolicy,
+              preflight.validates(cachedDirectPolicy)
         else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let admissionSnapshot = try loadedContext.admissionSnapshot()
+        let room = preflight.room
+        guard room.kind == "direct",
+              room.capacityProfileID == request.capacityProfile.id,
+              room.frozenAt == nil
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        let admissionSnapshot = try preflight.admissionSnapshot()
         let admission = admissionSnapshot.room
         let shard = admissionSnapshot.shard
         guard admission.shardLeaseID == shard.leaseID,
@@ -285,7 +322,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let directContext = try directMessageContext(from: loadedContext.directPolicySnapshot())
+        let directContext = try directMessageContext(from: cachedDirectPolicy.policySnapshot())
         guard directContext.restriction == nil,
               !directContext.requiresStrangerQuota,
               directContext.senderProfileVisibleToRecipient,
@@ -374,7 +411,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 commit: .init(
                     outcome: .accepted(acceptedMessage),
                     acceptedDirectProjectionShadows: [],
-                    directPolicyCacheUpdate: loadedContext.directPolicyCacheEntry(),
+                    directPolicyCacheUpdate: cachedDirectPolicy,
                     shardAdmissionCommandCredit: shardCreditToken
                 )
             ))
@@ -973,6 +1010,193 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     ) async throws {
         let key = "v2-message-operation:" + senderID.uuidString + ":" + clientMessageID.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+
+    /// Batch variant of the direct room-log preflight. The process-local
+    /// policy cache is deliberately *not* authority: this query locks the
+    /// authoritative rows and returns their revision fences. A missing row,
+    /// replay, or revision mismatch makes the caller fall back to the exact
+    /// established per-command transaction.
+    private func loadPlainDirectRoomLogBatchContexts(
+        _ ordered: [OrderedRoomWriteRequest],
+        sql: any SQLDatabase
+    ) async throws -> [PlainDirectRoomLogBatchPreflightRow] {
+        let input = try ordered.map { item in
+            PlainDirectRoomLogBatchPreflightInput(
+                ordinal: item.preflightOrdinal,
+                roomID: item.roomID,
+                senderID: item.senderID,
+                clientMessageID: try uuid(item.request.command.clientMessageID),
+                nowUnixSeconds: item.request.now.timeIntervalSince1970
+            )
+        }
+        let inputJSON = try roomWriteJSON(input)
+        let rows = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT input.ordinal, input.room_id, input.sender_id,
+                       input.client_message_id, input.now_unix_seconds
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                    ordinal integer,
+                    room_id uuid,
+                    sender_id uuid,
+                    client_message_id uuid,
+                    now_unix_seconds double precision
+                )
+            ), locked_room AS MATERIALIZED (
+                SELECT input.ordinal, input.sender_id, input.client_message_id,
+                       input.now_unix_seconds, room.room_kind,
+                       room.room_shard_id, room.room_sequence,
+                       room.timeline_sequence, room.membership_revision,
+                       room.capacity_profile_id, room.delivery_mode,
+                       room.frozen_at, room.room_id
+                FROM input
+                JOIN im_v2.rooms AS room ON room.room_id = input.room_id
+                ORDER BY room.room_id
+                FOR UPDATE OF room
+            ), prior_operation AS MATERIALIZED (
+                SELECT room.ordinal
+                FROM locked_room AS room
+                JOIN im_v2.messages AS message
+                  ON message.sender_user_id = room.sender_id
+                 AND message.client_message_id = room.client_message_id
+                UNION
+                SELECT room.ordinal
+                FROM locked_room AS room
+                JOIN im_v2.direct_message_denials AS denial
+                  ON denial.sender_user_id = room.sender_id
+                 AND denial.client_message_id = room.client_message_id
+            ), fresh_room AS MATERIALIZED (
+                SELECT room.*
+                FROM locked_room AS room
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM prior_operation AS prior
+                    WHERE prior.ordinal = room.ordinal
+                )
+            ), locked_admission AS MATERIALIZED (
+                SELECT room.ordinal,
+                       admission.eligible_member_count AS room_eligible_member_count,
+                       admission.command_window_limit AS room_command_window_limit,
+                       admission.command_window_used AS room_command_window_used,
+                       admission.fanout_window_limit AS room_fanout_window_limit,
+                       admission.fanout_window_used AS room_fanout_window_used,
+                       admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
+                       admission.outstanding_fanout_units AS room_outstanding_fanout_units,
+                       admission.max_outstanding_plans AS room_max_outstanding_plans,
+                       admission.outstanding_plans AS room_outstanding_plans,
+                       admission.shard_lease_id AS room_shard_lease_id,
+                       admission.shard_lease_generation AS room_shard_lease_generation,
+                       shard.lease_id AS shard_lease_id,
+                       shard.generation AS shard_generation,
+                       shard.valid_until AS shard_valid_until,
+                       shard.command_window_limit AS shard_command_window_limit,
+                       shard.command_window_used AS shard_command_window_used,
+                       shard.fanout_window_limit AS shard_fanout_window_limit,
+                       shard.fanout_window_used AS shard_fanout_window_used,
+                       shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
+                       shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
+                       shard.max_outstanding_plans AS shard_max_outstanding_plans,
+                       shard.outstanding_plans AS shard_outstanding_plans
+                FROM fresh_room AS room
+                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = room.room_shard_id
+                 AND shard.capacity_profile_id = room.capacity_profile_id
+                FOR UPDATE OF admission
+            ), locked_actor AS MATERIALIZED (
+                SELECT room.ordinal, membership.role AS actor_role,
+                       EXISTS (
+                           SELECT 1
+                           FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = room.sender_id
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS sender_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_member_mutes AS mute
+                           WHERE mute.room_id = room.room_id
+                             AND mute.user_id = room.sender_id
+                             AND mute.mute_until > to_timestamp(room.now_unix_seconds)
+                       ) AS muted
+                FROM fresh_room AS room
+                JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.room_id = room.room_id
+                 AND membership.user_id = room.sender_id
+                 AND membership.joined_revision <= room.membership_revision
+                 AND (membership.left_revision IS NULL
+                      OR membership.left_revision > room.membership_revision)
+                FOR UPDATE OF membership
+            ), direct_pair AS MATERIALIZED (
+                SELECT room.ordinal,
+                       CASE WHEN pair.lower_user_id = room.sender_id
+                            THEN pair.higher_user_id ELSE pair.lower_user_id END AS recipient_user_id,
+                       pair.direct_policy_revision,
+                       CASE WHEN pair.lower_user_id = room.sender_id
+                            THEN pair.lower_has_replied ELSE pair.higher_has_replied END AS sender_has_replied
+                FROM fresh_room AS room
+                JOIN locked_actor AS actor ON actor.ordinal = room.ordinal
+                JOIN im_v2.direct_room_pairs AS pair ON pair.room_id = room.room_id
+                WHERE room.room_kind = 'direct'
+                  AND (pair.lower_user_id = room.sender_id
+                       OR pair.higher_user_id = room.sender_id)
+                FOR SHARE OF pair
+            ), direct_policy_versions AS MATERIALIZED (
+                SELECT pair.ordinal, pair.recipient_user_id,
+                       pair.direct_policy_revision, pair.sender_has_replied,
+                       sender_version.revision AS sender_policy_revision,
+                       recipient_version.revision AS recipient_policy_revision
+                FROM direct_pair AS pair
+                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
+                JOIN im_v2.user_direct_send_policy_versions AS sender_version
+                  ON sender_version.user_id = room.sender_id
+                JOIN im_v2.user_direct_send_policy_versions AS recipient_version
+                  ON recipient_version.user_id = pair.recipient_user_id
+                FOR KEY SHARE OF sender_version, recipient_version
+            )
+            SELECT room.ordinal, room.room_kind, room.room_shard_id,
+                   room.room_sequence, room.timeline_sequence,
+                   room.membership_revision, room.capacity_profile_id,
+                   room.delivery_mode, room.frozen_at,
+                   admission.room_eligible_member_count,
+                   admission.room_command_window_limit,
+                   admission.room_command_window_used,
+                   admission.room_fanout_window_limit,
+                   admission.room_fanout_window_used,
+                   admission.room_max_outstanding_fanout_units,
+                   admission.room_outstanding_fanout_units,
+                   admission.room_max_outstanding_plans,
+                   admission.room_outstanding_plans,
+                   admission.room_shard_lease_id,
+                   admission.room_shard_lease_generation,
+                   admission.shard_lease_id, admission.shard_generation,
+                   admission.shard_valid_until,
+                   admission.shard_command_window_limit,
+                   admission.shard_command_window_used,
+                   admission.shard_fanout_window_limit,
+                   admission.shard_fanout_window_used,
+                   admission.shard_max_outstanding_fanout_units,
+                   admission.shard_outstanding_fanout_units,
+                   admission.shard_max_outstanding_plans,
+                   admission.shard_outstanding_plans,
+                   actor.actor_role, actor.sender_is_active, actor.muted,
+                   policy.recipient_user_id, policy.direct_policy_revision,
+                   policy.sender_policy_revision, policy.recipient_policy_revision,
+                   policy.sender_has_replied
+            FROM fresh_room AS room
+            LEFT JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
+            LEFT JOIN locked_actor AS actor ON actor.ordinal = room.ordinal
+            LEFT JOIN direct_policy_versions AS policy ON policy.ordinal = room.ordinal
+            ORDER BY room.ordinal
+            """).all(decoding: PlainDirectRoomLogBatchPreflightRow.self)
+        guard rows.count == ordered.count,
+              zip(rows, ordered).allSatisfy({ $0.0.ordinal == $0.1.preflightOrdinal })
+        else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        return rows
     }
 
     /// One transaction-scoped read loads the room, idempotency result, room
@@ -3410,6 +3634,174 @@ private struct PlainRoomLogMessageInput: Encodable {
     }
 }
 
+/// Input and result models for the durable, set-based direct-send preflight.
+/// They intentionally contain only state required after a compatible policy
+/// cache hit; fields used solely to derive the cached policy stay on the
+/// normal single-command path.
+private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
+    let ordinal: Int
+    let roomID: UUID
+    let senderID: UUID
+    let clientMessageID: UUID
+    let nowUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case roomID = "room_id"
+        case senderID = "sender_id"
+        case clientMessageID = "client_message_id"
+        case nowUnixSeconds = "now_unix_seconds"
+    }
+}
+
+private struct PlainDirectRoomLogBatchPreflightRow: Decodable {
+    let ordinal: Int
+    let kind: String
+    let roomShardID: String
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let membershipRevision: Int64
+    let capacityProfileID: String
+    let deliveryMode: V2GroupDeliveryMode
+    let frozenAt: Date?
+    let roomEligibleMemberCount: Int?
+    let roomCommandWindowLimit: Int?
+    let roomCommandWindowUsed: Int?
+    let roomFanoutWindowLimit: Int?
+    let roomFanoutWindowUsed: Int?
+    let roomMaxOutstandingFanoutUnits: Int?
+    let roomOutstandingFanoutUnits: Int?
+    let roomMaxOutstandingPlans: Int?
+    let roomOutstandingPlans: Int?
+    let roomShardLeaseID: UUID?
+    let roomShardLeaseGeneration: Int64?
+    let shardLeaseID: UUID?
+    let shardGeneration: Int64?
+    let shardValidUntil: Date?
+    let shardCommandWindowLimit: Int?
+    let shardCommandWindowUsed: Int?
+    let shardFanoutWindowLimit: Int?
+    let shardFanoutWindowUsed: Int?
+    let shardMaxOutstandingFanoutUnits: Int?
+    let shardOutstandingFanoutUnits: Int?
+    let shardMaxOutstandingPlans: Int?
+    let shardOutstandingPlans: Int?
+    let actorRole: String?
+    let senderIsActive: Bool?
+    let muted: Bool?
+    let recipientUserID: UUID?
+    let directPolicyRevision: Int64?
+    let senderPolicyRevision: Int64?
+    let recipientPolicyRevision: Int64?
+    let senderHasReplied: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case kind = "room_kind"
+        case roomShardID = "room_shard_id"
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+        case membershipRevision = "membership_revision"
+        case capacityProfileID = "capacity_profile_id"
+        case deliveryMode = "delivery_mode"
+        case frozenAt = "frozen_at"
+        case roomEligibleMemberCount = "room_eligible_member_count"
+        case roomCommandWindowLimit = "room_command_window_limit"
+        case roomCommandWindowUsed = "room_command_window_used"
+        case roomFanoutWindowLimit = "room_fanout_window_limit"
+        case roomFanoutWindowUsed = "room_fanout_window_used"
+        case roomMaxOutstandingFanoutUnits = "room_max_outstanding_fanout_units"
+        case roomOutstandingFanoutUnits = "room_outstanding_fanout_units"
+        case roomMaxOutstandingPlans = "room_max_outstanding_plans"
+        case roomOutstandingPlans = "room_outstanding_plans"
+        case roomShardLeaseID = "room_shard_lease_id"
+        case roomShardLeaseGeneration = "room_shard_lease_generation"
+        case shardLeaseID = "shard_lease_id"
+        case shardGeneration = "shard_generation"
+        case shardValidUntil = "shard_valid_until"
+        case shardCommandWindowLimit = "shard_command_window_limit"
+        case shardCommandWindowUsed = "shard_command_window_used"
+        case shardFanoutWindowLimit = "shard_fanout_window_limit"
+        case shardFanoutWindowUsed = "shard_fanout_window_used"
+        case shardMaxOutstandingFanoutUnits = "shard_max_outstanding_fanout_units"
+        case shardOutstandingFanoutUnits = "shard_outstanding_fanout_units"
+        case shardMaxOutstandingPlans = "shard_max_outstanding_plans"
+        case shardOutstandingPlans = "shard_outstanding_plans"
+        case actorRole = "actor_role"
+        case senderIsActive = "sender_is_active"
+        case muted
+        case recipientUserID = "recipient_user_id"
+        case directPolicyRevision = "direct_policy_revision"
+        case senderPolicyRevision = "sender_policy_revision"
+        case recipientPolicyRevision = "recipient_policy_revision"
+        case senderHasReplied = "sender_has_replied"
+    }
+
+    var room: RoomRow {
+        .init(
+            kind: kind,
+            roomShardID: roomShardID,
+            roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
+            membershipRevision: membershipRevision,
+            capacityProfileID: capacityProfileID,
+            deliveryMode: deliveryMode,
+            frozenAt: frozenAt
+        )
+    }
+
+    func validates(_ cache: V2DirectSendPolicyCache.Entry) -> Bool {
+        recipientUserID == cache.recipientID
+            && directPolicyRevision == cache.directPairRevision
+            && senderPolicyRevision == cache.senderPolicyRevision
+            && recipientPolicyRevision == cache.recipientPolicyRevision
+            && senderHasReplied == true
+    }
+
+    func admissionSnapshot() throws -> AdmissionSnapshotRow {
+        guard let roomEligibleMemberCount, let roomCommandWindowLimit,
+              let roomCommandWindowUsed, let roomFanoutWindowLimit,
+              let roomFanoutWindowUsed, let roomMaxOutstandingFanoutUnits,
+              let roomOutstandingFanoutUnits, let roomMaxOutstandingPlans,
+              let roomOutstandingPlans, let roomShardLeaseID,
+              let roomShardLeaseGeneration, let shardLeaseID,
+              let shardGeneration, let shardValidUntil,
+              let shardCommandWindowLimit, let shardCommandWindowUsed,
+              let shardFanoutWindowLimit, let shardFanoutWindowUsed,
+              let shardMaxOutstandingFanoutUnits,
+              let shardOutstandingFanoutUnits, let shardMaxOutstandingPlans,
+              let shardOutstandingPlans
+        else { throw V2AtomicRoomWriteBatchError.unsupportedRequestShape }
+        return .init(
+            roomEligibleMemberCount: roomEligibleMemberCount,
+            roomCommandWindowLimit: roomCommandWindowLimit,
+            roomCommandWindowUsed: roomCommandWindowUsed,
+            roomFanoutWindowLimit: roomFanoutWindowLimit,
+            roomFanoutWindowUsed: roomFanoutWindowUsed,
+            roomMaxOutstandingFanoutUnits: roomMaxOutstandingFanoutUnits,
+            roomOutstandingFanoutUnits: roomOutstandingFanoutUnits,
+            roomMaxOutstandingPlans: roomMaxOutstandingPlans,
+            roomOutstandingPlans: roomOutstandingPlans,
+            roomShardLeaseID: roomShardLeaseID,
+            roomShardLeaseGeneration: roomShardLeaseGeneration,
+            shardLeaseID: shardLeaseID,
+            shardGeneration: shardGeneration,
+            shardValidUntil: shardValidUntil,
+            shardCommandWindowLimit: shardCommandWindowLimit,
+            shardCommandWindowUsed: shardCommandWindowUsed,
+            shardFanoutWindowLimit: shardFanoutWindowLimit,
+            shardFanoutWindowUsed: shardFanoutWindowUsed,
+            shardMaxOutstandingFanoutUnits: shardMaxOutstandingFanoutUnits,
+            shardOutstandingFanoutUnits: shardOutstandingFanoutUnits,
+            shardMaxOutstandingPlans: shardMaxOutstandingPlans,
+            shardOutstandingPlans: shardOutstandingPlans,
+            actorRole: actorRole,
+            senderIsActive: senderIsActive,
+            muted: muted
+        )
+    }
+}
+
 private struct OrderedRoomWriteRequest {
     let originalIndex: Int
     let request: V2RoomWriteRequest
@@ -3417,6 +3809,7 @@ private struct OrderedRoomWriteRequest {
     let senderID: UUID
     let cacheKey: V2DirectSendPolicyCache.Key
     let cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+    let preflightOrdinal: Int
 }
 
 private struct OrderedRoomWriteCommit {
@@ -3553,6 +3946,32 @@ private struct DirectMessagePolicySnapshotRow: Decodable {
         case recipientAllowsCustomerMessages = "recipient_allows_customer_messages"
     }
 }
+
+private extension V2DirectSendPolicyCache.Entry {
+    /// The set preflight has already compared the durable pair and policy
+    /// revisions while holding their locks. Only after that fence matches may
+    /// these cached derived fields be reused for the unchanged decision table.
+    func policySnapshot() -> DirectMessagePolicySnapshotRow {
+        .init(
+            recipientUserID: recipientID,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+            senderCanSend: senderCanSend,
+            recipientIsActive: recipientIsActive,
+            blocked: blocked,
+            isFriend: isFriend,
+            senderHasReplied: senderHasReplied,
+            recipientHasReplied: recipientHasReplied,
+            allowsStrangers: allowsStrangers,
+            senderAccountKind: senderAccountKind,
+            senderAccountStatus: senderAccountStatus,
+            senderAllowsServiceMessages: senderAllowsServiceMessages,
+            recipientAccountKind: recipientAccountKind,
+            recipientAccountStatus: recipientAccountStatus,
+            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+        )
+    }
+}
+
 private struct DirectRoomProfileMutationRow: Decodable {
     let profileExists: Bool
     let neededCount: Int64
