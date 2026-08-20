@@ -6,3 +6,9 @@ services:
   gateway:
     environment:
       IM_V2_DIRECT_FANOUT_MODE: room_log
+      # Reserve shard command-window capacity in bounded durable batches for
+      # the fixed-audience direct room-log path. PostgreSQL remains the
+      # authority; an interrupted process can only leave up to 31 already
+      # charged credits unused for its current shard/lease. This removes the
+      # per-message shard admission update without weakening message commits.
+      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "32"
