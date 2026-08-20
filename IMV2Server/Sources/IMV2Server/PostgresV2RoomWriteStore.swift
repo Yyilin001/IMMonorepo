@@ -53,9 +53,71 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         let senderID = try uuid(command.senderUserID)
         let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
         let cachedDirectPolicy = await directSendPolicyCache.value(for: cacheKey)
-        let commit: RoomWriteCommit
+        let commit = try await acceptanceCommit(
+            command: command,
+            capacityProfile: capacityProfile,
+            identifiers: identifiers,
+            now: now,
+            roomID: roomID,
+            senderID: senderID,
+            cachedDirectPolicy: cachedDirectPolicy
+        )
+        return try await finalizeCommittedAcceptance(
+            command: command,
+            cacheKey: cacheKey,
+            commit: commit
+        )
+    }
+
+    /// Owns the retry boundary for one logical command.  The transaction body
+    /// is deliberately separate so the ordered batch can reuse the exact same
+    /// locking, authorization and idempotency code without creating nested
+    /// transactions.
+    private func acceptanceCommit(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date,
+        roomID: UUID,
+        senderID: UUID,
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+    ) async throws -> RoomWriteCommit {
         do {
-            commit = try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            return try await v2WithPostgresTransactionRetry(database: database) { transaction in
+                try await acceptInTransaction(
+                    command: command,
+                    capacityProfile: capacityProfile,
+                    identifiers: identifiers,
+                    now: now,
+                    roomID: roomID,
+                    senderID: senderID,
+                    cachedDirectPolicy: cachedDirectPolicy,
+                    transaction: transaction
+                )
+            }
+        } catch let rejection as LateShardAdmissionRejection {
+            switch rejection {
+            case .rateLimited(let retryAfterSeconds):
+                return .init(
+                    outcome: .rateLimited(retryAfterSeconds: retryAfterSeconds),
+                    acceptedDirectProjectionShadows: []
+                )
+            case .unavailable(let reason):
+                return .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
+            }
+        }
+    }
+
+    private func acceptInTransaction(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date,
+        roomID: UUID,
+        senderID: UUID,
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
+        transaction: any Database
+    ) async throws -> RoomWriteCommit {
             var shardCreditToken: V2ShardAdmissionCommandCreditPool.Token?
             do {
             guard let sql = transaction as? any SQLDatabase else {
@@ -417,23 +479,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 }
                 throw error
             }
-            }
-        } catch let rejection as LateShardAdmissionRejection {
-            switch rejection {
-            case .rateLimited(let retryAfterSeconds):
-                commit = .init(
-                    outcome: .rateLimited(retryAfterSeconds: retryAfterSeconds),
-                    acceptedDirectProjectionShadows: []
-                )
-            case .unavailable(let reason):
-                commit = .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
-            }
-        }
-        return try await finalizeCommittedAcceptance(
-            command: command,
-            cacheKey: cacheKey,
-            commit: commit
-        )
     }
 
     /// Runs only after Fluent has committed the source transaction.  Keeping
