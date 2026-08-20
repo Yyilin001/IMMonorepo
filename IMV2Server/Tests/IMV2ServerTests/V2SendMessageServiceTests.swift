@@ -99,6 +99,135 @@ struct V2SendMessageServiceTests {
         let state = try #require(await store.state(for: fixture.roomID))
         #expect(state.0.nextRoomSequence == 1)
     }
+
+    @Test("admission batching waits for an atomic batch and aligns each result")
+    func admissionBatchingUsesAtomicStoreAndAlignsResults() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher,
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000111")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000112")
+        let firstID = try ClientMessageID("00000000-0000-0000-0000-000000000113")
+        let secondID = try ClientMessageID("00000000-0000-0000-0000-000000000114")
+
+        async let first = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: firstID,
+            text: "one"
+        ))
+        async let second = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: secondID,
+            text: "two"
+        ))
+        let outcomes = try await [first, second]
+
+        #expect(outcomes == [
+            .rateLimited(retryAfterSeconds: 7),
+            .rateLimited(retryAfterSeconds: 8),
+        ])
+        #expect(await store.normalAcceptCallCount() == 0)
+        let batches = await store.batches()
+        #expect(batches.count == 1)
+        #expect(Set(batches[0]) == Set([firstID, secondID]))
+    }
+
+    @Test("an atomic batch failure is returned to each waiting command")
+    func admissionBatchingPropagatesAtomicFailure() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore(shouldFail: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000121")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000122")
+
+        async let first = captureSendOutcome { try await service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000123"),
+            text: "one"
+        )) }
+        async let second = captureSendOutcome { try await service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000124"),
+            text: "two"
+        )) }
+
+        let outcomes = await [first, second]
+        for outcome in outcomes {
+            guard case .failure(let error) = outcome else {
+                Issue.record("an atomic batch failure must fail every request")
+                continue
+            }
+            #expect(error as? V2RoomWriteStoreError == .corruptPersistenceState)
+        }
+        #expect(await store.normalAcceptCallCount() == 0)
+        #expect(await store.batches().count == 1)
+    }
+}
+
+private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
+    private let shouldFail: Bool
+    private var recordedBatches: [[ClientMessageID]] = []
+    private var normalCalls = 0
+
+    init(shouldFail: Bool = false) {
+        self.shouldFail = shouldFail
+    }
+
+    func accept(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) throws -> V2SendMessageOutcome {
+        normalCalls += 1
+        return .unavailable(.missingShardLease)
+    }
+
+    func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
+        recordedBatches.append(requests.map(\.command.clientMessageID))
+        if shouldFail {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return requests.map {
+            .rateLimited(retryAfterSeconds: $0.command.text == "one" ? 7 : 8)
+        }
+    }
+
+    func normalAcceptCallCount() -> Int { normalCalls }
+    func batches() -> [[ClientMessageID]] { recordedBatches }
+}
+
+private func captureSendOutcome(
+    _ operation: @escaping @Sendable () async throws -> V2SendMessageOutcome
+) async -> Result<V2SendMessageOutcome, any Error> {
+    do {
+        return .success(try await operation())
+    } catch {
+        return .failure(error)
+    }
 }
 
 private struct Fixture: Sendable {

@@ -87,6 +87,42 @@ public protocol V2RoomWriteStore: Sendable {
     ) async throws -> V2SendMessageOutcome
 }
 
+/// An immutable acceptance request prepared by the domain layer.  Keeping the
+/// generated identifiers with the request is essential: an ordered batch may
+/// retry its PostgreSQL transaction, but it must never mint a second message
+/// or event identity for the same client operation.
+public struct V2RoomWriteRequest: Sendable {
+    public let command: V2SendMessageCommand
+    public let capacityProfile: V2CapacityProfile
+    public let identifiers: V2AcceptanceIdentifiers
+    public let now: Date
+
+    public init(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) {
+        self.command = command
+        self.capacityProfile = capacityProfile
+        self.identifiers = identifiers
+        self.now = now
+    }
+}
+
+/// A store that can make a whole ordered input batch durable atomically.
+///
+/// This is deliberately a separate protocol rather than a convenience method
+/// on `V2RoomWriteStore`.  A fallback that loops over `accept` would commit a
+/// prefix before a later failure, while an admission batcher could only report
+/// a single error to every waiting client.  Such a fallback is both incorrect
+/// and not a WAL optimization.
+public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
+    func acceptAtomically(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome]
+}
+
 public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case roomNotFound
     case actorNotEligible
@@ -118,6 +154,7 @@ public struct V2AcceptanceIDFactory: Sendable {
 
 public struct V2SendMessageService: Sendable {
     private let store: any V2RoomWriteStore
+    private let batcher: V2SendMessageAdmissionBatcher?
     private let capacityProfile: V2CapacityProfile
     private let limits: V2MessageCommandLimits
     private let idFactory: V2AcceptanceIDFactory
@@ -128,9 +165,11 @@ public struct V2SendMessageService: Sendable {
         capacityProfile: V2CapacityProfile,
         limits: V2MessageCommandLimits,
         idFactory: V2AcceptanceIDFactory = .init(),
+        batcher: V2SendMessageAdmissionBatcher? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
+        self.batcher = batcher
         self.capacityProfile = capacityProfile
         self.limits = limits
         self.idFactory = idFactory
@@ -149,11 +188,20 @@ public struct V2SendMessageService: Sendable {
             replyTo: request.replyTo,
             limits: limits
         )
-        return try await store.accept(
+        let prepared = V2RoomWriteRequest(
             command: command,
             capacityProfile: capacityProfile,
             identifiers: try idFactory.make(),
             now: now()
+        )
+        if let batcher {
+            return try await batcher.accept(prepared)
+        }
+        return try await store.accept(
+            command: prepared.command,
+            capacityProfile: prepared.capacityProfile,
+            identifiers: prepared.identifiers,
+            now: prepared.now
         )
     }
 }
