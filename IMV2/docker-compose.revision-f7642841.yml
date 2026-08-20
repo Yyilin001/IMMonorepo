@@ -1,0 +1,3 @@
+services:
+  gateway:
+    image: imv2-server:direct-shard-admission-f7642841-linux
