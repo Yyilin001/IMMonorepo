@@ -429,6 +429,23 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 commit = .init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: [])
             }
         }
+        return try await finalizeCommittedAcceptance(
+            command: command,
+            cacheKey: cacheKey,
+            commit: commit
+        )
+    }
+
+    /// Runs only after Fluent has committed the source transaction.  Keeping
+    /// these process-local and cross-store side effects outside the SQL
+    /// acceptance boundary is what lets a future atomic batch commit all
+    /// canonical room records first, then finalize each client result without
+    /// acknowledging an uncommitted prefix.
+    private func finalizeCommittedAcceptance(
+        command: V2SendMessageCommand,
+        cacheKey: V2DirectSendPolicyCache.Key,
+        commit: RoomWriteCommit
+    ) async throws -> V2SendMessageOutcome {
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)
         }
