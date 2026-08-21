@@ -5,9 +5,14 @@ import SQLKit
 
 public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
     private let database: any Database
+    private let directRoomLogEventCache: V2DirectRoomLogEventCache?
 
-    public init(database: any Database) {
+    public init(
+        database: any Database,
+        directRoomLogEventCache: V2DirectRoomLogEventCache? = nil
+    ) {
         self.database = database
+        self.directRoomLogEventCache = directRoomLogEventCache
     }
 
     public func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage {
@@ -16,6 +21,26 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
               let actorUUID = UUID(uuidString: actorUserID.rawValue),
               afterRoomSequence <= UInt64(Int64.max)
         else { throw V2GroupEventLogError.corruptPersistenceState }
+
+        // The cache is deliberately reached only after a fresh durable
+        // membership read. It never contains authority or is used to answer
+        // a partial range: a miss falls through to the established one-query
+        // durable implementation below.
+        if let directRoomLogEventCache,
+           let access = try await authorizedDirectRoomCacheAccess(
+               roomID: roomUUID,
+               actorUserID: actorUUID,
+               sql: sql
+           ), let cached = await directRoomLogEventCache.page(
+               roomID: roomID,
+               actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
+               actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
+               currentHighWatermark: try groupEventUnsigned(access.roomSequence),
+               afterRoomSequence: afterRoomSequence,
+               pageSize: pageSize
+           ) {
+            return cached
+        }
 
         let rows = try await sql.raw("""
             WITH room AS MATERIALIZED (
@@ -222,6 +247,30 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
         guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
         return room
     }
+
+    /// Supplies the minimal, current membership fence needed by the local
+    /// direct-event cache. Returning `nil` is intentionally indistinguishable
+    /// from a cache miss; the durable pull retains the public error mapping
+    /// for missing rooms and unauthorized actors.
+    private func authorizedDirectRoomCacheAccess(
+        roomID: UUID,
+        actorUserID: UUID,
+        sql: any SQLDatabase
+    ) async throws -> DirectRoomCacheAccessRow? {
+        try await sql.raw("""
+            SELECT room.room_sequence, membership.joined_revision,
+                   membership.left_revision
+            FROM im_v2.rooms AS room
+            JOIN im_v2.room_memberships AS membership
+              ON membership.room_id = room.room_id
+             AND membership.user_id = \(bind: actorUserID)
+             AND membership.joined_revision <= room.membership_revision
+             AND (membership.left_revision IS NULL
+                  OR membership.left_revision > room.membership_revision)
+            WHERE room.room_id = \(bind: roomID)
+              AND room.room_kind = 'direct'
+            """).first(decoding: DirectRoomCacheAccessRow.self)
+    }
 }
 
 private struct GroupEventLogRoomRow: Decodable {
@@ -232,6 +281,18 @@ private struct GroupEventLogRoomRow: Decodable {
         case roomSequence = "room_sequence"
         case roomKind = "room_kind"
         case actorIsActiveMember = "actor_is_active_member"
+    }
+}
+
+private struct DirectRoomCacheAccessRow: Decodable {
+    let roomSequence: Int64
+    let actorJoinedRevision: Int64
+    let actorLeftRevision: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case roomSequence = "room_sequence"
+        case actorJoinedRevision = "joined_revision"
+        case actorLeftRevision = "left_revision"
     }
 }
 

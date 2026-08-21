@@ -307,6 +307,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
     public let directRoomLogAppendBatchHighActivityMinimumRequests: Int?
     public let directRoomLogAppendBatchHighActivityWindowMilliseconds: Int?
+    /// Zero disables the process-local direct event cache. Cached entries are
+    /// never authorization state and are always validated against PostgreSQL
+    /// before being served.
+    public let directRoomLogEventCacheMaximumEntries: Int
+    public let directRoomLogEventCacheMaximumBytes: Int
+    public let directRoomLogEventCacheMaximumEntriesPerRoom: Int
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// Unreferenced immutable revisions remain recoverable for this grace.
     /// The default is seven days; deployments may lengthen it independently
@@ -609,6 +615,41 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = parsedHighActivityAppendDelay
             directRoomLogAppendBatchHighActivityMinimumRequests = parsedHighActivityAppendMinimumRequests
             directRoomLogAppendBatchHighActivityWindowMilliseconds = parsedHighActivityAppendWindow
+        }
+        let rawDirectRoomLogEventCacheEntries = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES", environment: environment
+        ) ?? "0"
+        guard let parsedDirectRoomLogEventCacheEntries = Int(rawDirectRoomLogEventCacheEntries),
+              (0 ... 131_072).contains(parsedDirectRoomLogEventCacheEntries),
+              parsedDirectRoomLogEventCacheEntries == 0
+                || parsedDirectFanoutMode == .roomLog
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"
+            )
+        }
+        directRoomLogEventCacheMaximumEntries = parsedDirectRoomLogEventCacheEntries
+        if parsedDirectRoomLogEventCacheEntries == 0 {
+            directRoomLogEventCacheMaximumBytes = 0
+            directRoomLogEventCacheMaximumEntriesPerRoom = 0
+        } else {
+            let rawDirectRoomLogEventCacheBytes = Self.optional(
+                "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES", environment: environment
+            ) ?? "33554432"
+            let rawDirectRoomLogEventCacheEntriesPerRoom = Self.optional(
+                "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM", environment: environment
+            ) ?? "64"
+            guard let parsedDirectRoomLogEventCacheBytes = Int(rawDirectRoomLogEventCacheBytes),
+                  let parsedDirectRoomLogEventCacheEntriesPerRoom = Int(rawDirectRoomLogEventCacheEntriesPerRoom),
+                  (1_048_576 ... 536_870_912).contains(parsedDirectRoomLogEventCacheBytes),
+                  (1 ... 512).contains(parsedDirectRoomLogEventCacheEntriesPerRoom)
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM"
+                )
+            }
+            directRoomLogEventCacheMaximumBytes = parsedDirectRoomLogEventCacheBytes
+            directRoomLogEventCacheMaximumEntriesPerRoom = parsedDirectRoomLogEventCacheEntriesPerRoom
         }
         let rawFanoutPayloadWriteMode = Self.optional(
             "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment

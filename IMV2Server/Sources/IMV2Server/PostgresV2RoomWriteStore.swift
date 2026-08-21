@@ -452,7 +452,9 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
                 mediaPresentations: [],
-                usesRoomEventLog: true
+                usesRoomEventLog: true,
+                sourceEventID: timelineWriteSet.eventID,
+                acceptedMembershipRevision: try unsigned(room.membershipRevision)
             )
             let input = try plainRoomLogMessageInput(
                 writeSet: timelineWriteSet,
@@ -784,7 +786,9 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
                 mediaPresentations: mediaPresentations,
                 groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
-                usesRoomEventLog: usesDirectRoomLog
+                usesRoomEventLog: usesDirectRoomLog,
+                sourceEventID: timelineWriteSet.eventID,
+                acceptedMembershipRevision: try unsigned(room.membershipRevision)
             )
             let acceptedState = try V2MessageProjectionState(
                 accepted: acceptedMessage,

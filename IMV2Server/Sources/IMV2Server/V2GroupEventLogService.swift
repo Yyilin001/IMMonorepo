@@ -61,9 +61,14 @@ public struct V2GroupEventLogService: Sendable {
     public static let maximumPageSize = 500
 
     private let store: any V2GroupEventLogStore
+    private let directRoomLogEventCache: V2DirectRoomLogEventCache?
 
-    public init(store: any V2GroupEventLogStore) {
+    public init(
+        store: any V2GroupEventLogStore,
+        directRoomLogEventCache: V2DirectRoomLogEventCache? = nil
+    ) {
         self.store = store
+        self.directRoomLogEventCache = directRoomLogEventCache
     }
 
     public func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage {
@@ -79,5 +84,13 @@ public struct V2GroupEventLogService: Sendable {
     /// cursor after this result, because the room can advance immediately.
     public func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription {
         try await store.subscribe(roomID: roomID, actorUserID: actorUserID)
+    }
+
+    /// Best-effort local read acceleration after the message transaction has
+    /// committed. The durable cursor log remains the recovery path if this
+    /// process is restarted, another gateway accepted the message, or the
+    /// event does not fit the plain direct-message cache contract.
+    public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async {
+        await directRoomLogEventCache?.recordCommittedPlainDirectMessage(message)
     }
 }

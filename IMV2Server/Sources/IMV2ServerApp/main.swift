@@ -378,6 +378,14 @@ enum IMV2ServerApp {
                         : nil
                 )
                 : nil
+            let directRoomLogEventCache: V2DirectRoomLogEventCache? =
+                configuration.directRoomLogEventCacheMaximumEntries > 0
+                ? .init(configuration: .init(
+                    maximumEvents: configuration.directRoomLogEventCacheMaximumEntries,
+                    maximumBytes: configuration.directRoomLogEventCacheMaximumBytes,
+                    maximumEventsPerRoom: configuration.directRoomLogEventCacheMaximumEntriesPerRoom
+                ))
+                : nil
             // Register after the optional append batcher exists so the
             // loopback-only metrics endpoint can expose its aggregate queue
             // and adaptive-timer facts. The application has not started its
@@ -393,7 +401,8 @@ enum IMV2ServerApp {
                     databasePools: databasePoolTopology,
                     syncWakeCoalescer: syncWakeCoalescer,
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
-                    directRoomLogAppendBatcher: directRoomLogAppendBatcher
+                    directRoomLogAppendBatcher: directRoomLogAppendBatcher,
+                    directRoomLogEventCache: directRoomLogEventCache
                 )
             )
             let sendMessage = V2SendMessageService(
@@ -444,7 +453,11 @@ enum IMV2ServerApp {
                 groupMessaging: maintenanceGroupMessaging
             )
             let groupEventLog = V2GroupEventLogService(
-                store: PostgresV2GroupEventLogStore(database: database)
+                store: PostgresV2GroupEventLogStore(
+                    database: database,
+                    directRoomLogEventCache: directRoomLogEventCache
+                ),
+                directRoomLogEventCache: directRoomLogEventCache
             )
             // Foreground availability is intentionally a best-effort hint.
             // The same broker adapter also serves the durable Hybrid wake

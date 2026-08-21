@@ -80,6 +80,11 @@ protocol V2GatewayGroupAudienceImportHandling: Sendable {
 protocol V2GatewayGroupEventLogHandling: Sendable {
     func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage
     func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription
+    func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async
+}
+
+extension V2GatewayGroupEventLogHandling {
+    func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) async {}
 }
 
 protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
@@ -581,6 +586,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         }
         switch outcome {
         case .accepted(let message):
+            await groupEventLog.recordCommittedDirectRoomLogMessage(message)
             if message.groupDeliveryMode != nil || message.usesRoomEventLog {
                 await foregroundGroupEventHints.publishForegroundHint(.init(roomID: message.roomID, highWatermark: message.roomSequence))
             }

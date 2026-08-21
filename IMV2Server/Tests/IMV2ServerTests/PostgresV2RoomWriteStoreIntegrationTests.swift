@@ -9123,10 +9123,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: DirectMessageRowEventRow.self))
             #expect(directMessageEvent.acceptedEventID == acceptedEventID)
             #expect(directMessageEvent.acceptedEventStorage == "message_row")
+            #expect(accepted.sourceEventID?.rawValue == acceptedEventID.uuidString)
             // Direct-room creation commits its initial membership revision
             // before the first accepted message. The row-source event must
             // retain that exact historical fence rather than assuming zero.
             #expect(directMessageEvent.acceptedMembershipRevision == 1)
+            #expect(accepted.acceptedMembershipRevision == 1)
             #expect(try await count(
                 "im_v2.room_events WHERE event_id = '\(acceptedEventID.uuidString)'",
                 on: sql

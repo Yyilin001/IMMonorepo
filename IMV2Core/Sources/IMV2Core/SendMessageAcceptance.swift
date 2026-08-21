@@ -153,7 +153,9 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     public func materialized(
         mediaPresentations: [V2MediaPresentation],
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
-        usesRoomEventLog: Bool = false
+        usesRoomEventLog: Bool = false,
+        sourceEventID: EventID? = nil,
+        acceptedMembershipRevision: UInt64? = nil
     ) -> V2AcceptedMessage {
         V2AcceptedMessage(
             messageID: messageID,
@@ -170,6 +172,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             replyTo: replyTo,
             groupDeliveryMode: groupDeliveryMode,
             usesRoomEventLog: usesRoomEventLog,
+            sourceEventID: sourceEventID,
+            acceptedMembershipRevision: acceptedMembershipRevision,
             createdAt: createdAt
         )
     }
@@ -197,6 +201,15 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let groupDeliveryMode: V2GroupDeliveryMode?
     /// See ``V2AcceptedMessageDraft/usesRoomEventLog``.
     public let usesRoomEventLog: Bool
+    /// Internal durable source identifier for a canonical room-log event.
+    /// It is intentionally not part of the transport acknowledgement, but
+    /// allows a server-local read-through cache to preserve the same replay
+    /// identity as the database event stream.
+    public let sourceEventID: EventID?
+    /// Membership revision captured by the committed canonical event. A
+    /// cache must check this fence against a freshly authorized reader before
+    /// returning the event.
+    public let acceptedMembershipRevision: UInt64?
     public let createdAt: Date
 
     public init(
@@ -214,6 +227,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         replyTo: V2MessageReplyReference? = nil,
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
         usesRoomEventLog: Bool = false,
+        sourceEventID: EventID? = nil,
+        acceptedMembershipRevision: UInt64? = nil,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -232,6 +247,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.replyTo = replyTo
         self.groupDeliveryMode = groupDeliveryMode
         self.usesRoomEventLog = usesRoomEventLog
+        self.sourceEventID = sourceEventID
+        self.acceptedMembershipRevision = acceptedMembershipRevision
         self.createdAt = createdAt
     }
 }

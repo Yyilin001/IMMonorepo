@@ -27,6 +27,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == nil)
         #expect(defaults.directRoomLogAppendBatchHighActivityMinimumRequests == nil)
         #expect(defaults.directRoomLogAppendBatchHighActivityWindowMilliseconds == nil)
+        #expect(defaults.directRoomLogEventCacheMaximumEntries == 0)
+        #expect(defaults.directRoomLogEventCacheMaximumBytes == 0)
+        #expect(defaults.directRoomLogEventCacheMaximumEntriesPerRoom == 0)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
@@ -82,6 +85,27 @@ struct V2GatewayRuntimeConfigurationTests {
         )
         #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 16)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
+
+        var eventCache = roomLog
+        eventCache["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"] = "4096"
+        eventCache["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES"] = "16777216"
+        eventCache["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM"] = "32"
+        let eventCacheConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(eventCache)
+        )
+        #expect(eventCacheConfiguration.directRoomLogEventCacheMaximumEntries == 4096)
+        #expect(eventCacheConfiguration.directRoomLogEventCacheMaximumBytes == 16_777_216)
+        #expect(eventCacheConfiguration.directRoomLogEventCacheMaximumEntriesPerRoom == 32)
+
+        var eventCacheOutsideRoomLog = runtimeValues
+        eventCacheOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"] = "4096"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(eventCacheOutsideRoomLog)
+            )
+        }
 
         var highActivityAppendBatch = appendBatch
         highActivityAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "20"

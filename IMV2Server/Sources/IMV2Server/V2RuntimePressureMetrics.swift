@@ -50,19 +50,24 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// identifiers, so an adaptive rollout can be verified without a SQL
     /// inference or high-cardinality labels.
     public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
+    /// Best-effort local direct-event cache facts. No room, user or event ID
+    /// is exposed as a metric label.
+    public let directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot?
 
     public init(
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWake: V2SyncWakeCoalescerSnapshot,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
-        directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil
+        directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil,
+        directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil
     ) {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
         self.syncWake = syncWake
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
+        self.directRoomLogEventCache = directRoomLogEventCache
     }
 }
 
@@ -76,19 +81,22 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let syncWakeCoalescer: V2SyncWakeCoalescer
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher?
+    private let directRoomLogEventCache: V2DirectRoomLogEventCache?
 
     public init(
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWakeCoalescer: V2SyncWakeCoalescer,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
-        directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? = nil
+        directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? = nil,
+        directRoomLogEventCache: V2DirectRoomLogEventCache? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
+        self.directRoomLogEventCache = directRoomLogEventCache
     }
 
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
@@ -96,12 +104,14 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         async let syncWake = syncWakeCoalescer.snapshot()
         let credits = await shardAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
+        let eventCache = await directRoomLogEventCache?.snapshot()
         return await .init(
             databaseWork: databaseWork,
             databasePools: databasePools,
             syncWake: syncWake,
             shardAdmissionCommandCredits: credits,
-            directRoomLogAppendBatching: appendBatching
+            directRoomLogAppendBatching: appendBatching,
+            directRoomLogEventCache: eventCache
         )
     }
 }
@@ -270,6 +280,26 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# HELP im_v2_direct_room_log_append_batch_cancellations_total Staged requests removed before durable acceptance because their caller was cancelled.",
             "# TYPE im_v2_direct_room_log_append_batch_cancellations_total counter",
             "im_v2_direct_room_log_append_batch_cancellations_total \(batching.cancelledPendingRequests)",
+        ])
+    }
+    if let eventCache = snapshot.directRoomLogEventCache {
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_event_cache_entries Bounded process-local plain direct event cache occupancy.",
+            "# TYPE im_v2_direct_room_log_event_cache_entries gauge",
+            "im_v2_direct_room_log_event_cache_entries \(eventCache.cachedEvents)",
+            "# HELP im_v2_direct_room_log_event_cache_rooms Bounded process-local direct event cache room count.",
+            "# TYPE im_v2_direct_room_log_event_cache_rooms gauge",
+            "im_v2_direct_room_log_event_cache_rooms \(eventCache.cachedRooms)",
+            "# HELP im_v2_direct_room_log_event_cache_bytes Approximate payload bytes retained by the local direct event cache.",
+            "# TYPE im_v2_direct_room_log_event_cache_bytes gauge",
+            "im_v2_direct_room_log_event_cache_bytes \(eventCache.cachedBytes)",
+            "# HELP im_v2_direct_room_log_event_cache_lookups_total Local direct event cache lookup outcomes.",
+            "# TYPE im_v2_direct_room_log_event_cache_lookups_total counter",
+            "im_v2_direct_room_log_event_cache_lookups_total{outcome=\"hit\"} \(eventCache.hits)",
+            "im_v2_direct_room_log_event_cache_lookups_total{outcome=\"miss\"} \(eventCache.misses)",
+            "# HELP im_v2_direct_room_log_event_cache_bypassed_events_total Committed events that do not satisfy the plain direct cache contract.",
+            "# TYPE im_v2_direct_room_log_event_cache_bypassed_events_total counter",
+            "im_v2_direct_room_log_event_cache_bypassed_events_total \(eventCache.bypassedIneligibleEvents)",
         ])
     }
     return lines.joined(separator: "\n") + "\n"
