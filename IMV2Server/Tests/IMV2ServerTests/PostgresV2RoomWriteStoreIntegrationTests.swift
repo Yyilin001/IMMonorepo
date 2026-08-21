@@ -8399,6 +8399,42 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("schema readiness accepts the legacy direct event cursor contract during an online migration")
+    func schemaReadinessAcceptsLegacyDirectEventCursorContract() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2SchemaReadinessError.unsupportedDatabase
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+
+            // Model the pre-consolidation side of the online migration: the
+            // old reader cursor exists, while the new sequence invariant has
+            // not yet been installed. Startup must accept this state so the
+            // reader can be deployed before the concurrent index drop.
+            try await sql.raw("ALTER TABLE im_v2.messages DROP CONSTRAINT messages_message_row_sequences_match").run()
+            try await sql.raw("CREATE INDEX messages_direct_event_cursor_idx ON im_v2.messages (room_id, room_sequence) WHERE accepted_event_storage = 'message_row'").run()
+            try await V2SchemaReadiness.verify(database: app.db(.psql))
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("edge client request budget is shared across replicas and stores no clear-text address")
     func enforcesPseudonymousEdgeClientRateLimit() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),

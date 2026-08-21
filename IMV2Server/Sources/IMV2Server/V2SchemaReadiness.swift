@@ -161,18 +161,55 @@ public enum V2SchemaReadiness {
                           'messages_accepted_event_storage_check'
                       AND constraint_record.convalidated
                 )
-                AND EXISTS (
-                    SELECT 1
-                    FROM pg_index AS index_record
-                    JOIN pg_class AS index_relation
-                      ON index_relation.oid = index_record.indexrelid
-                    JOIN pg_namespace AS namespace
-                      ON namespace.oid = index_relation.relnamespace
-                    WHERE namespace.nspname = \(bind: schema)
-                      AND index_relation.relname =
-                          'messages_direct_event_cursor_idx'
-                      AND index_record.indisvalid
-                      AND index_record.indisready
+                -- The reader is intentionally compatible with both sides of
+                -- the online cursor-index consolidation.  Before the
+                -- migration it uses the legacy partial cursor index; after
+                -- the migration the validated sequence invariant lets it use
+                -- the existing unique room/timeline index instead.  Requiring
+                -- either complete contract keeps the deploy-before-DDL order
+                -- safe without admitting a partially applied new contract.
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_index AS index_record
+                        JOIN pg_class AS index_relation
+                          ON index_relation.oid = index_record.indexrelid
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = index_relation.relnamespace
+                        WHERE namespace.nspname = \(bind: schema)
+                          AND index_relation.relname =
+                              'messages_direct_event_cursor_idx'
+                          AND index_record.indisvalid
+                          AND index_record.indisready
+                    )
+                    OR (
+                        EXISTS (
+                            SELECT 1
+                            FROM pg_constraint AS constraint_record
+                            JOIN pg_class AS relation
+                              ON relation.oid = constraint_record.conrelid
+                            JOIN pg_namespace AS namespace
+                              ON namespace.oid = relation.relnamespace
+                            WHERE namespace.nspname = \(bind: schema)
+                              AND relation.relname = 'messages'
+                              AND constraint_record.conname =
+                                  'messages_message_row_sequences_match'
+                              AND constraint_record.convalidated
+                        )
+                        AND EXISTS (
+                            SELECT 1
+                            FROM pg_index AS index_record
+                            JOIN pg_class AS index_relation
+                              ON index_relation.oid = index_record.indexrelid
+                            JOIN pg_namespace AS namespace
+                              ON namespace.oid = index_relation.relnamespace
+                            WHERE namespace.nspname = \(bind: schema)
+                              AND index_relation.relname =
+                                  'messages_room_timeline_sequence_key'
+                              AND index_record.indisvalid
+                              AND index_record.indisready
+                        )
+                    )
                 ) AS exists
             FROM information_schema.columns
             WHERE table_schema = \(bind: schema)
