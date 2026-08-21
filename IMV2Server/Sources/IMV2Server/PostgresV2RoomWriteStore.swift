@@ -102,10 +102,23 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 eligibility.append(false)
                 continue
             }
+            // Keep this in lockstep with `prepareDirectRoomLogAppend`. The
+            // predicate is intentionally stricter than the normal direct-send
+            // decision: a transaction that might mutate a first-reply marker
+            // or stranger quota belongs on the ordinary path. A stale policy
+            // can only turn a later atomic attempt into its safe durable
+            // fallback; it cannot turn an ineligible request into an append.
+            guard let context = try? directMessageContext(from: policy.policySnapshot()) else {
+                eligibility.append(false)
+                continue
+            }
             eligibility.append(
-                policy.senderHasReplied
-                    && policy.senderAccountKind == nil
-                    && policy.recipientAccountKind == nil
+                context.restriction == nil
+                    && !context.requiresStrangerQuota
+                    && context.senderProfileVisibleToRecipient
+                    && context.senderCanSend == true
+                    && context.senderHasReplied
+                    && context.supportAccountID == nil
             )
         }
         return eligibility
