@@ -53,6 +53,16 @@ private enum ScenarioSendDispatch: String, Decodable, Sendable {
     case boundedClientQueue = "bounded_client_queue"
 }
 
+/// Selects the room-log cursor position used after a simulated device has
+/// opened its direct rooms. `zero` exercises durable history recovery. `tail`
+/// performs an authorized subscription first and starts the steady workload at
+/// the returned high watermark, so repeated steady-state runs do not silently
+/// re-read an ever-growing test history.
+private enum RoomLogInitialCursor: String, Sendable {
+    case zero
+    case tail
+}
+
 private struct LoadConfiguration: Sendable {
     let host: String
     let port: Int
@@ -74,6 +84,7 @@ private struct LoadConfiguration: Sendable {
     let targetOffset: Int
     let syncReads: Bool
     let roomLogReads: Bool
+    let roomLogInitialCursor: RoomLogInitialCursor
     let heartbeatSeconds: Int
     let maximumRSSMegabytes: Int
     let maximumFailurePercent: Double
@@ -140,6 +151,10 @@ private struct LoadConfiguration: Sendable {
         targetOffset = try Self.integer(values["--target-offset"] ?? "1", range: 1...4_999)
         syncReads = try Self.integer(values["--sync-reads"] ?? "1", range: 0...1) == 1
         roomLogReads = try Self.integer(values["--room-log-reads"] ?? "0", range: 0...1) == 1
+        guard let roomLogInitialCursor = RoomLogInitialCursor(
+            rawValue: (values["--room-log-initial-cursor"] ?? "zero").lowercased()
+        ) else { throw LoadError.invalidArguments }
+        self.roomLogInitialCursor = roomLogInitialCursor
         maximumRSSMegabytes = try Self.integer(values["--max-rss-mb"] ?? "2048", range: 256...8_192)
         guard let maximumFailurePercent = Double(values["--max-failure-percent"] ?? "1"),
               maximumFailurePercent >= 0, maximumFailurePercent <= 100
@@ -150,6 +165,12 @@ private struct LoadConfiguration: Sendable {
         } else {
             scenario = nil
         }
+        // Scenario warm-up currently observes direct-room-open completion,
+        // whereas `tail` adds a second subscription barrier. Keep this
+        // explicit rather than allowing a scenario phase to race that barrier
+        // and silently mix recovery with its intended steady workload.
+        guard roomLogInitialCursor == .zero || (roomLogReads && scenario == nil)
+        else { throw LoadError.invalidArguments }
         guard let scenarioRateScale = Double(values["--scenario-rate-scale"] ?? "1"),
               scenarioRateScale > 0, scenarioRateScale <= 1
         else { throw LoadError.invalidArguments }
@@ -572,6 +593,7 @@ private struct LoadRun {
                             messageBytes: configuration.messageBytes,
                             syncReads: configuration.syncReads,
                             roomLogReads: configuration.roomLogReads,
+                            roomLogInitialCursor: configuration.roomLogInitialCursor,
                             started: started,
                             authenticated: authenticated,
                             statistics: statistics
@@ -981,6 +1003,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case message(sent: NIODeadline, roomID: String)
         case syncPull(sent: NIODeadline)
         case roomEventPull(sent: NIODeadline, roomID: String)
+        case roomEventSubscribe(roomID: String)
         case syncAck(hasMore: Bool)
     }
 
@@ -996,6 +1019,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let messageText: String
     private let syncReads: Bool
     private let roomLogReads: Bool
+    private let roomLogInitialCursor: RoomLogInitialCursor
     private let started: NIODeadline
     private let authenticatedPromise: EventLoopPromise<Void>
     private let statistics: LoadStatistics
@@ -1014,6 +1038,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var syncRequested = false
     private var roomEventCursors: [String: UInt64] = [:]
     private var roomEventPullRooms: Set<String> = []
+    private var roomEventCursorSubscriptionPendingRooms: [String] = []
+    private var roomEventCursorSubscriptionInFlightRoom: String?
+    private var roomEventCursorSubscriptionRetryCounts: [String: Int] = [:]
+    private var roomEventCursorInitializationStarted = false
     private var heartbeatTask: RepeatedTask?
     private var messageTask: RepeatedTask?
     private var authenticationCompleted = false
@@ -1033,6 +1061,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         messageBytes: Int,
         syncReads: Bool,
         roomLogReads: Bool,
+        roomLogInitialCursor: RoomLogInitialCursor,
         started: NIODeadline,
         authenticated: EventLoopPromise<Void>,
         statistics: LoadStatistics
@@ -1058,6 +1087,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         messageText = String(repeating: "x", count: messageBytes)
         self.syncReads = syncReads
         self.roomLogReads = roomLogReads
+        self.roomLogInitialCursor = roomLogInitialCursor
         self.started = started
         authenticatedPromise = authenticated
         self.statistics = statistics
@@ -1175,7 +1205,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 else { throw LoadError.unexpectedResponse }
                 if !directRoomIDs.contains(response.roomID) { directRoomIDs.append(response.roomID) }
                 statistics.recordDirectRoomOpened()
-                if directRoomIDs.count == targetUserIDs.count { scheduleMessages(context: context) }
+                if directRoomIDs.count == targetUserIDs.count {
+                    try initializeRoomLogCursorThenScheduleMessages(context: context)
+                }
 
             case .message(let sent, let roomID):
                 messageRequestIDs.remove(frame.requestID)
@@ -1238,6 +1270,16 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 if page.hasMore_p {
                     try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
                 }
+
+            case .roomEventSubscribe(let roomID):
+                guard case .groupEventSubscribed(let subscription)? = envelope.body,
+                      subscription.roomID == roomID,
+                      roomEventCursorSubscriptionInFlightRoom == roomID
+                else { throw LoadError.unexpectedResponse }
+                roomEventCursors[roomID] = subscription.highWatermark
+                roomEventCursorSubscriptionInFlightRoom = nil
+                roomEventCursorSubscriptionRetryCounts.removeValue(forKey: roomID)
+                try sendNextRoomEventCursorSubscriptionOrScheduleMessages(context: context)
 
             case .syncAck(let hasMore):
                 guard case .acknowledged? = envelope.body else { throw LoadError.unexpectedResponse }
@@ -1352,6 +1394,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     private func scheduleMessages(context: ChannelHandlerContext) {
+        guard messageTask == nil else { return }
         guard let interval = messageIntervalMilliseconds else { return }
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
@@ -1366,6 +1409,94 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             catch {
                 handler.statistics.recordWorkloadFailure(
                     kind: "message",
+                    code: "CLIENT_WRITE_FAILURE"
+                )
+                context.close(promise: nil)
+            }
+        }
+    }
+
+    /// Establishes a real post-recovery cursor before the fixed-rate legacy
+    /// workload begins. A subscription is an authorized persistent-state
+    /// read, not a local guess: a message committed after the returned
+    /// watermark remains visible to the normal cursor pull.
+    private func initializeRoomLogCursorThenScheduleMessages(
+        context: ChannelHandlerContext
+    ) throws {
+        guard !roomEventCursorInitializationStarted else { return }
+        roomEventCursorInitializationStarted = true
+        guard roomLogReads, roomLogInitialCursor == .tail else {
+            scheduleMessages(context: context)
+            return
+        }
+        roomEventCursorSubscriptionPendingRooms = directRoomIDs.sorted()
+        guard !roomEventCursorSubscriptionPendingRooms.isEmpty else {
+            scheduleMessages(context: context)
+            return
+        }
+        try sendNextRoomEventCursorSubscriptionOrScheduleMessages(context: context)
+    }
+
+    /// Limit the tail barrier to one subscription per simulated device. The
+    /// connection ramp already bounds devices which initialize at once;
+    /// issuing every room from a device concurrently manufactures a threefold
+    /// read spike that is unrelated to normal client recovery.
+    private func sendNextRoomEventCursorSubscriptionOrScheduleMessages(
+        context: ChannelHandlerContext
+    ) throws {
+        guard roomEventCursorSubscriptionInFlightRoom == nil else {
+            throw LoadError.unexpectedResponse
+        }
+        guard !roomEventCursorSubscriptionPendingRooms.isEmpty else {
+            scheduleMessages(context: context)
+            return
+        }
+        let roomID = roomEventCursorSubscriptionPendingRooms.removeFirst()
+        roomEventCursorSubscriptionInFlightRoom = roomID
+        try sendRoomEventSubscribe(roomID: roomID, context: context)
+    }
+
+    private func sendRoomEventSubscribe(
+        roomID: String,
+        context: ChannelHandlerContext
+    ) throws {
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID
+        request.protocolVersion = IMV2ProtocolVersion.current
+        request.groupEventSubscribe = .init()
+        request.groupEventSubscribe.roomID = roomID
+        pendingRequests[requestID] = .roomEventSubscribe(roomID: roomID)
+        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    }
+
+    /// A subscription is a read-only cursor fence and `SERVER_BUSY` is an
+    /// explicit retryable response. Retain only a small, per-room retry budget
+    /// so tail warm-up behaves like a real client without converting an
+    /// unavailable Gateway into an unbounded hidden queue.
+    private static let maximumRoomEventCursorSubscriptionRetries = 5
+
+    private func scheduleRoomEventCursorSubscriptionRetry(
+        roomID: String,
+        retryCount: Int,
+        context: ChannelHandlerContext
+    ) {
+        let exponent = min(retryCount - 1, 4)
+        let delay = Int64(50 * (1 << exponent))
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let boundContext = context.loopBound
+        context.eventLoop.scheduleTask(in: .milliseconds(delay)) {
+            let handler = handler.value
+            let context = boundContext.value
+            guard case .authenticated = handler.stage,
+                  context.channel.isActive,
+                  handler.roomEventCursorSubscriptionInFlightRoom == roomID
+            else { return }
+            do {
+                try handler.sendRoomEventSubscribe(roomID: roomID, context: context)
+            } catch {
+                handler.statistics.recordWorkloadFailure(
+                    kind: "room_event_subscribe",
                     code: "CLIENT_WRITE_FAILURE"
                 )
                 context.close(promise: nil)
@@ -1503,6 +1634,27 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .roomEventPull(_, let roomID):
             roomEventPullRooms.remove(roomID)
             statistics.recordWorkloadFailure(kind: "room_event", code: code, retryable: retryable)
+        case .roomEventSubscribe(let roomID):
+            guard roomEventCursorSubscriptionInFlightRoom == roomID else {
+                throw LoadError.unexpectedResponse
+            }
+            let retryCount = roomEventCursorSubscriptionRetryCounts[roomID, default: 0]
+            if retryable, retryCount < Self.maximumRoomEventCursorSubscriptionRetries {
+                let nextRetryCount = retryCount + 1
+                roomEventCursorSubscriptionRetryCounts[roomID] = nextRetryCount
+                scheduleRoomEventCursorSubscriptionRetry(
+                    roomID: roomID,
+                    retryCount: nextRetryCount,
+                    context: context
+                )
+                return
+            }
+            roomEventCursorSubscriptionInFlightRoom = nil
+            statistics.recordWorkloadFailure(kind: "room_event_subscribe", code: code, retryable: retryable)
+            // A tail cursor must come from the server. Do not start a
+            // purported steady workload at cursor zero after its explicit
+            // initialization barrier failed.
+            throw LoadError.unexpectedResponse
         case .directRoom:
             statistics.recordWorkloadFailure(kind: "direct_room", code: code, retryable: retryable)
         }

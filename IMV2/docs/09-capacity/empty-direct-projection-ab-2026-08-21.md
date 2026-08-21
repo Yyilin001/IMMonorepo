@@ -84,3 +84,25 @@ limits applied.  It was removed from the running Gateway and is intentionally
 not retained as a deployment overlay.  Bounded early backpressure is the
 correct behavior here; throughput requires reducing per-message PostgreSQL
 work or adding physical write capacity, not accumulating more waiting reads.
+
+## Recovery versus steady-state test hygiene
+
+The load generator now supports `--room-log-initial-cursor tail`. It opens the
+same direct rooms, obtains an authorized high watermark one room at a time per
+simulated device, and only then begins the fixed-rate workload. The default
+remains `zero`, which deliberately exercises full durable cursor recovery.
+Retryable subscription backpressure uses a bounded per-room exponential retry
+budget; it never silently starts at cursor zero.
+
+This separates an initial history catch-up from the steady phase. It is
+important because reusing a long-lived test database with a zero cursor makes
+later runs read all historical room events and cannot be compared to a client
+that is already caught up. The tail barrier itself is a startup phase, not a
+claim that initial sync is free.
+
+An 8-write / 4-control-write / 20-read admission experiment was also rejected
+and removed. The direct append batcher has at most eight in-flight database
+transactions, but moving its unused reservation to reads did not make the
+1,100-msg/s mixed test stable: 583 bounded interactive-read rejections
+remained. This establishes that the next bottleneck is combined service work,
+not merely an incorrectly sized idle reservation.
