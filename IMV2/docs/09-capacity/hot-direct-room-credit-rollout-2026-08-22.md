@@ -188,6 +188,12 @@ raised ACK by 0.4%, reduced client skips by 23.1%, and reduced message P95 by
 The result validates this single-host write-amplification reduction at 1,200
 msg/s. It does not make a per-room writer parallel: above this profile the
 next observed pressure remains concurrent room-log reads and the physical
-PostgreSQL commit/WAL path. A first 1,400-msg/s candidate run had an unstable
-client arrival rate and is deliberately excluded from the capacity claim
-until it is repeated with the same diagnostics.
+PostgreSQL commit/WAL path. A later server-only diagnostic used 100 Mac load
+connections through an SSH transport tunnel because the Mac's public TLS
+egress was failing. At the same 1,400 msg/s target, increasing the strict
+per-device in-flight window from two to three raised ACK from the
+two-window-limited profile to 79,903 with zero failures, but read allocation
+`10/4/18` was worse than `12/4/16`: ACK fell to 78,552, message P95 rose from
+192 to 202 ms, and room-log P95 rose from 189 to 192 ms. The default remains
+`12/4/16`; the tunnel result is a server-capacity diagnostic only, not a
+public end-to-end latency claim.
