@@ -1046,6 +1046,7 @@ CREATE TABLE im_v2.messages (
     accepted_event_storage text DEFAULT 'room_event'::text NOT NULL,
     accepted_membership_revision bigint,
     CONSTRAINT messages_accepted_event_storage_check CHECK (((accepted_event_storage = 'room_event'::text) AND (accepted_event_id IS NULL) AND (accepted_membership_revision IS NULL)) OR ((accepted_event_storage = 'message_row'::text) AND (accepted_event_id IS NOT NULL) AND (accepted_membership_revision >= 0))),
+    CONSTRAINT messages_message_row_sequences_match CHECK (((accepted_event_storage <> 'message_row'::text) OR (room_sequence = timeline_sequence))),
     CONSTRAINT messages_check CHECK ((((withdrawn_at IS NULL) AND (withdrawn_by_user_id IS NULL)) OR ((withdrawn_at IS NOT NULL) AND (withdrawn_by_user_id IS NOT NULL)))),
     CONSTRAINT messages_content_revision_check CHECK ((content_revision > 0)),
     CONSTRAINT messages_rich_entities_array CHECK ((jsonb_typeof(rich_entities) = 'array'::text)),
@@ -2577,12 +2578,6 @@ CREATE INDEX message_reaction_operations_cleanup_idx ON im_v2.message_reaction_o
 CREATE INDEX message_withdrawal_operations_cleanup_idx ON im_v2.message_withdrawal_operations USING btree (created_at);
 
 CREATE INDEX messages_forwarded_from_idx ON im_v2.messages USING btree (forwarded_from_message_id) WHERE (forwarded_from_message_id IS NOT NULL);
-
--- This cursor index serves only direct accepted events materialized from a
--- message row.  It replaces the broader unique message-room-sequence index
--- and is substantially cheaper than retaining a duplicate room_events row
--- plus both of that table's indexes for each ordinary direct message.
-CREATE INDEX messages_direct_event_cursor_idx ON im_v2.messages USING btree (room_id, room_sequence) WHERE (accepted_event_storage = 'message_row'::text);
 
 CREATE INDEX messages_reply_to_message_idx ON im_v2.messages USING btree (reply_to_message_id) WHERE (reply_to_message_id IS NOT NULL);
 

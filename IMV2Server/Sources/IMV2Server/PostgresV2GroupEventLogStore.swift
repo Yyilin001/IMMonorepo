@@ -50,6 +50,11 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
                 FROM im_v2.messages AS message
                 WHERE message.room_id = \(bind: roomUUID)
                   AND message.accepted_event_storage = 'message_row'
+                  -- `message_row` is constrained to use the same room and
+                  -- timeline sequence.  Keep the cursor predicate on the
+                  -- existing unique `(room_id, timeline_sequence)` index so
+                  -- direct event pulls do not need a second write index.
+                  AND message.timeline_sequence > \(bind: Int64(afterRoomSequence))
             ), visible_events AS MATERIALIZED (
                 SELECT event.event_id, event.room_sequence, event.event_type,
                        event.payload, event.message_id, event.is_message_row
