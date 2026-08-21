@@ -67,3 +67,36 @@ p99 captured for both arms. The next code candidate also adds safe
 same-room microbatch support; it needs its own clean A/B because the current
 credit-only result cannot predict that workload. Until then the switch remains
 a measured-safe candidate, not a default performance recommendation.
+
+## Same-room microbatch follow-up — 2026-08-22
+
+Commit `55dfdb2b` permits multiple already-established, plain direct sends for
+the **same** room in one atomic CTE, while retaining FIFO room ownership,
+operation-key idempotency, and the old individual fallback for any policy
+mutation. This was tested separately from the 100-room workload above because
+a normal direct room has exactly two members: two authenticated users sent to
+each other with 32 client-side in-flight commands, requested 600 msg/s,
+128 B payloads, room-log pulls enabled, and a 60-second hold. Each arm reset
+only disposable message/derived-state data before it ran.
+
+| Arm | ACKed messages | Client skips | Message P95 | Room-log P95 | Atomic CTE shape | Workload failures |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| Existing `hot-direct-4fdbe649`, existing 20 ms adaptive profile | 6,511 | 29,750 | 683 ms | 661 ms | one command per same-room transaction | 0 |
+| `55dfdb2b`, same 20 ms adaptive profile | 3,966 | 31,892 | 1,039 ms | 1,026 ms | 1,983 commits / 3,966 requests (2.0 req/commit) | 0 |
+| `55dfdb2b`, A/B-only 1 ms base / 2 ms high-activity delay | 6,972 | 28,998 | 620 ms | 546 ms | 19 commits / 38 requests; 6,935 singleton dispatches | 0 |
+
+The 20 ms result is an important **negative** result, not a regression to
+hide. The direct pair reaches the batcher in two-request turns. Waiting 20 ms
+does make those two writes atomic, but adds enough server-side queueing that
+the 32 in-flight commands per sender back up to about one second. PostgreSQL
+was not saturated: the candidate's canonical append CTE averaged 0.569 ms
+(1,983 calls, 3,966 rows). The bottleneck was batch scheduling, not WAL or an
+unindexed statement.
+
+The 2 ms run restored and slightly improved end-to-end latency (ACK +7.1%,
+message P95 -9.2% versus the existing-image run), but it nearly never formed
+a multi-request batch across the public network. It therefore cannot justify
+enabling same-room microbatching as a broad throughput claim. The next code
+iteration must select the longer delay only when actual queue fill predicts
+amortisation; a global arrivals-per-second threshold alone cannot distinguish
+a broad fan-in workload from a two-member direct turn.

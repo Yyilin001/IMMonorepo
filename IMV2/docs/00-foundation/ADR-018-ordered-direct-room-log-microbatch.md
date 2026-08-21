@@ -57,8 +57,9 @@ PostgreSQL 实现必须遵守：
 2. 已完成：抽取 direct 普通文本的预检/持久化参数，加入 JSONB set-based CTE；真实 PostgreSQL
    集成测试覆盖两个已建立 direct room 的原子 append，以及富消息/策略副作用的单条回退。
 3. 已完成：部署开关、批处理命中指标、独立房间与已建立 hot direct room 的 PostgreSQL 集成回归。
-   从同一干净数据集依次测试关闭、8、16、32 和 1--2ms delay；该实现不支持 batch size 1，关闭即是
-   等价 baseline。真实主机 A/B 仍须按 workload 分别决定是否启用。
+   该实现不支持 batch size 1，关闭即是等价 baseline。真实主机 A/B 已证明：两个成员的公网私聊在
+   20ms 延迟下只能形成约 2 请求/批，P95 反而恶化；同一场景必须保持 1--2ms 互动延迟，除非实际
+   队列填充已经证明可摊销更长等待。真实主机 A/B 仍须按 workload 分别决定是否启用。
 
 将开关设为 `0` 或移除 batcher 即回退到当前单条事务；数据格式没有变化，不要求迁移或删除数据。
 
