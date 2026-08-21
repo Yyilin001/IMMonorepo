@@ -8,34 +8,10 @@
   "sendDispatch": "bounded_client_queue",
   "maximumQueuedMessagesPerConnection": 32,
   "personas": [
-    {
-      "name": "reader",
-      "share": 0.45,
-      "sendWeight": 0.1,
-      "roomLogReadWeight": 0.0,
-      "syncPullWeight": 0.0
-    },
-    {
-      "name": "regular_sender",
-      "share": 0.35,
-      "sendWeight": 1.0,
-      "roomLogReadWeight": 0.0,
-      "syncPullWeight": 0.0
-    },
-    {
-      "name": "high_frequency_sender",
-      "share": 0.15,
-      "sendWeight": 4.0,
-      "roomLogReadWeight": 0.0,
-      "syncPullWeight": 0.0
-    },
-    {
-      "name": "heavy_sender",
-      "share": 0.05,
-      "sendWeight": 10.0,
-      "roomLogReadWeight": 0.0,
-      "syncPullWeight": 0.0
-    }
+    { "name": "reader", "share": 0.45, "sendWeight": 0.1, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "regular_sender", "share": 0.35, "sendWeight": 1.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "high_frequency_sender", "share": 0.15, "sendWeight": 4.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "heavy_sender", "share": 0.05, "sendWeight": 10.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 }
   ],
   "phases": [
     {
