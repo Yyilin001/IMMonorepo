@@ -8,6 +8,12 @@ services:
 
   gateway:
     image: imv2-server:hot-direct-4fdbe649
+    environment:
+      # Enable only the bounded two-command reservation tested by the actor
+      # and PostgreSQL integration suite. The process-local heat threshold in
+      # the writer keeps sparse conversations on the normal room admission
+      # path, so this cannot turn into a global precharge.
+      IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE: "2"
 
   operator:
     image: imv2-server:hot-direct-4fdbe649
