@@ -2,6 +2,9 @@
   "name": "direct-1500-message-only-900-server-saturation-v1",
   "seed": 20260821,
   "roomWarmupTimeoutSeconds": 180,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 64,
+  "completionDrainSeconds": 10,
   "sendDispatch": "bounded_client_queue",
   "maximumQueuedMessagesPerConnection": 32,
   "personas": [

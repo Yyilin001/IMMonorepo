@@ -185,6 +185,19 @@ private struct LoadScenario: Decodable, Sendable {
     let name: String
     let seed: UInt64
     let roomWarmupTimeoutSeconds: Int
+    /// A capacity scenario may require that every phase finish without local
+    /// client backlog. This distinguishes a sustainable offered rate from a
+    /// rate which merely drains after the generator stops scheduling work.
+    let requiresSteadyStateDrain: Bool?
+    /// Small in-flight response tails at a phase boundary are normal for a
+    /// real network client. A strict scenario sets this explicit bound so it
+    /// still rejects material accumulation instead of requiring an impossible
+    /// zero exactly on the last scheduler tick.
+    let maximumSteadyStateQueuedMessages: Int?
+    /// Give in-flight protocol responses a short, explicit grace period
+    /// before transport teardown. This is not part of a phase's throughput:
+    /// its outcome is recorded separately in the report.
+    let completionDrainSeconds: Int?
     let sendDispatch: ScenarioSendDispatch?
     let maximumQueuedMessagesPerConnection: Int?
     let personas: [Persona]
@@ -194,6 +207,10 @@ private struct LoadScenario: Decodable, Sendable {
         let scenario = try JSONDecoder().decode(Self.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
         guard !scenario.name.isEmpty,
               scenario.roomWarmupTimeoutSeconds > 0,
+              (scenario.completionDrainSeconds ?? 10) >= 0,
+              (scenario.completionDrainSeconds ?? 10) <= 60,
+              (scenario.maximumSteadyStateQueuedMessages ?? 0) >= 0,
+              (scenario.maximumSteadyStateQueuedMessages ?? 0) <= (scenario.maximumQueuedMessagesPerConnection ?? 0) * 5_000,
               !scenario.personas.isEmpty,
               !scenario.phases.isEmpty
         else { throw LoadError.invalidScenario("missing required scenario fields") }
@@ -406,6 +423,7 @@ private struct LoadRun {
         var slots: [LoadConnectionSlot] = []
         var terminalError: Error?
         var scenarioPhases: [ScenarioPhaseReport] = []
+        var scenarioDrain: ScenarioDrainReport?
 
         do {
             var offset = 0
@@ -465,6 +483,31 @@ private struct LoadRun {
                     sslContext: sslContext,
                     statistics: statistics
                 )
+                scenarioDrain = await drainScenarioMessages(
+                    channels: slots.compactMap(\.channel),
+                    maximumSeconds: scenario.completionDrainSeconds ?? 10
+                )
+                if scenario.requiresSteadyStateDrain == true {
+                    let maximumQueued = scenario.maximumSteadyStateQueuedMessages ?? 0
+                    if let stalled = scenarioPhases.first(where: {
+                        !$0.isSteadyStateDrained(maximumQueuedMessages: maximumQueued)
+                    }) {
+                        throw LoadError.scenarioPhaseNotDrained(
+                            phase: stalled.name,
+                            queued: stalled.queuedScenarioMessagesAtEnd,
+                            maximumQueued: maximumQueued,
+                            sent: stalled.messagesSent,
+                            acknowledged: stalled.messagesAcknowledged
+                        )
+                    }
+                    guard scenarioDrain?.drained == true else {
+                        let pending = scenarioDrain?.pending ?? .zero
+                        throw LoadError.scenarioCompletionDrainTimedOut(
+                            queued: pending.queued,
+                            inFlight: pending.inFlight
+                        )
+                    }
+                }
             } else {
                 for second in 1...configuration.holdSeconds {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -480,7 +523,7 @@ private struct LoadRun {
 
         await close(channels: slots.compactMap(\.channel))
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), scenarioPhases: scenarioPhases, terminalError: terminalError)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -636,6 +679,45 @@ private struct LoadRun {
         return reports
     }
 
+    /// Polls the per-channel simulator state on its owning event loop before
+    /// closing TLS connections. It is intentionally bounded and is only a
+    /// teardown aid: `requiresSteadyStateDrain` evaluates the backlog sampled
+    /// *at the end of each phase*, before this drain begins.
+    private func drainScenarioMessages(
+        channels: [Channel],
+        maximumSeconds: Int
+    ) async -> ScenarioDrainReport {
+        let started = NIODeadline.now()
+        let deadline = started + .seconds(Int64(maximumSeconds))
+        var pending = await scenarioPendingMessages(channels: channels)
+        while !pending.isZero, NIODeadline.now() < deadline {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+            pending = await scenarioPendingMessages(channels: channels)
+        }
+        return .init(
+            drained: pending.isZero,
+            durationMilliseconds: Int((NIODeadline.now() - started).millisecondsDouble.rounded(.towardZero)),
+            pending: pending
+        )
+    }
+
+    private func scenarioPendingMessages(channels: [Channel]) async -> ScenarioPendingMessages {
+        guard let first = channels.first else { return .zero }
+        let futures = channels.map { channel -> EventLoopFuture<ScenarioPendingMessages> in
+            let promise = channel.eventLoop.makePromise(of: ScenarioPendingMessages.self)
+            channel.eventLoop.execute {
+                guard channel.isActive else {
+                    promise.succeed(.zero)
+                    return
+                }
+                channel.pipeline.fireUserInboundEventTriggered(ScenarioDrainProbe(completion: promise))
+            }
+            return promise.futureResult
+        }
+        let values = (try? await EventLoopFuture.whenAllSucceed(futures, on: first.eventLoop).get()) ?? []
+        return values.reduce(into: .zero) { total, next in total.add(next) }
+    }
+
     private func targetUserIDs(for connectionIndex: Int) -> [String] {
         guard configuration.messagesPerSecond > 0 || configuration.scenario != nil else { return [] }
         if configuration.scenario != nil {
@@ -721,6 +803,23 @@ private struct StartWorkloadEvent: Sendable {}
 private struct ScenarioSendEvent: Sendable {}
 private struct ScenarioRoomLogReadEvent: Sendable {}
 private struct ScenarioSyncPullEvent: Sendable {}
+
+private struct ScenarioPendingMessages: Sendable, Equatable, Encodable {
+    var queued: Int
+    var inFlight: Int
+
+    static let zero = Self(queued: 0, inFlight: 0)
+    var isZero: Bool { queued == 0 && inFlight == 0 }
+
+    mutating func add(_ other: Self) {
+        queued += other.queued
+        inFlight += other.inFlight
+    }
+}
+
+private struct ScenarioDrainProbe {
+    let completion: EventLoopPromise<ScenarioPendingMessages>
+}
 
 private enum ScenarioAction {
     case send
@@ -1180,6 +1279,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 statistics.recordWorkloadFailure(kind: "sync", code: "CLIENT_WRITE_FAILURE")
                 context.close(promise: nil)
             }
+        case let probe as ScenarioDrainProbe:
+            probe.completion.succeed(.init(
+                queued: queuedScenarioMessages,
+                inFlight: messageRequestIDs.count
+            ))
         default:
             context.fireUserInboundEventTriggered(event)
         }
@@ -1473,9 +1577,10 @@ private struct LoadReport: Encodable {
     let scenarioSendDispatch: String?
     let maximumQueuedScenarioMessagesPerConnection: Int?
     let scenarioPhases: [ScenarioPhaseReport]
+    let scenarioDrain: ScenarioDrainReport?
     let terminalError: String?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, scenarioPhases: [ScenarioPhaseReport], terminalError: Error?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?) {
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -1537,6 +1642,7 @@ private struct LoadReport: Encodable {
             _ in configuration.maximumQueuedScenarioMessagesPerConnection
         }
         self.scenarioPhases = scenarioPhases
+        self.scenarioDrain = scenarioDrain
         self.terminalError = terminalError.map(String.init(describing:))
     }
 
@@ -1564,6 +1670,10 @@ private struct ScenarioPhaseReport: Encodable {
     let syncRecordsReceived: Int
     let workloadFailed: Int
 
+    func isSteadyStateDrained(maximumQueuedMessages: Int) -> Bool {
+        scenarioMessageQueueOverflowed == 0 && queuedScenarioMessagesAtEnd <= maximumQueuedMessages
+    }
+
     init(phase: LoadScenario.Phase, rateScale: Double, started: LoadStatistics.State, ended: LoadStatistics.State) {
         name = phase.name
         durationSeconds = phase.durationSeconds
@@ -1583,6 +1693,12 @@ private struct ScenarioPhaseReport: Encodable {
         syncRecordsReceived = ended.syncRecordsReceived - started.syncRecordsReceived
         workloadFailed = ended.workloadFailed - started.workloadFailed
     }
+}
+
+private struct ScenarioDrainReport: Encodable {
+    let drained: Bool
+    let durationMilliseconds: Int
+    let pending: ScenarioPendingMessages
 }
 
 /// A bounded one-millisecond histogram avoids retaining millions of samples
@@ -1647,6 +1763,8 @@ private enum LoadError: Error, CustomStringConvertible {
     case connectionLossGuardTriggered(disconnected: Int, authenticated: Int)
     case workloadFailureGuardTriggered(failed: Int, attempted: Int)
     case roomWarmupTimedOut(opened: Int, required: Int)
+    case scenarioPhaseNotDrained(phase: String, queued: Int, maximumQueued: Int, sent: Int, acknowledged: Int)
+    case scenarioCompletionDrainTimedOut(queued: Int, inFlight: Int)
 
     var description: String {
         switch self {
@@ -1664,6 +1782,10 @@ private enum LoadError: Error, CustomStringConvertible {
         case .connectionLossGuardTriggered(let disconnected, let authenticated): return "active connection loss guard triggered: \(disconnected)/\(authenticated)"
         case .workloadFailureGuardTriggered(let failed, let attempted): return "message workload failure guard triggered: \(failed)/\(attempted)"
         case .roomWarmupTimedOut(let opened, let required): return "room warmup timed out: opened \(opened)/\(required)"
+        case .scenarioPhaseNotDrained(let phase, let queued, let maximumQueued, let sent, let acknowledged):
+            return "scenario phase did not sustain its offered rate: phase=\(phase) queued=\(queued) maximum_queued=\(maximumQueued) sent=\(sent) acknowledged=\(acknowledged)"
+        case .scenarioCompletionDrainTimedOut(let queued, let inFlight):
+            return "scenario completion drain timed out: queued=\(queued) in_flight=\(inFlight)"
         }
     }
 }
