@@ -171,6 +171,32 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(adaptiveHighActivityConfiguration
             .directRoomLogAppendBatchHighActivityWindowMilliseconds == 20)
 
+        // The production high-throughput overlay uses a one-second, 400
+        // request threshold: at a 20 ms long-delay budget this predicts at
+        // least eight arrivals to amortise the additional interactive wait.
+        // Keep that larger valid boundary covered so a future parser change
+        // cannot silently reject the deployed profile.
+        var productionAdaptiveHighActivityAppendBatch = appendBatch
+        productionAdaptiveHighActivityAppendBatch[
+            "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED"
+        ] = "512"
+        productionAdaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
+        ] = "20"
+        productionAdaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS"
+        ] = "400"
+        productionAdaptiveHighActivityAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
+        ] = "1000"
+        let productionAdaptiveHighActivityConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(productionAdaptiveHighActivityAppendBatch)
+        )
+        #expect(productionAdaptiveHighActivityConfiguration
+            .directRoomLogAppendBatchHighActivityMinimumRequests == 400)
+        #expect(productionAdaptiveHighActivityConfiguration
+            .directRoomLogAppendBatchHighActivityWindowMilliseconds == 1000)
+
         var incompleteAdaptiveHighActivityAppendBatch = appendBatch
         incompleteAdaptiveHighActivityAppendBatch[
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"

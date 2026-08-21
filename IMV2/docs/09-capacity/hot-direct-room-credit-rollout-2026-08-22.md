@@ -100,3 +100,25 @@ enabling same-room microbatching as a broad throughput claim. The next code
 iteration must select the longer delay only when actual queue fill predicts
 amortisation; a global arrivals-per-second threshold alone cannot distinguish
 a broad fan-in workload from a two-member direct turn.
+
+## Queue-fill threshold correction — 2026-08-22
+
+The 20 ms long-delay mode is now guarded by 400 arrivals in one second rather
+than 20. This is not an arbitrary larger number: a useful long-delay batch
+needs at least eight requests, and `8 / 20 ms = 400 requests/s` is the minimum
+arrival rate that predicts that fill. The configuration remains opt-in and
+keeps the ordinary 2 ms interactive cap.
+
+Two clean real-host runs validated both sides of the decision:
+
+| Workload, candidate `55dfdb2b` | ACKed messages | Client skips | Message P95 | Room-log P95 | High-delay flushes | Atomic append result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| One direct room, two members, requested 600 msg/s | 7,082 | 29,024 | 615 ms | 546 ms | 0 | Mostly singletons; no artificial 20 ms queueing |
+| 100 established direct rooms, 100 connections, requested 600 msg/s | 35,307 | 1,152 | 142 ms | 36 ms | 2,480 | 3,302 committed atomic batches for 34,824 requests (10.5 req/batch) |
+
+For the distributed run, PostgreSQL's canonical append CTE executed 3,716
+times for 35,238 rows, an observed 9.5 messages per SQL transaction. The
+message P95 remains within the prior clean 100-room range (136--143 ms), while
+the two-member room no longer enters long-delay mode. This proves the profile
+selects the intended workload class; it does not claim that a single ordered
+conversation can be made infinitely parallel.

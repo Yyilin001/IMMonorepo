@@ -14,10 +14,16 @@ services:
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: "32"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: "2"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS: "20"
-      # A one-second, 20-request threshold filters event-loop microbursts but
-      # enters high-activity mode within about 22 ms at the 900 msg/s test
-      # load. Isolated and low-rate sends continue to use the base delay.
-      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS: "20"
+      # A 20 ms delay should not be selected merely because a two-member
+      # direct room is active.  To amortise that extra wait into at least an
+      # eight-request transaction, the process must observe roughly
+      # 8 / 0.020 = 400 accepted arrivals per second.  The previous 20/s
+      # threshold incorrectly classified a ~100 msg/s direct pair as a broad
+      # fan-in workload, adding delay while forming only two-request batches.
+      # A one-second 400-request window still enters long-delay mode at the
+      # intended 600--900 msg/s distributed-load profile, while low-rate and
+      # ordinary direct conversations remain on the 2 ms interactive bound.
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS: "400"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS: "1000"
       # A best-effort, process-local read cache for freshly committed plain
       # direct events. PostgreSQL still authorizes every cache hit; entries
