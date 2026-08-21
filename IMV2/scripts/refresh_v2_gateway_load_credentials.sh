@@ -84,7 +84,9 @@ while IFS= read -r record || [[ -n "${record}" ]]; do
     pids=()
   fi
 done < "${input_path}"
-for pid in "${pids[@]}"; do wait "${pid}"; done
+if [[ -n "${pids[*]-}" ]]; then
+  for pid in "${pids[@]}"; do wait "${pid}"; done
+fi
 
 for ((index = 0; index < line_number; index += 1)); do
   [[ -s "${temporary_directory}/${index}" ]] || {
