@@ -66,3 +66,21 @@ the local RSS/CPU guard, or the configured failure threshold.  The 1,100
 msg/s run is therefore a valid overload observation, but it is not stable:
 its 192 retryable `room_event: SERVER_BUSY` responses place the current
 single-host steady-state boundary at 1,000 msg/s for this workload.
+
+## Rejected read-queue experiment
+
+The direct cause of the 1,100-msg/s rejection was the bounded interactive
+room-log-read queue (384 waiting reads), not a rejected foreground message
+write.  A temporary 768-item queue experiment removed the explicit read
+rejections, but did not increase sustainable service:
+
+| 1,100 msg/s setting | Busy responses | Client-skipped sends | Message P95 / P99 | Room-log P95 / P99 |
+| --- | ---: | ---: | ---: | ---: |
+| Default 384-item read queue | 192 | 564 | 339 / 686 ms | 515 / 1,387 ms |
+| Temporary 768-item read queue | 0 | 3,193 | 506 / 2,485 ms | 575 / 3,251 ms |
+
+The larger queue merely retained the overload until per-device in-flight
+limits applied.  It was removed from the running Gateway and is intentionally
+not retained as a deployment overlay.  Bounded early backpressure is the
+correct behavior here; throughput requires reducing per-message PostgreSQL
+work or adding physical write capacity, not accumulating more waiting reads.
