@@ -1139,10 +1139,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 
     /// Batch variant of the direct room-log preflight. The process-local
-    /// policy cache is deliberately *not* authority: this query locks the
-    /// authoritative rows and returns their revision fences. A missing row,
-    /// replay, or revision mismatch makes the caller fall back to the exact
-    /// established per-command transaction.
+    /// policy cache is deliberately *not* authority: every hit is accepted
+    /// only after this query locks and exactly matches the durable pair and
+    /// both user-policy revision fences. A miss or mismatch reads the
+    /// complete policy from PostgreSQL before the command can be accepted.
     private func loadPlainDirectRoomLogBatchContexts(
         _ ordered: [OrderedRoomWriteRequest],
         sql: any SQLDatabase
@@ -1153,24 +1153,46 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 roomID: item.roomID,
                 senderID: item.senderID,
                 clientMessageID: try uuid(item.request.command.clientMessageID),
-                nowUnixSeconds: item.request.now.timeIntervalSince1970
+                nowUnixSeconds: item.request.now.timeIntervalSince1970,
+                cachedDirectPolicy: item.cachedDirectPolicy
             )
         }
         let inputJSON = try roomWriteJSON(input)
         let rows = try await sql.raw("""
             WITH input AS MATERIALIZED (
                 SELECT input.ordinal, input.room_id, input.sender_id,
-                       input.client_message_id, input.now_unix_seconds
+                       input.client_message_id, input.now_unix_seconds,
+                       input.cached_recipient_id,
+                       input.cached_direct_pair_revision,
+                       input.cached_sender_policy_revision,
+                       input.cached_recipient_policy_revision,
+                       input.cached_recipient_is_active,
+                       input.cached_blocked, input.cached_is_friend,
+                       input.cached_allows_strangers
                 FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
                     ordinal integer,
                     room_id uuid,
                     sender_id uuid,
                     client_message_id uuid,
-                    now_unix_seconds double precision
+                    now_unix_seconds double precision,
+                    cached_recipient_id uuid,
+                    cached_direct_pair_revision bigint,
+                    cached_sender_policy_revision bigint,
+                    cached_recipient_policy_revision bigint,
+                    cached_recipient_is_active boolean,
+                    cached_blocked boolean,
+                    cached_is_friend boolean,
+                    cached_allows_strangers boolean
                 )
             ), locked_room AS MATERIALIZED (
                 SELECT input.ordinal, input.sender_id, input.client_message_id,
-                       input.now_unix_seconds, room.room_kind,
+                       input.now_unix_seconds, input.cached_recipient_id,
+                       input.cached_direct_pair_revision,
+                       input.cached_sender_policy_revision,
+                       input.cached_recipient_policy_revision,
+                       input.cached_recipient_is_active,
+                       input.cached_blocked, input.cached_is_friend,
+                       input.cached_allows_strangers, room.room_kind,
                        room.room_shard_id, room.room_sequence,
                        room.timeline_sequence, room.membership_revision,
                        room.capacity_profile_id, room.delivery_mode,
@@ -1307,7 +1329,12 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        pair.sender_profile_visible_to_recipient,
                        pair.sender_can_send, pair.sender_has_replied,
                        pair.recipient_has_replied,
-                       EXISTS (
+                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                      AND pair.recipient_user_id = room.cached_recipient_id
+                            THEN room.cached_recipient_is_active
+                            ELSE EXISTS (
                            SELECT 1 FROM im_v2.public_user_profiles AS profile
                            WHERE profile.user_id = pair.recipient_user_id
                              AND profile.state = 'active'
@@ -1315,25 +1342,40 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                                  SELECT 1 FROM im_v2.account_disables AS disabled
                                  WHERE disabled.user_id = profile.user_id
                              )
-                       ) AS recipient_is_active,
-                       EXISTS (
+                       ) END AS recipient_is_active,
+                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                      AND pair.recipient_user_id = room.cached_recipient_id
+                            THEN room.cached_blocked
+                            ELSE EXISTS (
                            SELECT 1 FROM im_v2.user_blocks AS block
                            WHERE (block.blocker_user_id = pair.lower_user_id
                                   AND block.blocked_user_id = pair.higher_user_id)
                               OR (block.blocker_user_id = pair.higher_user_id
                                   AND block.blocked_user_id = pair.lower_user_id)
-                       ) AS blocked,
-                       EXISTS (
+                       ) END AS blocked,
+                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                      AND pair.recipient_user_id = room.cached_recipient_id
+                            THEN room.cached_is_friend
+                            ELSE EXISTS (
                            SELECT 1 FROM im_v2.user_relationships AS relationship
                            WHERE relationship.lower_user_id = pair.lower_user_id
                              AND relationship.higher_user_id = pair.higher_user_id
                              AND relationship.state = 'accepted'
-                       ) AS is_friend,
-                       COALESCE((
+                       ) END AS is_friend,
+                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                      AND pair.recipient_user_id = room.cached_recipient_id
+                            THEN room.cached_allows_strangers
+                            ELSE COALESCE((
                            SELECT preference.allows_stranger_messages
                            FROM im_v2.user_stranger_message_preferences AS preference
                            WHERE preference.user_id = pair.recipient_user_id
-                       ), TRUE) AS allows_strangers,
+                       ), TRUE) END AS allows_strangers,
                        (SELECT account_kind FROM special
                         WHERE ordinal = pair.ordinal
                           AND account_user_id = room.sender_id) AS sender_account_kind,
@@ -4142,16 +4184,46 @@ private struct PlainRoomLogMessageInput: Encodable {
     }
 }
 
-/// Input and result models for the durable, set-based direct-send preflight.
-/// They intentionally contain only state required after a compatible policy
-/// cache hit; fields used solely to derive the cached policy stay on the
-/// normal single-command path.
+/// Input for the durable, set-based direct-send preflight. Cache fields are
+/// only immutable-by-revision policy facts; PostgreSQL treats them as usable
+/// only after matching all three locked revision fences and the recipient.
 private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
     let ordinal: Int
     let roomID: UUID
     let senderID: UUID
     let clientMessageID: UUID
     let nowUnixSeconds: Double
+    let cachedRecipientID: UUID?
+    let cachedDirectPairRevision: Int64?
+    let cachedSenderPolicyRevision: Int64?
+    let cachedRecipientPolicyRevision: Int64?
+    let cachedRecipientIsActive: Bool?
+    let cachedBlocked: Bool?
+    let cachedIsFriend: Bool?
+    let cachedAllowsStrangers: Bool?
+
+    init(
+        ordinal: Int,
+        roomID: UUID,
+        senderID: UUID,
+        clientMessageID: UUID,
+        nowUnixSeconds: Double,
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+    ) {
+        self.ordinal = ordinal
+        self.roomID = roomID
+        self.senderID = senderID
+        self.clientMessageID = clientMessageID
+        self.nowUnixSeconds = nowUnixSeconds
+        cachedRecipientID = cachedDirectPolicy?.recipientID
+        cachedDirectPairRevision = cachedDirectPolicy?.directPairRevision
+        cachedSenderPolicyRevision = cachedDirectPolicy?.senderPolicyRevision
+        cachedRecipientPolicyRevision = cachedDirectPolicy?.recipientPolicyRevision
+        cachedRecipientIsActive = cachedDirectPolicy?.recipientIsActive
+        cachedBlocked = cachedDirectPolicy?.blocked
+        cachedIsFriend = cachedDirectPolicy?.isFriend
+        cachedAllowsStrangers = cachedDirectPolicy?.allowsStrangers
+    }
 
     enum CodingKeys: String, CodingKey {
         case ordinal
@@ -4159,6 +4231,14 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
         case senderID = "sender_id"
         case clientMessageID = "client_message_id"
         case nowUnixSeconds = "now_unix_seconds"
+        case cachedRecipientID = "cached_recipient_id"
+        case cachedDirectPairRevision = "cached_direct_pair_revision"
+        case cachedSenderPolicyRevision = "cached_sender_policy_revision"
+        case cachedRecipientPolicyRevision = "cached_recipient_policy_revision"
+        case cachedRecipientIsActive = "cached_recipient_is_active"
+        case cachedBlocked = "cached_blocked"
+        case cachedIsFriend = "cached_is_friend"
+        case cachedAllowsStrangers = "cached_allows_strangers"
     }
 }
 
