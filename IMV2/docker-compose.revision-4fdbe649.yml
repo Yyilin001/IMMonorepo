@@ -9,6 +9,11 @@ services:
   gateway:
     image: imv2-server:hot-direct-4fdbe649
     environment:
+      # The single-node load database was explicitly seeded with this
+      # immutable profile and its eight room admission pools. Pinning the
+      # candidate prevents fresh direct pairs from selecting the stale v2
+      # profile, for which no durable pool exists.
+      IM_V2_CAPACITY_PROFILE_ID: "loadtest-v12"
       # Enable only the bounded two-command reservation tested by the actor
       # and PostgreSQL integration suite. The process-local heat threshold in
       # the writer keeps sparse conversations on the normal room admission
