@@ -124,7 +124,13 @@ private struct LoadConfiguration: Sendable {
         holdSeconds = try Self.integer(values["--hold-seconds"] ?? "60", range: 10...28_800)
         eventLoops = try Self.integer(values["--event-loops"] ?? "2", range: 1...4)
         heartbeatSeconds = try Self.integer(values["--heartbeat-seconds"] ?? "30", range: 10...50)
-        messagesPerSecond = try Self.integer(values["--messages-per-second"] ?? "0", range: 0...1_000)
+        // This is deliberately a generator-side safety bound, not a Gateway
+        // capacity claim.  A 1,000 msg/s cap prevented the load tool from
+        // locating the next server-side saturation point after a successful
+        // 1,000-msg/s run.  The guarded launcher continues to enforce local
+        // CPU/RSS limits and the run itself fails on connection/error-rate
+        // thresholds, so permit a materially higher controlled target here.
+        messagesPerSecond = try Self.integer(values["--messages-per-second"] ?? "0", range: 0...10_000)
         maximumInFlightMessagesPerConnection = try Self.integer(
             values["--max-inflight-messages-per-connection"] ?? "1",
             range: 1...32

@@ -39,6 +39,7 @@ not be used as a clean-database production-sizing claim.
 | First run after change | 950 msg/s | 63,363 | 43 / 774 / 1,167 ms | 173 | 509 calls, 2.82 s |
 | Warm established rooms | 950 msg/s | 63,640 | 48 / 302 / 821 ms | 8 | 0 calls |
 | Warm established rooms | 1,000 msg/s | 67,068 | 58 / 313 / 653 ms | 0 | 0 calls |
+| Warm established rooms | 1,100 msg/s | 73,152 | 68 / 339 / 686 ms | 192 | 0 calls |
 
 At the 1,000-msg/s run, the top write SQL remained the authorization/room
 preflight (8,077 calls, 10.54 s total, 1.305 ms mean), followed by canonical
@@ -58,3 +59,10 @@ one minimal canonical event/outbox transaction on the acknowledgement path,
 then idempotent asynchronous materialization of user-facing derived state.
 For direct room-log traffic, retain the current per-room event cursor as the
 recovery source and move only non-canonical side effects behind the outbox.
+
+The load generator now accepts a controlled target up to 10,000 msg/s.  This
+is only a test-tool input bound; it does not relax Gateway/database admission,
+the local RSS/CPU guard, or the configured failure threshold.  The 1,100
+msg/s run is therefore a valid overload observation, but it is not stable:
+its 192 retryable `room_event: SERVER_BUSY` responses place the current
+single-host steady-state boundary at 1,000 msg/s for this workload.
