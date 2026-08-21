@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Logging
 @preconcurrency import NIOCore
 
 /// A single TLS-decoded NIO channel. Work is serialized before it enters the
@@ -15,6 +16,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
+    private let logger = Logger(label: "imv2.gateway.transport")
     private var pending: V2GatewayInboundQueue
     private var processing = false
     /// Exactly one request task belongs to the channel. EOF, timeout,
@@ -177,6 +179,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         let eventLoop = context.eventLoop
+        let logger = logger
         processingTask = Task {
             let outcome: V2GatewayProcessingOutcome
             do {
@@ -196,6 +199,15 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     needsFrameDrain: needsFrameDrain
                 )
             } catch {
+                // The public protocol intentionally closes after a malformed
+                // or invalid request. Keep the client-facing behavior opaque,
+                // but retain the server-side error class for operations; the
+                // closure counter alone cannot distinguish a bad frame from a
+                // configuration or lifecycle regression.
+                logger.warning(
+                    "gateway request processing failed",
+                    metadata: ["error": "\(String(reflecting: error))"]
+                )
                 outcome = .failure(reason: v2GatewayClosureReason(for: error))
             }
             eventLoop.execute {
