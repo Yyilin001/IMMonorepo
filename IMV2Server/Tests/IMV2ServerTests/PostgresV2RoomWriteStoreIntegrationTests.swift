@@ -9445,7 +9445,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 outstandingFanoutUnits: 0, outstandingPlans: 0
             )
             let credits = V2RoomAdmissionCommandCreditPool(
-                database: app.db(.psql), batchSize: 2
+                database: app.db(.psql), batchSize: 32
             )
             let promotionNow = Date()
             #expect(await credits.shouldUseCredits(roomID: roomID, now: promotionNow) == false)

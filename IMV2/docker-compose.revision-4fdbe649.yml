@@ -14,11 +14,15 @@ services:
       # candidate prevents fresh direct pairs from selecting the stale v2
       # profile, for which no durable pool exists.
       IM_V2_CAPACITY_PROFILE_ID: "loadtest-v12"
-      # Enable only the bounded two-command reservation tested by the actor
-      # and PostgreSQL integration suite. The process-local heat threshold in
-      # the writer keeps sparse conversations on the normal room admission
-      # path, so this cannot turn into a global precharge.
-      IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE: "2"
+      # A hot room reserves at most 32 commands at a time.  PostgreSQL
+      # charges the room window before handing out a local token, so this
+      # removes up to 31 otherwise separate room_admission update
+      # transactions without allowing an over-admit.  Sparse rooms retain
+      # the normal per-command admission path until their committed-message
+      # heat threshold is crossed; a gateway crash can conservatively waste
+      # at most 31 credits for each active hot room and never creates a
+      # message without durable capacity.
+      IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE: "32"
 
   operator:
     image: imv2-server:hot-direct-4fdbe649
