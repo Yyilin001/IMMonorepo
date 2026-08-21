@@ -292,6 +292,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// an explicit, direct-room-log-only batch size for pre-charged command
     /// credits; it is never enabled by a client request.
     public let directRoomLogShardAdmissionCreditBatchSize: Int
+    /// Zero retains an exact room-admission update for every accepted direct
+    /// command. A positive value pre-charges the existing per-room command
+    /// window in bounded batches, preserving the room limit while avoiding a
+    /// `room_admission` lock/update on every eligible micro-batch item.
+    public let directRoomLogRoomAdmissionCreditBatchSize: Int
     /// Zero keeps direct room-log appends one command per transaction.  A
     /// positive value enables only the deliberately narrow, ordered plain
     /// direct-message micro-batch; non-eligible commands transparently use
@@ -546,6 +551,22 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directRoomLogShardAdmissionCreditBatchSize = parsedDirectRoomLogShardCreditBatchSize
+        let rawDirectRoomLogRoomCreditBatchSize = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE", environment: environment
+        ) ?? "0"
+        guard let parsedDirectRoomLogRoomCreditBatchSize = Int(rawDirectRoomLogRoomCreditBatchSize),
+              (0 ... 32).contains(parsedDirectRoomLogRoomCreditBatchSize),
+              parsedDirectRoomLogRoomCreditBatchSize == 0 || (
+                  parsedDirectFanoutMode == .roomLog
+                      && parsedDirectRoomLogAdmissionMode == .room
+                      && parsedDirectRoomLogShardCreditBatchSize > 0
+              )
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
+            )
+        }
+        directRoomLogRoomAdmissionCreditBatchSize = parsedDirectRoomLogRoomCreditBatchSize
         let rawDirectRoomLogAppendBatchSize = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE", environment: environment
         ) ?? "0"

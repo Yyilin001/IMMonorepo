@@ -288,6 +288,14 @@ enum IMV2ServerApp {
                     batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize
                 )
                 : nil
+            let directRoomLogRoomAdmissionCredits:
+                V2RoomAdmissionCommandCreditPool? =
+                configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
+                ? .init(
+                    database: database,
+                    batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize
+                )
+                : nil
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
                 source: V2AggregateDurableWorkMetricsSource(sources: [
                     PostgresV2DurableWorkMetricsSource(
@@ -341,7 +349,8 @@ enum IMV2ServerApp {
                 directFanoutMode: configuration.directFanoutMode,
                 directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                 payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
+                shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
+                roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
             )
             let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? =
                 configuration.directRoomLogAppendBatchSize > 0
@@ -401,6 +410,7 @@ enum IMV2ServerApp {
                     databasePools: databasePoolTopology,
                     syncWakeCoalescer: syncWakeCoalescer,
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
+                    roomAdmissionCommandCredits: directRoomLogRoomAdmissionCredits,
                     directRoomLogAppendBatcher: directRoomLogAppendBatcher,
                     directRoomLogEventCache: directRoomLogEventCache
                 )
@@ -549,7 +559,8 @@ enum IMV2ServerApp {
                     directFanoutMode: configuration.directFanoutMode,
                     directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                     payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits
+                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
+                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits

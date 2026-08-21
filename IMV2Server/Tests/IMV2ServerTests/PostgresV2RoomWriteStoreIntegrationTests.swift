@@ -9323,6 +9323,110 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("direct room-log room credits preserve the room command window across local token reuse")
+    func directRoomLogRoomCommandCreditsPreserveRoomCapacity() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql, isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_202_000)
+            let roomID = UUID(uuidString: "00000000-0000-0000-0000-00000000c201")!
+            let leaseID = UUID(uuidString: "00000000-0000-0000-0000-00000000c202")!
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, delivery_mode)
+                VALUES (\(bind: roomID), 'rooms-room-credit-test', 'room-credit-test', 'standard_fanout')
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-room-credit-test', 'room-credit-test', \(bind: leaseID), 1,
+                        \(bind: now.addingTimeInterval(600)), 10, 10, 10, 10)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans,
+                     shard_lease_id, shard_lease_generation)
+                VALUES (\(bind: roomID), 2, 2, 10, 10, 10, \(bind: leaseID), 1)
+                """).run()
+            let state = try ShardAdmissionState(
+                lease: .init(
+                    id: try .init(leaseID.uuidString), generation: 1,
+                    validUntil: now.addingTimeInterval(600),
+                    commandWindow: try .init(limit: 10),
+                    fanoutWindow: try .init(limit: 10),
+                    maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10
+                ),
+                outstandingFanoutUnits: 0, outstandingPlans: 0
+            )
+            let credits = V2RoomAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 2
+            )
+
+            let first = try await credits.acquire(roomID: roomID, shardState: state, now: now)
+            guard case .granted(let firstToken) = first else {
+                Issue.record("expected the first durable room command credit")
+                return
+            }
+            // A failed canonical write returns the process-local token. It
+            // must not decrement the durable reservation, which is what keeps
+            // a crash/retry from ever exceeding the room's command window.
+            await credits.release(firstToken, now: now)
+
+            for _ in 0 ..< 2 {
+                let acquisition = try await credits.acquire(roomID: roomID, shardState: state, now: now)
+                guard case .granted(let token) = acquisition else {
+                    Issue.record("expected a previously charged room credit")
+                    return
+                }
+                await credits.commit(token)
+            }
+            let exhausted = try await credits.acquire(roomID: roomID, shardState: state, now: now)
+            guard case .rateLimited = exhausted else {
+                Issue.record("the room credit pool oversold the room command window")
+                return
+            }
+            let persisted = try #require(try await sql.raw("""
+                SELECT command_window_used, fanout_window_used
+                FROM im_v2.room_admission
+                WHERE room_id = \(bind: roomID)
+                """).first(decoding: CapacityRow.self))
+            #expect(persisted.commandWindowUsed == 2)
+            #expect(persisted.fanoutWindowUsed == 0)
+            #expect(await credits.snapshot() == .init(
+                activeCredits: 0, inFlightCredits: 0,
+                batchReservations: 1, databaseCreditsReserved: 2,
+                committedCredits: 2, returnedCredits: 1,
+                expiredCreditsDiscarded: 0, capacityRejections: 1
+            ))
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("a 100k hybrid group persists ordinary messages as room-log events and fans out only explicit mentions")
     func acceptsOneHundredThousandMemberHybridRoomWithoutGlobalFanout() async throws {
         guard Environment.get("IMV2_RUN_HYBRID_100K_CAPACITY") == "1",

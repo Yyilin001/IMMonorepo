@@ -22,6 +22,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directFanoutMode == .planner)
         #expect(defaults.directRoomLogAdmissionMode == .room)
         #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
+        #expect(defaults.directRoomLogRoomAdmissionCreditBatchSize == 0)
         #expect(defaults.directRoomLogAppendBatchSize == 0)
         #expect(defaults.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
         #expect(defaults.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == nil)
@@ -76,6 +77,43 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(credits)
         ).directRoomLogShardAdmissionCreditBatchSize == 64)
+
+        var roomCredits = credits
+        roomCredits["IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"] = "16"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(roomCredits)
+        ).directRoomLogRoomAdmissionCreditBatchSize == 16)
+
+        var roomCreditsWithoutShardCredits = roomLog
+        roomCreditsWithoutShardCredits["IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"] = "16"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(roomCreditsWithoutShardCredits)
+            )
+        }
+
+        var roomCreditsWithShardOnlyAdmission = shardOnlyAdmission
+        roomCreditsWithShardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
+        roomCreditsWithShardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"] = "16"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(roomCreditsWithShardOnlyAdmission)
+            )
+        }
+
+        var oversizedRoomCredits = credits
+        oversizedRoomCredits["IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"] = "33"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversizedRoomCredits)
+            )
+        }
 
         var appendBatch = credits
         appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "32"

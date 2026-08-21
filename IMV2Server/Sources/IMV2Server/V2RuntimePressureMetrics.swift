@@ -45,6 +45,10 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// This is deliberately aggregate-only: shard IDs, room IDs and leases
     /// must never become Prometheus labels.
     public let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot?
+    /// Aggregate room-command credits. This intentionally has no room or
+    /// lease labels; it exists to verify that the semantic-preserving room
+    /// admission optimization is reserving bounded durable batches.
+    public let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot?
     /// Present only when ordered direct-room append batching is enabled. It
     /// exposes process-local queue and timer facts, never room/user/request
     /// identifiers, so an adaptive rollout can be verified without a SQL
@@ -59,6 +63,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWake: V2SyncWakeCoalescerSnapshot,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
+        roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot? = nil,
         directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil
     ) {
@@ -66,6 +71,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.databasePools = databasePools
         self.syncWake = syncWake
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
+        self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
         self.directRoomLogEventCache = directRoomLogEventCache
     }
@@ -80,6 +86,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let databasePools: V2DatabasePoolTopologySnapshot
     private let syncWakeCoalescer: V2SyncWakeCoalescer
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
+    private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher?
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
 
@@ -88,6 +95,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWakeCoalescer: V2SyncWakeCoalescer,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
+        roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
         directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil
     ) {
@@ -95,6 +103,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
+        self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
         self.directRoomLogEventCache = directRoomLogEventCache
     }
@@ -103,6 +112,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
         let credits = await shardAdmissionCommandCredits?.snapshot()
+        let roomCredits = await roomAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
         let eventCache = await directRoomLogEventCache?.snapshot()
         return await .init(
@@ -110,6 +120,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             databasePools: databasePools,
             syncWake: syncWake,
             shardAdmissionCommandCredits: credits,
+            roomAdmissionCommandCredits: roomCredits,
             directRoomLogAppendBatching: appendBatching,
             directRoomLogEventCache: eventCache
         )
@@ -246,6 +257,26 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# HELP im_v2_shard_admission_command_credit_rejections_total Requests rejected because the durable command window is full.",
             "# TYPE im_v2_shard_admission_command_credit_rejections_total counter",
             "im_v2_shard_admission_command_credit_rejections_total \(credits.capacityRejections)",
+        ])
+    }
+    if let credits = snapshot.roomAdmissionCommandCredits {
+        lines.append(contentsOf: [
+            "# HELP im_v2_room_admission_command_credits Process-local, already durable-charged per-room command-window credits for direct room-event-log sends.",
+            "# TYPE im_v2_room_admission_command_credits gauge",
+            "im_v2_room_admission_command_credits{state=\"available\"} \(credits.activeCredits)",
+            "im_v2_room_admission_command_credits{state=\"in_flight\"} \(credits.inFlightCredits)",
+            "# HELP im_v2_room_admission_command_credit_reservations_total Durable per-room command-credit batch reservations.",
+            "# TYPE im_v2_room_admission_command_credit_reservations_total counter",
+            "im_v2_room_admission_command_credit_reservations_total \(credits.batchReservations)",
+            "# HELP im_v2_room_admission_command_credits_reserved_total Per-room command-window credits durably charged in PostgreSQL batches.",
+            "# TYPE im_v2_room_admission_command_credits_reserved_total counter",
+            "im_v2_room_admission_command_credits_reserved_total \(credits.databaseCreditsReserved)",
+            "# HELP im_v2_room_admission_command_credits_committed_total Per-room credits consumed by committed message transactions.",
+            "# TYPE im_v2_room_admission_command_credits_committed_total counter",
+            "im_v2_room_admission_command_credits_committed_total \(credits.committedCredits)",
+            "# HELP im_v2_room_admission_command_credit_rejections_total Requests rejected because a per-room durable command window is full.",
+            "# TYPE im_v2_room_admission_command_credit_rejections_total counter",
+            "im_v2_room_admission_command_credit_rejections_total \(credits.capacityRejections)",
         ])
     }
     if let batching = snapshot.directRoomLogAppendBatching {

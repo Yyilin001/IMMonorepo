@@ -31,6 +31,37 @@ test. The accepted range is 1...128; 0 is the default and disables the
 feature. Start at 32. A larger value reduces SQL further, but increases the
 conservative unused quota after a process crash or a lease rollover.
 
+## Preserving per-room admission while batching it
+
+`IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE` is a separate, default-off
+optimization for the normal `room` admission mode. It is the only supported
+way to remove the per-message `room_admission` lock/update while retaining
+the existing per-room command-window contract:
+
+```
+IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room
+IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=32
+IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE=16
+```
+
+The accepted range is `1...32`; it requires `room_log`, normal `room`
+admission, and a nonzero shard-credit batch. `shard_only` and room credits
+are deliberately mutually exclusive: the former removes the room limit,
+whereas the latter preserves it.
+
+For a room credit reservation, PostgreSQL atomically increments that room's
+existing `room_admission.command_window_used` by at most the selected size,
+fenced to the currently active shard lease and generation. The Gateway then
+uses those already-charged credits locally. A rejected or rolled-back message
+returns its local token, but never decrements the durable charge; a crash can
+therefore only make the remainder of at most one batch per active
+`(gateway, room, lease)` unavailable until the normal admission-window reset.
+It cannot permit a command beyond the old room limit.
+
+Start at `16`, not `32`, because a direct room is much more likely than a
+shared shard to have a low per-window command limit. Keep this default off
+until the same-semantics A/B below has been recorded.
+
 ## Ordered append micro-batch
 
 `IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE` is a separate, default-off write
@@ -132,6 +163,10 @@ pure admission reducer by presenting its effective local state.
 - The idle direct-room `room_admission.command_window_used` value remains
   unchanged. Do not use that per-room metric to judge direct room-log traffic;
   use the shard-admission and Gateway rate-limit metrics instead.
+- With room credits enabled in normal `room` mode, the per-room counter is
+  still authoritative and therefore advances by each durable reservation,
+  rather than by each ACK. It may be ahead of the accepted-message count by
+  the local unused remainder; use it for enforcement, not exact analytics.
 - A failed message transaction returns its local token while its durable
   charge remains reserved; this is conservative, never an over-admission.
 - A crash, restart, or lease expiry can waste no more than the remaining
@@ -185,6 +220,12 @@ accepted direct-room-log commands (per shard), not one tail update per
 message. Compare accepted rate and p95/p99 latency as well; this optimization
 cannot remove the subsequent message/event/index/WAL work.
 
+With the room-credit switch enabled, `room_admission` updates for eligible
+steady-state direct appends should similarly approach one reservation per 16
+accepted commands per active room/lease. Verify the actual reservation count
+from PostgreSQL statistics or a controlled `pg_stat_statements` sample; do
+not infer it only from local process metrics.
+
 Do not infer append batching from delay settings or queue depth alone. A
 high `preclassified_individual` value is expected during first-contact traffic;
 for a high-activity steady-state profile, record the committed-request fraction
@@ -194,7 +235,8 @@ larger PostgreSQL connection pool.
 
 ## Rollback
 
-Set `IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room` and
+Set `IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room`,
+`IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE=0`, and, if required,
 `IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=0`, then restart the gateway.
 No migration or data rollback is required. Already reserved durable credits
 remain counted in the current command window and therefore only make the
