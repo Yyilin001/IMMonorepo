@@ -1478,6 +1478,11 @@ CREATE TABLE im_v2.schema_contract (
     CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-3'::text))
 );
 
+-- Readiness verification requires one canonical contract row. A DEFAULT only
+-- applies when callers insert; it does not populate a freshly initialized
+-- table, so seed it as part of the authoritative schema bootstrap.
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-3');
+
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
     capacity_profile_id text NOT NULL,
