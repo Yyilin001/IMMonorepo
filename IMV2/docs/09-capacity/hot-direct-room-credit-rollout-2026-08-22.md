@@ -149,3 +149,45 @@ same run recorded 4,779 canonical append CTE calls for 55,817 rows (11.7
 messages per transaction). This is a measured single-host improvement; it is
 not a substitute for future conversation-affine database shards once the
 canonical write lane itself becomes saturated.
+
+## 1,200 msg/s room-credit batch-size A/B — 2026-08-22
+
+The next clean distributed test exposed a separate source of write
+amplification. With room credits enabled at the original size of two, each
+promoted direct room acquired durable room-window capacity roughly once for
+every two committed commands, even though the canonical append already
+coalesced roughly ten messages per PostgreSQL transaction. The test host's
+room command window is 100,000 commands, and the credit-pool implementation
+already clamps a reservation to the durable remaining capacity. The candidate
+therefore increased only the tested room-credit batch cap from `2` to `32`;
+it preserves the same room lease fence, capacity authority, ordered append,
+idempotency operation fence, and ACK-after-commit rule.
+
+All rows used disposable-data reset, 100 established direct rooms, 100
+connections, two in-flight commands per connection, requested 1,200 msg/s,
+128 B payloads, room-log pulls enabled, and a 60-second hold. Commit
+`6415efe5` also changes the PostgreSQL integration test to configure a batch
+of 32 against a room with only two remaining commands, proving the durable
+reservation is clamped and cannot oversell the room window.
+
+| Room credit batch | ACKed | Client skips | Message P95 | Room-log P95 | Failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `2`, clean run 1 | 69,399 | 2,605 | 156 ms | 104 ms | 0 |
+| `2`, clean run 2 | 67,621 | 4,080 | 166 ms | 104 ms | 0 |
+| `32`, `6415efe5` | 69,701 | 2,004 | 134 ms | 99 ms | 0 |
+
+The `32` run reduced the room-admission reservation CTE from about 31,447
+calls to 2,100 (-93%). It durably reserved 67,200 room credits, committed
+64,935, and retained 2,265 unused credits after the run. These credits are
+already charged to PostgreSQL; they are a conservative, bounded availability
+loss if the Gateway crashes, never an unaccounted capacity grant. There were
+no capacity rejections. Relative to the better two-credit run, the candidate
+raised ACK by 0.4%, reduced client skips by 23.1%, and reduced message P95 by
+14.1%; relative to the two-credit median, the latency reduction is 16.8%.
+
+The result validates this single-host write-amplification reduction at 1,200
+msg/s. It does not make a per-room writer parallel: above this profile the
+next observed pressure remains concurrent room-log reads and the physical
+PostgreSQL commit/WAL path. A first 1,400-msg/s candidate run had an unstable
+client arrival rate and is deliberately excluded from the capacity claim
+until it is repeated with the same diagnostics.
