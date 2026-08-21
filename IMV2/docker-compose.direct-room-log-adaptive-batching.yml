@@ -6,7 +6,12 @@
 services:
   gateway:
     environment:
-      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: "16"
+      # Two independent 1,500-online / 900-msg/s runs on the 8-vCPU test
+      # host sustained ~20 committed requests per atomic append at this cap,
+      # reducing commit count by about 35% versus 16 without raising P95.
+      # Keep this profile single-Gateway and benchmark-specific; the runtime
+      # default remains disabled for deployments that do not opt in here.
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: "32"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: "2"
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS: "20"
       # A one-second, 20-request threshold filters event-loop microbursts but

@@ -39,12 +39,19 @@ messages for distinct rooms into one PostgreSQL transaction and one set-based
 append statement. It requires `room_log` and a nonzero shard-credit batch
 size. The batch staging queue is bounded by
 `IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED`; it must never be made
-unbounded to increase apparent throughput. Start with:
+unbounded to increase apparent throughput. For the measured 8-vCPU,
+single-Gateway high-activity profile, use:
 
 ```
-IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=16
+IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=32
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
 ```
+
+The `32` cap has two independent 1,500-online / 900-msg/s A/B samples on
+that host; see [the result](../09-capacity/direct-room-log-batch32-ab-2026-08-21.md).
+For an unmeasured topology, start at 8 or 16 and use the verification sequence
+below before raising it. A cap changes only batching efficiency, never the
+durability boundary or ACK-before-commit rule.
 
 The base delay is bounded to 1...25 ms. Keep the normal interactive base at
 2 ms: a permanently larger value trades every isolated send's latency for

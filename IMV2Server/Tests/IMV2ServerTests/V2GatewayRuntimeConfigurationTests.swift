@@ -78,12 +78,12 @@ struct V2GatewayRuntimeConfigurationTests {
         ).directRoomLogShardAdmissionCreditBatchSize == 64)
 
         var appendBatch = credits
-        appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "16"
+        appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "32"
         appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "2"
         let appendBatchConfiguration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(appendBatch)
         )
-        #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 16)
+        #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 32)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
 
         var eventCache = roomLog
