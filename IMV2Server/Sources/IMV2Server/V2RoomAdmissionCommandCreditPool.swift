@@ -90,7 +90,8 @@ public actor V2RoomAdmissionCommandCreditPool {
   /// untrusted request attempts.
   public func shouldUseCredits(roomID: UUID, now: Date) -> Bool {
     guard let heat = heatByRoom[roomID] else { return false }
-    guard now.timeIntervalSince(heat.lastCommittedAt) <= promotionWindow else {
+    let age = now.timeIntervalSince(heat.lastCommittedAt)
+    guard age >= 0, age <= promotionWindow else {
       heatByRoom.removeValue(forKey: roomID)
       return false
     }
@@ -102,6 +103,7 @@ public actor V2RoomAdmissionCommandCreditPool {
   /// token. Failed, denied, and idempotent commands cannot promote a room.
   public func recordNormalAdmissionCommit(roomID: UUID, now: Date) {
     if var heat = heatByRoom[roomID],
+       now.timeIntervalSince(heat.lastCommittedAt) >= 0,
        now.timeIntervalSince(heat.lastCommittedAt) <= promotionWindow {
       heat.committedCount = min(promotionCommitCount, heat.committedCount + 1)
       heat.lastCommittedAt = now

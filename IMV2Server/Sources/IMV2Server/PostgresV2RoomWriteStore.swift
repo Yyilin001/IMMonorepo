@@ -58,6 +58,36 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         let senderID = try uuid(command.senderUserID)
         let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
         let cachedDirectPolicy = await directSendPolicyCache.value(for: cacheKey)
+        let request = V2RoomWriteRequest(
+            command: command,
+            capacityProfile: capacityProfile,
+            identifiers: identifiers,
+            now: now
+        )
+        if directFanoutMode == .roomLog,
+           directRoomLogAdmissionMode == .room,
+           let roomAdmissionCommandCreditPool,
+           Self.isPlainDirectRoomLogBatchShape(request),
+           await roomAdmissionCommandCreditPool.shouldUseCredits(roomID: roomID, now: Date()) {
+            do {
+                let commit = try await acceptHotDirectRoomLog(
+                    request: request,
+                    roomID: roomID,
+                    senderID: senderID,
+                    cacheKey: cacheKey,
+                    cachedDirectPolicy: cachedDirectPolicy
+                )
+                return try await finalizeCommittedAcceptance(
+                    command: command,
+                    cacheKey: cacheKey,
+                    commit: commit
+                )
+            } catch V2AtomicRoomWriteBatchError.unsupportedRequestShape {
+                // A heat hint is never authorization. A room may have changed
+                // shape or policy after its last committed append, so preserve
+                // the established general path on any fast-path mismatch.
+            }
+        }
         let commit = try await acceptanceCommit(
             command: command,
             capacityProfile: capacityProfile,
@@ -185,7 +215,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             if directRoomLogAdmissionMode == .room,
                let roomAdmissionCommandCreditPool {
                 usesRoomAdmissionCredits = await roomAdmissionCommandCreditPool
-                    .shouldUseCredits(roomID: roomID, now: request.now)
+                    .shouldUseCredits(roomID: roomID, now: Date())
             } else {
                 usesRoomAdmissionCredits = false
             }
@@ -268,60 +298,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     }
                 }
                 if !prepared.isEmpty {
-                    try await persistPlainDirectRoomLogBatchPolicyMutations(
+                    commits.append(contentsOf: try await completePreparedDirectRoomLogAppends(
                         prepared,
                         sql: sql
-                    )
-                    try await persistPlainRoomLogMessages(
-                        inputs: prepared.enumerated().map { ordinal, append in
-                            append.input.withOrdinal(ordinal)
-                        },
-                        sql: sql
-                    )
-                    let projectionChanges = try await appendDirectPostAcceptanceProjections(
-                        for: prepared,
-                        sql: sql
-                    )
-                    guard projectionChanges.count == prepared.count else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                    for (append, projectionChanges) in zip(prepared, projectionChanges) {
-                        var cacheEntry = append.policyCacheEntry
-                        if append.advancesReplyMarker {
-                            cacheEntry = cacheEntry.markingSenderHasReplied()
-                        }
-                        cacheEntry = cacheEntry.applyingPostAcceptanceProjection(
-                            senderCapabilityInserted: projectionChanges.senderCapabilityInserted,
-                            recipientProfileInserted: projectionChanges.recipientProfileInserted
-                        )
-                        var shadows: [DirectProjectionShadowRequest] = []
-                        if projectionChanges.recipientProfileInserted {
-                            shadows.append(.init(
-                                userID: try .init(append.directContext.recipientID.uuidString),
-                                sourceEventID: try .init(append.input.eventID.uuidString),
-                                projectionKinds: ["direct_room_profile"]
-                            ))
-                        }
-                        if projectionChanges.senderCapabilityInserted {
-                            shadows.append(.init(
-                                userID: append.request.command.senderUserID,
-                                sourceEventID: try .init(append.input.eventID.uuidString),
-                                projectionKinds: ["direct_sending_capability"]
-                            ))
-                        }
-                        commits.append(.init(
-                            originalIndex: append.originalIndex,
-                            cacheKey: append.cacheKey,
-                            commit: .init(
-                                outcome: append.commit.outcome,
-                                acceptedDirectProjectionShadows: shadows,
-                                directPolicyCacheUpdate: cacheEntry,
-                                shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit,
-                                roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit,
-                                roomAdmissionHeatObservation: append.commit.roomAdmissionHeatObservation
-                            )
-                        ))
-                    }
+                    ))
                 }
                 guard commits.count == orderedRequests.count else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
@@ -354,6 +334,130 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return outcomes.compactMap { $0 }
+    }
+
+    /// Uses the same authoritative preflight and append graph as an ordered
+    /// micro-batch, but for one already-proven hot direct room. The batcher
+    /// intentionally cannot place two commands from the same room into one
+    /// atomic batch because that would weaken FIFO. Without this branch, the
+    /// most active conversation would therefore never benefit from the safe
+    /// per-room credit optimization.
+    private func acceptHotDirectRoomLog(
+        request: V2RoomWriteRequest,
+        roomID: UUID,
+        senderID: UUID,
+        cacheKey: V2DirectSendPolicyCache.Key,
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+    ) async throws -> RoomWriteCommit {
+        guard roomAdmissionCommandCreditPool != nil else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        let ordered = OrderedRoomWriteRequest(
+            originalIndex: 0,
+            request: request,
+            roomID: roomID,
+            senderID: senderID,
+            cacheKey: cacheKey,
+            cachedDirectPolicy: cachedDirectPolicy,
+            usesRoomAdmissionCredits: true,
+            preflightOrdinal: 0
+        )
+        return try await v2WithPostgresTransactionRetry(database: database) { transaction in
+            var prepared: PreparedDirectRoomLogAppend?
+            do {
+                let sql = try sqlDatabase(from: transaction)
+                try await acquireMessageOperationLocks([ordered], sql: sql)
+                let contexts = try await loadPlainDirectRoomLogBatchContexts([ordered], sql: sql)
+                guard contexts.count == 1 else {
+                    throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+                }
+                switch try await prepareDirectRoomLogAppend(ordered, preflight: contexts[0]) {
+                case .outcome(let commit):
+                    return commit
+                case .append(let append):
+                    prepared = append
+                    let commits = try await completePreparedDirectRoomLogAppends([append], sql: sql)
+                    guard commits.count == 1, let commit = commits.first?.commit else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    return commit
+                }
+            } catch {
+                if let append = prepared {
+                    if let token = append.commit.shardAdmissionCommandCredit,
+                       let shardAdmissionCommandCreditPool {
+                        await shardAdmissionCommandCreditPool.release(token, now: append.now)
+                    }
+                    if let token = append.commit.roomAdmissionCommandCredit,
+                       let roomAdmissionCommandCreditPool {
+                        await roomAdmissionCommandCreditPool.release(token, now: append.now)
+                    }
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Completes the authoritative durable append after every affected room,
+    /// membership, direct-pair and policy row has been preflight-locked.
+    /// Keeping it shared between a true micro-batch and the hot-room single
+    /// path prevents authorization, projection, or token-finalization drift.
+    private func completePreparedDirectRoomLogAppends(
+        _ prepared: [PreparedDirectRoomLogAppend],
+        sql: any SQLDatabase
+    ) async throws -> [OrderedRoomWriteCommit] {
+        guard !prepared.isEmpty else { return [] }
+        try await persistPlainDirectRoomLogBatchPolicyMutations(prepared, sql: sql)
+        try await persistPlainRoomLogMessages(
+            inputs: prepared.enumerated().map { ordinal, append in
+                append.input.withOrdinal(ordinal)
+            },
+            sql: sql
+        )
+        let projectionChanges = try await appendDirectPostAcceptanceProjections(
+            for: prepared,
+            sql: sql
+        )
+        guard projectionChanges.count == prepared.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return try zip(prepared, projectionChanges).map { append, changes in
+            var cacheEntry = append.policyCacheEntry
+            if append.advancesReplyMarker {
+                cacheEntry = cacheEntry.markingSenderHasReplied()
+            }
+            cacheEntry = cacheEntry.applyingPostAcceptanceProjection(
+                senderCapabilityInserted: changes.senderCapabilityInserted,
+                recipientProfileInserted: changes.recipientProfileInserted
+            )
+            var shadows: [DirectProjectionShadowRequest] = []
+            if changes.recipientProfileInserted {
+                shadows.append(.init(
+                    userID: try .init(append.directContext.recipientID.uuidString),
+                    sourceEventID: try .init(append.input.eventID.uuidString),
+                    projectionKinds: ["direct_room_profile"]
+                ))
+            }
+            if changes.senderCapabilityInserted {
+                shadows.append(.init(
+                    userID: append.request.command.senderUserID,
+                    sourceEventID: try .init(append.input.eventID.uuidString),
+                    projectionKinds: ["direct_sending_capability"]
+                ))
+            }
+            return .init(
+                originalIndex: append.originalIndex,
+                cacheKey: append.cacheKey,
+                commit: .init(
+                    outcome: append.commit.outcome,
+                    acceptedDirectProjectionShadows: shadows,
+                    directPolicyCacheUpdate: cacheEntry,
+                    shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit,
+                    roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit,
+                    roomAdmissionHeatObservation: append.commit.roomAdmissionHeatObservation
+                )
+            )
+        }
     }
 
     private static func isPlainDirectRoomLogBatchShape(
@@ -1041,7 +1145,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 directPolicyCacheUpdate: replyMarkerAdvanced
                     ? loadedContext.directPolicyCacheEntry()?.markingSenderHasReplied()
                     : loadedContext.directPolicyCacheEntry(),
-                shardAdmissionCommandCredit: shardCreditToken
+                shardAdmissionCommandCredit: shardCreditToken,
+                roomAdmissionHeatObservation: usesDirectRoomLog
+                    && directRoomLogAdmissionMode == .room
+                    && roomAdmissionCommandCreditPool != nil
+                    && directContext?.supportAccountID == nil
+                    && command.media.isEmpty
+                    && command.mentions.isEmpty
+                    && command.replyTo == nil
+                    && command.forwardedFrom == nil
+                    ? roomID : nil
             )
             } catch {
                 if let shardCreditToken, let shardAdmissionCommandCreditPool {
@@ -1699,7 +1812,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        message.rich_entities::text AS prior_rich_entities,
                        message.reply_to_message_id AS prior_reply_to_message_id,
                        message.created_at AS prior_created_at,
-                       NULL::uuid AS prior_source_event_id,
+                       message.accepted_event_id AS prior_source_event_id,
+                       message.accepted_membership_revision AS prior_accepted_membership_revision,
                        NULL::text AS prior_denial_reason
                 FROM locked_room
                 JOIN im_v2.messages AS message ON TRUE
@@ -1710,7 +1824,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        denial.timeline_sequence, denial.sender_user_id,
                        denial.client_message_id, NULL::text, NULL::text,
                        NULL::uuid, denial.created_at, denial.source_event_id,
-                       denial.reason
+                       NULL::bigint, denial.reason
                 FROM locked_room
                 JOIN im_v2.direct_message_denials AS denial ON TRUE
                 WHERE denial.sender_user_id = \(bind: senderID)
@@ -1893,6 +2007,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                    prior.prior_client_message_id, prior.prior_text_body,
                    prior.prior_rich_entities, prior.prior_reply_to_message_id,
                    prior.prior_created_at, prior.prior_source_event_id,
+                   prior.prior_accepted_membership_revision,
                    prior.prior_denial_reason,
                    admission.*, actor.actor_role, actor.sender_is_active, actor.muted,
                    policy.recipient_user_id, policy.sender_profile_visible_to_recipient,
@@ -3959,6 +4074,7 @@ private struct MessageAcceptanceContextRow: Decodable {
     let priorReplyToMessageID: UUID?
     let priorCreatedAt: Date?
     let priorSourceEventID: UUID?
+    let priorAcceptedMembershipRevision: Int64?
     let priorDenialReason: String?
     let roomEligibleMemberCount: Int?
     let roomCommandWindowLimit: Int?
@@ -4026,6 +4142,7 @@ private struct MessageAcceptanceContextRow: Decodable {
         case priorReplyToMessageID = "prior_reply_to_message_id"
         case priorCreatedAt = "prior_created_at"
         case priorSourceEventID = "prior_source_event_id"
+        case priorAcceptedMembershipRevision = "prior_accepted_membership_revision"
         case priorDenialReason = "prior_denial_reason"
         case roomEligibleMemberCount = "room_eligible_member_count"
         case roomCommandWindowLimit = "room_command_window_limit"
@@ -4092,7 +4209,8 @@ private struct MessageAcceptanceContextRow: Decodable {
                   priorSenderUserID == nil, priorClientMessageID == nil,
                   priorTextBody == nil, priorRichEntities == nil,
                   priorReplyToMessageID == nil, priorCreatedAt == nil,
-                  priorSourceEventID == nil, priorDenialReason == nil
+                  priorSourceEventID == nil, priorAcceptedMembershipRevision == nil,
+                  priorDenialReason == nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return nil
         }
@@ -4112,6 +4230,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             replyToMessageID: priorReplyToMessageID,
             createdAt: priorCreatedAt,
             sourceEventID: priorSourceEventID,
+            acceptedMembershipRevision: priorAcceptedMembershipRevision,
             denialReason: priorDenialReason
         ).operation()
     }
@@ -4914,8 +5033,10 @@ private struct MessageRow: Decodable {
     let textBody: String
     let richEntities: String
     let replyToMessageID: UUID?
+    let acceptedEventID: UUID?
+    let acceptedMembershipRevision: Int64?
     let createdAt: Date
-    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", richEntities = "rich_entities", replyToMessageID = "reply_to_message_id", createdAt = "created_at" }
+    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", richEntities = "rich_entities", replyToMessageID = "reply_to_message_id", acceptedEventID = "accepted_event_id", acceptedMembershipRevision = "accepted_membership_revision", createdAt = "created_at" }
     func acceptedMessage(
         media: [V2MediaReference] = [],
         mediaPresentations: [V2MediaPresentation] = [],
@@ -4933,7 +5054,9 @@ private struct MessageRow: Decodable {
         } else {
             replyTo = nil
         }
-        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, usesRoomEventLog: usesRoomEventLog, createdAt: createdAt)
+        let sourceEventID = try acceptedEventID.map { try EventID($0.uuidString) }
+        let membershipRevision = try acceptedMembershipRevision.map(unsigned)
+        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, usesRoomEventLog: usesRoomEventLog, sourceEventID: sourceEventID, acceptedMembershipRevision: membershipRevision, createdAt: createdAt)
     }
 }
 
@@ -5178,6 +5301,7 @@ private struct MessageOperationReplayRow: Decodable {
     let replyToMessageID: UUID?
     let createdAt: Date
     let sourceEventID: UUID?
+    let acceptedMembershipRevision: Int64?
     let denialReason: String?
 
     enum CodingKeys: String, CodingKey {
@@ -5193,6 +5317,7 @@ private struct MessageOperationReplayRow: Decodable {
         case replyToMessageID = "reply_to_message_id"
         case createdAt = "created_at"
         case sourceEventID = "source_event_id"
+        case acceptedMembershipRevision = "accepted_membership_revision"
         case denialReason = "denial_reason"
     }
 
@@ -5200,7 +5325,7 @@ private struct MessageOperationReplayRow: Decodable {
         switch outcomeKind {
         case "accepted":
             guard let messageID, let roomSequence, let textBody, let richEntities,
-                  sourceEventID == nil, denialReason == nil
+                  denialReason == nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return .accepted(.init(
                 messageID: messageID,
@@ -5212,11 +5337,14 @@ private struct MessageOperationReplayRow: Decodable {
                 textBody: textBody,
                 richEntities: richEntities,
                 replyToMessageID: replyToMessageID,
+                acceptedEventID: sourceEventID,
+                acceptedMembershipRevision: acceptedMembershipRevision,
                 createdAt: createdAt
             ))
         case "denied":
             guard messageID == nil, roomSequence == nil, textBody == nil,
                   richEntities == nil, replyToMessageID == nil,
+                  acceptedMembershipRevision == nil,
                   let sourceEventID, let denialReason,
                   let reason = V2DirectMessageDenied.Reason(rawValue: denialReason)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }

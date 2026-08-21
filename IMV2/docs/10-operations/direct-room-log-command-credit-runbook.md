@@ -72,6 +72,13 @@ based exclusively on committed canonical messages; denied, failed, duplicate,
 or merely attempted sends cannot consume memory or make a room eligible. The
 local promotion map is bounded to 8,192 rooms and drops inactive entries.
 
+The same promoted-room path also covers a single command that the append
+batcher must dispatch alone to preserve FIFO. It reuses the exact locked
+preflight, policy mutation, canonical append, projection, and token-finalize
+code used by a multi-room batch; it is not a weaker authorization path. This
+matters because a genuinely hot two-person conversation is often the one case
+that cannot put two of its own commands into one SQL batch.
+
 ## Ordered append micro-batch
 
 `IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE` is a separate, default-off write
