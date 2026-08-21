@@ -264,17 +264,14 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                         persistsRoomAdmission: directRoomLogAdmissionMode == .room,
                         sql: sql
                     )
-                    for append in prepared {
-                        let projectionChanges = try await appendDirectPostAcceptanceProjections(
-                            roomID: append.roomID,
-                            senderID: append.senderID,
-                            recipientID: append.directContext.recipientID,
-                            senderProfileVisibleToRecipient: append.directContext.senderProfileVisibleToRecipient,
-                            senderCanSend: append.directContext.senderCanSend,
-                            sourceEventID: append.input.eventID,
-                            createdAt: append.now,
-                            sql: sql
-                        )
+                    let projectionChanges = try await appendDirectPostAcceptanceProjections(
+                        for: prepared,
+                        sql: sql
+                    )
+                    guard projectionChanges.count == prepared.count else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    for (append, projectionChanges) in zip(prepared, projectionChanges) {
                         var cacheEntry = append.policyCacheEntry
                         if append.advancesReplyMarker {
                             cacheEntry = cacheEntry.markingSenderHasReplied()
@@ -1899,6 +1896,202 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     /// projection changed. Established conversations return without another
     /// PostgreSQL round trip; a state transition allocates its sequences and
     /// advances the markers atomically with the message transaction.
+    ///
+    /// The ordered direct micro-batch has already locked every pair and policy
+    /// row. Allocate all first-message projections in one SQL statement rather
+    /// than repeating the single-message CTE for each independent room. A
+    /// sender can occur in several rooms in one batch, so this deliberately
+    /// reserves that user's sync sequence range once and assigns its entries
+    /// in the existing ordered-batch order.
+    private func appendDirectPostAcceptanceProjections(
+        for appends: [PreparedDirectRoomLogAppend],
+        sql: any SQLDatabase
+    ) async throws -> [DirectPostAcceptanceProjectionChanges] {
+        guard !appends.isEmpty else { return [] }
+        let inputs = appends.enumerated().map { ordinal, append in
+            DirectPostAcceptanceProjectionInput(
+                ordinal: ordinal,
+                roomID: append.roomID,
+                senderID: append.senderID,
+                recipientID: append.directContext.recipientID,
+                senderProfileVisibleToRecipient: append.directContext.senderProfileVisibleToRecipient,
+                senderCanSend: append.directContext.senderCanSend,
+                sourceEventID: append.input.eventID,
+                createdAtUnixSeconds: append.now.timeIntervalSince1970
+            )
+        }
+        let inputJSON = try roomWriteJSON(inputs)
+        let rows = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT input.ordinal, input.room_id, input.sender_id,
+                       input.recipient_id,
+                       input.sender_profile_visible_to_recipient,
+                       input.sender_can_send, input.source_event_id,
+                       input.created_at_unix_seconds,
+                       to_timestamp(input.created_at_unix_seconds) AS created_at
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                    ordinal integer,
+                    room_id uuid,
+                    sender_id uuid,
+                    recipient_id uuid,
+                    sender_profile_visible_to_recipient boolean,
+                    sender_can_send boolean,
+                    source_event_id uuid,
+                    created_at_unix_seconds double precision
+                )
+            ), needed AS MATERIALIZED (
+                SELECT *
+                FROM input
+                WHERE NOT sender_profile_visible_to_recipient
+                   OR sender_can_send IS DISTINCT FROM TRUE
+            ), profile AS MATERIALIZED (
+                SELECT needed.ordinal, profile.public_handle,
+                       profile.display_name, profile.account_kind,
+                       profile.revision, profile.updated_at
+                FROM needed
+                JOIN im_v2.public_user_profiles AS profile
+                  ON profile.user_id = needed.sender_id
+                 AND profile.state = 'active'
+                 AND profile.revision > 0
+            ), projection_events AS MATERIALIZED (
+                SELECT needed.ordinal, needed.room_id, needed.sender_id,
+                       needed.recipient_id, needed.source_event_id,
+                       needed.created_at, needed.sender_id AS user_id,
+                       'direct_sending_capability'::text AS projection_kind,
+                       0 AS event_order,
+                       jsonb_build_object(
+                           'room_id', needed.room_id::text,
+                           'can_send', TRUE,
+                           'updated_at_ms',
+                               (needed.created_at_unix_seconds * 1000)::bigint
+                       ) AS payload
+                FROM needed
+                WHERE needed.sender_can_send IS DISTINCT FROM TRUE
+
+                UNION ALL
+
+                SELECT needed.ordinal, needed.room_id, needed.sender_id,
+                       needed.recipient_id, needed.source_event_id,
+                       needed.created_at, needed.recipient_id,
+                       'direct_room_profile', 1,
+                       jsonb_build_object(
+                           'room_id', needed.room_id::text,
+                           'target_user_id', needed.sender_id::text,
+                           'public_handle', profile.public_handle,
+                           'display_name', profile.display_name,
+                           'account_kind', profile.account_kind,
+                           'revision', profile.revision,
+                           'updated_at_ms',
+                               (extract(epoch FROM profile.updated_at) * 1000)::bigint
+                       )
+                FROM needed
+                JOIN profile USING (ordinal)
+                WHERE NOT needed.sender_profile_visible_to_recipient
+            ), numbered_projection_events AS MATERIALIZED (
+                SELECT projection_events.*,
+                       row_number() OVER (
+                           PARTITION BY user_id
+                           ORDER BY ordinal, event_order
+                       )::bigint AS user_sequence_ordinal,
+                       count(*) OVER (PARTITION BY user_id)::bigint AS user_event_count
+                FROM projection_events
+            ), sequence_counts AS MATERIALIZED (
+                SELECT user_id, max(user_event_count)::bigint AS event_count
+                FROM numbered_projection_events
+                GROUP BY user_id
+            ), sequence_insert AS (
+                INSERT INTO im_v2.user_sync_sequences AS current
+                    (user_id, next_sequence)
+                SELECT user_id, event_count
+                FROM sequence_counts
+                ORDER BY user_id
+                ON CONFLICT (user_id) DO UPDATE
+                SET next_sequence = current.next_sequence + EXCLUDED.next_sequence
+                RETURNING user_id, next_sequence
+            ), log_insert AS (
+                INSERT INTO im_v2.user_sync_log
+                    (user_id, user_sync_sequence, source_event_id,
+                     projection_kind, payload, created_at)
+                SELECT event.user_id,
+                       sequence.next_sequence - event.user_event_count
+                           + event.user_sequence_ordinal,
+                       event.source_event_id, event.projection_kind,
+                       event.payload, event.created_at
+                FROM numbered_projection_events AS event
+                JOIN sequence_insert AS sequence USING (user_id)
+                RETURNING user_id, source_event_id, projection_kind
+            ), pair_update AS (
+                UPDATE im_v2.direct_room_pairs AS pair
+                SET lower_profile_visible_to_higher = CASE
+                        WHEN pair.lower_user_id = needed.sender_id THEN TRUE
+                        ELSE pair.lower_profile_visible_to_higher
+                    END,
+                    higher_profile_visible_to_lower = CASE
+                        WHEN pair.higher_user_id = needed.sender_id THEN TRUE
+                        ELSE pair.higher_profile_visible_to_lower
+                    END,
+                    lower_can_send = CASE
+                        WHEN pair.lower_user_id = needed.sender_id THEN TRUE
+                        ELSE pair.lower_can_send
+                    END,
+                    higher_can_send = CASE
+                        WHEN pair.higher_user_id = needed.sender_id THEN TRUE
+                        ELSE pair.higher_can_send
+                    END
+                FROM needed
+                WHERE pair.room_id = needed.room_id
+                  AND (SELECT count(*) FROM profile) = (SELECT count(*) FROM needed)
+                RETURNING needed.ordinal
+            )
+            SELECT input.ordinal,
+                   EXISTS (
+                       SELECT 1 FROM projection_events AS event
+                       WHERE event.ordinal = input.ordinal
+                         AND event.projection_kind = 'direct_sending_capability'
+                   ) AS sender_capability_inserted,
+                   EXISTS (
+                       SELECT 1 FROM projection_events AS event
+                       WHERE event.ordinal = input.ordinal
+                         AND event.projection_kind = 'direct_room_profile'
+                   ) AS recipient_profile_inserted,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM needed
+                       WHERE needed.ordinal = input.ordinal
+                   ) THEN EXISTS (
+                       SELECT 1 FROM profile
+                       WHERE profile.ordinal = input.ordinal
+                   ) ELSE TRUE END AS profile_exists,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM needed
+                       WHERE needed.ordinal = input.ordinal
+                   ) THEN EXISTS (
+                       SELECT 1 FROM pair_update
+                       WHERE pair_update.ordinal = input.ordinal
+                   ) ELSE TRUE END AS pair_updated,
+                   (SELECT count(*)::bigint FROM projection_events) AS expected_event_count,
+                   (SELECT count(*)::bigint FROM log_insert) AS inserted_event_count
+            FROM input
+            ORDER BY input.ordinal
+            """).all(decoding: DirectPostAcceptanceProjectionBatchRow.self)
+        guard rows.count == appends.count,
+              rows.enumerated().allSatisfy({ $0.offset == $0.element.ordinal }),
+              rows.allSatisfy(\.profileExists),
+              rows.allSatisfy(\.pairUpdated),
+              let first = rows.first,
+              rows.allSatisfy({
+                  $0.expectedEventCount == first.expectedEventCount
+                      && $0.insertedEventCount == first.insertedEventCount
+              }),
+              first.expectedEventCount == first.insertedEventCount
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return rows.map {
+            .init(
+                senderCapabilityInserted: $0.senderCapabilityInserted,
+                recipientProfileInserted: $0.recipientProfileInserted
+            )
+        }
+    }
+
     private func appendDirectPostAcceptanceProjections(
         roomID: UUID,
         senderID: UUID,
@@ -4359,6 +4552,46 @@ private struct DirectProjectionShadowRequest {
 private struct DirectPostAcceptanceProjectionChanges {
     let senderCapabilityInserted: Bool
     let recipientProfileInserted: Bool
+}
+private struct DirectPostAcceptanceProjectionInput: Encodable {
+    let ordinal: Int
+    let roomID: UUID
+    let senderID: UUID
+    let recipientID: UUID
+    let senderProfileVisibleToRecipient: Bool
+    let senderCanSend: Bool?
+    let sourceEventID: UUID
+    let createdAtUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case roomID = "room_id"
+        case senderID = "sender_id"
+        case recipientID = "recipient_id"
+        case senderProfileVisibleToRecipient = "sender_profile_visible_to_recipient"
+        case senderCanSend = "sender_can_send"
+        case sourceEventID = "source_event_id"
+        case createdAtUnixSeconds = "created_at_unix_seconds"
+    }
+}
+private struct DirectPostAcceptanceProjectionBatchRow: Decodable {
+    let ordinal: Int
+    let senderCapabilityInserted: Bool
+    let recipientProfileInserted: Bool
+    let profileExists: Bool
+    let pairUpdated: Bool
+    let expectedEventCount: Int64
+    let insertedEventCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case senderCapabilityInserted = "sender_capability_inserted"
+        case recipientProfileInserted = "recipient_profile_inserted"
+        case profileExists = "profile_exists"
+        case pairUpdated = "pair_updated"
+        case expectedEventCount = "expected_event_count"
+        case insertedEventCount = "inserted_event_count"
+    }
 }
 private struct DirectMessagePolicySnapshotRow: Decodable {
     let recipientUserID: UUID

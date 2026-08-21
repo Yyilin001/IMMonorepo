@@ -8874,6 +8874,45 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return false
             })
             #expect(try await count("im_v2.stranger_message_windows", on: sql) == 2)
+            let coldProjectionRows = try await sql.raw("""
+                SELECT user_id, user_sync_sequence, source_event_id, projection_kind
+                FROM im_v2.user_sync_log
+                WHERE source_event_id IN
+                    ('00000000-0000-0000-0000-00000000c032'::uuid,
+                     '00000000-0000-0000-0000-00000000c036'::uuid)
+                ORDER BY user_id, user_sync_sequence
+                """).all(decoding: DirectBatchProjectionSyncAssertionRow.self)
+            #expect(coldProjectionRows.count == 4)
+            #expect(coldProjectionRows.filter {
+                $0.userID == senderUUID
+                    && $0.projectionKind == "direct_sending_capability"
+            }.count == 2)
+            #expect(coldProjectionRows.filter {
+                $0.projectionKind == "direct_room_profile"
+            }.count == 2)
+            let senderCapabilitySequences = coldProjectionRows
+                .filter { $0.userID == senderUUID }
+                .map(\.userSyncSequence)
+            #expect(senderCapabilitySequences.count == 2)
+            if senderCapabilitySequences.count == 2 {
+                #expect(senderCapabilitySequences[1] == senderCapabilitySequences[0] + 1)
+            }
+            let coldPairStates = try await sql.raw("""
+                SELECT lower_profile_visible_to_higher,
+                       higher_profile_visible_to_lower,
+                       lower_can_send, higher_can_send
+                FROM im_v2.direct_room_pairs
+                WHERE room_id IN
+                    (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
+                     \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
+                """).all(decoding: DirectPairProjectionStateAssertionRow.self)
+            #expect(coldPairStates.count == 2)
+            #expect(coldPairStates.allSatisfy {
+                $0.lowerProfileVisibleToHigher || $0.higherProfileVisibleToLower
+            })
+            #expect(coldPairStates.allSatisfy {
+                $0.lowerCanSend == true || $0.higherCanSend == true
+            })
             let coldCreditSnapshot = await shardCredits.snapshot()
             #expect(coldCreditSnapshot.databaseCreditsReserved == 2)
             #expect(coldCreditSnapshot.committedCredits == 2)
@@ -11704,6 +11743,19 @@ private struct DirectPairProjectionStateAssertionRow: Decodable, Equatable {
         case higherProfileVisibleToLower = "higher_profile_visible_to_lower"
         case lowerCanSend = "lower_can_send"
         case higherCanSend = "higher_can_send"
+    }
+}
+private struct DirectBatchProjectionSyncAssertionRow: Decodable {
+    let userID: UUID
+    let userSyncSequence: Int64
+    let sourceEventID: UUID
+    let projectionKind: String
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case userSyncSequence = "user_sync_sequence"
+        case sourceEventID = "source_event_id"
+        case projectionKind = "projection_kind"
     }
 }
 private struct MessageOperationCardinalityAssertionRow: Decodable, Equatable {
