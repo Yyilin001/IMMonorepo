@@ -122,3 +122,30 @@ message P95 remains within the prior clean 100-room range (136--143 ms), while
 the two-member room no longer enters long-delay mode. This proves the profile
 selects the intended workload class; it does not claim that a single ordered
 conversation can be made infinitely parallel.
+
+## 1,000 msg/s read/write admission A/B — 2026-08-22
+
+The 800 msg/s, 100-room workload is stable at 796 ACK/s with two in-flight
+commands per connection. At requested 1,000 msg/s, PostgreSQL write admission
+still had no queue or rejection, but room-log pulls began queueing behind the
+12 reserved interactive-read permits. A read-disabled diagnostic improved ACK
+from 53,526 to 57,379 and message P95 from 229 to 176 ms, establishing that
+the next limit was foreground read competition rather than a canonical write
+or WAL failure.
+
+The production single-host reservation was then changed within the existing
+32-permit isolated foreground pool, from append/control/read `16/4/12` to
+`12/4/16`. It neither opens extra PostgreSQL connections nor changes
+`fsync=on`, `synchronous_commit=on`, or `full_page_writes=on`.
+
+| 100 connections, 100 direct rooms, 1,000 msg/s, 2 in-flight, room-log enabled | ACKed | Client skips | Message P95 | Room-log P95 | Failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `16/4/12` reservation | 53,526 | 6,226 | 229 ms | 193 ms | 0 |
+| `12/4/16` reservation | 55,844 | 4,058 | 207 ms | 129 ms | 0 |
+
+The read-biased reservation improved ACK by 4.3%, reduced client skips by
+34.8%, reduced message P95 by 9.6%, and reduced room-log P95 by 33.2%. The
+same run recorded 4,779 canonical append CTE calls for 55,817 rows (11.7
+messages per transaction). This is a measured single-host improvement; it is
+not a substitute for future conversation-affine database shards once the
+canonical write lane itself becomes saturated.
