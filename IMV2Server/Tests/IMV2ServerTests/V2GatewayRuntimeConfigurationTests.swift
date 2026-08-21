@@ -198,7 +198,7 @@ struct V2GatewayRuntimeConfigurationTests {
             .directRoomLogAppendBatchHighActivityWindowMilliseconds == 1000)
 
         // The single-host deployment reserves the same 32 isolated
-        // foreground permits as 12/4/16 (append/control/read). This protects
+        // foreground permits as 10/4/18 (append/control/read). This protects
         // the read-biased 1,000 msg/s profile from being rejected on startup
         // while retaining an explicit physical-pool fence.
         var readBiasedForeground = runtimeValues
@@ -206,15 +206,15 @@ struct V2GatewayRuntimeConfigurationTests {
         readBiasedForeground["IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP"] = "8"
         readBiasedForeground["IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP"] = "4"
         readBiasedForeground["IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP"] = "2"
-        readBiasedForeground["IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT"] = "12"
+        readBiasedForeground["IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT"] = "10"
         readBiasedForeground["IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT"] = "4"
-        readBiasedForeground["IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT"] = "16"
+        readBiasedForeground["IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT"] = "18"
         readBiasedForeground["IM_V2_SYNC_DATABASE_WORK_LIMIT"] = "16"
         let readBiasedForegroundConfiguration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(readBiasedForeground)
         )
-        #expect(readBiasedForegroundConfiguration.foregroundWriteDatabaseWorkLimit == 12)
-        #expect(readBiasedForegroundConfiguration.interactiveReadDatabaseWorkLimit == 16)
+        #expect(readBiasedForegroundConfiguration.foregroundWriteDatabaseWorkLimit == 10)
+        #expect(readBiasedForegroundConfiguration.interactiveReadDatabaseWorkLimit == 18)
 
         var incompleteAdaptiveHighActivityAppendBatch = appendBatch
         incompleteAdaptiveHighActivityAppendBatch[
