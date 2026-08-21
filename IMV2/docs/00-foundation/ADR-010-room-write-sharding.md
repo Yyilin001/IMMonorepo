@@ -92,3 +92,54 @@ operator-only route 变更审计。这些是阶段 2 多物理 store 上线前�
 阶段 1：停止向新 shard 创建 room，旧 room 不动；新 route epoch 只影响未来创建。
 阶段 2：在 retention 窗口内将 route owner 回到旧 store，使用 ADR-006 的
 forwarding/final-verify 语义。任何已写入的新 owner room 不可通过修改环境变量回滚。
+
+## 2026-08-22 实现就绪度审计
+
+本次审计的目的是区分已存在的**逻辑 admission shard**和可真正分散 PostgreSQL
+WAL/索引/提交压力的**物理 room store**，防止以环境变量中多个 shard 名称误报容量。
+
+已确认的阶段 1 事实：
+
+1. `rooms.room_shard_id` 已被创建直聊时的稳定 direct-pair router 写入，并被后续
+   room mutation 读取为 admission owner；现有 room 不会因运行时列表变化被重散列。
+2. `V2DirectRoomShardRouter`、group 创建和 `shard_admission_pools` lease 已覆盖逻辑
+   owner 的创建与容量栅栏。它们都仍在控制 PostgreSQL 的同一 schema/实例内。
+3. 用户投影侧已经有可借鉴的物理 store registry 和版本化迁移基础：逻辑 user bucket
+   映射由部署私有 `IM_V2_USER_SHARD_STORES_JSON` 提供，copy/verify、forwarding、
+   cutover、retention 和 rollback 在 ADR-006 的边界内运行。
+
+尚未实施、因此禁止提前宣称为物理 room 分片的部分：
+
+1. Gateway 当前只构造一个 `PostgresV2RoomWriteStore(database: database)`；membership、
+   withdraw、edit、reaction、moderation、group capability 和 room-log Store 也全部接收
+   同一个 `database`。没有 `RoomStoreRegistry`，命令尚不能按已持久化 owner 转到不同
+   PostgreSQL connection/store。
+2. `IM_V2_DIRECT_ROOM_SHARD_ID` 是创建时的逻辑 shard 列表，而不是物理数据库地址
+   registry；改变它不能移动已有 room，更不能分散现有 `messages` 索引或 WAL writer。
+3. room acceptance 的控制面、room state 和部分 fan-out durable state 仍同库原子提交。
+   在没有显式 outbox/inbox ownership split 前，不能把其中任意表直接挪到新库，也不能
+   引入跨库事务或双写来“试运行”。
+
+阶段 2 应按以下顺序实施，且每一步都应有独立故障注入与 A/B 证据：
+
+1. 定义部署私有 `RoomStoreRegistry`：逻辑 room shard → `{database URL, schema, epoch}`；
+   禁止把物理地址写入 room row、event、delivery、日志或客户端响应。启动时验证 registry
+   唯一性、schema、连接池总额与每个物理 store 的 migration version。
+2. 引入只读 `RoomRouteStore` 和带 epoch 的 room owner record；所有 room command 先按
+   room ID 解析 owner，再由 registry 取得同一 owner store。每个 command transaction
+   必须继续在一个 room store 内完成 room、membership、admission、message 和 event 的
+   原子提交。
+3. 先只让**新创建**的 room 写入第二个物理 store；禁止迁移历史 room。验证断连重试、
+   operation-key 幂等、member revoke、同 room 连续写、cache miss、outbox retry 与
+   目标 store 不可达时不会误写另一个 owner。
+4. 仅在上述新 room 多 store 稳定后，按 ADR-006 类似的 copy → verify → forwarding →
+   cutover → retention 流程迁移一个指定 room；切换和回滚均必须由 operator-only、epoch
+   fenced API 驱动，不能由环境变量或人工 SQL 直接改 `room_shard_id`。
+5. 在相同 payload、连接数、room 分布和可靠性设置下，采集每个 store 的 ACK/s、P95/P99、
+   WAL bytes/fsync time、checkpoint、index I/O、锁等待、连接池队列及数据一致性审计。
+   只有各 store 的写入确实分散且没有 sequence/authorization/idempotency 差异，才可以
+   报告横向容量提升。
+
+在用户明确批准新增物理 PostgreSQL store 之前，本 ADR 的实现状态保持“阶段 1 已实施”。
+单机阶段继续以 `fsync=on`、`synchronous_commit=on`、`full_page_writes=on` 为基线，
+并只接受不改变授权、幂等或 ACK 持久性语义的测得优化。
