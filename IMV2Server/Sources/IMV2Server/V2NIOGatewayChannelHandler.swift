@@ -27,6 +27,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let promise: EventLoopPromise<Void>
     }
     private var pendingResponseWrite: PendingResponseWrite?
+    /// A bounded decoder batch left later wire frames in the byte stream.
+    /// Drain those before later TCP chunks so response order remains FIFO.
+    private var needsFrameDrain = false
     private var closed = false
     // `V2GatewayByteStream` is an actor, so installing its channel callbacks
     // crosses an async boundary. Never let an authenticate frame register in
@@ -156,12 +159,19 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private func processNext(context: ChannelHandlerContext) {
         guard callbacksReady, !closed, !processing,
               context.channel.isWritable,
-              !pending.isEmpty
+              (needsFrameDrain || !pending.isEmpty)
         else { return }
         processing = true
-        guard let inbound = pending.popFirst() else {
-            processing = false
-            return
+        let inbound: Data
+        if needsFrameDrain {
+            needsFrameDrain = false
+            inbound = Data()
+        } else {
+            guard let next = pending.popFirst() else {
+                processing = false
+                return
+            }
+            inbound = next
         }
         let stream = stream
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
@@ -171,7 +181,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
-                try await stream.receive(inbound) { response in
+                let needsFrameDrain = try await stream.receive(inbound) { response in
                     try Task.checkCancellation()
                     try await eventLoop.flatSubmit {
                         boundHandler.value.writeWhenWritable(
@@ -181,7 +191,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     }.get()
                 }
                 try Task.checkCancellation()
-                outcome = .success(authenticated: await stream.isAuthenticated())
+                outcome = .success(
+                    authenticated: await stream.isAuthenticated(),
+                    needsFrameDrain: needsFrameDrain
+                )
             } catch {
                 outcome = .failure(reason: v2GatewayClosureReason(for: error))
             }
@@ -202,7 +215,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         guard !closed else { return }
         processing = false
         switch outcome {
-        case .success(let authenticated):
+        case .success(let authenticated, let needsFrameDrain):
+            self.needsFrameDrain = needsFrameDrain
             if authenticated {
                 authenticationDeadline?.cancel()
                 authenticationDeadline = nil
@@ -367,7 +381,7 @@ private enum V2GatewayTransportWriteError: Error {
 }
 
 private enum V2GatewayProcessingOutcome: Sendable {
-    case success(authenticated: Bool)
+    case success(authenticated: Bool, needsFrameDrain: Bool)
     case failure(reason: V2GatewayConnectionClosure)
 }
 

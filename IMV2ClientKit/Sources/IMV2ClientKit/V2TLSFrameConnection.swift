@@ -513,8 +513,17 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private func nextFrame(connection: NWConnection) async throws -> V2Frame {
         if !bufferedFrames.isEmpty { return bufferedFrames.removeFirst() }
         while true {
-            let bytes = try await receiveChunk(connection: connection)
-            let frames = try decoder.append(bytes)
+            let frames: [V2Frame]
+            if decoder.hasBufferedBytes {
+                let bufferedFrames = try decoder.append(Data())
+                if bufferedFrames.isEmpty {
+                    frames = try decoder.append(try await receiveChunk(connection: connection))
+                } else {
+                    frames = bufferedFrames
+                }
+            } else {
+                frames = try decoder.append(try await receiveChunk(connection: connection))
+            }
             if let first = frames.first {
                 bufferedFrames.append(contentsOf: frames.dropFirst())
                 return first

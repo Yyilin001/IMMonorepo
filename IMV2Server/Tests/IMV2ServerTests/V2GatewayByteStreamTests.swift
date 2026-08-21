@@ -104,6 +104,59 @@ struct V2GatewayByteStreamTests {
         #expect(v2GatewayClosureReason(for: V2FrameCodecError.invalidMagic) == .requestFailure)
     }
 
+    @Test("a dense valid transport read drains in bounded FIFO batches")
+    func drainsDenseCoalescedFramesWithoutClosing() async throws {
+        let limits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            maximumFramesPerAppend: 4,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let stream = V2GatewayByteStream(
+            frameLimits: limits,
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
+            ),
+            handler: ByteStreamCommandFake(),
+            registry: V2DeviceConnectionRegistry()
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+
+        var denseWire = Data()
+        for requestID in 3...7 {
+            var heartbeat = IMV2Envelope()
+            heartbeat.requestID = UInt64(requestID)
+            heartbeat.protocolVersion = UInt32(protocolVersion)
+            heartbeat.heartbeat = .init()
+            denseWire.append(try encoded(heartbeat, version: protocolVersion))
+        }
+        let recorder = OutboundFrameRecorder()
+        #expect(try await stream.receive(denseWire) { bytes in
+            await recorder.append(bytes)
+        })
+        #expect(await recorder.count() == 4)
+        #expect(!(try await stream.receive(Data()) { bytes in
+            await recorder.append(bytes)
+        }))
+        let responseBytes = await recorder.all()
+        let responseIDs = try responseBytes.map { try decode($0).requestID }
+        #expect(responseIDs == [3, 4, 5, 6, 7])
+    }
+
     @Test("availability hints are asynchronous, state-free sync prompts")
     func emitsSyncAvailableForRegisteredUser() async throws {
         let registry = V2DeviceConnectionRegistry()
@@ -236,6 +289,7 @@ private actor OutboundFrameRecorder {
     }
 
     func count() -> Int { frames.count }
+    func all() -> [Data] { frames }
 }
 
 private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {

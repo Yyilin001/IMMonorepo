@@ -133,8 +133,11 @@ public struct V2Frame: Equatable, Sendable {
 public struct V2FrameLimits: Equatable, Sendable {
     public let maximumPayloadBytes: Int
     /// A transport read may coalesce arbitrary TCP packets. Bounding the
-    /// number of complete frames decoded from one read keeps the resulting
+    /// number of complete frames decoded in one drain keeps the resulting
     /// command/response batch finite even when every frame has an empty body.
+    /// Frames beyond the bound remain buffered for a subsequent drain: a
+    /// coalesced, otherwise-valid TCP read is not malformed just because it
+    /// contains more than one scheduling quantum of work.
     public let maximumFramesPerAppend: Int
     public let acceptedVersions: Set<UInt8>
 
@@ -176,14 +179,18 @@ public struct V2FrameDecoder: Sendable {
 
     public init(limits: V2FrameLimits) { self.limits = limits }
 
+    /// True when a previous append left bytes to be completed or drained.
+    /// Appending an empty `Data` value drains one further bounded batch. If
+    /// the remaining bytes are only a partial frame, that drain is empty and
+    /// the bytes stay buffered until the next transport read.
+    public var hasBufferedBytes: Bool { !buffered.isEmpty }
+
     public mutating func append(_ bytes: Data) throws -> [V2Frame] {
         buffered.append(bytes)
         var result: [V2Frame] = []
         var consumedBytes = 0
-        while buffered.count - consumedBytes >= V2Frame.headerLength {
-            guard result.count < limits.maximumFramesPerAppend else {
-                throw V2FrameCodecError.tooManyFramesInBatch(limits.maximumFramesPerAppend)
-            }
+        while result.count < limits.maximumFramesPerAppend,
+              buffered.count - consumedBytes >= V2Frame.headerLength {
             guard readUInt16(buffered, at: consumedBytes) == V2Frame.magic else {
                 throw V2FrameCodecError.invalidMagic
             }

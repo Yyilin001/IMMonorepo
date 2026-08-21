@@ -29,8 +29,8 @@ struct V2FrameCodecTests {
         #expect(throws: Never.self) { try decoder.finish() }
     }
 
-    @Test("a dense coalesced read has an explicit frame-count bound")
-    func rejectsExcessiveCoalescedFrames() throws {
+    @Test("a dense coalesced read drains in bounded frame batches")
+    func drainsExcessiveCoalescedFramesInBatches() throws {
         let limits = try V2FrameLimits(
             maximumPayloadBytes: 0,
             maximumFramesPerAppend: 4,
@@ -44,9 +44,10 @@ struct V2FrameCodecTests {
             ))
         }
         var decoder = V2FrameDecoder(limits: limits)
-        #expect(throws: V2FrameCodecError.tooManyFramesInBatch(4)) {
-            _ = try decoder.append(wire)
-        }
+        #expect(try decoder.append(wire).map(\.requestID) == [1, 2, 3, 4])
+        #expect(decoder.hasBufferedBytes)
+        #expect(try decoder.append(Data()).map(\.requestID) == [5])
+        #expect(!decoder.hasBufferedBytes)
     }
 
     @Test("a declared oversize payload fails before payload bytes arrive")

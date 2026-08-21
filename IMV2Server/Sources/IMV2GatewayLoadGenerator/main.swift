@@ -1075,7 +1075,12 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         do {
             let bytes = Data(unwrapInboundIn(data).readableBytesView)
-            for frame in try decoder.append(bytes) { try receive(frame, context: context) }
+            try receiveDecodedFrames(try decoder.append(bytes), context: context)
+            while decoder.hasBufferedBytes {
+                let frames = try decoder.append(Data())
+                guard !frames.isEmpty else { break }
+                try receiveDecodedFrames(frames, context: context)
+            }
         } catch {
             if authenticationCompleted {
                 FileHandle.standardError.write(
@@ -1084,6 +1089,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             }
             failAuthentication(error, context: context)
         }
+    }
+
+    private func receiveDecodedFrames(_ frames: [V2Frame], context: ChannelHandlerContext) throws {
+        for frame in frames { try receive(frame, context: context) }
     }
 
     func channelInactive(context: ChannelHandlerContext) {

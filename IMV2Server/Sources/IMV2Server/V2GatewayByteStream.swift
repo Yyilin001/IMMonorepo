@@ -45,8 +45,13 @@ public actor V2GatewayByteStream {
     /// cannot continue from an unknown protocol state.
     public func receive(_ bytes: Data) async throws -> [Data] {
         var responses: [Data] = []
-        try await receive(bytes) { response in
+        var needsFrameDrain = try await receive(bytes) { response in
             responses.append(response)
+        }
+        while needsFrameDrain {
+            needsFrameDrain = try await receive(Data()) { response in
+                responses.append(response)
+            }
         }
         return responses
     }
@@ -57,7 +62,7 @@ public actor V2GatewayByteStream {
     public func receive(
         _ bytes: Data,
         respond: (Data) async throws -> Void
-    ) async throws {
+    ) async throws -> Bool {
         do {
             let inbound = try decoder.append(bytes)
             for frame in inbound {
@@ -72,6 +77,12 @@ public actor V2GatewayByteStream {
                 try await updateHybridGroupSubscription(inbound: inboundEnvelope, response: response)
                 try await respond(try V2FrameCodec.encode(response, limits: frameLimits))
             }
+            // A full decode quantum can leave a valid complete frame behind.
+            // The NIO owner schedules one continuation before it consumes a
+            // later TCP chunk, retaining per-connection wire order. A trailing
+            // partial frame costs at most one empty drain and remains buffered
+            // for the next actual transport read.
+            return inbound.count == frameLimits.maximumFramesPerAppend && decoder.hasBufferedBytes
         } catch {
             // A framing failure may leave an invalid prefix buffered. Session
             // closure fences further commands, but resetting the parser also
