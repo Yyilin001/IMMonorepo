@@ -1954,6 +1954,30 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         sql: any SQLDatabase
     ) async throws -> [DirectPostAcceptanceProjectionChanges] {
         guard !appends.isEmpty else { return [] }
+        // The authoritative preflight has already locked every direct-pair
+        // row and read the current visibility/capability facts. Once both
+        // pair-local producer markers are established, another plain message
+        // cannot produce a profile or capability Sync record. Avoid sending
+        // the otherwise-empty set CTE to PostgreSQL for that steady state:
+        // under load it was one complete SQL statement per append batch even
+        // though `needed`, `projection_events`, and `pair_update` were empty.
+        //
+        // This is deliberately a batch-wide short circuit. If even one room
+        // still needs a first-message projection, the existing CTE runs for
+        // the complete batch so sequence allocation, Sync Log insertion, and
+        // pair marker updates remain one atomic transaction.
+        guard appends.contains(where: {
+            !$0.directContext.senderProfileVisibleToRecipient
+                || $0.directContext.senderCanSend != true
+        }) else {
+            return Array(
+                repeating: .init(
+                    senderCapabilityInserted: false,
+                    recipientProfileInserted: false
+                ),
+                count: appends.count
+            )
+        }
         let inputs = appends.enumerated().map { ordinal, append in
             DirectPostAcceptanceProjectionInput(
                 ordinal: ordinal,

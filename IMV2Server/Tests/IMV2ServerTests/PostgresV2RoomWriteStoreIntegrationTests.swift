@@ -9016,6 +9016,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected post-revision cache warm acceptance")
                 return
             }
+            let projectionRecordsBeforeSteadyStateBatch = try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM im_v2.user_sync_log
+                WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
+                """).first(decoding: CountRow.self)
             let batched = try await writer.acceptAtomically(requests: [
                 .init(
                     command: try .init(
@@ -9054,6 +9059,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 if case .accepted(let message) = $0 { return message.usesRoomEventLog }
                 return false
             })
+            let projectionRecordsAfterSteadyStateBatch = try await sql.raw("""
+                SELECT COUNT(*)::bigint AS value
+                FROM im_v2.user_sync_log
+                WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
+                """).first(decoding: CountRow.self)
+            #expect(
+                projectionRecordsAfterSteadyStateBatch?.value
+                    == projectionRecordsBeforeSteadyStateBatch?.value
+            )
             try await sql.raw("""
                 DELETE FROM im_v2.user_relationships
                 WHERE lower_user_id = \(bind: senderUUID)
