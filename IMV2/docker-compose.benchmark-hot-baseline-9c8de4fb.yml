@@ -1,0 +1,10 @@
+# Controlled A/B baseline for the hot direct-room write experiment. It uses
+# the same seeded immutable capacity profile as the candidate, but deliberately
+# leaves room-level command credits disabled so the only intended behavioural
+# difference is the candidate's hot-room implementation.
+services:
+  gateway:
+    image: imv2-server:empty-direct-projection-9c8de4fb
+    environment:
+      IM_V2_CAPACITY_PROFILE_ID: "loadtest-v12"
+      IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE: "0"
