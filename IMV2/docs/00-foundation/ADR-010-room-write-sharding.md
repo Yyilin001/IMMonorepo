@@ -1,6 +1,6 @@
 # ADR-010：Room 写入路由与消息存储拆分
 
-状态：提案，等待容量目标与运维存储拓扑批准  
+状态：阶段 1 已实施；阶段 2 等待容量目标与运维存储拓扑批准
 日期：2026-08-21  
 所有者：V2 存储/网关
 
@@ -20,24 +20,23 @@ batch 延迟不会提供数量级提升。
 
 现有 schema 已持久化 `rooms.room_shard_id`，所有后续 room mutation 都从 room
 row 读取该值。负载环境已有 `rooms-load-00` 至 `rooms-load-07` 八个 admission
-shard；不过新直聊由单个 `IM_V2_DIRECT_ROOM_SHARD_ID` 创建，因此生产创建路径
-仍是静态 shard 选择。逻辑 shard 只分散 admission pool 行，不会在同一 PostgreSQL
-实例中分散 `messages` 索引、WAL 或磁盘写入。
+shard；新直聊已按规范化 pair 的固定 FNV-1a hash，从有序的
+`IM_V2_DIRECT_ROOM_SHARD_ID` 集合选择一个 owner。逻辑 shard 只分散 admission
+pool 行，不会在同一 PostgreSQL 实例中分散 `messages` 索引、WAL 或磁盘写入。
 
 ## 决定
 
 将 room shard 作为 **持久化且不可隐式重算的 room 写入 owner**，分两步推进：
 
-### 阶段 1：单库逻辑路由准备（不作为单机提速承诺）
+### 阶段 1：单库逻辑路由准备（已实施；不作为单机提速承诺）
 
-- 增加版本化 room route 控制面，包含 route epoch、可创建 shard 集和停用状态；
-- 只在直聊首次创建、pair advisory lock 持有期间，按规范化 pair 的稳定 hash 和
-  当前 route epoch 选择一个可创建 shard；将结果写入 `rooms.room_shard_id`；
+- 只在直聊首次创建、pair advisory lock 持有期间，按规范化 pair 的稳定 hash
+  选择一个可创建 shard；将结果写入 `rooms.room_shard_id`；
 - 已有 room 永远按其持久化 `room_shard_id` 读写，配置变化不得重散列或迁移它；
 - 每个可创建 shard 必须在启用路由前拥有有效
   `shard_admission_pools(room_shard_id, capacity_profile_id)` lease；
-- route change 采用 expand → create-on-new-route → drain/explicit migration
-  → disable，绝不以 Gateway 环境变量覆盖已存在 room。
+- 现行有序 shard 集的顺序是 route contract；变更采用 expand → create-on-new-route
+  → drain/explicit migration → disable，绝不以 Gateway 环境变量覆盖已存在 room。
 
 该阶段仅降低 shard-admission 行热点、建立可迁移的 owner 语义，并验证路由故障
 处理；它不应被报告为同机 `messages` 写吞吐提升。
@@ -67,14 +66,17 @@ shard；不过新直聊由单个 `IM_V2_DIRECT_ROOM_SHARD_ID` 创建，因此生
 
 ## 实施门槛与验证
 
-阶段 1 的合入门槛：
+阶段 1 已有的合入证据：
 
-1. 创建幂等、pair 并发创建、route epoch 变更、禁用 shard 和 lease 缺失的单元/PG
-   集成测试；
-2. 证明已有 room 不受 route 配置变更影响；
-3. 8 个 logical shard 与 1 个 logical shard 的同数据库 A/B，只记录 admission
-   contention，不把其当作 messages/WAL 容量结论；
-4. route 变更和 rollback 操作有 operator-only 审计记录。
+1. 创建幂等、pair 并发创建、缺失 lease 和固定 hash vector 的单元/PG 集成测试；
+2. `rooms.room_shard_id` 是后续 mutation 的唯一 owner 来源，因此已有 room 不会被
+   新 route 重散列；
+3. 负载环境使用 8 个 logical shard；它只用于降低 admission contention，不作为
+   `messages`/WAL 容量结论。
+
+阶段 1 尚未实施的运维控制面是持久化 route epoch、shard disable 状态和
+operator-only route 变更审计。这些是阶段 2 多物理 store 上线前的前置条件，不能
+用环境变量变更替代。
 
 阶段 2 的合入门槛：
 

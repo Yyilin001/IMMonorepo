@@ -515,6 +515,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.userShardRoute.observedRouterEpoch == 7)
         #expect(configuration.userShardStorage == [try .init(bucket: "users-primary", databaseURL: "postgres://v2:password@db/im_v2")])
         #expect(configuration.directRoomShardID == "rooms-primary")
+        #expect(configuration.directRoomShardRouter.shardIDs == ["rooms-primary"])
         #expect(configuration.groupRoomShardID == "rooms-primary")
         #expect(configuration.strangerMessagePolicy.maximumMessagesPerWindow == 3)
         #expect(configuration.strangerMessagePolicy.window == 86_400)
@@ -522,6 +523,16 @@ struct V2GatewayRuntimeConfigurationTests {
         guard case .durablePollingOnly = configuration.fanoutHint else {
             Issue.record("Expected durable polling without NATS configuration")
             return
+        }
+    }
+
+    @Test("runtime rejects a malformed direct room owner route before readiness")
+    func rejectsMalformedDirectRoomShardRoute() {
+        var values = runtimeValues
+        values["IM_V2_DIRECT_ROOM_SHARD_ID"] = "rooms-load-00,,rooms-load-01"
+
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_SHARD_ID")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
     }
 

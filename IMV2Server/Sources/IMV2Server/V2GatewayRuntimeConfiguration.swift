@@ -328,6 +328,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let userShardRoute: V2UserShardRoute
     public let userShardStorage: [V2UserShardStorageConfiguration]
     public let directRoomShardID: String
+    /// Parsed at process start so an invalid room-owner route fails readiness
+    /// rather than the first direct-room creation request.
+    public let directRoomShardRouter: V2DirectRoomShardRouter
     public let groupRoomShardID: String
     public let strangerMessagePolicy: V2StrangerMessagePolicy
     public let push: V2PushRuntimeConfiguration
@@ -820,6 +823,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                     : databasePolicy.maximumConnectionsPerEventLoop
         )
         directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
+        do {
+            directRoomShardRouter = try .init(rawValue: directRoomShardID)
+        } catch {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_SHARD_ID")
+        }
         groupRoomShardID = try Self.required("IM_V2_GROUP_ROOM_SHARD_ID", environment: environment)
         strangerMessagePolicy = try .init(
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),

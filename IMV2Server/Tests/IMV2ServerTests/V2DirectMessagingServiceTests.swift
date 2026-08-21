@@ -57,16 +57,30 @@ struct V2DirectMessagingServiceTests {
         #expect(Set(["rooms-00", "rooms-01", "rooms-02", "rooms-03"]).contains(shards[0]))
     }
 
+    @Test("direct shard route has fixed cross-binary vectors")
+    func directShardRouteHasFixedVectors() throws {
+        let router = try V2DirectRoomShardRouter(rawValue: "rooms-00,rooms-01,rooms-02,rooms-03")
+        #expect(router.shardIDs == ["rooms-00", "rooms-01", "rooms-02", "rooms-03"])
+        #expect(router.shardID(
+            for: try .init("00000000-0000-0000-0000-000000000811"),
+            and: try .init("00000000-0000-0000-0000-000000000812")
+        ) == "rooms-00")
+        #expect(router.shardID(
+            for: try .init("00000000-0000-0000-0000-000000000001"),
+            and: try .init("00000000-0000-0000-0000-000000000005")
+        ) == "rooms-03")
+    }
+
     @Test("rejects malformed or duplicate direct shard pools")
     func rejectsInvalidShardPools() throws {
-        #expect(throws: V2DirectMessagingPolicyError.invalidLimit) {
+        #expect(throws: V2DirectRoomShardRouter.Error.invalidShardIDs) {
             _ = try V2DirectMessagingService(
                 store: DirectStoreSpy(),
                 capacityProfile: try profile(),
                 roomShardID: "rooms-00,,rooms-01"
             )
         }
-        #expect(throws: V2DirectMessagingPolicyError.invalidLimit) {
+        #expect(throws: V2DirectRoomShardRouter.Error.invalidShardIDs) {
             _ = try V2DirectMessagingService(
                 store: DirectStoreSpy(),
                 capacityProfile: try profile(),

@@ -14,6 +14,48 @@ public struct V2StrangerMessagePolicy: Equatable, Sendable {
 
 public enum V2DirectMessagingPolicyError: Error, Equatable, Sendable { case invalidLimit }
 
+/// An ordered, deployment-controlled set of owners for newly-created direct
+/// rooms. The selected owner is persisted on the room, so this router is used
+/// only at creation time; it must never be consulted to re-route an existing
+/// room mutation.
+public struct V2DirectRoomShardRouter: Equatable, Sendable {
+    public enum Error: Swift.Error, Equatable, Sendable { case invalidShardIDs }
+
+    public let shardIDs: [String]
+
+    /// The comma-separated form is kept for deployment compatibility with the
+    /// existing `IM_V2_DIRECT_ROOM_SHARD_ID` setting. Its order is part of the
+    /// route contract: changing it requires an explicit route rollout.
+    public init(rawValue: String) throws {
+        let shardIDs = rawValue
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        try self.init(shardIDs: shardIDs)
+    }
+
+    public init(shardIDs: [String]) throws {
+        guard (1...64).contains(shardIDs.count),
+              shardIDs.allSatisfy({ !$0.isEmpty }),
+              Set(shardIDs).count == shardIDs.count
+        else { throw Error.invalidShardIDs }
+        self.shardIDs = shardIDs
+    }
+
+    /// FNV-1a is deliberately fixed rather than Swift's randomized `Hasher`:
+    /// every gateway replica and process restart must choose the same owner
+    /// for an unordered user pair.
+    public func shardID(for firstUserID: UserID, and secondUserID: UserID) -> String {
+        guard shardIDs.count > 1 else { return shardIDs[0] }
+        let pair = [firstUserID.rawValue.lowercased(), secondUserID.rawValue.lowercased()].sorted()
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for byte in (pair[0] + "\u{0}" + pair[1]).utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return shardIDs[Int(hash % UInt64(shardIDs.count))]
+    }
+}
+
 public enum V2OpenDirectRoomOutcome: Equatable, Sendable {
     case opened(V2DirectRoom)
     case idempotent(V2DirectRoom)
@@ -65,21 +107,24 @@ public struct V2DirectMessagingIDFactory: Sendable {
 public struct V2DirectMessagingService: Sendable {
     private let store: any V2DirectMessagingStore
     private let capacityProfile: V2CapacityProfile
-    private let roomShardIDs: [String]
+    private let roomShardRouter: V2DirectRoomShardRouter
     private let identifiers: V2DirectMessagingIDFactory
     private let now: @Sendable () -> Date
 
     public init(store: any V2DirectMessagingStore, capacityProfile: V2CapacityProfile, roomShardID: String, identifiers: V2DirectMessagingIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) throws {
-        let shards = roomShardID
-            .split(separator: ",", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard (1...64).contains(shards.count),
-              shards.allSatisfy({ !$0.isEmpty }),
-              Set(shards).count == shards.count
-        else { throw V2DirectMessagingPolicyError.invalidLimit }
+        try self.init(
+            store: store,
+            capacityProfile: capacityProfile,
+            roomShardRouter: .init(rawValue: roomShardID),
+            identifiers: identifiers,
+            now: now
+        )
+    }
+
+    public init(store: any V2DirectMessagingStore, capacityProfile: V2CapacityProfile, roomShardRouter: V2DirectRoomShardRouter, identifiers: V2DirectMessagingIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) throws {
         self.store = store
         self.capacityProfile = capacityProfile
-        self.roomShardIDs = shards
+        self.roomShardRouter = roomShardRouter
         self.identifiers = identifiers
         self.now = now
     }
@@ -89,7 +134,7 @@ public struct V2DirectMessagingService: Sendable {
         return try await store.open(
             command: command,
             capacityProfile: capacityProfile,
-            roomShardID: shardID(for: command),
+            roomShardID: roomShardRouter.shardID(for: command.actorUserID, and: command.targetUserID),
             roomID: try identifiers.makeRoomID(),
             now: now()
         )
@@ -103,19 +148,4 @@ public struct V2DirectMessagingService: Sendable {
         try await store.setUserAddPermission(command: .init(actorUserID: actorUserID, operationID: operationID, permission: permission), now: now())
     }
 
-    /// FNV-1a is deliberately fixed rather than Swift's randomized `Hasher`:
-    /// every gateway replica and process restart must choose the same pool for
-    /// an unordered user pair. Pair locking in the store remains the final
-    /// creation fence, while spreading independent rooms removes a single
-    /// shard-admission row as a process-wide serialization point.
-    private func shardID(for command: V2OpenDirectRoomCommand) -> String {
-        guard roomShardIDs.count > 1 else { return roomShardIDs[0] }
-        let pair = [command.actorUserID.rawValue.lowercased(), command.targetUserID.rawValue.lowercased()].sorted()
-        var hash: UInt64 = 1_469_598_103_934_665_603
-        for byte in (pair[0] + "\u{0}" + pair[1]).utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        return roomShardIDs[Int(hash % UInt64(roomShardIDs.count))]
-    }
 }

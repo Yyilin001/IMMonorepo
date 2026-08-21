@@ -432,7 +432,7 @@ enum IMV2ServerApp {
             let directMessaging = try V2DirectMessagingService(
                 store: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder),
                 capacityProfile: configuration.capacityProfile,
-                roomShardID: configuration.directRoomShardID
+                roomShardRouter: configuration.directRoomShardRouter
             )
             let groupMessaging = try V2GroupMessagingService(
                 store: PostgresV2GroupMessagingStore(database: database),
