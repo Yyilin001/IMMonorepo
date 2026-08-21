@@ -27,6 +27,26 @@ the benchmark precondition, not a performance optimization.
 | `empty-direct-projection-9c8de4fb`, room credits `0` | 33,591 | 3,038 | 129 ms | 95 ms | 0 |
 | `hot-direct-4fdbe649`, room credits `2` (repeat) | 31,609 | 4,526 | 146 ms | 99 ms | 0 |
 
+## Disposable-data control run
+
+The sequential rows above are not a valid latency comparison because each arm
+grew the same room histories. A later run truncated only the disposable load
+data (messages and derived state; accounts/direct rooms were retained), reset
+`pg_stat_statements`, and kept `fsync=on`, `synchronous_commit=on`, and
+`full_page_writes=on`.
+
+| Arm | ACKed messages | Client skips | Message P95 | Room-log P95 | Workload failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `empty-direct-projection-9c8de4fb`, room credits `0` | 35,118 | 942 | 130 ms | 36 ms | 0 |
+| `hot-direct-4fdbe649`, room credits `2` | 35,488 | 897 | 136 ms | 37 ms | 0 |
+
+The candidate acknowledged 1.1% more messages and skipped 4.8% fewer sends,
+but message P95 was 4.6% higher. This does **not** justify enabling the room
+credit path as a latency default. The Gateway in this control campaign already
+had the existing independent-room append batch enabled; a subsequent run with
+the same setting recorded 35,113 ACKs and 143 ms message P95, which is normal
+short-run variation rather than evidence of a new batch benefit.
+
 The first candidate run recorded 14,938 durable room-credit reservations,
 29,876 reserved credits, and 29,830 committed-credit consumes. That proves
 the promoted hot-room path was used for the intended direct writes, including
@@ -43,5 +63,7 @@ sample.
 The next valid performance decision requires a disposable, identically seeded
 campaign per arm (or an exact data reset), with PostgreSQL WAL-byte deltas,
 `pg_stat_statements` append/update calls, foreground queue peak, and p50/P95/
-p99 captured for both arms. Until then the switch remains a measured-safe
-candidate, not a default performance recommendation.
+p99 captured for both arms. The next code candidate also adds safe
+same-room microbatch support; it needs its own clean A/B because the current
+credit-only result cannot predict that workload. Until then the switch remains
+a measured-safe candidate, not a default performance recommendation.

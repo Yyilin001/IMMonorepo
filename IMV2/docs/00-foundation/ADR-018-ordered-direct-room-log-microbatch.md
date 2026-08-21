@@ -1,6 +1,6 @@
 # ADR-018：有序私聊 room-log 原子微批
 
-状态：已接受，实施中
+状态：已接受并实施，受运行时开关保护
 日期：2026-08-21
 所有者：消息平台主管
 
@@ -25,9 +25,11 @@ Planner、Delivery、Inbox、用户投影与 Sync Log 的逐消息重复写入�
 
 PostgreSQL 实现必须遵守：
 
-1. 一个 SQL batch 对同一房间至多取一个可持久化 command，避免同一 `rooms` 行被无定义地重复
-   `UPDATE`。当前实现发现重复 room 时整批在写前回退单条路径；后续可加 per-room scheduler，把较晚
-   command 留到下一轮以提高命中率。
+1. 一个 SQL batch 可以包含同一房间的多个 command，但仅限于已建立、无待处理资料/首次回复/陌生人
+   额度副作用，且已使用 durable room command credit 的 plain direct send。batcher 先给独立房间各一个
+   公平席位，再用空余容量按 arrival order 填充这些房间的后续 command；PostgreSQL 对相同 `room_id`
+   分配连续 cursor，并只把 `rooms`/`room_admission` 更新到该 room 的最后一个输入。任何冷启动、策略
+   副作用、重复 operation key 或不满足前提的同房间组合都在写前回退单条路径。
 2. 批内房间组按稳定 `room_id` 顺序取得 message-operation / room 锁，避免多房间事务与另一个批次
    形成 A→B / B→A 死锁；每个命令的 `(sender_id, client_message_id)` 唯一事实仍是幂等栅栏。
 3. 逐条执行 member revision、冻结、block、陌生人额度、媒体、mention、reply 与 capacity 检查。
@@ -54,8 +56,9 @@ PostgreSQL 实现必须遵守：
    时不会启用。
 2. 已完成：抽取 direct 普通文本的预检/持久化参数，加入 JSONB set-based CTE；真实 PostgreSQL
    集成测试覆盖两个已建立 direct room 的原子 append，以及富消息/策略副作用的单条回退。
-3. 实施中：增加部署开关和批处理命中指标；从同一干净数据集依次测试关闭、8、16、32 和 1--2ms
-   delay。该实现不支持 batch size 1，关闭即是等价 baseline。
+3. 已完成：部署开关、批处理命中指标、独立房间与已建立 hot direct room 的 PostgreSQL 集成回归。
+   从同一干净数据集依次测试关闭、8、16、32 和 1--2ms delay；该实现不支持 batch size 1，关闭即是
+   等价 baseline。真实主机 A/B 仍须按 workload 分别决定是否启用。
 
 将开关设为 `0` 或移除 batcher 即回退到当前单条事务；数据格式没有变化，不要求迁移或删除数据。
 

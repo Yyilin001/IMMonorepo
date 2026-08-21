@@ -329,9 +329,19 @@ public actor V2SendMessageAdmissionBatcher {
         }
     }
 
-    /// A command cannot overtake an earlier command for the same room.  We
-    /// may, however, skip a blocked room to fill a batch with independent
-    /// rooms; this avoids turning the actor itself into a global write lock.
+    /// A command cannot overtake an earlier command for the same room.  The
+    /// first pass gives independent, inactive rooms priority, then the second
+    /// pass uses spare batch capacity for later commands from those same
+    /// rooms.  This is important for a hot direct conversation: a strictly
+    /// one-room-per-batch selector leaves the very write lane that needs
+    /// amortisation permanently on single-command transactions.  Conversely,
+    /// filling the first batch slot-by-slot with a hot room would starve
+    /// unrelated conversations behind it.
+    ///
+    /// The PostgreSQL batch store serializes equal room IDs in arrival order
+    /// and advances their room sequences in one transaction.  A room already
+    /// owned by an in-flight batch remains in `remaining`, preserving the
+    /// existing no-overtake rule across transactions.
     private func dequeueNextBatch() -> [Pending]? {
         guard !pending.isEmpty else { return nil }
 
@@ -341,6 +351,7 @@ public actor V2SendMessageAdmissionBatcher {
         selected.reserveCapacity(configuration.maximumBatchSize)
         remaining.reserveCapacity(pending.count)
 
+        // Fairness pass: pick at most one command per inactive room first.
         for item in pending {
             guard selected.count < configuration.maximumBatchSize,
                   selectedRoomIDs.insert(item.request.command.roomID).inserted
@@ -350,8 +361,28 @@ public actor V2SendMessageAdmissionBatcher {
             }
             selected.append(item)
         }
+        // Hot-room pass: after every selected room has had an opportunity to
+        // enter this transaction, fill spare capacity only with commands for
+        // those rooms.  Keeping commands for a newly seen room in
+        // `remaining` gives it first-pass priority in the next transaction.
+        guard selected.count < configuration.maximumBatchSize else {
+            pending = remaining
+            return selected
+        }
+        let batchRoomIDs = Set(selected.map(\.request.command.roomID))
+        var deferred: [Pending] = []
+        deferred.reserveCapacity(remaining.count)
+        for item in remaining {
+            guard selected.count < configuration.maximumBatchSize,
+                  batchRoomIDs.contains(item.request.command.roomID)
+            else {
+                deferred.append(item)
+                continue
+            }
+            selected.append(item)
+        }
         guard !selected.isEmpty else { return nil }
-        pending = remaining
+        pending = deferred
         return selected
     }
 

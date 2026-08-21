@@ -9072,31 +9072,67 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 projectionRecordsAfterSteadyStateBatch?.value
                     == projectionRecordsBeforeSteadyStateBatch?.value
             )
-            // The first direct room is now hot from four committed ordinary
-            // appends. Its batch message reserved two durable room credits;
-            // this next same-room command cannot join an atomic FIFO batch,
-            // so it proves the hot *single* path consumes the remaining
-            // precharged token without re-locking or rewriting room_admission.
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID, actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-00000000c015"),
-                text: "热点会话的单条消息"
-            )) else {
-                Issue.record("expected hot direct single acceptance")
+            // The first direct room is now hot and all pair-local producer
+            // markers are established. Two consecutive commands for that
+            // *same* room may now share one transaction while retaining
+            // arrival-order room sequences. This is the hot-room case that
+            // the old distinct-room-only batch deliberately could not cover.
+            let sameRoomBatch = try await writer.acceptAtomically(requests: [
+                .init(
+                    command: try .init(
+                        roomID: room.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c015"),
+                        text: "热点会话的第一条原子批消息",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c016"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c017"),
+                        planID: .init("00000000-0000-0000-0000-00000000c018")
+                    ),
+                    now: now
+                ),
+                .init(
+                    command: try .init(
+                        roomID: room.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c019"),
+                        text: "热点会话的第二条原子批消息",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c01a"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c01b"),
+                        planID: .init("00000000-0000-0000-0000-00000000c01c")
+                    ),
+                    now: now
+                ),
+            ])
+            guard case .accepted(let firstSameRoomMessage) = sameRoomBatch[0],
+                  case .accepted(let secondSameRoomMessage) = sameRoomBatch[1],
+                  firstSameRoomMessage.usesRoomEventLog,
+                  secondSameRoomMessage.usesRoomEventLog,
+                  secondSameRoomMessage.roomSequence == firstSameRoomMessage.roomSequence + 1
+            else {
+                Issue.record("expected ordered hot direct atomic acceptance")
                 return
             }
             let hotRoomCredits = await roomCredits.snapshot()
-            #expect(hotRoomCredits.batchReservations == 1)
-            #expect(hotRoomCredits.databaseCreditsReserved == 2)
-            #expect(hotRoomCredits.committedCredits == 2)
+            // The first member consumes the one unused token from the prior
+            // reservation. The second needs a new two-credit reservation,
+            // whose remaining token stays available for the next command.
+            #expect(hotRoomCredits.batchReservations == 2)
+            #expect(hotRoomCredits.databaseCreditsReserved == 4)
+            #expect(hotRoomCredits.committedCredits == 3)
             let hotRoomAdmission = try #require(try await sql.raw("""
                 SELECT command_window_used, fanout_window_used
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            // Three normal commands plus one durable reservation of two;
-            // the second hot command consumes that existing reservation.
-            #expect(hotRoomAdmission.commandWindowUsed == 5)
+            // Five normal commands plus two durable reservations of two;
+            // all durable capacity remains charged before ACK.
+            #expect(hotRoomAdmission.commandWindowUsed == 7)
             #expect(hotRoomAdmission.fanoutWindowUsed == 0)
             try await sql.raw("""
                 DELETE FROM im_v2.user_relationships
@@ -9155,7 +9191,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 accepted.roomSequence + 2,
                 accepted.roomSequence + 3,
                 accepted.roomSequence + 4,
-                accepted.roomSequence + 5
+                accepted.roomSequence + 5,
+                accepted.roomSequence + 6
             ])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
@@ -9209,8 +9246,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 10)
-            // Nine ordinary direct messages are materialized from the
+            #expect(try await count("im_v2.messages", on: sql) == 11)
+            // Ten ordinary direct messages are materialized from the
             // message row itself. The reviewed message intentionally retains
             // the complete room-event write graph.
             #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
@@ -9222,28 +9259,29 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.room_outbox", on: sql) == 0)
             #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
             // Normal room admission remains authoritative. The hot room's
-            // five durable charges are three ordinary appends plus one
-            // two-credit reservation; the second hot append reused it.
+            // seven durable charges are five ordinary appends plus two
+            // two-credit reservations; their remaining credits stay fenced
+            // by the durable room window.
             let roomAdmission = try #require(try await sql.raw("""
                 SELECT command_window_used, fanout_window_used
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            #expect(roomAdmission.commandWindowUsed == 5)
+            #expect(roomAdmission.commandWindowUsed == 7)
             #expect(roomAdmission.fanoutWindowUsed == 0)
             let creditedAdmission = try #require(try await sql.raw("""
                 SELECT command_window_used, fanout_window_used
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
                 """).first(decoding: CapacityRow.self))
-            // Ten accepted commands reserve five database credit batches;
+            // Eleven accepted commands reserve six database credit batches;
             // the cold and warm room-log appends still preserve the
             // same conservatively durable command capacity.
-            #expect(creditedAdmission.commandWindowUsed == 10)
+            #expect(creditedAdmission.commandWindowUsed == 12)
             let creditSnapshot = await shardCredits.snapshot()
-            #expect(creditSnapshot.batchReservations == 5)
-            #expect(creditSnapshot.databaseCreditsReserved == 10)
-            #expect(creditSnapshot.committedCredits == 10)
+            #expect(creditSnapshot.batchReservations == 6)
+            #expect(creditSnapshot.databaseCreditsReserved == 12)
+            #expect(creditSnapshot.committedCredits == 11)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()

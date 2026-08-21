@@ -151,6 +151,47 @@ struct V2SendMessageServiceTests {
         #expect(snapshot.singletonDispatches == 0)
     }
 
+    @Test("a hot room can use spare atomic-batch capacity without overtaking its own commands")
+    func admissionBatchingAcceptsSameRoomInArrivalOrder() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher,
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000116")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000117")
+        let firstID = try ClientMessageID("00000000-0000-0000-0000-000000000118")
+        let secondID = try ClientMessageID("00000000-0000-0000-0000-000000000119")
+
+        let first = Task { try await service.send(.init(
+            roomID: roomID, actorUserID: senderID,
+            clientMessageID: firstID, text: "one"
+        )) }
+        while await batcher.snapshot().pendingRequests != 1 {
+            await Task.yield()
+        }
+        let second = Task { try await service.send(.init(
+            roomID: roomID, actorUserID: senderID,
+            clientMessageID: secondID, text: "two"
+        )) }
+        _ = try await [first.value, second.value]
+
+        #expect(await store.normalAcceptCallCount() == 0)
+        #expect(await store.batches() == [[firstID, secondID]])
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.atomicBatchCommitted == 1)
+        #expect(snapshot.atomicBatchCommittedRequests == 2)
+        #expect(snapshot.activeRooms == 0)
+    }
+
     @Test("adaptive batching keeps the short delay until sustained arrivals are observed")
     func admissionBatchingUsesHighActivityDelayOnlyAfterArrivalThreshold() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)

@@ -230,11 +230,14 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 preflightOrdinal: -1
             ))
         }
-        // The set-based SQL updates one row per room.  Holding a later same-
-        // room command for a future batch would preserve FIFO but requires a
-        // per-room scheduler; until that scheduler exists, decline the whole
-        // mixed batch and preserve the established sequential behavior.
-        guard Set(ordered.map(\.roomID)).count == ordered.count else {
+        // Do not let two members of one atomic batch claim the same durable
+        // idempotency fence.  A replay must remain a single-command outcome;
+        // otherwise both inputs could observe the pre-insert snapshot and
+        // turn a harmless client retry into a whole-batch unique violation.
+        let operationKeys = ordered.map {
+            "\($0.senderID.uuidString):\($0.request.command.clientMessageID.rawValue)"
+        }
+        guard Set(operationKeys).count == ordered.count else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
         // Every transaction acquires room rows in the same order.  Preserve
@@ -281,14 +284,22 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 guard contexts.count == orderedRequests.count else {
                     throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
                 }
+                try assertSameRoomBatchSafety(
+                    orderedRequests: orderedRequests,
+                    contexts: contexts
+                )
+                var roomAppendCounts: [UUID: Int64] = [:]
                 for (item, context) in zip(orderedRequests, contexts) {
+                    let sequenceOffset = roomAppendCounts[item.roomID, default: 0]
                     let result = try await prepareDirectRoomLogAppend(
                         item,
-                        preflight: context
+                        preflight: context,
+                        sequenceOffset: sequenceOffset
                     )
                     switch result {
                     case .append(let append):
                         prepared.append(append)
+                        roomAppendCounts[item.roomID] = sequenceOffset + 1
                     case .outcome(let commit):
                         commits.append(.init(
                             originalIndex: item.originalIndex,
@@ -479,7 +490,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
 
     private func prepareDirectRoomLogAppend(
         _ item: OrderedRoomWriteRequest,
-        preflight: PlainDirectRoomLogBatchPreflightRow
+        preflight: PlainDirectRoomLogBatchPreflightRow,
+        sequenceOffset: Int64 = 0
     ) async throws -> DirectRoomLogBatchPreparation {
         let request = item.request
         let command = request.command
@@ -487,7 +499,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         guard preflight.ordinal == item.preflightOrdinal else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let room = preflight.room
+        let room = try preflight.room.advancingSequences(by: sequenceOffset)
         guard room.kind == "direct",
               room.capacityProfileID == request.capacityProfile.id,
               room.frozenAt == nil
@@ -746,6 +758,39 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
             }
             throw error
+        }
+    }
+
+    /// A same-room batch is safe only after all direct-pair producer markers
+    /// are established and room admission is already represented by durable
+    /// credits.  That keeps the one-row-per-room set append free from
+    /// stranger-quota, first-reply, profile/capability, or room-admission
+    /// mutations whose per-command order has not been modelled here yet.
+    ///
+    /// The batch still locks the authoritative pair, membership, policy
+    /// versions and room row.  This is a narrow ordered append optimisation,
+    /// not a cache-based authorization shortcut.
+    private func assertSameRoomBatchSafety(
+        orderedRequests: [OrderedRoomWriteRequest],
+        contexts: [PlainDirectRoomLogBatchPreflightRow]
+    ) throws {
+        guard orderedRequests.count == contexts.count else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        let indicesByRoom = Dictionary(grouping: orderedRequests.indices) {
+            orderedRequests[$0].roomID
+        }
+        for indices in indicesByRoom.values where indices.count > 1 {
+            guard indices.allSatisfy({ orderedRequests[$0].usesRoomAdmissionCredits }),
+                  try indices.allSatisfy({
+                      let policy = try contexts[$0].directPolicySnapshot()
+                      return policy.senderHasReplied
+                          && policy.senderProfileVisibleToRecipient
+                          && policy.senderCanSend == true
+                  })
+            else {
+                throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+            }
         }
     }
 
@@ -3547,21 +3592,22 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 
     /// Appends one or more already-authorized plain direct messages in one
-    /// PostgreSQL statement. Inputs must contain at most one command for any
-    /// `room_id`; this keeps every room update deterministic and lets the
-    /// caller preserve FIFO by holding later commands for that room.
+    /// PostgreSQL statement. Inputs are already ordered by room and arrival
+    /// sequence. A room may therefore occur more than once: the message rows
+    /// retain every input while the room/admission state is updated exactly
+    /// once from that room's final input.
     private func persistPlainRoomLogMessages(
         inputs: [PlainRoomLogMessageInput],
         sql: any SQLDatabase
     ) async throws {
         guard !inputs.isEmpty,
-              Set(inputs.map(\.roomID)).count == inputs.count,
               Set(inputs.map(\.messageID)).count == inputs.count,
               Set(inputs.map(\.eventID)).count == inputs.count,
               inputs.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let inputsJSON = try roomWriteJSON(inputs)
         let expectedCount = Int64(inputs.count)
+        let expectedRoomCount = Int64(Set(inputs.map(\.roomID)).count)
         guard let mutation = try await sql.raw("""
             WITH input AS MATERIALIZED (
                 SELECT input.ordinal, input.room_id, input.message_id,
@@ -3594,24 +3640,28 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     membership_revision bigint,
                     created_at_unix_seconds double precision
                 )
+            ), final_room_input AS MATERIALIZED (
+                SELECT DISTINCT ON (room_id) *
+                FROM input
+                ORDER BY room_id, ordinal DESC
             ), room_update AS (
                 UPDATE im_v2.rooms AS room
                 SET room_sequence = input.room_sequence,
                     timeline_sequence = input.timeline_sequence
-                FROM input
+                FROM final_room_input AS input
                 WHERE room.room_id = input.room_id
                 RETURNING room.room_id
             ), admission_update AS (
                 UPDATE im_v2.room_admission AS admission
                 SET command_window_used = input.command_window_used
-                FROM input
+                FROM final_room_input AS input
                 JOIN room_update ON room_update.room_id = input.room_id
                 WHERE admission.room_id = input.room_id
                   AND input.persists_room_admission
                 RETURNING admission.room_id
             ), admission_passthrough AS (
                 SELECT room_update.room_id FROM room_update
-                JOIN input ON input.room_id = room_update.room_id
+                JOIN final_room_input AS input ON input.room_id = room_update.room_id
                 WHERE NOT input.persists_room_admission
             ), admission_gate AS (
                 SELECT room_id FROM admission_update
@@ -3646,8 +3696,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                    -- callers still reject a partial set append.
                    (SELECT count(*) FROM message_insert) AS event_count
             """).first(decoding: RoomLogMessageMutationRow.self),
-              mutation.roomCount == expectedCount,
-              mutation.admissionCount == expectedCount,
+              mutation.roomCount == expectedRoomCount,
+              mutation.admissionCount == expectedRoomCount,
               mutation.messageCount == expectedCount,
               mutation.reviewCount == 0,
               mutation.mediaCount == 0,
@@ -3789,6 +3839,28 @@ private struct RoomRow: Decodable {
             roomID: roomID,
             nextRoomSequence: UInt64(roomSequence) + 1,
             admission: admission.roomAdmissionState()
+        )
+    }
+
+    /// Each same-room member of one atomic append sees the preflight's
+    /// durable cursor. The batch owner assigns later members consecutive
+    /// cursors before the one set-based append mutates the room row to the
+    /// final value. Reject overflow rather than wrapping an observable room
+    /// sequence.
+    func advancingSequences(by offset: Int64) throws -> Self {
+        guard offset >= 0,
+              roomSequence <= Int64.max - offset,
+              timelineSequence <= Int64.max - offset
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return .init(
+            kind: kind,
+            roomShardID: roomShardID,
+            roomSequence: roomSequence + offset,
+            timelineSequence: timelineSequence + offset,
+            membershipRevision: membershipRevision,
+            capacityProfileID: capacityProfileID,
+            deliveryMode: deliveryMode,
+            frozenAt: frozenAt
         )
     }
 }
