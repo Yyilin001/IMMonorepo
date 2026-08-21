@@ -1,0 +1,13 @@
+# Candidate overlay for ordered same-room direct append batches. It layers on
+# the preceding hot-room credit overlay, retaining its explicit load profile
+# and bounded room credit configuration while replacing all server binaries
+# atomically for a reversible A/B deployment.
+services:
+  account:
+    image: imv2-server:same-room-batch-55dfdb2b
+
+  gateway:
+    image: imv2-server:same-room-batch-55dfdb2b
+
+  operator:
+    image: imv2-server:same-room-batch-55dfdb2b
