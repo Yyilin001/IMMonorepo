@@ -58,9 +58,12 @@ therefore only make the remainder of at most one batch per active
 `(gateway, room, lease)` unavailable until the normal admission-window reset.
 It cannot permit a command beyond the old room limit.
 
-Start at `16`, not `32`, because a direct room is much more likely than a
-shared shard to have a low per-window command limit. Keep this default off
-until the same-semantics A/B below has been recorded.
+Start at `2` for the first deployment experiment. A direct room is much more
+likely than a shared shard to have a low per-window command limit, and the
+two-credit value is the only room reservation size exercised by the real
+PostgreSQL integration test and the initial hot-room rollout. Larger values
+require their own same-semantics A/B before use. Keep this default off until
+that A/B has been recorded.
 
 The Gateway does **not** reserve credits on a room's first request. A room is
 locally promoted only after four successful ordinary direct appends in the
@@ -242,11 +245,31 @@ message. Compare accepted rate and p95/p99 latency as well; this optimization
 cannot remove the subsequent message/event/index/WAL work.
 
 With the room-credit switch enabled, `room_admission` updates for **promoted
-hot** direct conversations should similarly approach one reservation per 16
-accepted commands per active room/lease. Cold rooms intentionally remain at
+hot** direct conversations should similarly approach one reservation per
+configured credit batch accepted commands per active room/lease. Cold rooms intentionally remain at
 one update per accepted command. Verify the actual reservation count from
 PostgreSQL statistics or a controlled `pg_stat_statements` sample; do not
 infer it only from local process metrics.
+
+## 2026-08-22 initial hot-room rollout result
+
+See the complete [rollout record](../09-capacity/hot-direct-room-credit-rollout-2026-08-22.md).
+
+The first end-to-end rollout used a single Gateway, 100 established direct
+rooms, 600 requested messages/second, one fixed target per connection, 128 B
+payloads, 60-second holds, and room-credit batch size `2`. The candidate
+accepted 34,230 messages with zero workload failures; 29,830 committed
+messages used room credits, while the remainder stayed on the normal path
+during warm-up or after a local heat entry expired.
+
+This was a correctness and coverage result, not a conclusive latency win. A
+same-host baseline accepted 33,591 messages, but candidate and baseline runs
+were sequential and room-log history grew between them. The candidate message
+P95 was 148 ms versus baseline 129 ms, and a candidate repeat was 146 ms.
+Do not claim a stable P95 improvement from these samples. Reset the
+disposable load data (or use a fresh, identically seeded campaign) before
+making a production latency decision; retain the three reports with the
+deployment record.
 
 Do not infer append batching from delay settings or queue depth alone. A
 high `preclassified_individual` value is expected during first-contact traffic;
