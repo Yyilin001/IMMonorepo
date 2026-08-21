@@ -143,6 +143,12 @@ struct V2SendMessageServiceTests {
         let batches = await store.batches()
         #expect(batches.count == 1)
         #expect(Set(batches[0]) == Set([firstID, secondID]))
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.atomicBatchAttempts == 1)
+        #expect(snapshot.atomicBatchCommitted == 1)
+        #expect(snapshot.atomicBatchCommittedRequests == 2)
+        #expect(snapshot.atomicBatchFallbacks == 0)
+        #expect(snapshot.singletonDispatches == 0)
     }
 
     @Test("adaptive batching keeps the short delay until sustained arrivals are observed")
@@ -382,6 +388,11 @@ struct V2SendMessageServiceTests {
         ])
         #expect(await store.batches().count == 1)
         #expect(await store.normalAcceptCallCount() == 2)
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.atomicBatchAttempts == 1)
+        #expect(snapshot.atomicBatchCommitted == 0)
+        #expect(snapshot.atomicBatchFallbacks == 1)
+        #expect(snapshot.atomicBatchFallbackRequests == 2)
     }
 
     @Test("fallback returns each independent command's own result")

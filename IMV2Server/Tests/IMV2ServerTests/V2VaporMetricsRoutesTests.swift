@@ -122,7 +122,13 @@ struct V2VaporMetricsRoutesTests {
                 cancelledPendingRequests: 1,
                 baseDelayFlushes: 11,
                 highActivityDelayFlushes: 13,
-                highActivityDelayScheduled: true
+                highActivityDelayScheduled: true,
+                atomicBatchAttempts: 17,
+                atomicBatchCommitted: 12,
+                atomicBatchFallbacks: 4,
+                atomicBatchCommittedRequests: 141,
+                atomicBatchFallbackRequests: 29,
+                singletonDispatches: 6
             )
         ))
         V2VaporMetricsRoutes.register(
@@ -136,6 +142,10 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_pending_requests 7"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} 13"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"committed\"} 12"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"shape_fallback\"} 4"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"committed\"} 141"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"singleton_dispatch\"} 6"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
             #expect(body.contains("im_v2_database_work_queued{class=\"sync\"} 1"))
             #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground_write\",reason=\"timeout\"} 3"))

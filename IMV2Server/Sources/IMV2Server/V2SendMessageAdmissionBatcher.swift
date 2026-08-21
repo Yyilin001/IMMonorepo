@@ -27,6 +27,50 @@ public actor V2SendMessageAdmissionBatcher {
         /// high-activity budget. It is diagnostic only; the hard delay cap is
         /// still owned by the scheduled timer.
         public let highActivityDelayScheduled: Bool
+        /// Atomic append attempts containing two or more independent rooms.
+        /// These counters intentionally distinguish a successful set write
+        /// from a shape fallback, so an operator can measure actual SQL
+        /// coalescing rather than infer it from staging delay alone.
+        public let atomicBatchAttempts: UInt64
+        public let atomicBatchCommitted: UInt64
+        public let atomicBatchFallbacks: UInt64
+        public let atomicBatchCommittedRequests: UInt64
+        public let atomicBatchFallbackRequests: UInt64
+        /// A delayed underfilled batch is dispatched directly, without first
+        /// throwing the expected unsupported-shape error from the store.
+        public let singletonDispatches: UInt64
+
+        public init(
+            pendingRequests: Int,
+            inFlightBatches: Int,
+            activeRooms: Int,
+            stagingQueueFullRejections: UInt64,
+            cancelledPendingRequests: UInt64,
+            baseDelayFlushes: UInt64,
+            highActivityDelayFlushes: UInt64,
+            highActivityDelayScheduled: Bool,
+            atomicBatchAttempts: UInt64 = 0,
+            atomicBatchCommitted: UInt64 = 0,
+            atomicBatchFallbacks: UInt64 = 0,
+            atomicBatchCommittedRequests: UInt64 = 0,
+            atomicBatchFallbackRequests: UInt64 = 0,
+            singletonDispatches: UInt64 = 0
+        ) {
+            self.pendingRequests = pendingRequests
+            self.inFlightBatches = inFlightBatches
+            self.activeRooms = activeRooms
+            self.stagingQueueFullRejections = stagingQueueFullRejections
+            self.cancelledPendingRequests = cancelledPendingRequests
+            self.baseDelayFlushes = baseDelayFlushes
+            self.highActivityDelayFlushes = highActivityDelayFlushes
+            self.highActivityDelayScheduled = highActivityDelayScheduled
+            self.atomicBatchAttempts = atomicBatchAttempts
+            self.atomicBatchCommitted = atomicBatchCommitted
+            self.atomicBatchFallbacks = atomicBatchFallbacks
+            self.atomicBatchCommittedRequests = atomicBatchCommittedRequests
+            self.atomicBatchFallbackRequests = atomicBatchFallbackRequests
+            self.singletonDispatches = singletonDispatches
+        }
     }
 
     public struct Configuration: Equatable, Sendable {
@@ -111,6 +155,12 @@ public actor V2SendMessageAdmissionBatcher {
     private var baseDelayFlushes: UInt64 = 0
     private var highActivityDelayFlushes: UInt64 = 0
     private var scheduledDelay: ScheduledDelay?
+    private var atomicBatchAttempts: UInt64 = 0
+    private var atomicBatchCommitted: UInt64 = 0
+    private var atomicBatchFallbacks: UInt64 = 0
+    private var atomicBatchCommittedRequests: UInt64 = 0
+    private var atomicBatchFallbackRequests: UInt64 = 0
+    private var singletonDispatches: UInt64 = 0
     /// Use a monotonic clock so a wall-clock correction cannot accidentally
     /// put the batcher into high-activity mode or keep it there forever.
     private let clock = ContinuousClock()
@@ -147,7 +197,13 @@ public actor V2SendMessageAdmissionBatcher {
             cancelledPendingRequests: cancelledPendingRequests,
             baseDelayFlushes: baseDelayFlushes,
             highActivityDelayFlushes: highActivityDelayFlushes,
-            highActivityDelayScheduled: scheduledDelay == .highActivity
+            highActivityDelayScheduled: scheduledDelay == .highActivity,
+            atomicBatchAttempts: atomicBatchAttempts,
+            atomicBatchCommitted: atomicBatchCommitted,
+            atomicBatchFallbacks: atomicBatchFallbacks,
+            atomicBatchCommittedRequests: atomicBatchCommittedRequests,
+            atomicBatchFallbackRequests: atomicBatchFallbackRequests,
+            singletonDispatches: singletonDispatches
         )
     }
 
@@ -292,26 +348,43 @@ public actor V2SendMessageAdmissionBatcher {
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
         Task {
             let results: [Result<V2SendMessageOutcome, any Error>]
-            do {
-                let outcomes = try await withForegroundWriteAdmission {
-                    try await self.store.acceptAtomically(requests: batch.map(\.request))
-                }
-                guard outcomes.count == batch.count else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-                results = outcomes.map(Result.success)
-            } catch V2AtomicRoomWriteBatchError.unsupportedRequestShape {
-                // The durable batch rolled back before committing anything.
-                // Each fallback is now an independent durable operation, so
-                // run independent rooms concurrently and preserve an error
-                // for only the affected command.  This is intentionally not
-                // a best-effort batch: every individual fallback obtains the
-                // same bounded foreground-write admission as a normal send.
+            let disposition: BatchDisposition
+            if batch.count == 1 {
+                // A single request cannot satisfy the atomic-store contract.
+                // Dispatch it directly instead of deliberately paying for an
+                // exception-driven fallback on every underfilled timer flush.
                 results = await acceptIndividually(batch)
-            } catch {
-                results = Array(repeating: .failure(error), count: batch.count)
+                disposition = .singleton
+            } else {
+                do {
+                    let outcomes = try await withForegroundWriteAdmission {
+                        try await self.store.acceptAtomically(requests: batch.map(\.request))
+                    }
+                    guard outcomes.count == batch.count else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    results = outcomes.map(Result.success)
+                    disposition = .atomicCommitted(requestCount: batch.count)
+                } catch V2AtomicRoomWriteBatchError.unsupportedRequestShape {
+                    // The durable batch rolled back before committing anything.
+                    // Each fallback is now an independent durable operation, so
+                    // run independent rooms concurrently and preserve an error
+                    // for only the affected command.  This is intentionally not
+                    // a best-effort batch: every individual fallback obtains the
+                    // same bounded foreground-write admission as a normal send.
+                    results = await acceptIndividually(batch)
+                    disposition = .fallback(requestCount: batch.count)
+                } catch {
+                    results = Array(repeating: .failure(error), count: batch.count)
+                    disposition = .atomicFailed
+                }
             }
-            self.complete(batch: batch, roomIDs: roomIDs, results: results)
+            self.complete(
+                batch: batch,
+                roomIDs: roomIDs,
+                results: results,
+                disposition: disposition
+            )
         }
     }
 
@@ -376,11 +449,26 @@ public actor V2SendMessageAdmissionBatcher {
     private func complete(
         batch: [Pending],
         roomIDs: Set<RoomID>,
-        results: [Result<V2SendMessageOutcome, any Error>]
+        results: [Result<V2SendMessageOutcome, any Error>],
+        disposition: BatchDisposition
     ) {
         precondition(inFlightBatchCount > 0)
         inFlightBatchCount -= 1
         activeRoomIDs.subtract(roomIDs)
+        switch disposition {
+        case .atomicCommitted(let requestCount):
+            atomicBatchAttempts &+= 1
+            atomicBatchCommitted &+= 1
+            atomicBatchCommittedRequests &+= UInt64(requestCount)
+        case .fallback(let requestCount):
+            atomicBatchAttempts &+= 1
+            atomicBatchFallbacks &+= 1
+            atomicBatchFallbackRequests &+= UInt64(requestCount)
+        case .atomicFailed:
+            atomicBatchAttempts &+= 1
+        case .singleton:
+            singletonDispatches &+= 1
+        }
         guard results.count == batch.count else {
             batch.forEach { $0.continuation.resume(throwing: V2RoomWriteStoreError.corruptPersistenceState) }
             startAvailableBatchesIfPossible()
@@ -393,6 +481,13 @@ public actor V2SendMessageAdmissionBatcher {
             }
         }
         startAvailableBatchesIfPossible()
+    }
+
+    private enum BatchDisposition: Sendable {
+        case atomicCommitted(requestCount: Int)
+        case fallback(requestCount: Int)
+        case atomicFailed
+        case singleton
     }
 
     private func cancelPendingRequest(_ pendingID: UUID) {
