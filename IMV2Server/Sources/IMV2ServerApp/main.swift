@@ -580,7 +580,11 @@ enum IMV2ServerApp {
                     ? databaseWorkAdmission
                     : nil,
                 controlWriteAdmissionEnabled:
-                    configuration.foregroundControlWriteDatabaseWorkLimit > 0
+                    configuration.foregroundControlWriteDatabaseWorkLimit > 0,
+                maximumGroupEventPagePayloadBytes: max(
+                    1,
+                    configuration.frameLimits.maximumPayloadBytes - 4_096
+                )
             )
             let fanoutDeliveryControlStore = PostgresV2FanoutDeliveryStore(
                 database: deliveryDatabase,

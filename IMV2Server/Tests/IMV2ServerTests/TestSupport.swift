@@ -118,6 +118,7 @@ func makeGatewayDomainCommandHandler(
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
     databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+    maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
     now: @escaping @Sendable () -> Date = Date.init
 ) -> V2GatewayDomainCommandHandler {
     let unsupported = V2UnsupportedGatewayTestDependency()
@@ -142,6 +143,7 @@ func makeGatewayDomainCommandHandler(
         sync: sync,
         telemetry: telemetry,
         databaseWorkAdmission: databaseWorkAdmission,
+        maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
         now: now
     )
 }

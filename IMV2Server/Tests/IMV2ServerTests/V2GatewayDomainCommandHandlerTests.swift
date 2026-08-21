@@ -601,6 +601,73 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(try await handler.handle(envelope: request, identity: fixture.identity).error.code == "GROUP_CREATION_FROZEN")
     }
 
+    @Test("room-log pulls trim a valid page to the exact gateway payload budget")
+    func groupEventPullRespectsGatewayPayloadBudget() async throws {
+        let fixture = try GatewayDomainFixture()
+        let roomID = fixture.roomID
+        let entries = try (1...8).map { sequence in
+            V2GroupEventLogEntry(
+                sourceEventID: try .init(String(format: "00000000-0000-0000-0000-%012d", sequence)),
+                roomSequence: UInt64(sequence),
+                projectionKind: "message.accepted",
+                payload: Data(repeating: 0x78, count: 700)
+            )
+        }
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupEventLog: .init(store: GatewaySizedGroupEventLogStore(
+                page: .init(roomID: roomID, events: entries, nextRoomSequence: 8, hasMore: false)
+            )),
+            sync: fixture.syncService(),
+            maximumGroupEventPagePayloadBytes: 2_048
+        )
+        var request = IMV2Envelope()
+        request.groupEventPull = .init()
+        request.groupEventPull.roomID = roomID.rawValue
+        request.groupEventPull.pageSize = 8
+
+        var response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.groupEventPage.events.count > 0)
+        #expect(response.groupEventPage.events.count < entries.count)
+        #expect(response.groupEventPage.hasMore_p)
+        #expect(response.groupEventPage.nextRoomSequence == response.groupEventPage.events.last?.roomSequence)
+
+        response.requestID = .max
+        response.protocolVersion = IMV2ProtocolVersion.current
+        let payload = try V2ServerProtobufFrameCodec.encode(
+            response,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)
+        ).payload
+        #expect(payload.count <= 2_048)
+    }
+
+    @Test("room-log pulls surface an unencodable durable event as a stable error")
+    func groupEventPullReportsUnencodableEvent() async throws {
+        let fixture = try GatewayDomainFixture()
+        let oversizedEvent = V2GroupEventLogEntry(
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000001"),
+            roomSequence: 1,
+            projectionKind: "message.accepted",
+            payload: Data(repeating: 0x78, count: 2_500)
+        )
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupEventLog: .init(store: GatewaySizedGroupEventLogStore(
+                page: .init(roomID: fixture.roomID, events: [oversizedEvent], nextRoomSequence: 1, hasMore: false)
+            )),
+            sync: fixture.syncService(),
+            maximumGroupEventPagePayloadBytes: 2_048
+        )
+        var request = IMV2Envelope()
+        request.groupEventPull = .init()
+        request.groupEventPull.roomID = fixture.roomID.rawValue
+        request.groupEventPull.pageSize = 1
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "GROUP_EVENT_TOO_LARGE")
+        #expect(!response.error.retryable)
+    }
+
     @Test("Hybrid room subscription verifies the session actor and returns only its waterline")
     func groupEventSubscriptionUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
@@ -951,6 +1018,18 @@ private actor GatewayGroupEventLogStore: V2GroupEventLogStore {
     }
 
     func actor() -> UserID? { capturedActor }
+}
+
+private struct GatewaySizedGroupEventLogStore: V2GroupEventLogStore {
+    let page: V2GroupEventLogPage
+
+    func pull(roomID _: RoomID, actorUserID _: UserID, afterRoomSequence _: UInt64, pageSize _: Int) async throws -> V2GroupEventLogPage {
+        page
+    }
+
+    func subscribe(roomID: RoomID, actorUserID _: UserID) async throws -> V2GroupEventSubscription {
+        .init(roomID: roomID, highWatermark: page.nextRoomSequence)
+    }
 }
 
 private actor GatewayModerationStore: V2ModerationStore {

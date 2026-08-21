@@ -150,9 +150,15 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private let controlWriteAdmissionEnabled: Bool
+    /// A room-log page shares the ordinary gateway-frame payload budget with
+    /// its envelope headers. The final wire encoder remains authoritative;
+    /// this budget prevents a valid durable backlog from becoming a transport
+    /// disconnect before it reaches that boundary.
+    private let maximumGroupEventPagePayloadBytes: Int
     private let now: @Sendable () -> Date
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init) {
+        precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
         self.membership = membership
         self.withdrawal = withdrawal
@@ -174,6 +180,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
+        self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
     }
 
@@ -199,8 +206,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
         controlWriteAdmissionEnabled: Bool = false,
+        maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
+        precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
         membership = membershipHandler
         withdrawal = withdrawalHandler
@@ -222,6 +231,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
+        self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
     }
 
@@ -986,18 +996,41 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             pageSize: Int(request.pageSize)
         )
         var response = IMV2Envelope()
+        // Use the largest possible request ID to make this sizing an upper
+        // bound. `V2GatewaySession` replaces it with the actual request ID
+        // immediately before final protobuf encoding.
+        response.requestID = .max
+        response.protocolVersion = IMV2ProtocolVersion.current
         response.groupEventPage = .init()
         response.groupEventPage.roomID = page.roomID.rawValue
         response.groupEventPage.nextRoomSequence = page.nextRoomSequence
         response.groupEventPage.hasMore_p = page.hasMore
-        response.groupEventPage.events = page.events.map {
+
+        var truncated = false
+        for (index, entry) in page.events.enumerated() {
             var event = IMV2GroupEvent()
-            event.sourceEventID = $0.sourceEventID.rawValue
-            event.roomSequence = $0.roomSequence
-            event.projectionKind = $0.projectionKind
-            event.payload = $0.payload
-            return event
+            event.sourceEventID = entry.sourceEventID.rawValue
+            event.roomSequence = entry.roomSequence
+            event.projectionKind = entry.projectionKind
+            event.payload = entry.payload
+
+            var candidate = response
+            candidate.groupEventPage.events.append(event)
+            candidate.groupEventPage.nextRoomSequence = entry.roomSequence
+            candidate.groupEventPage.hasMore_p = page.hasMore || index < page.events.endIndex - 1
+            guard try candidate.serializedData().count <= maximumGroupEventPagePayloadBytes else {
+                truncated = true
+                break
+            }
+            response = candidate
         }
+        guard !response.groupEventPage.events.isEmpty || page.events.isEmpty else {
+            // A durable event must not be able to force a transport close. A
+            // client cannot recover by repeating the same cursor, so make the
+            // persisted incompatibility explicit and retain the connection.
+            return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
+        }
+        response.groupEventPage.hasMore_p = response.groupEventPage.hasMore_p || truncated
         return response
     }
 
