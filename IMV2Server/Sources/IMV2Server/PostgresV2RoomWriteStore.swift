@@ -181,6 +181,14 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             let roomID = try uuid(request.command.roomID)
             let senderID = try uuid(request.command.senderUserID)
             let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
+            let usesRoomAdmissionCredits: Bool
+            if directRoomLogAdmissionMode == .room,
+               let roomAdmissionCommandCreditPool {
+                usesRoomAdmissionCredits = await roomAdmissionCommandCreditPool
+                    .shouldUseCredits(roomID: roomID, now: request.now)
+            } else {
+                usesRoomAdmissionCredits = false
+            }
             ordered.append(.init(
                 originalIndex: originalIndex,
                 request: request,
@@ -188,6 +196,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: senderID,
                 cacheKey: cacheKey,
                 cachedDirectPolicy: await directSendPolicyCache.value(for: cacheKey),
+                usesRoomAdmissionCredits: usesRoomAdmissionCredits,
                 preflightOrdinal: -1
             ))
         }
@@ -214,6 +223,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: item.senderID,
                 cacheKey: item.cacheKey,
                 cachedDirectPolicy: item.cachedDirectPolicy,
+                usesRoomAdmissionCredits: item.usesRoomAdmissionCredits,
                 preflightOrdinal: ordinal
             )
         }
@@ -266,8 +276,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                         inputs: prepared.enumerated().map { ordinal, append in
                             append.input.withOrdinal(ordinal)
                         },
-                        persistsRoomAdmission: directRoomLogAdmissionMode == .room
-                            && roomAdmissionCommandCreditPool == nil,
                         sql: sql
                     )
                     let projectionChanges = try await appendDirectPostAcceptanceProjections(
@@ -309,7 +317,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                                 acceptedDirectProjectionShadows: shadows,
                                 directPolicyCacheUpdate: cacheEntry,
                                 shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit,
-                                roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit
+                                roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit,
+                                roomAdmissionHeatObservation: append.commit.roomAdmissionHeatObservation
                             )
                         ))
                     }
@@ -381,8 +390,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let usesRoomAdmissionCredits = directRoomLogAdmissionMode == .room
-            && roomAdmissionCommandCreditPool != nil
+        let usesRoomAdmissionCredits = item.usesRoomAdmissionCredits
         let shard: ShardRow
         let roomCommandWindowUsed: Int
         if usesRoomAdmissionCredits {
@@ -604,7 +612,9 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 room: room,
                 roomID: item.roomID,
                 senderID: item.senderID,
-                clientMessageID: clientMessageID
+                clientMessageID: clientMessageID,
+                persistsRoomAdmission: !usesRoomAdmissionCredits
+                    && directRoomLogAdmissionMode == .room
             )
             return .append(.init(
                 originalIndex: item.originalIndex,
@@ -622,7 +632,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     acceptedDirectProjectionShadows: [],
                     directPolicyCacheUpdate: nil,
                     shardAdmissionCommandCredit: shardCreditToken,
-                    roomAdmissionCommandCredit: roomCreditToken
+                    roomAdmissionCommandCredit: roomCreditToken,
+                    roomAdmissionHeatObservation: usesRoomAdmissionCredits ? nil : item.roomID
                 )
             ))
         } catch {
@@ -641,7 +652,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         room: RoomRow,
         roomID: UUID,
         senderID: UUID,
-        clientMessageID: UUID
+        clientMessageID: UUID,
+        persistsRoomAdmission: Bool
     ) throws -> PlainRoomLogMessageInput {
         return try .init(
             ordinal: 0,
@@ -650,6 +662,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             eventID: uuid(eventID),
             senderID: senderID,
             clientMessageID: clientMessageID,
+            persistsRoomAdmission: persistsRoomAdmission,
             roomSequence: signed(acceptedMessage.roomSequence),
             timelineSequence: signed(acceptedMessage.timelineSequence),
             commandWindowUsed: commandWindowUsed,
@@ -1059,6 +1072,13 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
            let roomAdmissionCommandCreditPool {
             await roomAdmissionCommandCreditPool.commit(roomCreditToken)
         }
+        if let roomID = commit.roomAdmissionHeatObservation,
+           let roomAdmissionCommandCreditPool {
+            await roomAdmissionCommandCreditPool.recordNormalAdmissionCommit(
+                roomID: roomID,
+                now: Date()
+            )
+        }
         try await shadowCommittedDirectProjectionsIfNeeded(command: command, commit: commit)
         return commit.outcome
     }
@@ -1303,13 +1323,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         _ ordered: [OrderedRoomWriteRequest],
         sql: any SQLDatabase
     ) async throws -> [PlainDirectRoomLogBatchPreflightRow] {
-        // When room-command credits are enabled, the credit pool reserves the
-        // same durable room-admission row with the current shard-lease fence.
-        // The batch preflight must not also lock or read it per command.
-        // Generic/single-command acceptance remains unchanged and continues
-        // to use its own full room-admission preflight.
-        let bypassesRoomAdmissionPreflight = directRoomLogAdmissionMode == .shardOnly
-            || roomAdmissionCommandCreditPool != nil
         let input = try ordered.map { item in
             PlainDirectRoomLogBatchPreflightInput(
                 ordinal: item.preflightOrdinal,
@@ -1317,7 +1330,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: item.senderID,
                 clientMessageID: try uuid(item.request.command.clientMessageID),
                 nowUnixSeconds: item.request.now.timeIntervalSince1970,
-                cachedDirectPolicy: item.cachedDirectPolicy
+                cachedDirectPolicy: item.cachedDirectPolicy,
+                usesRoomAdmissionCredits: item.usesRoomAdmissionCredits
             )
         }
         let inputJSON = try roomWriteJSON(input)
@@ -1331,7 +1345,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        input.cached_recipient_policy_revision,
                        input.cached_recipient_is_active,
                        input.cached_blocked, input.cached_is_friend,
-                       input.cached_allows_strangers
+                       input.cached_allows_strangers,
+                       input.uses_room_admission_credits
                 FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
                     ordinal integer,
                     room_id uuid,
@@ -1345,7 +1360,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     cached_recipient_is_active boolean,
                     cached_blocked boolean,
                     cached_is_friend boolean,
-                    cached_allows_strangers boolean
+                    cached_allows_strangers boolean,
+                    uses_room_admission_credits boolean
                 )
             ), locked_room AS MATERIALIZED (
                 SELECT input.ordinal, input.sender_id, input.client_message_id,
@@ -1355,7 +1371,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        input.cached_recipient_policy_revision,
                        input.cached_recipient_is_active,
                        input.cached_blocked, input.cached_is_friend,
-                       input.cached_allows_strangers, room.room_kind,
+                       input.cached_allows_strangers,
+                       input.uses_room_admission_credits, room.room_kind,
                        room.room_shard_id, room.room_sequence,
                        room.timeline_sequence, room.membership_revision,
                        room.capacity_profile_id, room.delivery_mode,
@@ -1403,7 +1420,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 -- redundant per-room command window in that mode.  This
                 -- predicate is a request-independent configuration constant;
                 -- PostgreSQL can return no rows before touching admission.
-                WHERE NOT \(bind: bypassesRoomAdmissionPreflight)
+                WHERE NOT (
+                    \(bind: directRoomLogAdmissionMode == .shardOnly)
+                    OR room.uses_room_admission_credits
+                )
                 FOR UPDATE OF admission
             ), locked_admission AS MATERIALIZED (
                 SELECT room.ordinal,
@@ -3279,6 +3299,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 eventID: eventID,
                 senderID: senderID,
                 clientMessageID: clientMessageID,
+                persistsRoomAdmission: persistsRoomAdmission,
                 roomSequence: roomSequence,
                 timelineSequence: timelineSequence,
                 commandWindowUsed: commandWindowUsed,
@@ -3290,7 +3311,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 membershipRevision: room.membershipRevision,
                 createdAtUnixSeconds: message.createdAt.timeIntervalSince1970
             )],
-            persistsRoomAdmission: persistsRoomAdmission,
             sql: sql
         )
     }
@@ -3417,7 +3437,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     /// caller preserve FIFO by holding later commands for that room.
     private func persistPlainRoomLogMessages(
         inputs: [PlainRoomLogMessageInput],
-        persistsRoomAdmission: Bool,
         sql: any SQLDatabase
     ) async throws {
         guard !inputs.isEmpty,
@@ -3433,7 +3452,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 SELECT input.ordinal, input.room_id, input.message_id,
                        input.event_id, input.sender_id, input.client_message_id,
                        input.room_sequence, input.timeline_sequence,
-                       input.command_window_used, input.text_body,
+                       input.command_window_used, input.persists_room_admission,
+                       input.text_body,
                        input.rich_entities, input.reply_to_message_id,
                        input.forwarded_from_message_id,
                        input.forwarded_from_user_id,
@@ -3450,6 +3470,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     room_sequence bigint,
                     timeline_sequence bigint,
                     command_window_used bigint,
+                    persists_room_admission boolean,
                     text_body text,
                     rich_entities jsonb,
                     reply_to_message_id uuid,
@@ -3471,11 +3492,12 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 FROM input
                 JOIN room_update ON room_update.room_id = input.room_id
                 WHERE admission.room_id = input.room_id
-                  AND \(bind: persistsRoomAdmission)
+                  AND input.persists_room_admission
                 RETURNING admission.room_id
             ), admission_passthrough AS (
                 SELECT room_update.room_id FROM room_update
-                WHERE NOT \(bind: persistsRoomAdmission)
+                JOIN input ON input.room_id = room_update.room_id
+                WHERE NOT input.persists_room_admission
             ), admission_gate AS (
                 SELECT room_id FROM admission_update
                 UNION ALL
@@ -4418,6 +4440,9 @@ private struct PlainRoomLogMessageInput: Encodable {
     let eventID: UUID
     let senderID: UUID
     let clientMessageID: UUID
+    /// Cold rooms update their durable row in the append transaction. Hot
+    /// rooms have already charged a bounded command-credit batch instead.
+    let persistsRoomAdmission: Bool
     let roomSequence: Int64
     let timelineSequence: Int64
     let commandWindowUsed: Int
@@ -4436,6 +4461,7 @@ private struct PlainRoomLogMessageInput: Encodable {
         case eventID = "event_id"
         case senderID = "sender_id"
         case clientMessageID = "client_message_id"
+        case persistsRoomAdmission = "persists_room_admission"
         case roomSequence = "room_sequence"
         case timelineSequence = "timeline_sequence"
         case commandWindowUsed = "command_window_used"
@@ -4456,6 +4482,7 @@ private struct PlainRoomLogMessageInput: Encodable {
             eventID: eventID,
             senderID: senderID,
             clientMessageID: clientMessageID,
+            persistsRoomAdmission: persistsRoomAdmission,
             roomSequence: roomSequence,
             timelineSequence: timelineSequence,
             commandWindowUsed: commandWindowUsed,
@@ -4487,6 +4514,7 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
     let cachedBlocked: Bool?
     let cachedIsFriend: Bool?
     let cachedAllowsStrangers: Bool?
+    let usesRoomAdmissionCredits: Bool
 
     init(
         ordinal: Int,
@@ -4494,7 +4522,8 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
         senderID: UUID,
         clientMessageID: UUID,
         nowUnixSeconds: Double,
-        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
+        usesRoomAdmissionCredits: Bool
     ) {
         self.ordinal = ordinal
         self.roomID = roomID
@@ -4509,6 +4538,7 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
         cachedBlocked = cachedDirectPolicy?.blocked
         cachedIsFriend = cachedDirectPolicy?.isFriend
         cachedAllowsStrangers = cachedDirectPolicy?.allowsStrangers
+        self.usesRoomAdmissionCredits = usesRoomAdmissionCredits
     }
 
     enum CodingKeys: String, CodingKey {
@@ -4525,6 +4555,7 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
         case cachedBlocked = "cached_blocked"
         case cachedIsFriend = "cached_is_friend"
         case cachedAllowsStrangers = "cached_allows_strangers"
+        case usesRoomAdmissionCredits = "uses_room_admission_credits"
     }
 }
 
@@ -4802,6 +4833,7 @@ private struct OrderedRoomWriteRequest {
     let senderID: UUID
     let cacheKey: V2DirectSendPolicyCache.Key
     let cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+    let usesRoomAdmissionCredits: Bool
     let preflightOrdinal: Int
 }
 
@@ -4935,19 +4967,25 @@ private struct RoomWriteCommit {
     /// The per-room command credit is durably precharged before the message
     /// transaction and becomes consumed only when that transaction commits.
     let roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token?
+    /// A normal committed append contributes evidence that a room is locally
+    /// hot enough for future calls to use precharged room credits. This is
+    /// intentionally finalized only after the canonical transaction commits.
+    let roomAdmissionHeatObservation: UUID?
 
     init(
         outcome: V2SendMessageOutcome,
         acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?,
         directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry? = nil,
         shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token? = nil,
-        roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token? = nil
+        roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token? = nil,
+        roomAdmissionHeatObservation: UUID? = nil
     ) {
         self.outcome = outcome
         self.acceptedDirectProjectionShadows = acceptedDirectProjectionShadows
         self.directPolicyCacheUpdate = directPolicyCacheUpdate
         self.shardAdmissionCommandCredit = shardAdmissionCommandCredit
         self.roomAdmissionCommandCredit = roomAdmissionCommandCredit
+        self.roomAdmissionHeatObservation = roomAdmissionHeatObservation
     }
 }
 private struct DirectProjectionShadowRequest {

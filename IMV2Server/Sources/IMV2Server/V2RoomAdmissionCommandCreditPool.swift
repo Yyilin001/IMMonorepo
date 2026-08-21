@@ -30,6 +30,7 @@ public actor V2RoomAdmissionCommandCreditPool {
     public let returnedCredits: Int
     public let expiredCreditsDiscarded: Int
     public let capacityRejections: Int
+    public let promotedHotRooms: Int
   }
 
   public enum Acquisition: Sendable {
@@ -51,9 +52,22 @@ public actor V2RoomAdmissionCommandCreditPool {
     let validUntil: Date
   }
 
+  private struct Heat: Sendable {
+    var committedCount: Int
+    var lastCommittedAt: Date
+  }
+
   private let database: any Database
   private let batchSize: Int
+  /// Sparse direct conversations must never pay an extra reservation
+  /// transaction just to cache credits they will never use. Only a room with
+  /// this many *previously committed* plain appends in the short window is
+  /// eligible for the precharged path.
+  private let promotionCommitCount = 4
+  private let promotionWindow: TimeInterval = 5
+  private let maximumTrackedRooms = 8_192
   private var credits: [Key: Credits] = [:]
+  private var heatByRoom: [UUID: Heat] = [:]
   private var tokenKeys: [UUID: Key] = [:]
   private var pendingReservations: [Key: Task<Reservation?, Error>] = [:]
   private var batchReservations = 0
@@ -67,6 +81,38 @@ public actor V2RoomAdmissionCommandCreditPool {
     precondition((1...32).contains(batchSize))
     self.database = database
     self.batchSize = batchSize
+  }
+
+  /// Returns true only for a proven locally hot room. This method is called
+  /// before the SQL preflight so cold rooms retain the original single
+  /// transaction (`rooms -> room_admission`) path with no extra database
+  /// round-trip. Heat is based only on prior committed messages, never on
+  /// untrusted request attempts.
+  public func shouldUseCredits(roomID: UUID, now: Date) -> Bool {
+    guard let heat = heatByRoom[roomID] else { return false }
+    guard now.timeIntervalSince(heat.lastCommittedAt) <= promotionWindow else {
+      heatByRoom.removeValue(forKey: roomID)
+      return false
+    }
+    return heat.committedCount >= promotionCommitCount
+  }
+
+  /// Records a successfully committed normal direct append. It is deliberately
+  /// separate from `commit(_:)`, which applies only to an already precharged
+  /// token. Failed, denied, and idempotent commands cannot promote a room.
+  public func recordNormalAdmissionCommit(roomID: UUID, now: Date) {
+    if var heat = heatByRoom[roomID],
+       now.timeIntervalSince(heat.lastCommittedAt) <= promotionWindow {
+      heat.committedCount = min(promotionCommitCount, heat.committedCount + 1)
+      heat.lastCommittedAt = now
+      heatByRoom[roomID] = heat
+      return
+    }
+    if heatByRoom.count >= maximumTrackedRooms,
+       let evicted = heatByRoom.keys.first {
+      heatByRoom.removeValue(forKey: evicted)
+    }
+    heatByRoom[roomID] = .init(committedCount: 1, lastCommittedAt: now)
   }
 
   /// Acquires one already-charged room command credit. `shardState` comes
@@ -153,7 +199,11 @@ public actor V2RoomAdmissionCommandCreditPool {
   }
 
   public func snapshot() -> Snapshot {
-    .init(
+    let now = Date()
+    heatByRoom = heatByRoom.filter {
+      now.timeIntervalSince($0.value.lastCommittedAt) <= promotionWindow
+    }
+    return .init(
       activeCredits: credits.values.reduce(into: 0) { $0 += $1.available },
       inFlightCredits: tokenKeys.count,
       batchReservations: batchReservations,
@@ -161,7 +211,10 @@ public actor V2RoomAdmissionCommandCreditPool {
       committedCredits: committedCredits,
       returnedCredits: returnedCredits,
       expiredCreditsDiscarded: expiredCreditsDiscarded,
-      capacityRejections: capacityRejections
+      capacityRejections: capacityRejections,
+      promotedHotRooms: heatByRoom.values.filter {
+        $0.committedCount >= promotionCommitCount
+      }.count
     )
   }
 

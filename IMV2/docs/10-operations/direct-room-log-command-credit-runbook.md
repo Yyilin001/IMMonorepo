@@ -62,6 +62,16 @@ Start at `16`, not `32`, because a direct room is much more likely than a
 shared shard to have a low per-window command limit. Keep this default off
 until the same-semantics A/B below has been recorded.
 
+The Gateway does **not** reserve credits on a room's first request. A room is
+locally promoted only after four successful ordinary direct appends in the
+last five seconds. Cold and sparse conversations keep the original single
+transaction path (`rooms` and `room_admission` are locked and updated
+together), so enabling the switch cannot turn a broad fan-out of infrequent
+conversations into one extra PostgreSQL reservation per room. Promotion is
+based exclusively on committed canonical messages; denied, failed, duplicate,
+or merely attempted sends cannot consume memory or make a room eligible. The
+local promotion map is bounded to 8,192 rooms and drops inactive entries.
+
 ## Ordered append micro-batch
 
 `IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE` is a separate, default-off write
@@ -194,6 +204,10 @@ Scrape the loopback /metrics endpoint. When enabled, observe:
 - im_v2_shard_admission_command_credit_rejections_total: capacity-window
   rejections. Any unexpected rise requires stopping the load test and
   verifying the configured lease/profile capacity.
+- im_v2_room_admission_command_credit_hot_rooms: rooms that have passed the
+  committed-message promotion threshold. In a sparse-online test this should
+  remain near zero; a nonzero room-credit reservation count with this gauge at
+  zero is a defect.
 - im_v2_direct_room_log_append_atomic_batches_total and
   im_v2_direct_room_log_append_atomic_requests_total: whether Gateway staging
   produces real set-based message appends. `committed` is the only outcome
@@ -220,11 +234,12 @@ accepted direct-room-log commands (per shard), not one tail update per
 message. Compare accepted rate and p95/p99 latency as well; this optimization
 cannot remove the subsequent message/event/index/WAL work.
 
-With the room-credit switch enabled, `room_admission` updates for eligible
-steady-state direct appends should similarly approach one reservation per 16
-accepted commands per active room/lease. Verify the actual reservation count
-from PostgreSQL statistics or a controlled `pg_stat_statements` sample; do
-not infer it only from local process metrics.
+With the room-credit switch enabled, `room_admission` updates for **promoted
+hot** direct conversations should similarly approach one reservation per 16
+accepted commands per active room/lease. Cold rooms intentionally remain at
+one update per accepted command. Verify the actual reservation count from
+PostgreSQL statistics or a controlled `pg_stat_statements` sample; do not
+infer it only from local process metrics.
 
 Do not infer append batching from delay settings or queue depth alone. A
 high `preclassified_individual` value is expected during first-contact traffic;

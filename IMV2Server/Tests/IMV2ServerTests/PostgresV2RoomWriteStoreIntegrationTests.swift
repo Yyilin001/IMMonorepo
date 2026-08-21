@@ -9378,6 +9378,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let credits = V2RoomAdmissionCommandCreditPool(
                 database: app.db(.psql), batchSize: 2
             )
+            let promotionNow = Date()
+            #expect(await credits.shouldUseCredits(roomID: roomID, now: promotionNow) == false)
+            for _ in 0 ..< 4 {
+                await credits.recordNormalAdmissionCommit(roomID: roomID, now: promotionNow)
+            }
+            #expect(await credits.shouldUseCredits(roomID: roomID, now: promotionNow) == true)
+            #expect(await credits.shouldUseCredits(
+                roomID: roomID,
+                now: promotionNow.addingTimeInterval(6)
+            ) == false)
+            for _ in 0 ..< 4 {
+                await credits.recordNormalAdmissionCommit(roomID: roomID, now: Date())
+            }
 
             let first = try await credits.acquire(roomID: roomID, shardState: state, now: now)
             guard case .granted(let firstToken) = first else {
@@ -9413,7 +9426,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 activeCredits: 0, inFlightCredits: 0,
                 batchReservations: 1, databaseCreditsReserved: 2,
                 committedCredits: 2, returnedCredits: 1,
-                expiredCreditsDiscarded: 0, capacityRejections: 1
+                expiredCreditsDiscarded: 0, capacityRejections: 1,
+                promotedHotRooms: 1
             ))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()

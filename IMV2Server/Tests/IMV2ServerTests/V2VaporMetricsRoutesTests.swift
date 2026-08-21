@@ -118,7 +118,8 @@ struct V2VaporMetricsRoutesTests {
                 activeCredits: 6, inFlightCredits: 2,
                 batchReservations: 8, databaseCreditsReserved: 96,
                 committedCredits: 81, returnedCredits: 3,
-                expiredCreditsDiscarded: 4, capacityRejections: 7
+                expiredCreditsDiscarded: 4, capacityRejections: 7,
+                promotedHotRooms: 5
             ),
             directRoomLogAppendBatching: .init(
                 pendingRequests: 7,
@@ -182,6 +183,7 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_shard_admission_command_credit_rejections_total 5"))
             #expect(body.contains("im_v2_room_admission_command_credits{state=\"available\"} 6"))
             #expect(body.contains("im_v2_room_admission_command_credits{state=\"in_flight\"} 2"))
+            #expect(body.contains("im_v2_room_admission_command_credit_hot_rooms 5"))
             #expect(body.contains("im_v2_room_admission_command_credit_reservations_total 8"))
             #expect(body.contains("im_v2_room_admission_command_credits_reserved_total 96"))
             #expect(body.contains("im_v2_room_admission_command_credits_committed_total 81"))
