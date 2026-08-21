@@ -5,11 +5,13 @@ import SQLKit
 
 /// PostgreSQL implementation of the V2 acceptance boundary.
 ///
-/// Room-local state is serialized by `rooms -> room_admission`. Shard
-/// admission is evaluated optimistically, then reserved with one conditional
-/// atomic increment as the final statement in the transaction. This preserves
-/// exact capacity and lease fencing without holding the shared shard row while
-/// policy checks and durable message writes run.
+/// Room-local state is serialized by `rooms -> room_admission` for the
+/// general path. The plain direct shard-only path deliberately serializes on
+/// `rooms` and reserves command capacity from the shard credit pool instead.
+/// Shard admission is evaluated optimistically, then reserved with one
+/// conditional atomic increment as the final statement in the transaction.
+/// This preserves exact capacity and lease fencing without holding the shared
+/// shard row while policy checks and durable message writes run.
 public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let database: any Database
     private let strangerMessagePolicy: V2StrangerMessagePolicy
@@ -370,17 +372,39 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let admissionSnapshot = try preflight.admissionSnapshot()
-        let admission = admissionSnapshot.room
-        let shard = admissionSnapshot.shard
-        guard admission.shardLeaseID == shard.leaseID,
-              admission.shardLeaseGeneration == shard.generation,
-              admissionSnapshot.senderIsActive == true,
-              let role = admissionSnapshot.actorRole,
-              V2RoomMembershipRole(rawValue: role) != nil,
-              admissionSnapshot.muted == false
-        else {
-            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        let shard: ShardRow
+        let roomCommandWindowUsed: Int
+        switch directRoomLogAdmissionMode {
+        case .room:
+            let admissionSnapshot = try preflight.admissionSnapshot()
+            let admission = admissionSnapshot.room
+            shard = admissionSnapshot.shard
+            guard admission.shardLeaseID == shard.leaseID,
+                  admission.shardLeaseGeneration == shard.generation,
+                  admissionSnapshot.senderIsActive == true,
+                  let role = admissionSnapshot.actorRole,
+                  V2RoomMembershipRole(rawValue: role) != nil,
+                  admissionSnapshot.muted == false
+            else {
+                throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+            }
+            roomCommandWindowUsed = admission.commandWindowUsed
+        case .shardOnly:
+            shard = try preflight.shard()
+            // Shard-only admission intentionally does not read or lock the
+            // per-room admission row.  Room serialization, membership/mute
+            // authorization and the durable shard credit reservation remain
+            // authoritative; only the redundant room command window is gone.
+            guard preflight.senderIsActive == true,
+                  let role = preflight.actorRole,
+                  V2RoomMembershipRole(rawValue: role) != nil,
+                  preflight.muted == false
+            else {
+                throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+            }
+            // `persistPlainRoomLogMessages` deliberately ignores this value
+            // when `persistsRoomAdmission` is false.
+            roomCommandWindowUsed = 0
         }
         let directContext = try directMessageContext(from: preflight.directPolicySnapshot())
         guard directContext.restriction == nil,
@@ -390,7 +414,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
 
-        let roomState = try room.commandState(roomID: command.roomID, admission: admission)
         let shardState = try shard.admissionState()
         let shardStateForReduction: ShardAdmissionState
         let shardCreditToken: V2ShardAdmissionCommandCreditPool.Token
@@ -412,16 +435,12 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             return .outcome(.init(outcome: .unavailable(reason), acceptedDirectProjectionShadows: []))
         }
         do {
-            let result = directRoomLogAdmissionMode == .shardOnly
-                ? try directRoomLogShardOnlyReduction(
-                    command: command,
-                    roomState: roomState,
-                    shardState: shardStateForReduction,
-                    profile: request.capacityProfile.limits,
-                    identifiers: request.identifiers,
-                    now: request.now
-                )
-                : try roomLogReduction(
+            let writeSet: PlainDirectRoomLogWriteSet
+            switch directRoomLogAdmissionMode {
+            case .room:
+                let admission = try preflight.admissionSnapshot().room
+                let roomState = try room.commandState(roomID: command.roomID, admission: admission)
+                let result = try roomLogReduction(
                     command: command,
                     roomState: roomState,
                     shardState: shardStateForReduction,
@@ -430,34 +449,72 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     reliableTargetCount: 0,
                     now: request.now
                 )
-            guard case .accepted(let writeSet) = result else {
-                await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
-                return .outcome(.init(
-                    outcome: result.outcome(usesRoomEventLog: true),
-                    acceptedDirectProjectionShadows: []
-                ))
+                guard case .accepted(let transaction) = result else {
+                    await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
+                    return .outcome(.init(
+                        outcome: result.outcome(usesRoomEventLog: true),
+                        acceptedDirectProjectionShadows: []
+                    ))
+                }
+                writeSet = .init(
+                    acceptedMessage: transaction.acceptedMessage,
+                    eventID: transaction.eventID,
+                    nextShardState: transaction.nextShardState,
+                    roomCommandWindowUsed: roomCommandWindowUsed
+                )
+            case .shardOnly:
+                switch try directRoomLogShardOnlyBatchReduction(
+                    command: command,
+                    nextRoomSequence: unsigned(room.roomSequence + 1),
+                    shardState: shardStateForReduction,
+                    profile: request.capacityProfile.limits,
+                    identifiers: request.identifiers,
+                    now: request.now
+                ) {
+                case .accepted(let transaction):
+                    writeSet = .init(
+                        acceptedMessage: transaction.acceptedMessage,
+                        eventID: transaction.eventID,
+                        nextShardState: transaction.nextShardState,
+                        roomCommandWindowUsed: roomCommandWindowUsed
+                    )
+                case .rateLimited(let retryAfterSeconds):
+                    await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
+                    return .outcome(.init(
+                        outcome: .rateLimited(retryAfterSeconds: retryAfterSeconds),
+                        acceptedDirectProjectionShadows: []
+                    ))
+                case .unavailable(let reason):
+                    await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
+                    return .outcome(.init(
+                        outcome: .unavailable(reason),
+                        acceptedDirectProjectionShadows: []
+                    ))
+                }
             }
-            let timelineWriteSet = try withTimelineSequence(
-                writeSet,
+            let timelineMessage = try withTimelineSequence(
+                writeSet.acceptedMessage,
                 timelineSequence: unsigned(room.timelineSequence + 1)
             )
             let shardReservation = try shardAdmissionReservation(
                 from: shardStateForReduction,
-                to: timelineWriteSet.nextShardState
+                to: writeSet.nextShardState
             )
             guard shardReservation.commandDelta == 1,
                   shardReservation.fanoutDelta == 0,
                   shardReservation.outstandingUnitDelta == 0,
                   shardReservation.outstandingPlanDelta == 0
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
+            let acceptedMessage = timelineMessage.materialized(
                 mediaPresentations: [],
                 usesRoomEventLog: true,
-                sourceEventID: timelineWriteSet.eventID,
+                sourceEventID: writeSet.eventID,
                 acceptedMembershipRevision: try unsigned(room.membershipRevision)
             )
             let input = try plainRoomLogMessageInput(
-                writeSet: timelineWriteSet,
+                acceptedMessage: timelineMessage,
+                eventID: writeSet.eventID,
+                commandWindowUsed: writeSet.roomCommandWindowUsed,
                 room: room,
                 roomID: item.roomID,
                 senderID: item.senderID,
@@ -488,30 +545,31 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 
     private func plainRoomLogMessageInput(
-        writeSet: V2MessageAcceptanceTransaction,
+        acceptedMessage: V2AcceptedMessageDraft,
+        eventID: EventID,
+        commandWindowUsed: Int,
         room: RoomRow,
         roomID: UUID,
         senderID: UUID,
         clientMessageID: UUID
     ) throws -> PlainRoomLogMessageInput {
-        let message = writeSet.acceptedMessage
         return try .init(
             ordinal: 0,
             roomID: roomID,
-            messageID: uuid(message.messageID),
-            eventID: uuid(writeSet.eventID),
+            messageID: uuid(acceptedMessage.messageID),
+            eventID: uuid(eventID),
             senderID: senderID,
             clientMessageID: clientMessageID,
-            roomSequence: signed(message.roomSequence),
-            timelineSequence: signed(message.timelineSequence),
-            commandWindowUsed: writeSet.nextRoomState.admission.commandWindow.used,
-            text: message.text,
-            entities: message.entities,
+            roomSequence: signed(acceptedMessage.roomSequence),
+            timelineSequence: signed(acceptedMessage.timelineSequence),
+            commandWindowUsed: commandWindowUsed,
+            text: acceptedMessage.text,
+            entities: acceptedMessage.entities,
             replyToMessageID: nil,
             forwardedFromMessageID: nil,
             forwardedFromUserID: nil,
             membershipRevision: room.membershipRevision,
-            createdAtUnixSeconds: message.createdAt.timeIntervalSince1970
+            createdAtUnixSeconds: acceptedMessage.createdAt.timeIntervalSince1970
         )
     }
 
@@ -1224,7 +1282,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     SELECT 1 FROM prior_operation AS prior
                     WHERE prior.ordinal = room.ordinal
                 )
-            ), locked_admission AS MATERIALIZED (
+            ), locked_room_admission AS MATERIALIZED (
                 SELECT room.ordinal,
                        admission.eligible_member_count AS room_eligible_member_count,
                        admission.command_window_limit AS room_command_window_limit,
@@ -1236,7 +1294,29 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        admission.max_outstanding_plans AS room_max_outstanding_plans,
                        admission.outstanding_plans AS room_outstanding_plans,
                        admission.shard_lease_id AS room_shard_lease_id,
-                       admission.shard_lease_generation AS room_shard_lease_generation,
+                       admission.shard_lease_generation AS room_shard_lease_generation
+                FROM fresh_room AS room
+                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
+                -- Shard-only direct room-log admission has one durable
+                -- authority, `shard_admission_pools`.  Do not even read the
+                -- redundant per-room command window in that mode.  This
+                -- predicate is a request-independent configuration constant;
+                -- PostgreSQL can return no rows before touching admission.
+                WHERE NOT \(bind: directRoomLogAdmissionMode == .shardOnly)
+                FOR UPDATE OF admission
+            ), locked_admission AS MATERIALIZED (
+                SELECT room.ordinal,
+                       admission.room_eligible_member_count,
+                       admission.room_command_window_limit,
+                       admission.room_command_window_used,
+                       admission.room_fanout_window_limit,
+                       admission.room_fanout_window_used,
+                       admission.room_max_outstanding_fanout_units,
+                       admission.room_outstanding_fanout_units,
+                       admission.room_max_outstanding_plans,
+                       admission.room_outstanding_plans,
+                       admission.room_shard_lease_id,
+                       admission.room_shard_lease_generation,
                        shard.lease_id AS shard_lease_id,
                        shard.generation AS shard_generation,
                        shard.valid_until AS shard_valid_until,
@@ -1249,11 +1329,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        shard.max_outstanding_plans AS shard_max_outstanding_plans,
                        shard.outstanding_plans AS shard_outstanding_plans
                 FROM fresh_room AS room
-                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
+                LEFT JOIN locked_room_admission AS admission ON admission.ordinal = room.ordinal
                 JOIN im_v2.shard_admission_pools AS shard
                   ON shard.room_shard_id = room.room_shard_id
                  AND shard.capacity_profile_id = room.capacity_profile_id
-                FOR UPDATE OF admission
             ), locked_actor AS MATERIALIZED (
                 SELECT room.ordinal, membership.role AS actor_role,
                        EXISTS (
@@ -1927,9 +2006,29 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 
     private func withTimelineSequence(_ writeSet: V2MessageAcceptanceTransaction, timelineSequence: UInt64) throws -> V2MessageAcceptanceTransaction {
-        let message = writeSet.acceptedMessage
-        let revisedMessage = V2AcceptedMessageDraft(messageID: message.messageID, roomID: message.roomID, roomSequence: message.roomSequence, timelineSequence: timelineSequence, senderUserID: message.senderUserID, clientMessageID: message.clientMessageID, text: message.text, media: message.media, mentions: message.mentions, entities: message.entities, replyTo: message.replyTo, groupDeliveryMode: message.groupDeliveryMode, createdAt: message.createdAt)
+        let revisedMessage = try withTimelineSequence(writeSet.acceptedMessage, timelineSequence: timelineSequence)
         return .init(acceptedMessage: revisedMessage, eventID: writeSet.eventID, fanoutPlan: writeSet.fanoutPlan, nextRoomState: writeSet.nextRoomState, nextShardState: writeSet.nextShardState)
+    }
+
+    private func withTimelineSequence(
+        _ message: V2AcceptedMessageDraft,
+        timelineSequence: UInt64
+    ) throws -> V2AcceptedMessageDraft {
+        .init(
+            messageID: message.messageID,
+            roomID: message.roomID,
+            roomSequence: message.roomSequence,
+            timelineSequence: timelineSequence,
+            senderUserID: message.senderUserID,
+            clientMessageID: message.clientMessageID,
+            text: message.text,
+            media: message.media,
+            mentions: message.mentions,
+            entities: message.entities,
+            replyTo: message.replyTo,
+            groupDeliveryMode: message.groupDeliveryMode,
+            createdAt: message.createdAt
+        )
     }
 
     /// Makes an unopened direct pair visible to the recipient only after its
@@ -3521,14 +3620,14 @@ private func roomLogReduction(
 /// Authorization is deliberately outside this helper and remains checked
 /// against locked room, membership, direct-pair, policy-version and stranger
 /// quota state by `PostgresV2RoomWriteStore.accept` before this reduction.
-private func directRoomLogShardOnlyReduction(
+private func directRoomLogShardOnlyBatchReduction(
     command: V2SendMessageCommand,
-    roomState: V2RoomCommandState,
+    nextRoomSequence: UInt64,
     shardState: ShardAdmissionState,
     profile: RoomCapacityProfile,
     identifiers: V2AcceptanceIdentifiers,
     now: Date
-) throws -> V2SendMessageAcceptanceResult {
+) throws -> DirectRoomLogShardOnlyReductionResult {
     guard let lease = shardState.lease else { return .unavailable(.missingShardLease) }
     guard lease.isValid(at: now) else { return .unavailable(.expiredShardLease) }
     guard lease.commandWindow.canReserve(1) else {
@@ -3552,7 +3651,7 @@ private func directRoomLogShardOnlyReduction(
     let accepted = V2AcceptedMessageDraft(
         messageID: identifiers.messageID,
         roomID: command.roomID,
-        roomSequence: roomState.nextRoomSequence,
+        roomSequence: nextRoomSequence,
         senderUserID: command.senderUserID,
         clientMessageID: command.clientMessageID,
         text: command.text,
@@ -3562,28 +3661,85 @@ private func directRoomLogShardOnlyReduction(
         replyTo: command.replyTo,
         createdAt: now
     )
-    let nextRoom = V2RoomCommandState(
-        roomID: roomState.roomID,
-        nextRoomSequence: roomState.nextRoomSequence + 1,
-        admission: roomState.admission
-    )
     return .accepted(.init(
         acceptedMessage: accepted,
         eventID: identifiers.eventID,
-        fanoutPlan: .init(
-            id: identifiers.planID,
-            sourceEventID: identifiers.eventID,
-            roomID: command.roomID,
-            roomSequence: accepted.roomSequence,
-            reservation: .init(
-                cost: try .init(targetCount: 0),
-                shardLeaseID: lease.id,
-                shardLeaseGeneration: lease.generation
-            )
-        ),
-        nextRoomState: nextRoom,
         nextShardState: nextShard
     ))
+}
+
+/// The direct room-log shard-only path has no room-admission mutation.  Keep
+/// this separate from `V2MessageAcceptanceTransaction`: fabricating a room
+/// admission value merely to satisfy the general fan-out transaction shape
+/// would make it too easy to accidentally persist stale admission state.
+private enum DirectRoomLogShardOnlyReductionResult {
+    case accepted(DirectRoomLogShardOnlyWriteSet)
+    case rateLimited(retryAfterSeconds: Int)
+    case unavailable(FanoutAdmissionUnavailableReason)
+}
+
+private struct DirectRoomLogShardOnlyWriteSet {
+    let acceptedMessage: V2AcceptedMessageDraft
+    let eventID: EventID
+    let nextShardState: ShardAdmissionState
+}
+
+/// The general, non-batched acceptance path still carries the full room
+/// transaction shape.  Keep this compatibility wrapper separate from the
+/// optimized batch reducer, which deliberately has no room-admission state.
+private func directRoomLogShardOnlyReduction(
+    command: V2SendMessageCommand,
+    roomState: V2RoomCommandState,
+    shardState: ShardAdmissionState,
+    profile: RoomCapacityProfile,
+    identifiers: V2AcceptanceIdentifiers,
+    now: Date
+) throws -> V2SendMessageAcceptanceResult {
+    switch try directRoomLogShardOnlyBatchReduction(
+        command: command,
+        nextRoomSequence: roomState.nextRoomSequence,
+        shardState: shardState,
+        profile: profile,
+        identifiers: identifiers,
+        now: now
+    ) {
+    case .accepted(let writeSet):
+        return .accepted(.init(
+            acceptedMessage: writeSet.acceptedMessage,
+            eventID: writeSet.eventID,
+            fanoutPlan: .init(
+                id: identifiers.planID,
+                sourceEventID: writeSet.eventID,
+                roomID: command.roomID,
+                roomSequence: writeSet.acceptedMessage.roomSequence,
+                reservation: .init(
+                    cost: try .init(targetCount: 0),
+                    shardLeaseID: try requireShardLeaseID(writeSet.nextShardState),
+                    shardLeaseGeneration: try requireShardLeaseGeneration(writeSet.nextShardState)
+                )
+            ),
+            nextRoomState: V2RoomCommandState(
+                roomID: roomState.roomID,
+                nextRoomSequence: roomState.nextRoomSequence + 1,
+                admission: roomState.admission
+            ),
+            nextShardState: writeSet.nextShardState
+        ))
+    case .rateLimited(let retryAfterSeconds):
+        return .rateLimited(retryAfterSeconds: retryAfterSeconds)
+    case .unavailable(let reason):
+        return .unavailable(reason)
+    }
+}
+
+private func requireShardLeaseID(_ state: ShardAdmissionState) throws -> ShardAdmissionLeaseID {
+    guard let lease = state.lease else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    return lease.id
+}
+
+private func requireShardLeaseGeneration(_ state: ShardAdmissionState) throws -> UInt64 {
+    guard let lease = state.lease else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    return lease.generation
 }
 
 // Kept as a narrow semantic wrapper while group hybrid still has explicit
@@ -3933,6 +4089,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
         )
     }
+
 }
 
 private struct AdmissionSnapshotRow: Decodable {
@@ -4510,6 +4667,31 @@ private struct PlainDirectRoomLogBatchPreflightRow: Decodable {
             muted: muted
         )
     }
+
+    /// The shard-only direct batch never materializes `room_admission`; the
+    /// shard row below is the exact state passed to the durable credit pool.
+    func shard() throws -> ShardRow {
+        guard let shardLeaseID, let shardGeneration, let shardValidUntil,
+              let shardCommandWindowLimit, let shardCommandWindowUsed,
+              let shardFanoutWindowLimit, let shardFanoutWindowUsed,
+              let shardMaxOutstandingFanoutUnits,
+              let shardOutstandingFanoutUnits, let shardMaxOutstandingPlans,
+              let shardOutstandingPlans
+        else { throw V2AtomicRoomWriteBatchError.unsupportedRequestShape }
+        return .init(
+            leaseID: shardLeaseID,
+            generation: shardGeneration,
+            validUntil: shardValidUntil,
+            commandWindowLimit: shardCommandWindowLimit,
+            commandWindowUsed: shardCommandWindowUsed,
+            fanoutWindowLimit: shardFanoutWindowLimit,
+            fanoutWindowUsed: shardFanoutWindowUsed,
+            maxOutstandingFanoutUnits: shardMaxOutstandingFanoutUnits,
+            outstandingFanoutUnits: shardOutstandingFanoutUnits,
+            maxOutstandingPlans: shardMaxOutstandingPlans,
+            outstandingPlans: shardOutstandingPlans
+        )
+    }
 }
 
 private struct OrderedRoomWriteRequest {
@@ -4531,6 +4713,16 @@ private struct OrderedRoomWriteCommit {
 private enum DirectRoomLogBatchPreparation {
     case append(PreparedDirectRoomLogAppend)
     case outcome(RoomWriteCommit)
+}
+
+/// Minimal accepted-event material used by the plain direct room-log fast
+/// path.  In shard-only mode the room command window is intentionally absent;
+/// the durable shard credit is the sole command admission authority.
+private struct PlainDirectRoomLogWriteSet {
+    let acceptedMessage: V2AcceptedMessageDraft
+    let eventID: EventID
+    let nextShardState: ShardAdmissionState
+    let roomCommandWindowUsed: Int
 }
 
 private struct PreparedDirectRoomLogAppend {
