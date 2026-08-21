@@ -1,0 +1,9 @@
+services:
+  account:
+    image: imv2-server:direct-cursor-readiness-ad3dae16
+
+  gateway:
+    image: imv2-server:direct-cursor-readiness-ad3dae16
+
+  operator:
+    image: imv2-server:direct-cursor-readiness-ad3dae16
