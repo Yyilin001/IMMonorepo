@@ -69,14 +69,18 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         )
     }
 
-    /// Partitions only on facts already resident in the process-local direct
-    /// policy cache.  This is deliberately advisory: `acceptAtomically` still
-    /// locks the durable room, membership, direct-pair and policy-version
-    /// rows, then validates the cached revisions before it appends anything.
+    /// Partitions only on request shape and optional process-local policy
+    /// hints. `true` is deliberately not an authorization decision:
+    /// `acceptAtomically` still locks the durable room, membership,
+    /// direct-pair and policy-version rows, derives the complete policy, and
+    /// applies stranger quota / first-reply mutations inside the same
+    /// transaction as the append.
     ///
-    /// In particular, a cache miss and a first reply use the normal durable
-    /// path.  They must not cause unrelated established conversations in the
-    /// same gateway staging window to lose their set-based append.
+    /// This intentionally admits a cache miss to the *attempted* subset. A
+    /// fresh direct relationship is a common load shape; forcing it through
+    /// one transaction per message creates a cold-start queue spike. Any
+    /// unsupported room or policy outcome makes the whole compatible subset
+    /// fall back to the established individual path before it commits.
     public func atomicBatchEligibility(
         requests: [V2RoomWriteRequest]
     ) async -> [Bool] {
@@ -91,35 +95,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         eligibility.reserveCapacity(requests.count)
         for request in requests {
             guard Self.isPlainDirectRoomLogBatchShape(request),
-                  let roomID = try? uuid(request.command.roomID),
-                  let senderID = try? uuid(request.command.senderUserID)
+                  (try? uuid(request.command.roomID)) != nil,
+                  (try? uuid(request.command.senderUserID)) != nil
             else {
                 eligibility.append(false)
                 continue
             }
-            let key = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
-            guard let policy = await directSendPolicyCache.value(for: key) else {
-                eligibility.append(false)
-                continue
-            }
-            // Keep this in lockstep with `prepareDirectRoomLogAppend`. The
-            // predicate is intentionally stricter than the normal direct-send
-            // decision: a transaction that might mutate a first-reply marker
-            // or stranger quota belongs on the ordinary path. A stale policy
-            // can only turn a later atomic attempt into its safe durable
-            // fallback; it cannot turn an ineligible request into an append.
-            guard let context = try? directMessageContext(from: policy.policySnapshot()) else {
-                eligibility.append(false)
-                continue
-            }
-            eligibility.append(
-                context.restriction == nil
-                    && !context.requiresStrangerQuota
-                    && context.senderProfileVisibleToRecipient
-                    && context.senderCanSend == true
-                    && context.senderHasReplied
-                    && context.supportAccountID == nil
-            )
+            // Do not read a policy cache here. The classifier is only a
+            // shape gate; the transaction below owns the complete policy
+            // decision for both hot and cold conversations.
+            eligibility.append(true)
         }
         return eligibility
     }
@@ -208,22 +193,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         guard Set(ordered.map(\.roomID)).count == ordered.count else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        // The set preflight below retains all authoritative locks and revision
-        // checks, but deliberately relies on an already-established direct
-        // policy cache entry for the expensive derived policy fields. A cache
-        // miss, or a first-reply command that could mutate a pair, continues
-        // through the established single-command transaction.
-        guard ordered.allSatisfy({ item in
-            guard let policy = item.cachedDirectPolicy else { return false }
-            // Special-account state carries its own lifecycle rules. Keep it
-            // on the single-command path until it has an equally complete
-            // set-based authorization graph.
-            return policy.senderHasReplied
-                && policy.senderAccountKind == nil
-                && policy.recipientAccountKind == nil
-        }) else {
-            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
-        }
         // Every transaction acquires room rows in the same order.  Preserve
         // arrival order for commands sharing a room, since their sequence is
         // an observable part of the room-log contract.
@@ -275,11 +244,6 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     switch result {
                     case .append(let append):
                         prepared.append(append)
-                        commits.append(.init(
-                            originalIndex: item.originalIndex,
-                            cacheKey: item.cacheKey,
-                            commit: append.commit
-                        ))
                     case .outcome(let commit):
                         commits.append(.init(
                             originalIndex: item.originalIndex,
@@ -289,13 +253,62 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     }
                 }
                 if !prepared.isEmpty {
+                    try await persistPlainDirectRoomLogBatchPolicyMutations(
+                        prepared,
+                        sql: sql
+                    )
                     try await persistPlainRoomLogMessages(
                         inputs: prepared.enumerated().map { ordinal, append in
                             append.input.withOrdinal(ordinal)
                         },
                         persistsRoomAdmission: directRoomLogAdmissionMode == .room,
-                        sql: try sqlDatabase(from: transaction)
+                        sql: sql
                     )
+                    for append in prepared {
+                        let projectionChanges = try await appendDirectPostAcceptanceProjections(
+                            roomID: append.roomID,
+                            senderID: append.senderID,
+                            recipientID: append.directContext.recipientID,
+                            senderProfileVisibleToRecipient: append.directContext.senderProfileVisibleToRecipient,
+                            senderCanSend: append.directContext.senderCanSend,
+                            sourceEventID: append.input.eventID,
+                            createdAt: append.now,
+                            sql: sql
+                        )
+                        var cacheEntry = append.policyCacheEntry
+                        if append.advancesReplyMarker {
+                            cacheEntry = cacheEntry.markingSenderHasReplied()
+                        }
+                        cacheEntry = cacheEntry.applyingPostAcceptanceProjection(
+                            senderCapabilityInserted: projectionChanges.senderCapabilityInserted,
+                            recipientProfileInserted: projectionChanges.recipientProfileInserted
+                        )
+                        var shadows: [DirectProjectionShadowRequest] = []
+                        if projectionChanges.recipientProfileInserted {
+                            shadows.append(.init(
+                                userID: try .init(append.directContext.recipientID.uuidString),
+                                sourceEventID: try .init(append.input.eventID.uuidString),
+                                projectionKinds: ["direct_room_profile"]
+                            ))
+                        }
+                        if projectionChanges.senderCapabilityInserted {
+                            shadows.append(.init(
+                                userID: append.request.command.senderUserID,
+                                sourceEventID: try .init(append.input.eventID.uuidString),
+                                projectionKinds: ["direct_sending_capability"]
+                            ))
+                        }
+                        commits.append(.init(
+                            originalIndex: append.originalIndex,
+                            cacheKey: append.cacheKey,
+                            commit: .init(
+                                outcome: append.commit.outcome,
+                                acceptedDirectProjectionShadows: shadows,
+                                directPolicyCacheUpdate: cacheEntry,
+                                shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit
+                            )
+                        ))
+                    }
                 }
                 guard commits.count == orderedRequests.count else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
@@ -350,10 +363,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         let request = item.request
         let command = request.command
         let clientMessageID = try uuid(command.clientMessageID)
-        guard preflight.ordinal == item.preflightOrdinal,
-              let cachedDirectPolicy = item.cachedDirectPolicy,
-              preflight.validates(cachedDirectPolicy)
-        else {
+        guard preflight.ordinal == item.preflightOrdinal else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
         let room = preflight.room
@@ -375,12 +385,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
         }
-        let directContext = try directMessageContext(from: cachedDirectPolicy.policySnapshot())
+        let directContext = try directMessageContext(from: preflight.directPolicySnapshot())
         guard directContext.restriction == nil,
-              !directContext.requiresStrangerQuota,
-              directContext.senderProfileVisibleToRecipient,
-              directContext.senderCanSend == true,
-              directContext.senderHasReplied,
               directContext.supportAccountID == nil,
               let shardAdmissionCommandCreditPool
         else {
@@ -459,12 +465,20 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 clientMessageID: clientMessageID
             )
             return .append(.init(
+                originalIndex: item.originalIndex,
+                request: request,
+                cacheKey: item.cacheKey,
+                roomID: item.roomID,
+                senderID: item.senderID,
                 input: input,
                 now: request.now,
+                directContext: directContext,
+                policyCacheEntry: try preflight.directPolicyCacheEntry(),
+                advancesReplyMarker: !directContext.senderHasReplied,
                 commit: .init(
                     outcome: .accepted(acceptedMessage),
                     acceptedDirectProjectionShadows: [],
-                    directPolicyCacheUpdate: cachedDirectPolicy,
+                    directPolicyCacheUpdate: nil,
                     shardAdmissionCommandCredit: shardCreditToken
                 )
             ))
@@ -1245,22 +1259,30 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                       OR membership.left_revision > room.membership_revision)
                 FOR UPDATE OF membership
             ), direct_pair AS MATERIALIZED (
-                SELECT room.ordinal,
+                SELECT room.ordinal, pair.lower_user_id, pair.higher_user_id,
                        CASE WHEN pair.lower_user_id = room.sender_id
                             THEN pair.higher_user_id ELSE pair.lower_user_id END AS recipient_user_id,
                        pair.direct_policy_revision,
                        CASE WHEN pair.lower_user_id = room.sender_id
-                            THEN pair.lower_has_replied ELSE pair.higher_has_replied END AS sender_has_replied
+                            THEN pair.lower_profile_visible_to_higher
+                            ELSE pair.higher_profile_visible_to_lower
+                       END AS sender_profile_visible_to_recipient,
+                       CASE WHEN pair.lower_user_id = room.sender_id
+                            THEN pair.lower_can_send ELSE pair.higher_can_send
+                       END AS sender_can_send,
+                       CASE WHEN pair.lower_user_id = room.sender_id
+                            THEN pair.lower_has_replied ELSE pair.higher_has_replied END AS sender_has_replied,
+                       CASE WHEN pair.lower_user_id = room.sender_id
+                            THEN pair.higher_has_replied ELSE pair.lower_has_replied END AS recipient_has_replied
                 FROM fresh_room AS room
                 JOIN locked_actor AS actor ON actor.ordinal = room.ordinal
                 JOIN im_v2.direct_room_pairs AS pair ON pair.room_id = room.room_id
                 WHERE room.room_kind = 'direct'
                   AND (pair.lower_user_id = room.sender_id
                        OR pair.higher_user_id = room.sender_id)
-                FOR SHARE OF pair
+                FOR UPDATE OF pair
             ), direct_policy_versions AS MATERIALIZED (
-                SELECT pair.ordinal, pair.recipient_user_id,
-                       pair.direct_policy_revision, pair.sender_has_replied,
+                SELECT pair.*,
                        sender_version.revision AS sender_policy_revision,
                        recipient_version.revision AS recipient_policy_revision
                 FROM direct_pair AS pair
@@ -1270,6 +1292,71 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 JOIN im_v2.user_direct_send_policy_versions AS recipient_version
                   ON recipient_version.user_id = pair.recipient_user_id
                 FOR KEY SHARE OF sender_version, recipient_version
+            ), special AS MATERIALIZED (
+                SELECT pair.ordinal, account.account_user_id, account.account_kind,
+                       account.status, account.allows_customer_messages,
+                       account.allows_service_messages
+                FROM direct_policy_versions AS pair
+                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
+                JOIN im_v2.special_accounts AS account
+                  ON account.account_user_id = room.sender_id
+                  OR account.account_user_id = pair.recipient_user_id
+                ORDER BY pair.ordinal, account.account_user_id
+                FOR KEY SHARE OF account
+            ), direct_policy AS MATERIALIZED (
+                SELECT pair.ordinal, pair.recipient_user_id,
+                       pair.direct_policy_revision, pair.sender_policy_revision,
+                       pair.recipient_policy_revision,
+                       pair.sender_profile_visible_to_recipient,
+                       pair.sender_can_send, pair.sender_has_replied,
+                       pair.recipient_has_replied,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = pair.recipient_user_id
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS recipient_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.user_blocks AS block
+                           WHERE (block.blocker_user_id = pair.lower_user_id
+                                  AND block.blocked_user_id = pair.higher_user_id)
+                              OR (block.blocker_user_id = pair.higher_user_id
+                                  AND block.blocked_user_id = pair.lower_user_id)
+                       ) AS blocked,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.user_relationships AS relationship
+                           WHERE relationship.lower_user_id = pair.lower_user_id
+                             AND relationship.higher_user_id = pair.higher_user_id
+                             AND relationship.state = 'accepted'
+                       ) AS is_friend,
+                       COALESCE((
+                           SELECT preference.allows_stranger_messages
+                           FROM im_v2.user_stranger_message_preferences AS preference
+                           WHERE preference.user_id = pair.recipient_user_id
+                       ), TRUE) AS allows_strangers,
+                       (SELECT account_kind FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = room.sender_id) AS sender_account_kind,
+                       (SELECT status FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = room.sender_id) AS sender_account_status,
+                       (SELECT allows_service_messages FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = room.sender_id) AS sender_allows_service_messages,
+                       (SELECT account_kind FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = pair.recipient_user_id) AS recipient_account_kind,
+                       (SELECT status FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = pair.recipient_user_id) AS recipient_account_status,
+                       (SELECT allows_customer_messages FROM special
+                        WHERE ordinal = pair.ordinal
+                          AND account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
+                FROM direct_policy_versions AS pair
+                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
             )
             SELECT room.ordinal, room.room_kind, room.room_shard_id,
                    room.room_sequence, room.timeline_sequence,
@@ -1297,13 +1384,21 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                    admission.shard_max_outstanding_plans,
                    admission.shard_outstanding_plans,
                    actor.actor_role, actor.sender_is_active, actor.muted,
-                   policy.recipient_user_id, policy.direct_policy_revision,
+                   policy.recipient_user_id,
+                   policy.sender_profile_visible_to_recipient,
+                   policy.direct_policy_revision,
                    policy.sender_policy_revision, policy.recipient_policy_revision,
-                   policy.sender_has_replied
+                   policy.sender_can_send, policy.recipient_is_active,
+                   policy.blocked, policy.is_friend, policy.sender_has_replied,
+                   policy.recipient_has_replied, policy.allows_strangers,
+                   policy.sender_account_kind, policy.sender_account_status,
+                   policy.sender_allows_service_messages,
+                   policy.recipient_account_kind, policy.recipient_account_status,
+                   policy.recipient_allows_customer_messages
             FROM fresh_room AS room
             LEFT JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
             LEFT JOIN locked_actor AS actor ON actor.ordinal = room.ordinal
-            LEFT JOIN direct_policy_versions AS policy ON policy.ordinal = room.ordinal
+            LEFT JOIN direct_policy AS policy ON policy.ordinal = room.ordinal
             ORDER BY room.ordinal
             """).all(decoding: PlainDirectRoomLogBatchPreflightRow.self)
         guard rows.count == ordered.count,
@@ -2737,6 +2832,122 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         )
     }
 
+    /// Applies the direct-only mutable policy effects for a batch whose room,
+    /// membership, pair and user-policy rows are already locked by the
+    /// authoritative preflight. Every mutation is set-based and the caller
+    /// treats a partial cardinality as an unsupported shape, so the enclosing
+    /// transaction rolls back and the established per-command path decides
+    /// each outcome without losing quota.
+    private func persistPlainDirectRoomLogBatchPolicyMutations(
+        _ appends: [PreparedDirectRoomLogAppend],
+        sql: any SQLDatabase
+    ) async throws {
+        let quotaInputs = appends.compactMap { append -> DirectRoomLogQuotaMutationInput? in
+            guard append.directContext.requiresStrangerQuota else { return nil }
+            return .init(
+                senderID: append.senderID,
+                recipientID: append.directContext.recipientID,
+                nowUnixSeconds: append.now.timeIntervalSince1970
+            )
+        }
+        guard Set(quotaInputs.map { "\($0.senderID.uuidString)|\($0.recipientID.uuidString)" }).count == quotaInputs.count else {
+            // A direct pair is unique by design, and this batch already has
+            // one command per room. Keep the assertion explicit because the
+            // upsert below must not consume two quota units for one logical
+            // pair if that invariant ever changes.
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        if !quotaInputs.isEmpty {
+            let inputJSON = try roomWriteJSON(quotaInputs)
+            let expectedCount = Int64(quotaInputs.count)
+            let windowSeconds = strangerMessagePolicy.window
+            guard let result = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT input.sender_id, input.recipient_id,
+                           input.now_unix_seconds
+                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                        sender_id uuid,
+                        recipient_id uuid,
+                        now_unix_seconds double precision
+                    )
+                ), consumed AS (
+                    INSERT INTO im_v2.stranger_message_windows AS existing_window
+                        (sender_user_id, recipient_user_id, window_started_at, message_count)
+                    SELECT input.sender_id, input.recipient_id,
+                           to_timestamp(input.now_unix_seconds), 1
+                    FROM input
+                    ON CONFLICT (sender_user_id, recipient_user_id) DO UPDATE
+                    SET window_started_at = CASE
+                            WHEN existing_window.window_started_at <= EXCLUDED.window_started_at - \(bind: windowSeconds) * interval '1 second'
+                            THEN EXCLUDED.window_started_at
+                            ELSE existing_window.window_started_at
+                        END,
+                        message_count = CASE
+                            WHEN existing_window.window_started_at <= EXCLUDED.window_started_at - \(bind: windowSeconds) * interval '1 second'
+                            THEN 1
+                            ELSE existing_window.message_count + 1
+                        END
+                    WHERE existing_window.window_started_at <= EXCLUDED.window_started_at - \(bind: windowSeconds) * interval '1 second'
+                       OR existing_window.message_count < \(bind: strangerMessagePolicy.maximumMessagesPerWindow)
+                    RETURNING sender_user_id, recipient_user_id
+                )
+                SELECT \(bind: expectedCount)::bigint AS expected_count,
+                       (SELECT count(*) FROM consumed)::bigint AS applied_count
+                """).first(decoding: DirectRoomLogBatchMutationCounts.self),
+                  result.expectedCount == expectedCount,
+                  result.appliedCount == expectedCount
+            else {
+                throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+            }
+        }
+
+        let markerInputs = appends.compactMap { append -> DirectRoomLogReplyMarkerMutationInput? in
+            guard append.advancesReplyMarker else { return nil }
+            return .init(roomID: append.roomID, senderID: append.senderID)
+        }
+        guard Set(markerInputs.map(\.roomID)).count == markerInputs.count else {
+            throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+        }
+        if !markerInputs.isEmpty {
+            let inputJSON = try roomWriteJSON(markerInputs)
+            let expectedCount = Int64(markerInputs.count)
+            guard let result = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT input.room_id, input.sender_id
+                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                        room_id uuid,
+                        sender_id uuid
+                    )
+                ), advanced AS (
+                    UPDATE im_v2.direct_room_pairs AS pair
+                    SET lower_has_replied = CASE
+                            WHEN pair.lower_user_id = input.sender_id THEN TRUE
+                            ELSE pair.lower_has_replied
+                        END,
+                        higher_has_replied = CASE
+                            WHEN pair.higher_user_id = input.sender_id THEN TRUE
+                            ELSE pair.higher_has_replied
+                        END,
+                        direct_policy_revision = pair.direct_policy_revision + 1
+                    FROM input
+                    WHERE pair.room_id = input.room_id
+                      AND (pair.lower_user_id = input.sender_id
+                           OR pair.higher_user_id = input.sender_id)
+                      AND ((pair.lower_user_id = input.sender_id AND NOT pair.lower_has_replied)
+                           OR (pair.higher_user_id = input.sender_id AND NOT pair.higher_has_replied))
+                    RETURNING pair.room_id
+                )
+                SELECT \(bind: expectedCount)::bigint AS expected_count,
+                       (SELECT count(*) FROM advanced)::bigint AS applied_count
+                """).first(decoding: DirectRoomLogBatchMutationCounts.self),
+                  result.expectedCount == expectedCount,
+                  result.appliedCount == expectedCount
+            else {
+                throw V2AtomicRoomWriteBatchError.unsupportedRequestShape
+            }
+        }
+    }
+
     /// Appends one or more already-authorized plain direct messages in one
     /// PostgreSQL statement. Inputs must contain at most one command for any
     /// `room_id`; this keeps every room update deterministic and lets the
@@ -3818,10 +4029,23 @@ private struct PlainDirectRoomLogBatchPreflightRow: Decodable {
     let senderIsActive: Bool?
     let muted: Bool?
     let recipientUserID: UUID?
+    let senderProfileVisibleToRecipient: Bool?
     let directPolicyRevision: Int64?
     let senderPolicyRevision: Int64?
     let recipientPolicyRevision: Int64?
+    let senderCanSend: Bool?
+    let recipientIsActive: Bool?
+    let blocked: Bool?
+    let isFriend: Bool?
     let senderHasReplied: Bool?
+    let recipientHasReplied: Bool?
+    let allowsStrangers: Bool?
+    let senderAccountKind: String?
+    let senderAccountStatus: String?
+    let senderAllowsServiceMessages: Bool?
+    let recipientAccountKind: String?
+    let recipientAccountStatus: String?
+    let recipientAllowsCustomerMessages: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ordinal
@@ -3859,10 +4083,23 @@ private struct PlainDirectRoomLogBatchPreflightRow: Decodable {
         case senderIsActive = "sender_is_active"
         case muted
         case recipientUserID = "recipient_user_id"
+        case senderProfileVisibleToRecipient = "sender_profile_visible_to_recipient"
         case directPolicyRevision = "direct_policy_revision"
         case senderPolicyRevision = "sender_policy_revision"
         case recipientPolicyRevision = "recipient_policy_revision"
+        case senderCanSend = "sender_can_send"
+        case recipientIsActive = "recipient_is_active"
+        case blocked
+        case isFriend = "is_friend"
         case senderHasReplied = "sender_has_replied"
+        case recipientHasReplied = "recipient_has_replied"
+        case allowsStrangers = "allows_strangers"
+        case senderAccountKind = "sender_account_kind"
+        case senderAccountStatus = "sender_account_status"
+        case senderAllowsServiceMessages = "sender_allows_service_messages"
+        case recipientAccountKind = "recipient_account_kind"
+        case recipientAccountStatus = "recipient_account_status"
+        case recipientAllowsCustomerMessages = "recipient_allows_customer_messages"
     }
 
     var room: RoomRow {
@@ -3878,12 +4115,56 @@ private struct PlainDirectRoomLogBatchPreflightRow: Decodable {
         )
     }
 
-    func validates(_ cache: V2DirectSendPolicyCache.Entry) -> Bool {
-        recipientUserID == cache.recipientID
-            && directPolicyRevision == cache.directPairRevision
-            && senderPolicyRevision == cache.senderPolicyRevision
-            && recipientPolicyRevision == cache.recipientPolicyRevision
-            && senderHasReplied == true
+    func directPolicySnapshot() throws -> DirectMessagePolicySnapshotRow {
+        guard let recipientUserID, let senderProfileVisibleToRecipient,
+              let recipientIsActive, let blocked, let isFriend,
+              let senderHasReplied, let recipientHasReplied,
+              let allowsStrangers
+        else { throw V2AtomicRoomWriteBatchError.unsupportedRequestShape }
+        return .init(
+            recipientUserID: recipientUserID,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+            senderCanSend: senderCanSend,
+            recipientIsActive: recipientIsActive,
+            blocked: blocked,
+            isFriend: isFriend,
+            senderHasReplied: senderHasReplied,
+            recipientHasReplied: recipientHasReplied,
+            allowsStrangers: allowsStrangers,
+            senderAccountKind: senderAccountKind,
+            senderAccountStatus: senderAccountStatus,
+            senderAllowsServiceMessages: senderAllowsServiceMessages,
+            recipientAccountKind: recipientAccountKind,
+            recipientAccountStatus: recipientAccountStatus,
+            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+        )
+    }
+
+    func directPolicyCacheEntry() throws -> V2DirectSendPolicyCache.Entry {
+        guard let directPolicyRevision, let senderPolicyRevision,
+              let recipientPolicyRevision
+        else { throw V2AtomicRoomWriteBatchError.unsupportedRequestShape }
+        let policy = try directPolicySnapshot()
+        return .init(
+            recipientID: policy.recipientUserID,
+            directPairRevision: directPolicyRevision,
+            senderPolicyRevision: senderPolicyRevision,
+            recipientPolicyRevision: recipientPolicyRevision,
+            senderProfileVisibleToRecipient: policy.senderProfileVisibleToRecipient,
+            senderCanSend: policy.senderCanSend,
+            recipientIsActive: policy.recipientIsActive,
+            blocked: policy.blocked,
+            isFriend: policy.isFriend,
+            senderHasReplied: policy.senderHasReplied,
+            recipientHasReplied: policy.recipientHasReplied,
+            allowsStrangers: policy.allowsStrangers,
+            senderAccountKind: policy.senderAccountKind,
+            senderAccountStatus: policy.senderAccountStatus,
+            senderAllowsServiceMessages: policy.senderAllowsServiceMessages,
+            recipientAccountKind: policy.recipientAccountKind,
+            recipientAccountStatus: policy.recipientAccountStatus,
+            recipientAllowsCustomerMessages: policy.recipientAllowsCustomerMessages
+        )
     }
 
     func admissionSnapshot() throws -> AdmissionSnapshotRow {
@@ -3952,9 +4233,49 @@ private enum DirectRoomLogBatchPreparation {
 }
 
 private struct PreparedDirectRoomLogAppend {
+    let originalIndex: Int
+    let request: V2RoomWriteRequest
+    let cacheKey: V2DirectSendPolicyCache.Key
+    let roomID: UUID
+    let senderID: UUID
     let input: PlainRoomLogMessageInput
     let now: Date
+    let directContext: DirectMessageAcceptanceContext
+    let policyCacheEntry: V2DirectSendPolicyCache.Entry
+    let advancesReplyMarker: Bool
     let commit: RoomWriteCommit
+}
+
+private struct DirectRoomLogQuotaMutationInput: Encodable {
+    let senderID: UUID
+    let recipientID: UUID
+    let nowUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case senderID = "sender_id"
+        case recipientID = "recipient_id"
+        case nowUnixSeconds = "now_unix_seconds"
+    }
+}
+
+private struct DirectRoomLogReplyMarkerMutationInput: Encodable {
+    let roomID: UUID
+    let senderID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case senderID = "sender_id"
+    }
+}
+
+private struct DirectRoomLogBatchMutationCounts: Decodable {
+    let expectedCount: Int64
+    let appliedCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case expectedCount = "expected_count"
+        case appliedCount = "applied_count"
+    }
 }
 
 private struct MessageRow: Decodable {
@@ -4084,6 +4405,38 @@ private extension V2DirectSendPolicyCache.Entry {
             recipientUserID: recipientID,
             senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
             senderCanSend: senderCanSend,
+            recipientIsActive: recipientIsActive,
+            blocked: blocked,
+            isFriend: isFriend,
+            senderHasReplied: senderHasReplied,
+            recipientHasReplied: recipientHasReplied,
+            allowsStrangers: allowsStrangers,
+            senderAccountKind: senderAccountKind,
+            senderAccountStatus: senderAccountStatus,
+            senderAllowsServiceMessages: senderAllowsServiceMessages,
+            recipientAccountKind: recipientAccountKind,
+            recipientAccountStatus: recipientAccountStatus,
+            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+        )
+    }
+
+    /// These two pair-local flags become true in the same source transaction
+    /// as the first accepted message. Publishing the refined value only after
+    /// commit therefore cannot make an uncommitted profile/capability visible
+    /// to a later authorization attempt. The durable preflight still checks
+    /// the pair and policy revisions before it relies on this hint.
+    func applyingPostAcceptanceProjection(
+        senderCapabilityInserted: Bool,
+        recipientProfileInserted: Bool
+    ) -> Self {
+        guard senderCapabilityInserted || recipientProfileInserted else { return self }
+        return .init(
+            recipientID: recipientID,
+            directPairRevision: directPairRevision,
+            senderPolicyRevision: senderPolicyRevision,
+            recipientPolicyRevision: recipientPolicyRevision,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient || recipientProfileInserted,
+            senderCanSend: senderCapabilityInserted ? true : senderCanSend,
             recipientIsActive: recipientIsActive,
             blocked: blocked,
             isFriend: isFriend,

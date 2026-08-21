@@ -61,3 +61,17 @@
 | WAL sync | 36,427 | 28.3 s | — |
 
 下一项结构性收益应来自减少首条/陌生人关系的逐条授权工作，且必须保留：操作幂等锁、直接关系策略版本、成员/房间版本和 quota 的事务原子性。
+
+## Direct Append v2：冷关系批量授权
+
+已实现的 v2 路径不把 Gateway 缓存升级为授权来源。对于每个 plain direct room-log batch，它会在一个 PostgreSQL 事务内：
+
+1. 以确定顺序取得操作、房间、成员、admission、direct pair 和策略版本锁；
+2. 重新计算账号状态、双向 block、好友关系、陌生人偏好及特殊账号限制；
+3. 对允许的冷关系以 set-based `INSERT ... ON CONFLICT DO UPDATE` 消费陌生人 quota，并以 set-based `UPDATE` 推进首次回复标记；
+4. 批量追加消息；再原子写入首次 profile/capability projection；
+5. 事务提交后才发布缓存条目和跨 shard shadow。
+
+任一条策略不兼容、quota 不足、重复操作或特殊账号规则无法由共享事务完整表达时，整个候选子集回滚并回退到已存在的单条路径。不会出现“部分已扣额度、但消息未落库”或“缓存先允许、数据库后来拒绝”的状态。
+
+真实 PostgreSQL 16 集成测试覆盖了两个无缓存、首条陌生人直聊在同一个 batch 中完成 quota、reply marker、首次投影和 canonical room-log write；普通 Swift 回归为 397 tests / 79 suites。下一轮云端复测会以全新 profile 测量其对 900 msg/s 冷关系场景的效果。

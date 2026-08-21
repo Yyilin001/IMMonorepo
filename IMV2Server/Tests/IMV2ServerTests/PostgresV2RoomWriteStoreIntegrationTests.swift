@@ -8779,6 +8779,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected direct room")
                 return
             }
+            guard case .opened(let secondRoom) = try await direct.open(
+                actorUserID: senderID,
+                operationID: try .init("00000000-0000-0000-0000-00000000c005"),
+                targetUserID: try .init(memberThreeUUID.uuidString)
+            ) else {
+                Issue.record("expected second direct room")
+                return
+            }
             let shardCredits = V2ShardAdmissionCommandCreditPool(
                 database: app.db(.psql), batchSize: 2
             )
@@ -8795,6 +8803,80 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 store: writer, capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now }
             )
+            // Neither sender has a direct-policy cache entry yet and both
+            // sends must consume a stranger quota, advance the reply marker,
+            // and publish the recipient profile/capability. This proves the
+            // cold path remains one all-or-nothing transaction rather than
+            // trusting an optimistic cache write.
+            let coldEligibility = await writer.atomicBatchEligibility(requests: [
+                .init(
+                    command: try .init(
+                        roomID: room.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c030"),
+                        text: "第一条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c031"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c032"),
+                        planID: .init("00000000-0000-0000-0000-00000000c033")
+                    ),
+                    now: now
+                ),
+                .init(
+                    command: try .init(
+                        roomID: secondRoom.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c034"),
+                        text: "第二条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c035"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c036"),
+                        planID: .init("00000000-0000-0000-0000-00000000c037")
+                    ),
+                    now: now
+                ),
+            ])
+            #expect(coldEligibility == [true, true])
+            let coldBatched = try await writer.acceptAtomically(requests: [
+                .init(
+                    command: try .init(
+                        roomID: room.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c030"),
+                        text: "第一条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c031"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c032"),
+                        planID: .init("00000000-0000-0000-0000-00000000c033")
+                    ),
+                    now: now
+                ),
+                .init(
+                    command: try .init(
+                        roomID: secondRoom.roomID, senderUserID: senderID,
+                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c034"),
+                        text: "第二条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c035"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c036"),
+                        planID: .init("00000000-0000-0000-0000-00000000c037")
+                    ),
+                    now: now
+                ),
+            ])
+            #expect(coldBatched.allSatisfy {
+                if case .accepted(let message) = $0 { return message.usesRoomEventLog }
+                return false
+            })
+            #expect(try await count("im_v2.stranger_message_windows", on: sql) == 2)
+            let coldCreditSnapshot = await shardCredits.snapshot()
+            #expect(coldCreditSnapshot.databaseCreditsReserved == 2)
+            #expect(coldCreditSnapshot.committedCredits == 2)
             let clientID = try ClientMessageID("00000000-0000-0000-0000-00000000c003")
             guard case .accepted(let accepted) = try await messages.send(.init(
                 roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
@@ -8814,10 +8896,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(replayed == accepted)
 
-            // The first accepted message seeds the process-local direct-send
-            // policy cache. A later policy mutation must still be fenced by
-            // the durable user policy revision inside the write transaction;
-            // a stale cache entry must never authorize this send.
+            // A later policy mutation must still be fenced by the durable
+            // user policy revision inside the write transaction; a stale
+            // cache entry must never authorize this send.
             guard case .accepted = try await messages.send(.init(
                 roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: try .init("00000000-0000-0000-0000-00000000c004"),
@@ -8827,28 +8908,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
 
-            // The micro-batch is intentionally restricted to an already
-            // established direct conversation: first sends mutate policy
-            // state and therefore retain the ordinary transaction.  Once both
-            // conversations are warm, two distinct-room appends share the
-            // actual set-based SQL statement and one durable commit.
-            guard case .opened(let secondRoom) = try await direct.open(
-                actorUserID: senderID,
-                operationID: try .init("00000000-0000-0000-0000-00000000c005"),
-                targetUserID: try .init(memberThreeUUID.uuidString)
-            ) else {
-                Issue.record("expected second direct room")
-                return
-            }
-            guard case .accepted = try await messages.send(.init(
-                roomID: secondRoom.roomID,
-                actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-00000000c020"),
-                text: "建立第二个会话"
-            )) else {
-                Issue.record("expected second-room seed acceptance")
-                return
-            }
             // Friend relationships make the two established conversations
             // eligible without changing their room-event history.  The test
             // removes them immediately after the append so the stale-policy
@@ -8969,8 +9028,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(stalePolicyDenial.reason == .generic)
 
             let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
-            let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)
-            let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
+            let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
+            let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
             #expect(senderPage.events.map(\.roomSequence) == [
                 accepted.roomSequence,
                 accepted.roomSequence + 1,
@@ -9015,7 +9074,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             let recoveredAfterRevision = try await roomLog.pull(
                 roomID: room.roomID, actorUserID: senderID,
-                afterRoomSequence: 0, pageSize: 10
+                afterRoomSequence: accepted.roomSequence - 1, pageSize: 10
             )
             let originalPayload = String(
                 data: try #require(recoveredAfterRevision.events.first?.payload),
@@ -9028,8 +9087,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 8)
-            // Seven ordinary direct messages are materialized from the
+            #expect(try await count("im_v2.messages", on: sql) == 9)
+            // Eight ordinary direct messages are materialized from the
             // message row itself. The reviewed message intentionally retains
             // the complete room-event write graph.
             #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
@@ -9055,14 +9114,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
                 """).first(decoding: CapacityRow.self))
-            // Eight accepted commands consume four database credit batches;
-            // the two room-log appends in the micro-batch still preserve the
+            // Nine accepted commands reserve five database credit batches;
+            // the cold and warm room-log appends still preserve the
             // same conservatively durable command capacity.
-            #expect(creditedAdmission.commandWindowUsed == 8)
+            #expect(creditedAdmission.commandWindowUsed == 10)
             let creditSnapshot = await shardCredits.snapshot()
-            #expect(creditSnapshot.batchReservations == 4)
-            #expect(creditSnapshot.databaseCreditsReserved == 8)
-            #expect(creditSnapshot.committedCredits == 8)
+            #expect(creditSnapshot.batchReservations == 5)
+            #expect(creditSnapshot.databaseCreditsReserved == 10)
+            #expect(creditSnapshot.committedCredits == 9)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
