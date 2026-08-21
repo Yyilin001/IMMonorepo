@@ -110,17 +110,42 @@ public struct V2RoomWriteRequest: Sendable {
     }
 }
 
-/// A store that can make a whole ordered input batch durable atomically.
+/// A store that can make a compatible ordered input subset durable atomically.
 ///
 /// This is deliberately a separate protocol rather than a convenience method
-/// on `V2RoomWriteStore`.  A fallback that loops over `accept` would commit a
-/// prefix before a later failure, while an admission batcher could only report
-/// a single error to every waiting client.  Such a fallback is both incorrect
-/// and not a WAL optimization.
+/// on `V2RoomWriteStore`. The batcher keeps the result for every independent
+/// command, so an implementation can atomically commit the subset it has
+/// classified as compatible while the remaining distinct rooms use their
+/// ordinary durable path. A false classification is never an authorization
+/// outcome and cannot be returned to a client.
 public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
+    /// A process-local, advisory classification for one pending batch.
+    ///
+    /// `true` means the implementation expects the request to be eligible for
+    /// its shared transaction fast path.  It is never an authorization
+    /// decision: a later atomic attempt must still take every authoritative
+    /// lock and may decline the request when a durable revision changed.  A
+    /// `false` result merely lets the batcher send that independent request
+    /// through the established one-command path without making unrelated,
+    /// eligible requests give up their set-based transaction.
+    func atomicBatchEligibility(
+        requests: [V2RoomWriteRequest]
+    ) async -> [Bool]
+
     func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome]
+}
+
+public extension V2AtomicRoomWriteBatchStore {
+    /// Stores that do not expose a cheap advisory classifier retain the
+    /// original all-or-nothing attempt behaviour.  This keeps the classifier
+    /// an optimisation rather than a new requirement for correctness.
+    func atomicBatchEligibility(
+        requests: [V2RoomWriteRequest]
+    ) async -> [Bool] {
+        Array(repeating: true, count: requests.count)
+    }
 }
 
 /// A batch implementation may decline a shape that cannot preserve the

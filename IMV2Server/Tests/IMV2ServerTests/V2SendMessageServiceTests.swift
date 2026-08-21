@@ -441,6 +441,59 @@ struct V2SendMessageServiceTests {
         #expect(error as? V2RoomWriteStoreError == .actorNotEligible)
     }
 
+    @Test("preclassified requests do not make compatible rooms abandon their atomic append")
+    func admissionBatchingSeparatesPreclassifiedRequests() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let individuallyAcceptedID = try ClientMessageID("00000000-0000-0000-0000-000000000184")
+        let store = AtomicBatchTestStore(
+            preclassifiedClientMessageIDs: [individuallyAcceptedID]
+        )
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let senderID = try UserID("00000000-0000-0000-0000-000000000181")
+
+        async let first = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000182"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000183"),
+            text: "first"
+        ))
+        async let individual = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000185"),
+            actorUserID: senderID,
+            clientMessageID: individuallyAcceptedID,
+            text: "individual"
+        ))
+        async let third = service.send(.init(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000186"),
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID("00000000-0000-0000-0000-000000000187"),
+            text: "third"
+        ))
+
+        #expect(try await [first, individual, third] == [
+            .rateLimited(retryAfterSeconds: 8),
+            .unavailable(.missingShardLease),
+            .rateLimited(retryAfterSeconds: 8),
+        ])
+        #expect(await store.batches().count == 1)
+        #expect(await store.batches().first?.count == 2)
+        #expect(await store.normalAcceptCallCount() == 1)
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.atomicBatchAttempts == 1)
+        #expect(snapshot.atomicBatchCommitted == 1)
+        #expect(snapshot.atomicBatchCommittedRequests == 2)
+        #expect(snapshot.atomicPreclassifiedIndividualRequests == 1)
+    }
+
     @Test("independent room batches use bounded parallelism")
     func admissionBatchingUsesBoundedParallelismAcrossIndependentRooms() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -495,17 +548,24 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     private let shouldFail: Bool
     private let shouldDeclineBatch: Bool
     private let failingNormalClientMessageIDs: Set<ClientMessageID>
+    private let preclassifiedClientMessageIDs: Set<ClientMessageID>
     private var recordedBatches: [[ClientMessageID]] = []
     private var normalCalls = 0
 
     init(
         shouldFail: Bool = false,
         shouldDeclineBatch: Bool = false,
-        failingNormalClientMessageIDs: Set<ClientMessageID> = []
+        failingNormalClientMessageIDs: Set<ClientMessageID> = [],
+        preclassifiedClientMessageIDs: Set<ClientMessageID> = []
     ) {
         self.shouldFail = shouldFail
         self.shouldDeclineBatch = shouldDeclineBatch
         self.failingNormalClientMessageIDs = failingNormalClientMessageIDs
+        self.preclassifiedClientMessageIDs = preclassifiedClientMessageIDs
+    }
+
+    func atomicBatchEligibility(requests: [V2RoomWriteRequest]) -> [Bool] {
+        requests.map { !preclassifiedClientMessageIDs.contains($0.command.clientMessageID) }
     }
 
     func accept(

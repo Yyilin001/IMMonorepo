@@ -152,6 +152,16 @@ Scrape the loopback /metrics endpoint. When enabled, observe:
 - im_v2_shard_admission_command_credit_rejections_total: capacity-window
   rejections. Any unexpected rise requires stopping the load test and
   verifying the configured lease/profile capacity.
+- im_v2_direct_room_log_append_atomic_batches_total and
+  im_v2_direct_room_log_append_atomic_requests_total: whether Gateway staging
+  produces real set-based message appends. `committed` is the only outcome
+  that reduced PostgreSQL append transactions. `preclassified_individual`
+  means a request safely used the ordinary path (for example a cold or
+  first-reply direct-policy cache entry) without making unrelated established
+  conversations abandon their atomic batch. `shape_fallback` means a durable
+  revision or preflight check declined an otherwise eligible subset; it must
+  remain low after a steady-state warm-up. These counters are diagnostics,
+  not permission decisions.
 
 For a controlled A/B run, reset the disposable message data and
 pg_stat_statements, hold connections, message rate, payload size, and gateway
@@ -167,6 +177,13 @@ The shard-admission update/query count should approach one reservation per 32
 accepted direct-room-log commands (per shard), not one tail update per
 message. Compare accepted rate and p95/p99 latency as well; this optimization
 cannot remove the subsequent message/event/index/WAL work.
+
+Do not infer append batching from delay settings or queue depth alone. A
+high `preclassified_individual` value is expected during first-contact traffic;
+for a high-activity steady-state profile, record the committed-request fraction
+after bilateral conversations have been warmed. A low committed fraction means
+the next optimisation is batch eligibility coverage, not a larger delay or a
+larger PostgreSQL connection pool.
 
 ## Rollback
 

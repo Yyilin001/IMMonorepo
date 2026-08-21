@@ -69,6 +69,48 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         )
     }
 
+    /// Partitions only on facts already resident in the process-local direct
+    /// policy cache.  This is deliberately advisory: `acceptAtomically` still
+    /// locks the durable room, membership, direct-pair and policy-version
+    /// rows, then validates the cached revisions before it appends anything.
+    ///
+    /// In particular, a cache miss and a first reply use the normal durable
+    /// path.  They must not cause unrelated established conversations in the
+    /// same gateway staging window to lose their set-based append.
+    public func atomicBatchEligibility(
+        requests: [V2RoomWriteRequest]
+    ) async -> [Bool] {
+        guard directFanoutMode == .roomLog,
+              !contentReviewMode.enqueuesJobs,
+              shardAdmissionCommandCreditPool != nil
+        else {
+            return Array(repeating: false, count: requests.count)
+        }
+
+        var eligibility: [Bool] = []
+        eligibility.reserveCapacity(requests.count)
+        for request in requests {
+            guard Self.isPlainDirectRoomLogBatchShape(request),
+                  let roomID = try? uuid(request.command.roomID),
+                  let senderID = try? uuid(request.command.senderUserID)
+            else {
+                eligibility.append(false)
+                continue
+            }
+            let key = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
+            guard let policy = await directSendPolicyCache.value(for: key) else {
+                eligibility.append(false)
+                continue
+            }
+            eligibility.append(
+                policy.senderHasReplied
+                    && policy.senderAccountKind == nil
+                    && policy.recipientAccountKind == nil
+            )
+        }
+        return eligibility
+    }
+
     /// Owns the retry boundary for one logical command.  The transaction body
     /// is deliberately separate so the ordered batch can reuse the exact same
     /// locking, authorization and idempotency code without creating nested
