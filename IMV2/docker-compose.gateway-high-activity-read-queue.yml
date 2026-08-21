@@ -1,0 +1,11 @@
+services:
+  gateway:
+    environment:
+      # The default load-test read queue of 384 rejects a short room-log pull
+      # burst before the work-conserving foreground controller can drain it.
+      # This overlay is deliberately narrow: it does not add PostgreSQL
+      # connections or permits, and it leaves write/control/sync admission
+      # unchanged.  Use only for the high-activity direct room-log A/B; keep
+      # the queue bounded so an unhealthy database still produces backpressure
+      # rather than unbounded Gateway memory growth.
+      IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED: 768
