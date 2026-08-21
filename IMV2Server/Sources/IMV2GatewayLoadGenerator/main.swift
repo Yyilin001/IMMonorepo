@@ -42,6 +42,17 @@ enum IMV2GatewayLoadGenerator {
     }
 }
 
+/// Defines what a weighted scenario does when its selected device already has
+/// its configured number of message requests in flight.  The default models a
+/// client that declines to buffer more user actions.  The bounded queue mode
+/// is deliberately opt-in for measuring server saturation: it retains demand
+/// locally, but records both queue pressure and overflow so it cannot disguise
+/// client-side backpressure as successful server throughput.
+private enum ScenarioSendDispatch: String, Decodable, Sendable {
+    case strictPerDevice = "strict_per_device"
+    case boundedClientQueue = "bounded_client_queue"
+}
+
 private struct LoadConfiguration: Sendable {
     let host: String
     let port: Int
@@ -68,6 +79,14 @@ private struct LoadConfiguration: Sendable {
     let maximumFailurePercent: Double
     let scenario: LoadScenario?
     let scenarioRateScale: Double
+
+    var scenarioSendDispatch: ScenarioSendDispatch {
+        scenario?.sendDispatch ?? .strictPerDevice
+    }
+
+    var maximumQueuedScenarioMessagesPerConnection: Int {
+        scenario?.maximumQueuedMessagesPerConnection ?? 0
+    }
 
     init(arguments: [String]) throws {
         var values: [String: String] = [:]
@@ -166,6 +185,8 @@ private struct LoadScenario: Decodable, Sendable {
     let name: String
     let seed: UInt64
     let roomWarmupTimeoutSeconds: Int
+    let sendDispatch: ScenarioSendDispatch?
+    let maximumQueuedMessagesPerConnection: Int?
     let personas: [Persona]
     let phases: [Phase]
 
@@ -183,6 +204,9 @@ private struct LoadScenario: Decodable, Sendable {
                       && $0.roomLogReadWeight >= 0 && $0.syncPullWeight >= 0
               }),
               scenario.personas.contains(where: { $0.sendWeight > 0 }),
+              (scenario.sendDispatch != .boundedClientQueue
+                  || ((scenario.maximumQueuedMessagesPerConnection ?? 0) >= 1
+                      && (scenario.maximumQueuedMessagesPerConnection ?? 0) <= 1_024)),
               scenario.phases.allSatisfy({
                   !$0.name.isEmpty && $0.durationSeconds > 0 && $0.messagesPerSecond >= 0
                       && $0.roomLogReadsPerSecond >= 0 && $0.syncPullsPerSecond >= 0
@@ -238,6 +262,12 @@ private final class LoadStatistics: @unchecked Sendable {
         var messagesSent = 0
         var messagesAcknowledged = 0
         var messagesSkipped = 0
+        var scenarioMessagesScheduled = 0
+        var scenarioMessagesDeferred = 0
+        var scenarioMessageQueueOverflowed = 0
+        var scenarioMessageQueueAbandoned = 0
+        var queuedScenarioMessages = 0
+        var maximumQueuedScenarioMessages = 0
         var syncPullsSent = 0
         var syncBatchesReceived = 0
         var syncRecordsReceived = 0
@@ -304,6 +334,33 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordMessageSkipped() { lock.withLock { state.messagesSkipped += 1 } }
+    func recordScenarioMessageScheduled() { lock.withLock { state.scenarioMessagesScheduled += 1 } }
+    func recordScenarioMessageDeferred() {
+        lock.withLock {
+            state.scenarioMessagesDeferred += 1
+            state.queuedScenarioMessages += 1
+            state.maximumQueuedScenarioMessages = max(
+                state.maximumQueuedScenarioMessages,
+                state.queuedScenarioMessages
+            )
+        }
+    }
+    func recordScenarioMessageDequeued() {
+        lock.withLock { state.queuedScenarioMessages = max(0, state.queuedScenarioMessages - 1) }
+    }
+    func recordScenarioMessageQueueOverflow() {
+        lock.withLock {
+            state.scenarioMessageQueueOverflowed += 1
+            state.messagesSkipped += 1
+        }
+    }
+    func recordScenarioMessageQueueAbandoned(count: Int) {
+        guard count > 0 else { return }
+        lock.withLock {
+            state.scenarioMessageQueueAbandoned += count
+            state.queuedScenarioMessages = max(0, state.queuedScenarioMessages - count)
+        }
+    }
     func recordSyncPullSent() { lock.withLock { state.syncPullsSent += 1 } }
     func recordSyncBatch(milliseconds: Double, records: Int) {
         lock.withLock {
@@ -461,6 +518,8 @@ private struct LoadRun {
                             messagesPerSecond: configuration.messagesPerSecond,
                             totalConnections: configuration.connections,
                             maximumInFlightMessagesPerConnection: configuration.maximumInFlightMessagesPerConnection,
+                            scenarioSendDispatch: configuration.scenarioSendDispatch,
+                            maximumQueuedScenarioMessages: configuration.maximumQueuedScenarioMessagesPerConnection,
                             messageBytes: configuration.messageBytes,
                             syncReads: configuration.syncReads,
                             roomLogReads: configuration.roomLogReads,
@@ -827,6 +886,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let messageIntervalMilliseconds: Int64?
     private let messageInitialDelayMilliseconds: Int64
     private let maximumInFlightMessagesPerConnection: Int
+    private let scenarioSendDispatch: ScenarioSendDispatch
+    private let maximumQueuedScenarioMessages: Int
     private let messageText: String
     private let syncReads: Bool
     private let roomLogReads: Bool
@@ -840,6 +901,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var pendingRequests: [UInt64: PendingRequest] = [:]
     private var heartbeatRequestID: UInt64?
     private var messageRequestIDs: Set<UInt64> = []
+    private var queuedScenarioMessages = 0
     private var directRoomIDs: [String] = []
     private var nextRoomIndex = 0
     private var nextSyncToken = ""
@@ -861,6 +923,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         messagesPerSecond: Int,
         totalConnections: Int,
         maximumInFlightMessagesPerConnection: Int,
+        scenarioSendDispatch: ScenarioSendDispatch,
+        maximumQueuedScenarioMessages: Int,
         messageBytes: Int,
         syncReads: Bool,
         roomLogReads: Bool,
@@ -873,6 +937,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         self.connectionIndex = connectionIndex
         self.heartbeatSeconds = heartbeatSeconds
         self.maximumInFlightMessagesPerConnection = maximumInFlightMessagesPerConnection
+        self.scenarioSendDispatch = scenarioSendDispatch
+        self.maximumQueuedScenarioMessages = maximumQueuedScenarioMessages
         if messagesPerSecond > 0 {
             let interval = max(1, Int64(totalConnections) * 1_000 / Int64(messagesPerSecond))
             messageIntervalMilliseconds = interval
@@ -924,6 +990,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     func channelInactive(context: ChannelHandlerContext) {
         heartbeatTask?.cancel()
         messageTask?.cancel()
+        statistics.recordScenarioMessageQueueAbandoned(count: queuedScenarioMessages)
+        queuedScenarioMessages = 0
         if registered { statistics.recordDisconnected() }
         if !authenticationCompleted { failAuthentication(LoadError.connectionClosed, context: context, close: false) }
     }
@@ -971,11 +1039,12 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .authenticated:
             guard let pending = pendingRequests.removeValue(forKey: frame.requestID) else { return }
             if case .error(let error)? = envelope.body {
-                handleRejected(
+                try handleRejected(
                     pending,
                     requestID: frame.requestID,
                     code: error.code,
-                    retryable: error.retryable
+                    retryable: error.retryable,
+                    context: context
                 )
                 return
             }
@@ -1002,6 +1071,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 else { throw LoadError.unexpectedResponse }
                 statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
                 if roomLogReads { try sendRoomEventPullIfNeeded(roomID: roomID, context: context) }
+                try drainQueuedScenarioMessages(context: context)
 
             case .syncPull(let sent):
                 guard case .syncBatch(let batch)? = envelope.body else {
@@ -1078,7 +1148,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             }
         case is ScenarioSendEvent:
             guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
-            do { try sendMessage(context: context) }
+            statistics.recordScenarioMessageScheduled()
+            do {
+                switch scenarioSendDispatch {
+                case .strictPerDevice:
+                    try sendMessage(context: context)
+                case .boundedClientQueue:
+                    try enqueueScenarioMessage(context: context)
+                }
+            }
             catch {
                 statistics.recordWorkloadFailure(kind: "message", code: "CLIENT_WRITE_FAILURE")
                 context.close(promise: nil)
@@ -1199,6 +1277,37 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
+    /// Retain a scenario-selected action only when its per-device queue has a
+    /// hard bound.  The queue is intentionally local to the simulated device:
+    /// this preserves weighted user behaviour while allowing a saturation run
+    /// to distinguish server backlog from the previous immediate-drop model.
+    private func enqueueScenarioMessage(context: ChannelHandlerContext) throws {
+        guard !directRoomIDs.isEmpty else { return }
+        if messageRequestIDs.count < maximumInFlightMessagesPerConnection {
+            try sendMessage(context: context)
+            return
+        }
+        guard queuedScenarioMessages < maximumQueuedScenarioMessages else {
+            statistics.recordScenarioMessageQueueOverflow()
+            return
+        }
+        queuedScenarioMessages += 1
+        statistics.recordScenarioMessageDeferred()
+    }
+
+    /// ACKs and rejections both free a device in-flight slot.  Drain at most
+    /// the advertised window, never recursively through the event loop, and
+    /// keep `messagesSent` as the number actually written to the socket.
+    private func drainQueuedScenarioMessages(context: ChannelHandlerContext) throws {
+        while queuedScenarioMessages > 0,
+              messageRequestIDs.count < maximumInFlightMessagesPerConnection,
+              context.channel.isActive {
+            queuedScenarioMessages -= 1
+            statistics.recordScenarioMessageDequeued()
+            try sendMessage(context: context)
+        }
+    }
+
     private func startSyncIfNeeded(context: ChannelHandlerContext) throws {
         guard syncReads, !syncInFlight else { return }
         syncInFlight = true
@@ -1258,8 +1367,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         _ pending: PendingRequest,
         requestID: UInt64,
         code: String,
-        retryable: Bool
-    ) {
+        retryable: Bool,
+        context: ChannelHandlerContext
+    ) throws {
         switch pending {
         case .heartbeat:
             heartbeatRequestID = nil
@@ -1267,6 +1377,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .message:
             messageRequestIDs.remove(requestID)
             statistics.recordWorkloadFailure(kind: "message", code: code, retryable: retryable)
+            try drainQueuedScenarioMessages(context: context)
         case .syncPull, .syncAck:
             syncInFlight = false
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
@@ -1338,6 +1449,12 @@ private struct LoadReport: Encodable {
     let messagesSent: Int
     let messagesAcknowledged: Int
     let messagesSkipped: Int
+    let scenarioMessagesScheduled: Int
+    let scenarioMessagesDeferred: Int
+    let scenarioMessageQueueOverflowed: Int
+    let scenarioMessageQueueAbandoned: Int
+    let queuedScenarioMessagesAtEnd: Int
+    let maximumQueuedScenarioMessages: Int
     let syncPullsSent: Int
     let syncBatchesReceived: Int
     let syncRecordsReceived: Int
@@ -1353,6 +1470,8 @@ private struct LoadReport: Encodable {
     let roomEventPullLatency: Percentiles
     let scenarioName: String?
     let scenarioRateScale: Double?
+    let scenarioSendDispatch: String?
+    let maximumQueuedScenarioMessagesPerConnection: Int?
     let scenarioPhases: [ScenarioPhaseReport]
     let terminalError: String?
 
@@ -1392,6 +1511,12 @@ private struct LoadReport: Encodable {
         messagesSent = state.messagesSent
         messagesAcknowledged = state.messagesAcknowledged
         messagesSkipped = state.messagesSkipped
+        scenarioMessagesScheduled = state.scenarioMessagesScheduled
+        scenarioMessagesDeferred = state.scenarioMessagesDeferred
+        scenarioMessageQueueOverflowed = state.scenarioMessageQueueOverflowed
+        scenarioMessageQueueAbandoned = state.scenarioMessageQueueAbandoned
+        queuedScenarioMessagesAtEnd = state.queuedScenarioMessages
+        maximumQueuedScenarioMessages = state.maximumQueuedScenarioMessages
         syncPullsSent = state.syncPullsSent
         syncBatchesReceived = state.syncBatchesReceived
         syncRecordsReceived = state.syncRecordsReceived
@@ -1407,12 +1532,16 @@ private struct LoadReport: Encodable {
         roomEventPullLatency = state.roomEventPullLatency.percentiles
         scenarioName = configuration.scenario?.name
         scenarioRateScale = configuration.scenario.map { _ in configuration.scenarioRateScale }
+        scenarioSendDispatch = configuration.scenario.map { _ in configuration.scenarioSendDispatch.rawValue }
+        maximumQueuedScenarioMessagesPerConnection = configuration.scenario.map {
+            _ in configuration.maximumQueuedScenarioMessagesPerConnection
+        }
         self.scenarioPhases = scenarioPhases
         self.terminalError = terminalError.map(String.init(describing:))
     }
 
     var summary: String {
-        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) messages_skipped=\(messagesSkipped) scenario_queue_max=\(maximumQueuedScenarioMessages) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
     }
 }
 
@@ -1425,6 +1554,10 @@ private struct ScenarioPhaseReport: Encodable {
     let messagesSent: Int
     let messagesAcknowledged: Int
     let messagesSkipped: Int
+    let scenarioMessagesScheduled: Int
+    let scenarioMessagesDeferred: Int
+    let scenarioMessageQueueOverflowed: Int
+    let queuedScenarioMessagesAtEnd: Int
     let roomEventPullsSent: Int
     let roomEventRecordsReceived: Int
     let syncPullsSent: Int
@@ -1440,6 +1573,10 @@ private struct ScenarioPhaseReport: Encodable {
         messagesSent = ended.messagesSent - started.messagesSent
         messagesAcknowledged = ended.messagesAcknowledged - started.messagesAcknowledged
         messagesSkipped = ended.messagesSkipped - started.messagesSkipped
+        scenarioMessagesScheduled = ended.scenarioMessagesScheduled - started.scenarioMessagesScheduled
+        scenarioMessagesDeferred = ended.scenarioMessagesDeferred - started.scenarioMessagesDeferred
+        scenarioMessageQueueOverflowed = ended.scenarioMessageQueueOverflowed - started.scenarioMessageQueueOverflowed
+        queuedScenarioMessagesAtEnd = ended.queuedScenarioMessages
         roomEventPullsSent = ended.roomEventPullsSent - started.roomEventPullsSent
         roomEventRecordsReceived = ended.roomEventRecordsReceived - started.roomEventRecordsReceived
         syncPullsSent = ended.syncPullsSent - started.syncPullsSent
