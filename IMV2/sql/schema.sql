@@ -1473,6 +1473,35 @@ CREATE TABLE im_v2.rooms (
     CONSTRAINT rooms_timeline_sequence_check CHECK ((timeline_sequence >= 0))
 );
 
+-- Physical room-store routing is control-plane metadata. The canonical room,
+-- membership and message rows live only in the selected owner store; these
+-- records contain no endpoint and are never sent to clients.
+CREATE TABLE im_v2.room_owner_routes (
+    room_id uuid NOT NULL,
+    room_shard_id text NOT NULL,
+    route_epoch bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT room_owner_routes_pkey PRIMARY KEY (room_id),
+    CONSTRAINT room_owner_routes_room_shard_id_check CHECK ((length(btrim(room_shard_id)) > 0)),
+    CONSTRAINT room_owner_routes_route_epoch_check CHECK ((route_epoch >= 0))
+);
+
+CREATE TABLE im_v2.direct_room_owner_routes (
+    lower_user_id uuid NOT NULL,
+    higher_user_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    room_shard_id text NOT NULL,
+    route_epoch bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT direct_room_owner_routes_pkey PRIMARY KEY (lower_user_id, higher_user_id),
+    CONSTRAINT direct_room_owner_routes_room_id_key UNIQUE (room_id),
+    CONSTRAINT direct_room_owner_routes_order_check CHECK ((lower_user_id::text < higher_user_id::text)),
+    CONSTRAINT direct_room_owner_routes_room_shard_id_check CHECK ((length(btrim(room_shard_id)) > 0)),
+    CONSTRAINT direct_room_owner_routes_route_epoch_check CHECK ((route_epoch >= 0))
+);
+
 CREATE TABLE im_v2.schema_contract (
     schema_id text DEFAULT 'im-v2-current-3'::text NOT NULL,
     CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-3'::text))

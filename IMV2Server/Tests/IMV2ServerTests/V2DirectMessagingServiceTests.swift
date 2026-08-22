@@ -71,6 +71,16 @@ struct V2DirectMessagingServiceTests {
         ) == "rooms-03")
     }
 
+    @Test("room-owner direct route fence is valid PostgreSQL text")
+    func roomOwnerRouteLockKeyIsTextSafe() {
+        let lower = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let higher = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let key = roomOwnerDirectRouteLockKey(.init(lower: lower, higher: higher))
+
+        #expect(!key.utf8.contains(0))
+        #expect(key == "room-route:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002")
+    }
+
     @Test("rejects malformed or duplicate direct shard pools")
     func rejectsInvalidShardPools() throws {
         #expect(throws: V2DirectRoomShardRouter.Error.invalidShardIDs) {

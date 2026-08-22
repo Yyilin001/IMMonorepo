@@ -764,6 +764,46 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
+    @Test("runtime resolves every logical room owner through an explicit physical registry")
+    func parsesAndRejectsInvalidRoomShardStorageRegistry() throws {
+        let defaultConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(Set(defaultConfiguration.roomShardStorage.map(\.shardID)) == Set([
+            "rooms-primary",
+        ]))
+        #expect(defaultConfiguration.roomShardStorage.allSatisfy {
+            $0.databaseURL == "postgres://v2:password@db/im_v2"
+        })
+
+        var values = runtimeValues
+        values["IM_V2_DIRECT_ROOM_SHARD_ID"] = "rooms-00,rooms-01"
+        values["IM_V2_GROUP_ROOM_SHARD_ID"] = "groups-primary"
+        values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
+        [{"shard_id":"rooms-00","database_url":"postgres://v2:password@rooms-a/im_v2","schema":"im_v2"},
+         {"shard_id":"rooms-01","database_url":"postgres://v2:password@rooms-b/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-primary","database_url":"postgres://v2:password@control/im_v2","schema":"im_v2"}]
+        """
+        let configuration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(values)
+        )
+        #expect(configuration.roomShardStorage.map(\.shardID) == [
+            "rooms-00", "rooms-01", "groups-primary",
+        ])
+
+        values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
+        [{"shard_id":"rooms-00","database_url":"postgres://v2:password@rooms-a/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-primary","database_url":"postgres://v2:password@control/im_v2","schema":"im_v2"}]
+        """
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_ROOM_SHARD_STORES_JSON"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+    }
+
     @Test("APNs mode requires explicit provider and endpoint secrets")
     func rejectsIncompleteAPNSConfiguration() {
         var values = runtimeValues

@@ -1,0 +1,106 @@
+# Disposable single-host topology validation. It exercises the same physical
+# boundaries as a production control/message/user split, but all containers
+# intentionally share one Docker host. Do not use its throughput as a
+# horizontal-scaling claim.
+services:
+  # The base local account stack keeps a deliberately conservative edge limit.
+  # This disposable validation overlay needs to mint a bounded pool of synthetic
+  # identities before the gateway test begins; production configuration is not
+  # affected.
+  account:
+    environment:
+      IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS: 10000
+
+  postgres-room-00:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: im_v2
+      POSTGRES_USER: im_v2
+      POSTGRES_PASSWORD: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+    volumes:
+      - v2-room-shard-00-postgres:/var/lib/postgresql/data
+      - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    pids_limit: 128
+
+  postgres-room-01:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: im_v2
+      POSTGRES_USER: im_v2
+      POSTGRES_PASSWORD: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+    volumes:
+      - v2-room-shard-01-postgres:/var/lib/postgresql/data
+      - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    pids_limit: 128
+
+  postgres-user-projection:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: im_v2
+      POSTGRES_USER: im_v2
+      POSTGRES_PASSWORD: ${IM_V2_LOCAL_POSTGRES_PASSWORD:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+    volumes:
+      - v2-user-projection-postgres:/var/lib/postgresql/data
+      - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+    pids_limit: 128
+
+  gateway:
+    # Each TLS session consumes at least one descriptor. The base developer
+    # stack intentionally inherits Docker's small default; this validation
+    # topology explicitly exercises 1,000 concurrent sessions.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      IM_V2_MAX_USER_SHARD_STORES: 4
+      IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 128
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-00,rooms-01
+      IM_V2_GROUP_ROOM_SHARD_ID: groups-primary
+      IM_V2_ROOM_SHARD_STORES_JSON: >-
+        [{"shard_id":"rooms-00","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-room-00:5432/im_v2","schema":"im_v2"},{"shard_id":"rooms-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-room-01:5432/im_v2","schema":"im_v2"},{"shard_id":"groups-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]
+      IM_V2_USER_SHARD_STORES_JSON: >-
+        [{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-user-projection:5432/im_v2","schema":"im_v2"}]
+      IM_V2_DIRECT_FANOUT_MODE: room_log
+      IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: shard_only
+      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: 32
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: 32
+      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: 2
+      IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 1000000
+      IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT: 8
+      IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT: 2
+      IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT: 4
+      IM_V2_SYNC_DATABASE_WORK_LIMIT: 4
+    depends_on:
+      postgres-room-00:
+        condition: service_healthy
+      postgres-room-01:
+        condition: service_healthy
+      postgres-user-projection:
+        condition: service_healthy
+
+volumes:
+  v2-room-shard-00-postgres:
+  v2-room-shard-01-postgres:
+  v2-user-projection-postgres:

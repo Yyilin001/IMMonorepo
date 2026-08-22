@@ -126,6 +126,47 @@ public struct V2UserShardStorageConfiguration: Codable, Equatable, Sendable {
     }
 }
 
+/// Deployment-only physical owner registry for room writes. A row's durable
+/// `room_shard_id` selects one entry; the registry must cover every shard that
+/// this gateway can create or serve. Several logical shards may intentionally
+/// share one database during a staged rollout, so duplicate addresses are
+/// valid while duplicate shard IDs are not.
+public struct V2RoomShardStorageConfiguration: Codable, Equatable, Sendable {
+    public let shardID: String
+    public let databaseURL: String
+    public let schema: String
+
+    public init(shardID: String, databaseURL: String, schema: String = "im_v2") throws {
+        let normalizedShard = shardID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURL = databaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedShard.isEmpty, !normalizedURL.isEmpty,
+              schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil
+        else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON") }
+        self.shardID = normalizedShard
+        self.databaseURL = normalizedURL
+        self.schema = schema
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case shardID = "shard_id"
+        case databaseURL = "database_url"
+        case schema
+    }
+
+    public static func parseRegistryJSON(_ rawValue: String) throws -> [Self] {
+        guard let data = rawValue.data(using: .utf8) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
+        }
+        let decoded: [Self]
+        do { decoded = try JSONDecoder().decode([Self].self, from: data) }
+        catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON") }
+        guard !decoded.isEmpty, Set(decoded.map(\.shardID)).count == decoded.count else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
+        }
+        return decoded
+    }
+}
+
 /// Push remains disabled until every APNs secret and topic is explicitly
 /// provisioned. The endpoint-encryption secret is required only in the process
 /// that actually resolves endpoint plaintext for a provider request.
@@ -332,6 +373,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let gatewayReplicaCount: Int
     public let userShardRoute: V2UserShardRoute
     public let userShardStorage: [V2UserShardStorageConfiguration]
+    /// Physical owner locations for room write shards. These are deployment
+    /// facts; existing rooms keep their persisted logical owner.
+    public let roomShardStorage: [V2RoomShardStorageConfiguration]
     public let directRoomShardID: String
     /// Parsed at process start so an invalid room-owner route fails readiness
     /// rather than the first direct-room creation request.
@@ -765,9 +809,21 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             bucket: Self.required("IM_V2_USER_SHARD_BUCKET", environment: environment),
             observedRouterEpoch: try Self.nonNegative("IM_V2_USER_SHARD_ROUTER_EPOCH", environment: environment)
         )
+        directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
+        do {
+            directRoomShardRouter = try .init(rawValue: directRoomShardID)
+        } catch {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_SHARD_ID")
+        }
+        groupRoomShardID = try Self.required("IM_V2_GROUP_ROOM_SHARD_ID", environment: environment)
         userShardStorage = try Self.userShardStorage(
             rawValue: Self.optional("IM_V2_USER_SHARD_STORES_JSON", environment: environment),
             localBucket: userShardRoute.bucket,
+            localDatabaseURL: databaseURL
+        )
+        roomShardStorage = try Self.roomShardStorage(
+            rawValue: Self.optional("IM_V2_ROOM_SHARD_STORES_JSON", environment: environment),
+            requiredShardIDs: Set(directRoomShardRouter.shardIDs + [groupRoomShardID]),
             localDatabaseURL: databaseURL
         )
         guard databaseWorkloadPoolBudget.totalConnectionsPerEventLoop <=
@@ -777,7 +833,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 "IM_V2_DATABASE_WORKLOAD_POOL_BUDGET"
             )
         }
-        guard userShardStorage.count <= databasePolicy.maximumUserShardStores else {
+        guard userShardStorage.count <= databasePolicy.maximumUserShardStores,
+              roomShardStorage.count <= databasePolicy.maximumUserShardStores else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_USER_SHARD_STORES")
         }
         let foregroundPoolCapacity = databasePolicy.eventLoopThreads * (
@@ -837,19 +894,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             }
         }
         try databasePolicy.validate(
-            databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL),
+            databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),
             connectionsPerEventLoopPerPhysicalStore:
                 databaseWorkloadPoolIsolationEnabled
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
                     : databasePolicy.maximumConnectionsPerEventLoop
         )
-        directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
-        do {
-            directRoomShardRouter = try .init(rawValue: directRoomShardID)
-        } catch {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_SHARD_ID")
-        }
-        groupRoomShardID = try Self.required("IM_V2_GROUP_ROOM_SHARD_ID", environment: environment)
         strangerMessagePolicy = try .init(
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
             window: TimeInterval(try Self.positive("IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS", environment: environment))
@@ -1052,6 +1102,21 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let decoded = try V2UserShardStorageConfiguration.parseRegistryJSON(rawValue)
         guard decoded.contains(where: { $0.bucket == localBucket })
         else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_USER_SHARD_STORES_JSON") }
+        return decoded
+    }
+
+    private static func roomShardStorage(
+        rawValue: String?, requiredShardIDs: Set<String>, localDatabaseURL: String
+    ) throws -> [V2RoomShardStorageConfiguration] {
+        guard let rawValue else {
+            return try requiredShardIDs.sorted().map {
+                try .init(shardID: $0, databaseURL: localDatabaseURL)
+            }
+        }
+        let decoded = try V2RoomShardStorageConfiguration.parseRegistryJSON(rawValue)
+        guard Set(decoded.map(\.shardID)) == requiredShardIDs else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
+        }
         return decoded
     }
 
