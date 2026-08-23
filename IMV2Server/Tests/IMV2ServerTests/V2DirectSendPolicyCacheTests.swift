@@ -57,6 +57,7 @@ struct V2DirectSendPolicyCacheTests {
             recipientID: UUID(), directPairRevision: directPairRevision,
             senderPolicyRevision: 1, recipientPolicyRevision: 1,
             senderProfileVisibleToRecipient: true, senderCanSend: true,
+            senderIsActive: true,
             recipientIsActive: true, blocked: false, isFriend: true,
             senderHasReplied: senderHasReplied, recipientHasReplied: true, allowsStrangers: true,
             senderAccountKind: nil, senderAccountStatus: nil,

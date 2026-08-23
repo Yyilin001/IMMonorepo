@@ -22,6 +22,11 @@ public actor V2DirectSendPolicyCache {
         public let recipientPolicyRevision: Int64
         public let senderProfileVisibleToRecipient: Bool
         public let senderCanSend: Bool?
+        /// The sender profile/account activity observed by the durable
+        /// preflight. It may be reused only with the sender policy revision
+        /// fence; account disable increments that revision in the same
+        /// transaction.
+        public let senderIsActive: Bool
         public let recipientIsActive: Bool
         public let blocked: Bool
         public let isFriend: Bool
@@ -45,6 +50,7 @@ public actor V2DirectSendPolicyCache {
             recipientPolicyRevision: Int64,
             senderProfileVisibleToRecipient: Bool,
             senderCanSend: Bool?,
+            senderIsActive: Bool,
             recipientIsActive: Bool,
             blocked: Bool,
             isFriend: Bool,
@@ -64,6 +70,7 @@ public actor V2DirectSendPolicyCache {
             self.recipientPolicyRevision = recipientPolicyRevision
             self.senderProfileVisibleToRecipient = senderProfileVisibleToRecipient
             self.senderCanSend = senderCanSend
+            self.senderIsActive = senderIsActive
             self.recipientIsActive = recipientIsActive
             self.blocked = blocked
             self.isFriend = isFriend
@@ -90,6 +97,7 @@ public actor V2DirectSendPolicyCache {
                 recipientPolicyRevision: recipientPolicyRevision,
                 senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
                 senderCanSend: senderCanSend,
+                senderIsActive: senderIsActive,
                 recipientIsActive: recipientIsActive,
                 blocked: blocked,
                 isFriend: isFriend,

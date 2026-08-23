@@ -155,7 +155,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         groupDeliveryMode: V2GroupDeliveryMode? = nil,
         usesRoomEventLog: Bool = false,
         sourceEventID: EventID? = nil,
-        acceptedMembershipRevision: UInt64? = nil
+        acceptedMembershipRevision: UInt64? = nil,
+        directRecipientUserID: UserID? = nil
     ) -> V2AcceptedMessage {
         V2AcceptedMessage(
             messageID: messageID,
@@ -174,6 +175,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             usesRoomEventLog: usesRoomEventLog,
             sourceEventID: sourceEventID,
             acceptedMembershipRevision: acceptedMembershipRevision,
+            directRecipientUserID: directRecipientUserID,
             createdAt: createdAt
         )
     }
@@ -210,6 +212,12 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     /// cache must check this fence against a freshly authorized reader before
     /// returning the event.
     public let acceptedMembershipRevision: UInt64?
+    /// For a plain direct room-log event, the other participant captured by
+    /// the same locked acceptance transaction.  This is deliberately server
+    /// internal: it lets a live delivery accelerator target only identities
+    /// that were visible at commit time instead of inferring recipients from
+    /// a later subscription or membership lookup.
+    public let directRecipientUserID: UserID?
     public let createdAt: Date
 
     public init(
@@ -229,6 +237,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         usesRoomEventLog: Bool = false,
         sourceEventID: EventID? = nil,
         acceptedMembershipRevision: UInt64? = nil,
+        directRecipientUserID: UserID? = nil,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -249,6 +258,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.usesRoomEventLog = usesRoomEventLog
         self.sourceEventID = sourceEventID
         self.acceptedMembershipRevision = acceptedMembershipRevision
+        self.directRecipientUserID = directRecipientUserID
         self.createdAt = createdAt
     }
 }

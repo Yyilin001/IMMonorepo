@@ -8829,6 +8829,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let roomCredits = V2RoomAdmissionCommandCreditPool(
                 database: app.db(.psql), batchSize: 2
             )
+            let fastAppendCache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(
                 database: app.db(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
@@ -8836,6 +8837,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 contentReviewMode: .disabled,
                 directFanoutMode: .roomLog,
                 directRoomLogAdmissionMode: .room,
+                directRoomLogFastAppendCache: fastAppendCache,
                 shardAdmissionCommandCreditPool: shardCredits,
                 roomAdmissionCommandCreditPool: roomCredits
             )
@@ -9025,6 +9027,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.user_sync_log
                 WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
                 """).first(decoding: CountRow.self)
+            let fastAppendBeforeSteadyStateBatch = await fastAppendCache.snapshot()
             let batched = try await writer.acceptAtomically(requests: [
                 .init(
                     command: try .init(
@@ -9072,6 +9075,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 projectionRecordsAfterSteadyStateBatch?.value
                     == projectionRecordsBeforeSteadyStateBatch?.value
             )
+            let fastAppendAfterSteadyStateBatch = await fastAppendCache.snapshot()
+            #expect(
+                fastAppendAfterSteadyStateBatch.committedAppends
+                    == fastAppendBeforeSteadyStateBatch.committedAppends + 2
+            )
+            #expect(fastAppendAfterSteadyStateBatch.fallbackAppends == 0)
             // The first direct room is now hot and all pair-local producer
             // markers are established. Two consecutive commands for that
             // *same* room may now share one transaction while retaining
@@ -9171,6 +9180,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 operationID: try .init("00000000-0000-0000-0000-00000000c005"),
                 permission: .deny
             )
+            let fastAppendBeforeStalePolicy = await fastAppendCache.snapshot()
             let stalePolicyAttempt = try await messages.send(.init(
                 roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: try .init("00000000-0000-0000-0000-00000000c006"),
@@ -9181,6 +9191,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
             #expect(stalePolicyDenial.reason == .generic)
+            let fastAppendAfterStalePolicy = await fastAppendCache.snapshot()
+            #expect(
+                fastAppendAfterStalePolicy.fallbackAppends
+                    == fastAppendBeforeStalePolicy.fallbackAppends + 1
+            )
 
             let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: app.db(.psql)))
             let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
