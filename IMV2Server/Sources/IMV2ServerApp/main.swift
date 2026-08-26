@@ -116,6 +116,11 @@ enum IMV2ServerApp {
                 try await V2SchemaReadiness.verify(
                     database: shardDatabase, schema: storage.schema
                 )
+                try await V2CapacityProfileReadiness.verify(
+                    database: shardDatabase,
+                    schema: storage.schema,
+                    profile: configuration.capacityProfile
+                )
             }
             func shardLocations(
                 for role: V2PostgresWorkloadPoolBudget.Role
@@ -241,7 +246,13 @@ enum IMV2ServerApp {
                 policy: configuration.commandRateLimitPolicy
             )
             let connectionRegistry = V2DeviceConnectionRegistry(
-                connectionAdmissionPolicy: configuration.authenticatedConnectionAdmissionPolicy
+                connectionAdmissionPolicy: configuration.authenticatedConnectionAdmissionPolicy,
+                livePresenceRenewalConfiguration: .init(
+                    maximumBatchSize: configuration.livePresenceRenewalBatchSize,
+                    maximumDelay: .milliseconds(
+                        configuration.livePresenceRenewalMaximumDelayMilliseconds
+                    )
+                )
             )
             let syncWakeCoalescer = V2SyncWakeCoalescer(
                 downstream: connectionRegistry,
@@ -318,6 +329,18 @@ enum IMV2ServerApp {
                     batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize
                 )
                 : nil
+            // Shared across all co-located room writers. It is a bounded
+            // hint cache only; PostgreSQL remains the policy and cursor
+            // authority for every conditional append.
+            let directRoomLogFastAppendCache = V2DirectRoomLogFastAppendCache(
+                capacity: configuration.directRoomLogFastAppendCacheMaximumEntries,
+                lifetime: .seconds(
+                    configuration.directRoomLogFastAppendCacheLifetimeSeconds
+                )
+            )
+            let directSendPolicyCache = V2DirectSendPolicyCache(
+                capacity: configuration.directSendPolicyCacheMaximumEntries
+            )
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
                 source: V2AggregateDurableWorkMetricsSource(sources: [
                     PostgresV2DurableWorkMetricsSource(
@@ -368,60 +391,90 @@ enum IMV2ServerApp {
                 ? .init(configuration: .init(
                     maximumEvents: configuration.directRoomLogEventCacheMaximumEntries,
                     maximumBytes: configuration.directRoomLogEventCacheMaximumBytes,
-                    maximumEventsPerRoom: configuration.directRoomLogEventCacheMaximumEntriesPerRoom
+                    maximumEventsPerRoom: configuration.directRoomLogEventCacheMaximumEntriesPerRoom,
+                    shardCount: configuration.directRoomLogEventCacheShardCount,
+                    maximumPendingWrites: configuration.directRoomLogEventCacheMaximumPendingWrites
                 ))
                 : nil
             let roomShardRouter = V2PostgresRoomShardRouter(database: database)
-            var roomWriteStoresByShard: [String: any V2AtomicRoomWriteBatchStore] = [:]
-            var directMessagingStoresByShard: [String: any V2DirectMessagingStore] = [:]
-            var groupEventLogStoresByShard: [String: any V2GroupEventLogStore] = [:]
-            for storage in configuration.roomShardStorage {
-                guard let ownerDatabase = roomShardDatabases[storage.shardID] else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-                // Credit pools carry durable admission state in the same room
-                // owner store as the append. A control-store pool must never
-                // reserve a command credit for a different PostgreSQL owner.
-                let shardCredits: V2ShardAdmissionCommandCreditPool? =
-                    configuration.directRoomLogShardAdmissionCreditBatchSize > 0
-                    ? .init(
-                        database: ownerDatabase,
-                        batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize
-                    )
-                    : nil
-                let roomCredits: V2RoomAdmissionCommandCreditPool? =
-                    configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
-                    ? .init(
-                        database: ownerDatabase,
-                        batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize
-                    )
-                    : nil
-                roomWriteStoresByShard[storage.shardID] = PostgresV2RoomWriteStore(
-                    database: ownerDatabase,
+            let roomPhysicalLocationKeys = Set(configuration.roomShardStorage.map {
+                $0.databaseURL + "\u{0}" + $0.schema
+            })
+            let roomWriteStore: any V2AtomicRoomWriteBatchStore
+            let directMessagingStore: any V2DirectMessagingStore
+            let groupEventLogStore: any V2GroupEventLogStore
+            if roomPhysicalLocationKeys.count == 1 {
+                // Preserve the original single-owner hot path exactly. In
+                // particular, its command-credit pools are shared with the
+                // Gateway's pressure metrics and append batcher; creating a
+                // second actor over the same PostgreSQL rows changes credit
+                // refill/heat coordination without adding isolation.
+                roomWriteStore = PostgresV2RoomWriteStore(
+                    database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
                     directFanoutMode: configuration.directFanoutMode,
                     directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                     payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    shardAdmissionCommandCreditPool: shardCredits,
-                    roomAdmissionCommandCreditPool: roomCredits
+                    directSendPolicyCache: directSendPolicyCache,
+                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
+                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
+                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
                 )
-                directMessagingStoresByShard[storage.shardID] = PostgresV2DirectMessagingStore(
-                    database: ownerDatabase, shadowForwarder: userShardShadowForwarder
+                directMessagingStore = PostgresV2DirectMessagingStore(
+                    database: database, shadowForwarder: userShardShadowForwarder
                 )
-                groupEventLogStoresByShard[storage.shardID] = PostgresV2GroupEventLogStore(
-                    database: ownerDatabase, directRoomLogEventCache: directRoomLogEventCache
+                groupEventLogStore = PostgresV2GroupEventLogStore(
+                    database: database, directRoomLogEventCache: directRoomLogEventCache
                 )
+            } else {
+                var roomWriteStoresByShard: [String: any V2AtomicRoomWriteBatchStore] = [:]
+                var directMessagingStoresByShard: [String: any V2DirectMessagingStore] = [:]
+                var groupEventLogStoresByShard: [String: any V2GroupEventLogStore] = [:]
+                var roomStoreKeyByShard: [String: String] = [:]
+                var roomWriteStoresByPhysicalLocation: [String: any V2AtomicRoomWriteBatchStore] = [:]
+                var directMessagingStoresByPhysicalLocation: [String: any V2DirectMessagingStore] = [:]
+                var groupEventLogStoresByPhysicalLocation: [String: any V2GroupEventLogStore] = [:]
+                for storage in configuration.roomShardStorage {
+                    guard let ownerDatabase = roomShardDatabases[storage.shardID] else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    let physicalLocationKey = storage.databaseURL + "\u{0}" + storage.schema
+                    roomStoreKeyByShard[storage.shardID] = physicalLocationKey
+                    if let existingWrite = roomWriteStoresByPhysicalLocation[physicalLocationKey],
+                       let existingDirect = directMessagingStoresByPhysicalLocation[physicalLocationKey],
+                       let existingEvents = groupEventLogStoresByPhysicalLocation[physicalLocationKey] {
+                        roomWriteStoresByShard[storage.shardID] = existingWrite
+                        directMessagingStoresByShard[storage.shardID] = existingDirect
+                        groupEventLogStoresByShard[storage.shardID] = existingEvents
+                        continue
+                    }
+                    let shardCredits: V2ShardAdmissionCommandCreditPool? =
+                        configuration.directRoomLogShardAdmissionCreditBatchSize > 0
+                        ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize)
+                        : nil
+                    let roomCredits: V2RoomAdmissionCommandCreditPool? =
+                        configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
+                        ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize)
+                        : nil
+                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder, contentReviewMode: configuration.contentReviewMode, directFanoutMode: configuration.directFanoutMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, payloadWriteMode: configuration.fanoutPayloadWriteMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits)
+                    let direct = PostgresV2DirectMessagingStore(database: ownerDatabase, shadowForwarder: userShardShadowForwarder)
+                    let events = PostgresV2GroupEventLogStore(database: ownerDatabase, directRoomLogEventCache: directRoomLogEventCache)
+                    roomWriteStoresByPhysicalLocation[physicalLocationKey] = write
+                    directMessagingStoresByPhysicalLocation[physicalLocationKey] = direct
+                    groupEventLogStoresByPhysicalLocation[physicalLocationKey] = events
+                    roomWriteStoresByShard[storage.shardID] = write
+                    directMessagingStoresByShard[storage.shardID] = direct
+                    groupEventLogStoresByShard[storage.shardID] = events
+                }
+                roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter, stores: roomWriteStoresByShard, physicalStoreKeyByShard: roomStoreKeyByShard)
+                directMessagingStore = try V2RoutedDirectMessagingStore(router: roomShardRouter, ownerStores: directMessagingStoresByShard, controlStore: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder))
+                groupEventLogStore = try V2RoutedGroupEventLogStore(router: roomShardRouter, stores: groupEventLogStoresByShard)
             }
-            let roomWriteStore = try V2RoutedRoomWriteStore(
-                router: roomShardRouter, stores: roomWriteStoresByShard
-            )
-            let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? =
-                configuration.directRoomLogAppendBatchSize > 0
-                ? .init(
-                    store: roomWriteStore,
-                    configuration: .init(
+            let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
+            if configuration.directRoomLogAppendBatchSize > 0 {
+                let appendBatchConfiguration = V2SendMessageAdmissionBatcher.Configuration(
                         maximumBatchSize: configuration.directRoomLogAppendBatchSize,
                         maximumDelay: .milliseconds(
                             configuration.directRoomLogAppendBatchMaximumDelayMilliseconds
@@ -440,18 +493,31 @@ enum IMV2ServerApp {
                                 observationWindow: .milliseconds(windowMilliseconds)
                             )
                         }(),
-                        maximumInFlightBatches: min(
-                            8,
-                            configuration.foregroundWriteDatabaseWorkLimit
-                        ),
+                        maximumInFlightBatches:
+                            configuration.directRoomLogAppendBatchMaximumInFlightBatches,
                         maximumPendingRequests:
                             configuration.foregroundWriteDatabaseWorkMaximumQueued
-                    ),
-                    databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
-                        ? databaseWorkAdmission
-                        : nil
                 )
-                : nil
+                let appendDatabaseWorkAdmission = configuration.databaseWorkAdmissionEnabled
+                    ? databaseWorkAdmission
+                    : nil
+                if configuration.directRoomLogAppendLaneCount == 1 {
+                    directRoomLogAppendBatcher = V2SendMessageAdmissionBatcher(
+                        store: roomWriteStore,
+                        configuration: appendBatchConfiguration,
+                        databaseWorkAdmission: appendDatabaseWorkAdmission
+                    )
+                } else {
+                    directRoomLogAppendBatcher = V2ShardedSendMessageAdmissionBatcher(
+                        store: roomWriteStore,
+                        configuration: appendBatchConfiguration,
+                        laneCount: configuration.directRoomLogAppendLaneCount,
+                        databaseWorkAdmission: appendDatabaseWorkAdmission
+                    )
+                }
+            } else {
+                directRoomLogAppendBatcher = nil
+            }
             // Register after the optional append batcher exists so the
             // loopback-only metrics endpoint can expose its aggregate queue
             // and adaptive-timer facts. The application has not started its
@@ -469,7 +535,10 @@ enum IMV2ServerApp {
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCredits: directRoomLogRoomAdmissionCredits,
                     directRoomLogAppendBatcher: directRoomLogAppendBatcher,
-                    directRoomLogEventCache: directRoomLogEventCache
+                    directSendPolicyCache: directSendPolicyCache,
+                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
+                    directRoomLogEventCache: directRoomLogEventCache,
+                    connectionRegistry: connectionRegistry
                 )
             )
             let sendMessage = V2SendMessageService(
@@ -497,13 +566,7 @@ enum IMV2ServerApp {
             )
             let readReceipt = V2ReadReceiptService(store: PostgresV2ReadReceiptStore(database: database, shadowForwarder: userShardShadowForwarder))
             let directMessaging = try V2DirectMessagingService(
-                store: try V2RoutedDirectMessagingStore(
-                    router: roomShardRouter,
-                    ownerStores: directMessagingStoresByShard,
-                    controlStore: PostgresV2DirectMessagingStore(
-                        database: database, shadowForwarder: userShardShadowForwarder
-                    )
-                ),
+                store: directMessagingStore,
                 capacityProfile: configuration.capacityProfile,
                 roomShardRouter: configuration.directRoomShardRouter
             )
@@ -526,9 +589,7 @@ enum IMV2ServerApp {
                 groupMessaging: maintenanceGroupMessaging
             )
             let groupEventLog = V2GroupEventLogService(
-                store: try V2RoutedGroupEventLogStore(
-                    router: roomShardRouter, stores: groupEventLogStoresByShard
-                ),
+                store: groupEventLogStore,
                 directRoomLogEventCache: directRoomLogEventCache
             )
             // Foreground availability is intentionally a best-effort hint.
@@ -545,11 +606,16 @@ enum IMV2ServerApp {
             case .nats(let nats):
                 let broker = V2NATSGroupEventWakeBroker(
                     configuration: nats,
-                    receiveWake: { [weak connectionRegistry] wake in
-                        await connectionRegistry?.notifyForegroundGroupAvailable(
-                            roomID: wake.roomID,
-                            highWatermark: wake.highWatermark
-                        )
+                    receiveWake: { [weak connectionRegistry] notification in
+                        switch notification {
+                        case .wake(let wake):
+                            await connectionRegistry?.notifyForegroundGroupAvailable(
+                                roomID: wake.roomID,
+                                highWatermark: wake.highWatermark
+                            )
+                        case .directEvent(let event):
+                            await connectionRegistry?.notifyForegroundDirectEvent(event)
+                        }
                     }
                 )
                 natsGroupWakeBroker = broker
@@ -621,6 +687,8 @@ enum IMV2ServerApp {
                     directFanoutMode: configuration.directFanoutMode,
                     directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                     payloadWriteMode: configuration.fanoutPayloadWriteMode,
+                    directSendPolicyCache: directSendPolicyCache,
+                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
                 ),
@@ -848,6 +916,9 @@ enum IMV2ServerApp {
             // therefore never extend the committed-message response path.
             let foregroundGroupEventHintTask = Task {
                 await foregroundGroupEventHints.run()
+            }
+            let directRoomLogEventCacheTask = Task {
+                await directRoomLogEventCache?.run()
             }
             let syncWakeCoalescerTask = Task {
                 if configuration.syncWakeCoalescingEnabled {
@@ -1483,8 +1554,10 @@ enum IMV2ServerApp {
             syncLogCompactionTask.cancel()
             maintenanceTask.cancel()
             foregroundGroupEventHintTask.cancel()
+            directRoomLogEventCacheTask.cancel()
             syncWakeCoalescerTask.cancel()
             await foregroundGroupEventHints.finish()
+            await directRoomLogEventCache?.finish()
             for task in userProjectionTasks { await task.value }
             for task in snapshotArtifactTasks { await task.value }
             for task in messageProjectionBackfillTasks { await task.value }
@@ -1500,7 +1573,9 @@ enum IMV2ServerApp {
             await syncLogCompactionTask.value
             await maintenanceTask.value
             await foregroundGroupEventHintTask.value
+            await directRoomLogEventCacheTask.value
             await syncWakeCoalescerTask.value
+            await connectionRegistry.finishLivePresenceRenewals()
             await connectionRegistry.detachForegroundGroupInterestManager()
             await connectionRegistry.detachLiveActivityBroker()
             await natsLiveActivityBroker?.shutdown()

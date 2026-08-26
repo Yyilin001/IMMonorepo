@@ -11,6 +11,11 @@ import IMV2Core
 /// into an internal fast-path miss and is retried through the established
 /// complete acceptance path.
 public actor V2DirectRoomLogFastAppendCache {
+    struct Update: Sendable {
+        let entry: Entry
+        let key: Key
+    }
+
     public struct Snapshot: Sendable, Equatable {
         public let entries: Int
         public let lookupHits: Int64
@@ -18,6 +23,31 @@ public actor V2DirectRoomLogFastAppendCache {
         public let attemptedAppends: Int64
         public let committedAppends: Int64
         public let fallbackAppends: Int64
+        public let insertions: UInt64
+        public let evictions: UInt64
+        public let expirations: UInt64
+
+        public init(
+            entries: Int,
+            lookupHits: Int64,
+            lookupMisses: Int64,
+            attemptedAppends: Int64,
+            committedAppends: Int64,
+            fallbackAppends: Int64,
+            insertions: UInt64 = 0,
+            evictions: UInt64 = 0,
+            expirations: UInt64 = 0
+        ) {
+            self.entries = entries
+            self.lookupHits = lookupHits
+            self.lookupMisses = lookupMisses
+            self.attemptedAppends = attemptedAppends
+            self.committedAppends = committedAppends
+            self.fallbackAppends = fallbackAppends
+            self.insertions = insertions
+            self.evictions = evictions
+            self.expirations = expirations
+        }
     }
 
     public struct Key: Hashable, Sendable {
@@ -32,7 +62,7 @@ public actor V2DirectRoomLogFastAppendCache {
 
     /// The last committed room cursor plus the immutable-by-revision policy
     /// snapshot required to construct a conditional append attempt.
-    public struct Entry: Sendable {
+    public struct Entry: Sendable, Equatable {
         public let policy: V2DirectSendPolicyCache.Entry
         public let roomShardID: String
         public let capacityProfileID: String
@@ -75,21 +105,40 @@ public actor V2DirectRoomLogFastAppendCache {
         }
     }
 
-    private struct Stored: Sendable {
+    /// Actor-isolated intrusive LRU node. A capacity eviction must remain O(1):
+    /// this cache is updated after every committed fast append, and an O(n)
+    /// dictionary scan here serializes every caller behind the cache actor once
+    /// a wide-room workload reaches the bound.
+    private final class Node {
+        let key: Key
         var entry: Entry
         var expiresAt: ContinuousClock.Instant
-        var lastAccess: ContinuousClock.Instant
+
+        weak var previous: Node?
+        var next: Node?
+
+        init(key: Key, entry: Entry, expiresAt: ContinuousClock.Instant) {
+            self.key = key
+            self.entry = entry
+            self.expiresAt = expiresAt
+        }
     }
 
     private let capacity: Int
     private let lifetime: Duration
     private let clock = ContinuousClock()
-    private var entries: [Key: Stored] = [:]
+    private var entries: [Key: Node] = [:]
+    private var keysByRoomID: [UUID: Set<Key>] = [:]
+    private var mostRecent: Node?
+    private var leastRecent: Node?
     private var lookupHits: Int64 = 0
     private var lookupMisses: Int64 = 0
     private var attemptedAppends: Int64 = 0
     private var committedAppends: Int64 = 0
     private var fallbackAppends: Int64 = 0
+    private var insertions: UInt64 = 0
+    private var evictions: UInt64 = 0
+    private var expirations: UInt64 = 0
 
     public init(capacity: Int = 50_000, lifetime: Duration = .seconds(60)) {
         self.capacity = max(1, capacity)
@@ -98,28 +147,60 @@ public actor V2DirectRoomLogFastAppendCache {
 
     public func value(for key: Key) -> Entry? {
         let now = clock.now
-        guard var stored = entries[key] else {
+        guard let node = entries[key] else {
             lookupMisses += 1
             return nil
         }
-        guard stored.expiresAt > now else {
-            entries.removeValue(forKey: key)
+        guard node.expiresAt > now else {
+            remove(node)
+            expirations &+= 1
             lookupMisses += 1
             return nil
         }
         lookupHits += 1
-        stored.lastAccess = now
-        entries[key] = stored
-        return stored.entry
+        moveToMostRecent(node)
+        return node.entry
+    }
+
+    /// One actor hop for a micro-batch. Recency is still applied in request
+    /// order, so the final LRU state is identical to repeated `value(for:)`
+    /// calls without serializing the caller through N separate awaits.
+    public func valuesIfAllPresent(for keys: [Key]) -> [Entry]? {
+        var values: [Entry] = []
+        values.reserveCapacity(keys.count)
+        for key in keys {
+            guard let value = value(for: key) else { return nil }
+            values.append(value)
+        }
+        return values
     }
 
     public func insert(_ entry: Entry, for key: Key) {
         let now = clock.now
-        if entries[key] == nil, entries.count >= capacity,
-           let oldest = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key {
-            entries.removeValue(forKey: oldest)
+        if let existing = entries[key] {
+            existing.entry = entry
+            existing.expiresAt = now + lifetime
+            moveToMostRecent(existing)
+            return
         }
-        entries[key] = .init(entry: entry, expiresAt: now + lifetime, lastAccess: now)
+        if entries.count >= capacity, let leastRecent {
+            remove(leastRecent)
+            evictions &+= 1
+        }
+        let node = Node(key: key, entry: entry, expiresAt: now + lifetime)
+        entries[key] = node
+        keysByRoomID[key.roomID, default: []].insert(key)
+        attachAsMostRecent(node)
+        insertions &+= 1
+    }
+
+    /// Publishes a committed micro-batch with one actor hop. The input order is
+    /// durable room order, so a repeated room/sender key naturally leaves its
+    /// newest committed cursor in the cache.
+    func insert(_ updates: [Update]) {
+        for update in updates {
+            insert(update.entry, for: update.key)
+        }
     }
 
     /// A miss may mean a concurrent send, permission change, membership
@@ -127,11 +208,18 @@ public actor V2DirectRoomLogFastAppendCache {
     /// direction; the full path will repopulate it after its transaction
     /// commits.
     public func invalidate(_ key: Key) {
-        entries.removeValue(forKey: key)
+        guard let node = entries[key] else { return }
+        remove(node)
     }
 
     public func invalidate(roomID: UUID) {
-        entries = entries.filter { $0.key.roomID != roomID }
+        guard let keys = keysByRoomID[roomID] else { return }
+        for key in keys {
+            if let node = entries[key] {
+                remove(node, updateRoomIndex: false)
+            }
+        }
+        keysByRoomID.removeValue(forKey: roomID)
     }
 
     /// These counters are deliberately local observability only. They make
@@ -156,7 +244,52 @@ public actor V2DirectRoomLogFastAppendCache {
             lookupMisses: lookupMisses,
             attemptedAppends: attemptedAppends,
             committedAppends: committedAppends,
-            fallbackAppends: fallbackAppends
+            fallbackAppends: fallbackAppends,
+            insertions: insertions,
+            evictions: evictions,
+            expirations: expirations
         )
+    }
+
+    private func moveToMostRecent(_ node: Node) {
+        guard mostRecent !== node else { return }
+        detach(node)
+        attachAsMostRecent(node)
+    }
+
+    private func attachAsMostRecent(_ node: Node) {
+        node.previous = nil
+        node.next = mostRecent
+        mostRecent?.previous = node
+        mostRecent = node
+        if leastRecent == nil {
+            leastRecent = node
+        }
+    }
+
+    private func detach(_ node: Node) {
+        if let previous = node.previous {
+            previous.next = node.next
+        } else {
+            mostRecent = node.next
+        }
+        if let next = node.next {
+            next.previous = node.previous
+        } else {
+            leastRecent = node.previous
+        }
+        node.previous = nil
+        node.next = nil
+    }
+
+    private func remove(_ node: Node, updateRoomIndex: Bool = true) {
+        detach(node)
+        entries.removeValue(forKey: node.key)
+        if updateRoomIndex {
+            keysByRoomID[node.key.roomID]?.remove(node.key)
+            if keysByRoomID[node.key.roomID]?.isEmpty == true {
+                keysByRoomID.removeValue(forKey: node.key.roomID)
+            }
+        }
     }
 }

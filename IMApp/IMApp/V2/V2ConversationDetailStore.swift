@@ -337,13 +337,23 @@ final class V2ConversationDetailStore {
     }
 
     private func runSubscribedHybridGroup(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
+        var requiresDurablePull = true
         while !Task.isCancelled {
-            let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
-            guard shouldContinue else { return }
+            if requiresDurablePull {
+                let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
+                guard shouldContinue else { return }
+            }
             do {
                 let wake = try await nextHybridWakeOrFallback(synchronizer)
                 if let wake, wake.roomID != roomID {
                     continue
+                }
+                if let wake {
+                    requiresDurablePull = !(try await synchronizer.applyLiveEvent(wake))
+                } else {
+                    // The low-frequency fallback is deliberately a durable
+                    // pull, because it has no event payload to apply.
+                    requiresDurablePull = true
                 }
             } catch is CancellationError {
                 return

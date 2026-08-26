@@ -182,6 +182,19 @@ public actor V2RoomAdmissionCommandCreditPool {
     committedCredits += 1
   }
 
+  /// Finalizes one already-committed room-log micro-batch in one actor hop.
+  public func commit(_ tokens: [Token]) {
+    for token in tokens { commit(token) }
+  }
+
+  /// Preserves committed message order while avoiding one actor hop per cold
+  /// room observation. This remains a heat hint only; it never grants credit.
+  public func recordNormalAdmissionCommits(_ observations: [(UUID, Date)]) {
+    for (roomID, now) in observations {
+      recordNormalAdmissionCommit(roomID: roomID, now: now)
+    }
+  }
+
   /// Returns a token if its canonical transaction did not commit. This is
   /// process-local only; the durable reservation intentionally remains
   /// charged so a crash/retry can never oversell the room window.

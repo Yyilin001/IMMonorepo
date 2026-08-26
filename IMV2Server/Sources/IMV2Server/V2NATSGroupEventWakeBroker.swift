@@ -55,6 +55,14 @@ public enum V2NATSGroupEventWakeBrokerError: Error, Equatable, Sendable {
     case invalidPayload
 }
 
+/// The NATS payload is a best-effort foreground notification.  A receiver
+/// must still treat `.wake` as a cursor-pull prompt, while `.directEvent` is
+/// usable only when the client has the immediately preceding cursor.
+public enum V2ForegroundGroupEventNotification: Sendable {
+    case wake(V2GroupEventWake)
+    case directEvent(V2DirectRoomLiveEvent)
+}
+
 /// One reusable Core NATS connection per Gateway. It owns only current local
 /// viewer interests, not a durable consumer per user or per room. Subject
 /// subscriptions are reference-counted by `V2DeviceConnectionRegistry`.
@@ -68,10 +76,36 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     private struct WireWake: Codable, Sendable {
         let roomID: String
         let highWatermark: UInt64
+        let directEvent: WireDirectEvent?
 
         enum CodingKeys: String, CodingKey {
             case roomID = "room_id"
             case highWatermark = "high_watermark"
+            case directEvent = "direct_event"
+        }
+    }
+
+    private struct WireDirectEvent: Codable, Sendable {
+        let sourceEventID: String
+        let roomSequence: UInt64
+        let projectionKind: String
+        let payload: Data
+        let recipientUserIDs: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case sourceEventID = "source_event_id"
+            case roomSequence = "room_sequence"
+            case projectionKind = "projection_kind"
+            case payload
+            case recipientUserIDs = "recipient_user_ids"
+        }
+
+        init(_ event: V2DirectRoomLiveEvent) {
+            sourceEventID = event.sourceEventID.rawValue
+            roomSequence = event.roomSequence
+            projectionKind = event.projectionKind
+            payload = event.payload
+            recipientUserIDs = event.recipientUserIDs.map(\.rawValue).sorted()
         }
     }
 
@@ -89,7 +123,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     private let configuration: V2NATSGroupEventWakeConfiguration
     private let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-    private let receiveWake: @Sendable (V2GroupEventWake) async -> Void
+    private let receiveNotification: @Sendable (V2ForegroundGroupEventNotification) async -> Void
     private var connection: Connection?
     private var pendingConnection: Task<Connection, any Error>?
     private var pendingActivations: [RoomID: PendingActivation] = [:]
@@ -104,10 +138,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     public init(
         configuration: V2NATSGroupEventWakeConfiguration,
-        receiveWake: @escaping @Sendable (V2GroupEventWake) async -> Void
+        receiveWake: @escaping @Sendable (V2ForegroundGroupEventNotification) async -> Void
     ) {
         self.configuration = configuration
-        self.receiveWake = receiveWake
+        receiveNotification = receiveWake
     }
 
     deinit {
@@ -194,11 +228,30 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     }
 
     public func publish(_ wake: V2GroupEventWake) async throws {
+        try await publish(.init(
+            roomID: wake.roomID.rawValue,
+            highWatermark: wake.highWatermark,
+            directEvent: nil
+        ), roomID: wake.roomID)
+    }
+
+    /// Like metadata hints, live payload delivery is advisory.  Any NATS
+    /// issue degrades to the normal durable cursor pull instead of affecting
+    /// an already accepted send.
+    public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
+        try? await publish(.init(
+            roomID: event.roomID.rawValue,
+            highWatermark: event.highWatermark,
+            directEvent: .init(event)
+        ), roomID: event.roomID)
+    }
+
+    private func publish(_ wake: WireWake, roomID: RoomID) async throws {
         let connection = try await connectedChannel()
         let channel = connection.channel
-        let payload = try JSONEncoder().encode(WireWake(roomID: wake.roomID.rawValue, highWatermark: wake.highWatermark))
+        let payload = try JSONEncoder().encode(wake)
         var buffer = channel.allocator.buffer(capacity: payload.count + configuration.subjectPrefix.utf8.count + 64)
-        buffer.writeString("PUB \(subject(for: wake.roomID)) \(payload.count)\r\n")
+        buffer.writeString("PUB \(subject(for: roomID)) \(payload.count)\r\n")
         buffer.writeBytes(payload)
         buffer.writeString("\r\n")
         do {
@@ -249,13 +302,13 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             let host = configuration.url.host!
             let port = configuration.url.port ?? 4222
             let timeout = acknowledgementTimeout
-            let receiveWake = self.receiveWake
+            let receiveNotification = self.receiveNotification
             let token = configuration.token
             let replay = subscriptions.map { roomID, subscriptionID in
                 (subject(for: roomID), subscriptionID)
             }
             pendingReplaySubscriptionIDs = Set(replay.map(\.1))
-            pending = Task { [group, host, port, timeout, token, replay, receiveWake] in
+            pending = Task { [group, host, port, timeout, token, replay, receiveNotification] in
                 try await Self.openConnection(
                     group: group,
                     host: host,
@@ -263,7 +316,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                     timeout: timeout,
                     token: token,
                     replay: replay,
-                    receiveWake: receiveWake
+                    receiveNotification: receiveNotification
                 )
             }
             pendingConnection = pending
@@ -320,13 +373,39 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         timeout: TimeAmount,
         token: String?,
         replay: [(subject: String, subscriptionID: Int)],
-        receiveWake: @escaping @Sendable (V2GroupEventWake) async -> Void
+        receiveNotification: @escaping @Sendable (V2ForegroundGroupEventNotification) async -> Void
     ) async throws -> Connection {
         let handler = V2NATSConfirmedInboundHandler(onPayload: { payload in
             guard let wire = try? JSONDecoder().decode(WireWake.self, from: payload),
                   let roomID = try? RoomID(wire.roomID)
             else { return }
-            await receiveWake(.init(roomID: roomID, highWatermark: wire.highWatermark))
+            guard let direct = wire.directEvent else {
+                await receiveNotification(.wake(.init(roomID: roomID, highWatermark: wire.highWatermark)))
+                return
+            }
+            guard direct.roomSequence == wire.highWatermark,
+                  direct.roomSequence > 0,
+                  !direct.projectionKind.isEmpty,
+                  !direct.payload.isEmpty,
+                  let sourceEventID = try? EventID(direct.sourceEventID)
+            else {
+                await receiveNotification(.wake(.init(roomID: roomID, highWatermark: wire.highWatermark)))
+                return
+            }
+            let recipients = Set(direct.recipientUserIDs.compactMap { try? UserID($0) })
+            guard !recipients.isEmpty, recipients.count == direct.recipientUserIDs.count else {
+                await receiveNotification(.wake(.init(roomID: roomID, highWatermark: wire.highWatermark)))
+                return
+            }
+            await receiveNotification(.directEvent(.init(
+                roomID: roomID,
+                highWatermark: wire.highWatermark,
+                sourceEventID: sourceEventID,
+                roomSequence: direct.roomSequence,
+                projectionKind: direct.projectionKind,
+                payload: direct.payload,
+                recipientUserIDs: recipients
+            )))
         })
         let channel = try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.connectTimeout, value: timeout)

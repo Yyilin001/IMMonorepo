@@ -8399,6 +8399,91 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("capacity-profile readiness rejects a reused identifier with changed durable limits")
+    func capacityProfileReadinessRejectsPersistedLimitDrift() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2CapacityProfileReadinessError.unsupportedDatabase
+            }
+            guard (try await sql.raw(
+                "SELECT to_regnamespace('im_v2') IS NOT NULL AS exists"
+            ).first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await sql.raw("CREATE SCHEMA im_v2").run()
+            try await sql.raw("""
+                CREATE TABLE im_v2.shard_admission_pools (
+                    room_shard_id text NOT NULL,
+                    capacity_profile_id text NOT NULL,
+                    command_window_limit bigint NOT NULL,
+                    fanout_window_limit bigint NOT NULL,
+                    max_outstanding_fanout_units bigint NOT NULL,
+                    max_outstanding_plans bigint NOT NULL,
+                    PRIMARY KEY (room_shard_id, capacity_profile_id)
+                )
+                """).run()
+            let profile = try V2CapacityProfile(id: "loadtest-v17", limits: .init(
+                maxEligibleMembers: 10,
+                maxCommandsPerWindow: 500_000,
+                maxFanoutUnitsPerWindow: 100_000,
+                maxOutstandingFanoutUnits: 1_000_000,
+                maxOutstandingPlans: 10_000,
+                maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 3
+            ))
+
+            // A new profile may start before its control plane issues a pool.
+            try await V2CapacityProfileReadiness.verify(
+                database: app.db(.psql), profile: profile
+            )
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, command_window_limit,
+                     fanout_window_limit, max_outstanding_fanout_units,
+                     max_outstanding_plans)
+                VALUES ('rooms-load-00', 'loadtest-v17', 500000, 100000,
+                        1000000, 10000)
+                """).run()
+            try await V2CapacityProfileReadiness.verify(
+                database: app.db(.psql), profile: profile
+            )
+
+            try await sql.raw("""
+                UPDATE im_v2.shard_admission_pools
+                SET command_window_limit = 100000
+                WHERE capacity_profile_id = 'loadtest-v17'
+                """).run()
+            await #expect(throws: V2CapacityProfileReadinessError.persistedLimitsMismatch(
+                profileID: "loadtest-v17"
+            )) {
+                try await V2CapacityProfileReadiness.verify(
+                    database: app.db(.psql), profile: profile
+                )
+            }
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("schema readiness accepts the legacy direct event cursor contract during an online migration")
     func schemaReadinessAcceptsLegacyDirectEventCursorContract() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -10542,6 +10627,20 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 connectionID: firstConnection,
                 now: now.addingTimeInterval(1)
             ) == .accepted(expiresAt: now.addingTimeInterval(11)))
+            try await sql.raw("""
+                INSERT INTO im_v2.user_live_activity_preferences
+                    (user_id, allows_online_presence, allows_typing_indicators, updated_at)
+                VALUES (\(bind: user), FALSE, TRUE, \(bind: now.addingTimeInterval(1)))
+                """).run()
+            let batched = try await store.renewConnections([.init(
+                identity: identity,
+                connectionID: firstConnection,
+                now: now.addingTimeInterval(1.5)
+            )])
+            #expect(batched[firstConnection] == .init(
+                outcome: .accepted(expiresAt: now.addingTimeInterval(11.5)),
+                allowsOnlinePresence: false
+            ))
 
             let afterExpiry = now.addingTimeInterval(12)
             #expect(try await store.renewConnection(

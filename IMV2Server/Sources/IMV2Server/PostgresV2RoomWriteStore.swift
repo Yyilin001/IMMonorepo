@@ -354,18 +354,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             }
         }
 
-        var outcomes = Array<V2SendMessageOutcome?>(repeating: nil, count: requests.count)
-        for item in committed {
-            outcomes[item.originalIndex] = try await finalizeCommittedAcceptance(
-                command: requests[item.originalIndex].command,
-                cacheKey: item.cacheKey,
-                commit: item.commit
-            )
-        }
-        guard outcomes.allSatisfy({ $0 != nil }) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return outcomes.compactMap { $0 }
+        return try await finalizeCommittedAcceptances(
+            requests: requests,
+            committed: committed
+        )
     }
 
     /// Attempts the strictly steady-state branch for one ordinary direct
@@ -408,18 +400,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         ) else {
             return nil
         }
-        var outcomes = Array<V2SendMessageOutcome?>(repeating: nil, count: requests.count)
-        for committed in commits {
-            outcomes[committed.originalIndex] = try await finalizeCommittedAcceptance(
-                command: requests[committed.originalIndex].command,
-                cacheKey: committed.cacheKey,
-                commit: committed.commit
-            )
-        }
-        guard outcomes.allSatisfy({ $0 != nil }) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return outcomes.compactMap { $0 }
+        return try await finalizeCommittedAcceptances(
+            requests: requests,
+            committed: commits
+        )
     }
 
     /// The fast path has deliberately narrow semantics. Any mutable direct
@@ -453,14 +437,23 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         // leaks the prefix's tokens when a later input misses.
         var candidates: [FastPlainDirectRoomLogCandidate] = []
         candidates.reserveCapacity(requests.count)
+        let cacheKeys = knownIDs.map {
+            V2DirectRoomLogFastAppendCache.Key(
+                roomID: $0.roomID,
+                senderID: $0.senderID
+            )
+        }
+        guard let cachedSnapshots = await directRoomLogFastAppendCache.valuesIfAllPresent(
+            for: cacheKeys
+        ) else {
+            return nil
+        }
         for (originalIndex, request) in requests.enumerated() {
             let identity = knownIDs[originalIndex]
             let command = request.command
+            let snapshot = cachedSnapshots[originalIndex]
             guard Self.isPlainDirectRoomLogBatchShape(request),
                   command.targetRule == .eligibleMemberCount,
-                  let snapshot = await directRoomLogFastAppendCache.value(for: .init(
-                    roomID: identity.roomID, senderID: identity.senderID
-                  )),
                   snapshot.capacityProfileID == request.capacityProfile.id,
                   fastPlainDirectPolicyIsEligible(snapshot.policy),
                   let lease = snapshot.shardState.lease,
@@ -1626,6 +1619,85 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         }
         try await shadowCommittedDirectProjectionsIfNeeded(command: command, commit: commit)
         return commit.outcome
+    }
+
+    /// Finalizes one already-committed micro-batch without paying several actor
+    /// hops per message. Every update is process-local or idempotent and happens
+    /// strictly after PostgreSQL commit; client outcomes are still withheld
+    /// until all required shadow writes have completed.
+    private func finalizeCommittedAcceptances(
+        requests: [V2RoomWriteRequest],
+        committed: [OrderedRoomWriteCommit]
+    ) async throws -> [V2SendMessageOutcome] {
+        guard committed.count == requests.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+
+        var policyUpdates: [V2DirectSendPolicyCache.Update] = []
+        var fastAppendUpdates: [V2DirectRoomLogFastAppendCache.Update] = []
+        var shardTokens: [V2ShardAdmissionCommandCreditPool.Token] = []
+        var roomTokens: [V2RoomAdmissionCommandCreditPool.Token] = []
+        var heatObservations: [(UUID, Date)] = []
+        policyUpdates.reserveCapacity(committed.count)
+        fastAppendUpdates.reserveCapacity(committed.count)
+        shardTokens.reserveCapacity(committed.count)
+        roomTokens.reserveCapacity(committed.count)
+        heatObservations.reserveCapacity(committed.count)
+        // Admission heat is process-local runtime state, so it must use the
+        // runtime clock just like the former per-commit finalizer. Request
+        // timestamps may be deterministic/replayed and are not a valid cache
+        // freshness clock.
+        let heatObservationNow = Date()
+
+        for item in committed {
+            guard requests.indices.contains(item.originalIndex) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            if let entry = item.commit.directPolicyCacheUpdate {
+                policyUpdates.append(.init(entry: entry, key: item.cacheKey))
+            }
+            if let entry = item.commit.directRoomLogFastAppendCacheUpdate {
+                fastAppendUpdates.append(.init(
+                    entry: entry,
+                    key: .init(roomID: item.cacheKey.roomID, senderID: item.cacheKey.senderID)
+                ))
+            }
+            if let token = item.commit.shardAdmissionCommandCredit {
+                shardTokens.append(token)
+            }
+            if let token = item.commit.roomAdmissionCommandCredit {
+                roomTokens.append(token)
+            }
+            if let roomID = item.commit.roomAdmissionHeatObservation {
+                heatObservations.append((roomID, heatObservationNow))
+            }
+        }
+
+        // These mutations are tiny actor-isolated dictionary/counter updates.
+        // One batched hop per actor is cheaper and more predictable than
+        // creating four child tasks for every PostgreSQL micro-batch.
+        await directSendPolicyCache.insert(policyUpdates)
+        await directRoomLogFastAppendCache.insert(fastAppendUpdates)
+        if let shardAdmissionCommandCreditPool {
+            await shardAdmissionCommandCreditPool.commit(shardTokens)
+        }
+        if let roomAdmissionCommandCreditPool {
+            await roomAdmissionCommandCreditPool.commit(roomTokens)
+            await roomAdmissionCommandCreditPool.recordNormalAdmissionCommits(heatObservations)
+        }
+
+        var outcomes = Array<V2SendMessageOutcome?>(repeating: nil, count: requests.count)
+        for item in committed {
+            try await shadowCommittedDirectProjectionsIfNeeded(
+                command: requests[item.originalIndex].command,
+                commit: item.commit
+            )
+            outcomes[item.originalIndex] = item.commit.outcome
+        }
+        guard outcomes.allSatisfy({ $0 != nil }) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return outcomes.compactMap { $0 }
     }
 
     /// Applies the reducer's shard delta against the current row instead of

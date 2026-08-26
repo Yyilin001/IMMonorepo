@@ -66,16 +66,13 @@ public actor V2GatewayByteStream {
         do {
             let inbound = try decoder.append(bytes)
             for frame in inbound {
-                let inboundEnvelope = try V2ServerProtobufFrameCodec.decode(frame)
-                let response: V2Frame
-                if await session.authenticatedIdentity() == nil {
-                    response = try await session.receiveBootstrap(frame)
-                } else {
-                    response = try await session.receiveAuthenticated(frame, handler: handler)
-                }
+                let exchange = try await session.receive(frame, handler: handler)
                 try await registerAuthenticatedDeviceIfNeeded()
-                try await updateHybridGroupSubscription(inbound: inboundEnvelope, response: response)
-                try await respond(try V2FrameCodec.encode(response, limits: frameLimits))
+                try await updateHybridGroupSubscription(
+                    inbound: exchange.request,
+                    response: exchange.responseEnvelope
+                )
+                try await respond(try V2FrameCodec.encode(exchange.response, limits: frameLimits))
             }
             // A full decode quantum can leave a valid complete frame behind.
             // The NIO owner schedules one continuation before it consumes a
@@ -164,9 +161,13 @@ public actor V2GatewayByteStream {
     }
 
     /// A best-effort foreground wake over the same authenticated TLS stream.
-    /// Its payload is deliberately metadata-only; cursor pull remains the
-    /// durable and authorization-checked read path.
-    public func sendGroupEventAvailable(roomID: RoomID, highWatermark: UInt64) async {
+    /// A plain direct event may include an optional post-commit payload, but
+    /// cursor pull remains the durable recovery and gap-repair path.
+    public func sendGroupEventAvailable(
+        roomID: RoomID,
+        highWatermark: UInt64,
+        directEvent: V2DirectRoomLiveEvent? = nil
+    ) async {
         guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
         var envelope = IMV2Envelope()
         envelope.requestID = 0
@@ -174,6 +175,14 @@ public actor V2GatewayByteStream {
         envelope.groupEventAvailable = .init()
         envelope.groupEventAvailable.roomID = roomID.rawValue
         envelope.groupEventAvailable.highWatermark = highWatermark
+        if let directEvent,
+           directEvent.roomID == roomID,
+           directEvent.highWatermark == highWatermark {
+            envelope.groupEventAvailable.sourceEventID = directEvent.sourceEventID.rawValue
+            envelope.groupEventAvailable.roomSequence = directEvent.roomSequence
+            envelope.groupEventAvailable.projectionKind = directEvent.projectionKind
+            envelope.groupEventAvailable.eventPayload = directEvent.payload
+        }
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
         else { return }
@@ -225,27 +234,24 @@ public actor V2GatewayByteStream {
         await registry.unregister(connectionID: connectionID)
     }
 
-    private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: V2Frame) async throws {
+    private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
         switch inbound.body {
         case .setLiveActivityPreferences:
-            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
-            guard case .liveActivityPreferencesSet(let updated)? = responseEnvelope.body
+            guard case .liveActivityPreferencesSet(let updated)? = response.body
             else { return }
             guard await registry.applyLiveActivityPreferences(
                 connectionID: connectionID,
                 allowsOnlinePresence: updated.allowsOnlinePresence
             ) else { throw V2GatewaySessionError.authenticatedConnectionLimit }
         case .groupEventSubscribe(let request):
-            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
-            guard case .groupEventSubscribed(let subscribed)? = responseEnvelope.body,
+            guard case .groupEventSubscribed(let subscribed)? = response.body,
                   subscribed.roomID == request.roomID
             else { return }
             await registry.subscribeForegroundGroup(self, connectionID: connectionID, roomID: try .init(request.roomID))
         case .groupEventUnsubscribe(let request):
             await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
         case .subscribePresence(let request):
-            let responseEnvelope = try V2ServerProtobufFrameCodec.decode(response)
-            guard case .presenceSubscribed(let subscribed)? = responseEnvelope.body,
+            guard case .presenceSubscribed(let subscribed)? = response.body,
                   subscribed.roomID == request.roomID,
                   let roomID = try? RoomID(request.roomID), let targetUserID = try? UserID(subscribed.targetUserID)
             else { return }
@@ -257,7 +263,7 @@ public actor V2GatewayByteStream {
         case .unsubscribeTyping(let request):
             await registry.unsubscribeTyping(connectionID: connectionID, roomID: try .init(request.roomID))
         case .setTypingState(let request):
-            guard case .acknowledged? = try V2ServerProtobufFrameCodec.decode(response).body,
+            guard case .acknowledged? = response.body,
                   let identity = registeredIdentity
             else { return }
             await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date())

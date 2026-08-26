@@ -24,15 +24,26 @@ struct V2DirectSendPolicyCacheTests {
 
     @Test("capacity evicts the least recently used entry")
     func boundsMemory() async throws {
-        let cache = V2DirectSendPolicyCache(capacity: 1)
+        let cache = V2DirectSendPolicyCache(capacity: 2)
         let first = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
         let second = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let third = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
 
         await cache.insert(makeEntry(), for: first)
         await cache.insert(makeEntry(), for: second)
+        // Refresh the first key. The second key must now be the O(1) tail.
+        #expect(await cache.value(for: first) != nil)
+        await cache.insert(makeEntry(), for: third)
 
-        #expect(await cache.value(for: first) == nil)
-        #expect(await cache.value(for: second) != nil)
+        #expect(await cache.value(for: first) != nil)
+        #expect(await cache.value(for: second) == nil)
+        #expect(await cache.value(for: third) != nil)
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.entries == 2)
+        #expect(snapshot.evictions == 1)
+        #expect(snapshot.insertions == 3)
+        #expect(snapshot.hits == 3)
+        #expect(snapshot.misses == 1)
     }
 
     @Test("reply-marker refinement preserves the durable revision fence")

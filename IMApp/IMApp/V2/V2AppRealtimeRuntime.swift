@@ -957,7 +957,27 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
     func nextWake() async throws -> V2ActiveHybridGroupWake {
         let wake = try await wakeSource.nextGroupEventAvailabilityHint()
-        return .init(roomID: wake.roomID.rawValue, highWatermark: wake.highWatermark)
+        return .init(roomID: wake.roomID.rawValue, highWatermark: wake.highWatermark, liveEvent: wake.liveEvent)
+    }
+
+    func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) async throws -> Bool {
+        guard let roomID = try? RoomID(wake.roomID),
+              let event = wake.liveEvent,
+              event.roomSequence == wake.highWatermark,
+              let access = try await localStore.groupEventAccess(roomID: roomID),
+              access.isAuthorized,
+              access.delivery == .durableRoomLog
+        else { return false }
+        let cursor = try await localStore.groupEventCursor(roomID: roomID)
+        guard event.roomSequence == cursor + 1 else { return false }
+        let page = V2ClientGroupEventPage(
+            roomID: roomID,
+            events: [event],
+            nextRoomSequence: event.roomSequence,
+            hasMore: false
+        )
+        _ = try await localStore.applyGroupEventPage(page)
+        return true
     }
 
     func unsubscribe(roomID: String) async {

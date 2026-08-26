@@ -51,11 +51,58 @@ public struct V2GatewayCommandRateLimitPolicy: Equatable, Sendable {
     }
 }
 
-/// A process overload boundary, not a product/abuse quota. It is deliberately
-/// shared by every authenticated session on one replica and charges both the
-/// device and user buckets atomically. The identity map has a hard LRU bound,
-/// so reconnect churn cannot turn the limiter itself into a memory leak.
-public actor V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGatewayCommandAdmitting {
+/// A process overload boundary, not a product/abuse quota. Users are assigned
+/// to stable independent lanes so unrelated connections do not serialize on
+/// one global actor. Every device belonging to one authenticated user enters
+/// the same lane, preserving atomic device+user charging. Per-lane LRU budgets
+/// partition the configured process-wide identity ceiling exactly.
+public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGatewayCommandAdmitting, Sendable {
+    private let shards: [V2AuthenticatedGatewayCommandRateLimiterShard]
+
+    public init(policy: V2GatewayCommandRateLimitPolicy, shardCount: Int = 16) {
+        precondition(shardCount > 0)
+        // Small policy fixtures and deliberately tiny deployments retain one
+        // lane. Production-sized maps gain parallelism without creating a
+        // shard whose budget cannot hold one user and one device atomically.
+        let effectiveShardCount = min(
+            shardCount,
+            max(1, policy.maximumTrackedIdentities / 1_024)
+        )
+        let base = policy.maximumTrackedIdentities / effectiveShardCount
+        let remainder = policy.maximumTrackedIdentities % effectiveShardCount
+        shards = (0..<effectiveShardCount).map { index in
+            let capacity = base + (index < remainder ? 1 : 0)
+            return .init(policy: .init(
+                deviceCommandsPerSecond: Int(policy.deviceCommandsPerSecond),
+                deviceBurst: policy.deviceBurst,
+                userCommandsPerSecond: Int(policy.userCommandsPerSecond),
+                userBurst: policy.userBurst,
+                maximumTrackedIdentities: capacity
+            ))
+        }
+    }
+
+    public func admit(identity: V2AuthenticatedConnection, now: Date) async -> Bool {
+        await shards[shardIndex(for: identity.userID)].admit(identity: identity, now: now)
+    }
+
+    func trackedIdentityCount() async -> Int {
+        var total = 0
+        for shard in shards { total += await shard.trackedIdentityCount() }
+        return total
+    }
+
+    private func shardIndex(for userID: UserID) -> Int {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in userID.rawValue.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return Int(hash % UInt64(shards.count))
+    }
+}
+
+private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     private enum TrackedIdentity: Hashable, Sendable {
         case device(DeviceID)
         case user(UserID)
@@ -78,9 +125,9 @@ public actor V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGatewayCom
     private var leastRecentlyUsed: TrackedIdentity?
     private var mostRecentlyUsed: TrackedIdentity?
 
-    public init(policy: V2GatewayCommandRateLimitPolicy) { self.policy = policy }
+    init(policy: V2GatewayCommandRateLimitPolicy) { self.policy = policy }
 
-    public func admit(identity: V2AuthenticatedConnection, now: Date) -> Bool {
+    func admit(identity: V2AuthenticatedConnection, now: Date) -> Bool {
         var device = refilled(
             devices[identity.deviceID],
             capacity: policy.deviceBurst,

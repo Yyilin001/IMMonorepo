@@ -2743,6 +2743,18 @@ public nonisolated struct IMV2GroupEventAvailable: Sendable {
 
   public var highWatermark: UInt64 = 0
 
+  /// Optional acceleration payload for a plain direct room-log event.  Its
+  /// absence (and all group-room wakes) retains the original metadata-only
+  /// contract.  Clients must accept it only when it is the next contiguous
+  /// cursor event; otherwise they use GroupEventPull for durable recovery.
+  public var sourceEventID: String = String()
+
+  public var roomSequence: UInt64 = 0
+
+  public var projectionKind: String = String()
+
+  public var eventPayload: Data = Data()
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -8079,7 +8091,7 @@ nonisolated extension IMV2GroupEventUnsubscribe: SwiftProtobuf.Message, SwiftPro
 
 nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GroupEventAvailable"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}source_event_id\0\u{3}room_sequence\0\u{3}projection_kind\0\u{3}event_payload\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8089,6 +8101,10 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.highWatermark) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.sourceEventID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.roomSequence) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.projectionKind) }()
+      case 6: try { try decoder.decodeSingularBytesField(value: &self.eventPayload) }()
       default: break
       }
     }
@@ -8101,12 +8117,28 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
     if self.highWatermark != 0 {
       try visitor.visitSingularUInt64Field(value: self.highWatermark, fieldNumber: 2)
     }
+    if !self.sourceEventID.isEmpty {
+      try visitor.visitSingularStringField(value: self.sourceEventID, fieldNumber: 3)
+    }
+    if self.roomSequence != 0 {
+      try visitor.visitSingularUInt64Field(value: self.roomSequence, fieldNumber: 4)
+    }
+    if !self.projectionKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.projectionKind, fieldNumber: 5)
+    }
+    if !self.eventPayload.isEmpty {
+      try visitor.visitSingularBytesField(value: self.eventPayload, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2GroupEventAvailable, rhs: IMV2GroupEventAvailable) -> Bool {
     if lhs.roomID != rhs.roomID {return false}
     if lhs.highWatermark != rhs.highWatermark {return false}
+    if lhs.sourceEventID != rhs.sourceEventID {return false}
+    if lhs.roomSequence != rhs.roomSequence {return false}
+    if lhs.projectionKind != rhs.projectionKind {return false}
+    if lhs.eventPayload != rhs.eventPayload {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

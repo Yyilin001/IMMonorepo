@@ -28,6 +28,55 @@ struct V2GatewaySessionTests {
         #expect(try V2ServerProtobufFrameCodec.decode(response).error.code == "UNAVAILABLE")
     }
 
+    @Test("production receive returns the same validated request used for dispatch")
+    func productionReceiveReturnsValidatedRequest() async throws {
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 0) }
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        let helloExchange = try await session.receive(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0),
+            handler: GatewayCommandFake()
+        )
+        #expect(helloExchange.request == hello)
+        #expect(
+            try V2ServerProtobufFrameCodec.decode(helloExchange.response)
+                .serverHello.selectedCapabilityProfile == "base"
+        )
+
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        let authenticationExchange = try await session.receive(
+            try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion),
+            handler: GatewayCommandFake()
+        )
+        #expect(authenticationExchange.request == authenticate)
+
+        var request = IMV2Envelope()
+        request.requestID = 3
+        request.protocolVersion = UInt32(protocolVersion)
+        request.syncPull = .init()
+        let exchange = try await session.receive(
+            try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
+            handler: GatewayCommandFake()
+        )
+        #expect(exchange.request == request)
+        #expect(exchange.responseEnvelope.requestID == request.requestID)
+        #expect(try V2ServerProtobufFrameCodec.decode(exchange.response) == exchange.responseEnvelope)
+    }
+
     @Test("bootstrap uses the authenticator's one combined identity and expiry read")
     func usesCombinedAuthenticationRead() async throws {
         let auth = CombinedGatewayAuthFake()

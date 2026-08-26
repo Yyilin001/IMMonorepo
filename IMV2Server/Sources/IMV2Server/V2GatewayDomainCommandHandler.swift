@@ -35,6 +35,64 @@ private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity
     return wire
 }
 
+/// Exact protobuf payload size for the gateway's `GroupEventPage` envelope.
+///
+/// The handler used to append one event, serialize the whole candidate page,
+/// then repeat. That makes a full page quadratic in both protobuf work and
+/// temporary allocations. Keeping the estimator beside the wire mapping makes
+/// the size fence linear while the final gateway encode remains authoritative.
+private func v2GroupEventPageEnvelopeBytes(
+    roomID: String,
+    eventFieldBytes: Int,
+    nextRoomSequence: UInt64,
+    hasMore: Bool
+) -> Int {
+    let pageBytes =
+        v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 1, payloadBytes: roomID.utf8.count)
+        + eventFieldBytes
+        + v2ProtobufVarintFieldBytes(fieldNumber: 3, value: nextRoomSequence)
+        + (hasMore ? v2ProtobufVarintFieldBytes(fieldNumber: 4, value: 1) : 0)
+
+    return v2ProtobufVarintFieldBytes(fieldNumber: 1, value: .max)
+        + v2ProtobufVarintFieldBytes(fieldNumber: 2, value: UInt64(IMV2ProtocolVersion.current))
+        + v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 62, payloadBytes: pageBytes)
+}
+
+private func v2GroupEventRepeatedFieldBytes(_ entry: V2GroupEventLogEntry) -> Int {
+    let eventBytes =
+        v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 1, payloadBytes: entry.sourceEventID.rawValue.utf8.count)
+        + v2ProtobufVarintFieldBytes(fieldNumber: 2, value: entry.roomSequence)
+        + v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 3, payloadBytes: entry.projectionKind.utf8.count)
+        + v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 4, payloadBytes: entry.payload.count)
+    return v2ProtobufLengthDelimitedFieldBytes(fieldNumber: 2, payloadBytes: eventBytes)
+}
+
+private func v2ProtobufLengthDelimitedFieldBytes(fieldNumber: Int, payloadBytes: Int) -> Int {
+    v2ProtobufTagBytes(fieldNumber: fieldNumber, wireType: 2)
+        + v2ProtobufVarintByteCount(UInt64(payloadBytes))
+        + payloadBytes
+}
+
+private func v2ProtobufVarintFieldBytes(fieldNumber: Int, value: UInt64) -> Int {
+    guard value != 0 else { return 0 }
+    return v2ProtobufTagBytes(fieldNumber: fieldNumber, wireType: 0)
+        + v2ProtobufVarintByteCount(value)
+}
+
+private func v2ProtobufTagBytes(fieldNumber: Int, wireType: UInt64) -> Int {
+    v2ProtobufVarintByteCount((UInt64(fieldNumber) << 3) | wireType)
+}
+
+private func v2ProtobufVarintByteCount(_ value: UInt64) -> Int {
+    var remaining = value
+    var count = 1
+    while remaining >= 0x80 {
+        remaining >>= 7
+        count += 1
+    }
+    return count
+}
+
 protocol V2GatewayRoomMembershipHandling: Sendable {
     func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome
 }
@@ -587,7 +645,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         switch outcome {
         case .accepted(let message):
             await groupEventLog.recordCommittedDirectRoomLogMessage(message)
-            if message.groupDeliveryMode != nil || message.usesRoomEventLog {
+            if V2DirectRoomLiveEventDraft(message) != nil {
+                // Best effort and post-commit only. The dispatcher validates
+                // and queues immutable acceptance data, then serializes the
+                // optional payload off this accepted-send hot path.
+                await foregroundGroupEventHints.publishForegroundDirectMessage(message)
+            } else if message.groupDeliveryMode != nil || message.usesRoomEventLog {
                 await foregroundGroupEventHints.publishForegroundHint(.init(roomID: message.roomID, highWatermark: message.roomSequence))
             }
             return acceptedMessageEnvelope(message)
@@ -1009,26 +1072,28 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         response.protocolVersion = IMV2ProtocolVersion.current
         response.groupEventPage = .init()
         response.groupEventPage.roomID = page.roomID.rawValue
-        response.groupEventPage.nextRoomSequence = page.nextRoomSequence
-        response.groupEventPage.hasMore_p = page.hasMore
-
-        var truncated = false
+        var eventFieldBytes = 0
         for (index, entry) in page.events.enumerated() {
+            let candidateEventFieldBytes = eventFieldBytes + v2GroupEventRepeatedFieldBytes(entry)
+            let candidateHasMore = page.hasMore || index < page.events.endIndex - 1
+            guard v2GroupEventPageEnvelopeBytes(
+                roomID: page.roomID.rawValue,
+                eventFieldBytes: candidateEventFieldBytes,
+                nextRoomSequence: entry.roomSequence,
+                hasMore: candidateHasMore
+            ) <= maximumGroupEventPagePayloadBytes else {
+                break
+            }
+
             var event = IMV2GroupEvent()
             event.sourceEventID = entry.sourceEventID.rawValue
             event.roomSequence = entry.roomSequence
             event.projectionKind = entry.projectionKind
             event.payload = entry.payload
-
-            var candidate = response
-            candidate.groupEventPage.events.append(event)
-            candidate.groupEventPage.nextRoomSequence = entry.roomSequence
-            candidate.groupEventPage.hasMore_p = page.hasMore || index < page.events.endIndex - 1
-            guard try candidate.serializedData().count <= maximumGroupEventPagePayloadBytes else {
-                truncated = true
-                break
-            }
-            response = candidate
+            response.groupEventPage.events.append(event)
+            response.groupEventPage.nextRoomSequence = entry.roomSequence
+            response.groupEventPage.hasMore_p = candidateHasMore
+            eventFieldBytes = candidateEventFieldBytes
         }
         guard !response.groupEventPage.events.isEmpty || page.events.isEmpty else {
             // A durable event must not be able to force a transport close. A
@@ -1036,7 +1101,19 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             // persisted incompatibility explicit and retain the connection.
             return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
         }
-        response.groupEventPage.hasMore_p = response.groupEventPage.hasMore_p || truncated
+
+        if page.events.isEmpty {
+            response.groupEventPage.nextRoomSequence = page.nextRoomSequence
+            response.groupEventPage.hasMore_p = page.hasMore
+        }
+
+        // The estimator is exact for the current schema. Keep one final real
+        // encode here as a fail-closed compatibility fence if the proto evolves
+        // without its estimator being updated. Session encoding then only
+        // substitutes an actual request ID, which cannot exceed UInt64.max.
+        guard try response.serializedData().count <= maximumGroupEventPagePayloadBytes else {
+            return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
+        }
         return response
     }
 

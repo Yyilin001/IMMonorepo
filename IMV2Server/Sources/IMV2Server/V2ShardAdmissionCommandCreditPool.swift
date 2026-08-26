@@ -148,6 +148,13 @@ public actor V2ShardAdmissionCommandCreditPool {
     committedCredits += 1
   }
 
+  /// Finalizes one already-committed message micro-batch with a single actor
+  /// hop. Missing tokens retain the same deliberately harmless semantics as
+  /// `commit(_:)` because their durable capacity was charged before issuance.
+  public func commit(_ tokens: [Token]) {
+    for token in tokens { commit(token) }
+  }
+
   /// Returns a token whose surrounding transaction did not commit. Returning
   /// it is process-local only; the database batch remains safely charged.
   public func release(_ token: Token, now: Date) {

@@ -125,6 +125,12 @@ struct V2VaporMetricsRoutesTests {
                 pendingRequests: 7,
                 inFlightBatches: 3,
                 activeRooms: 5,
+                dequeuedRequests: 151,
+                queueWaitMillisecondsTotal: 701,
+                queueWaitMillisecondsMax: 19,
+                completedBatches: 17,
+                batchExecutionMillisecondsTotal: 901,
+                batchExecutionMillisecondsMax: 73,
                 stagingQueueFullRejections: 2,
                 cancelledPendingRequests: 1,
                 baseDelayFlushes: 11,
@@ -138,9 +144,24 @@ struct V2VaporMetricsRoutesTests {
                 atomicPreclassifiedIndividualRequests: 37,
                 singletonDispatches: 6
             ),
+            directSendPolicy: .init(
+                entries: 49_999, hits: 211, misses: 31,
+                insertions: 61_000, evictions: 11_001, expirations: 7
+            ),
+            directRoomLogFastAppend: .init(
+                entries: 17, lookupHits: 101, lookupMisses: 9,
+                attemptedAppends: 83, committedAppends: 79,
+                fallbackAppends: 4, insertions: 93,
+                evictions: 12, expirations: 3
+            ),
             directRoomLogEventCache: .init(
                 cachedEvents: 31, cachedRooms: 7, cachedBytes: 4096,
-                hits: 101, misses: 9, bypassedIneligibleEvents: 3
+                hits: 101, misses: 9, bypassedIneligibleEvents: 3,
+                pendingWrites: 5, droppedWrites: 2
+            ),
+            livePresenceRenewals: .init(
+                pendingConnections: 4, submittedRequests: 1_001,
+                executedBatches: 42, failedBatches: 1, largestBatch: 64
             )
         ))
         V2VaporMetricsRoutes.register(
@@ -152,7 +173,16 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_control_write\"} 0"))
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_lanes 1"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_pending_requests 7"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_busiest_lane_pending_requests 7"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_busiest_lane_in_flight 3"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_dequeued_requests_total 151"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_queue_wait_milliseconds_total 701"))
+            #expect(body.contains("im_v2_direct_room_log_append_batch_execution_milliseconds_max 73"))
+            #expect(body.contains("im_v2_direct_send_policy_cache_entries 49999"))
+            #expect(body.contains("im_v2_direct_send_policy_cache_lookups_total{outcome=\"hit\"} 211"))
+            #expect(body.contains("im_v2_direct_send_policy_cache_removals_total{reason=\"capacity\"} 11001"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} 13"))
             #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"committed\"} 12"))
             #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"shape_fallback\"} 4"))
@@ -160,9 +190,22 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"preclassified_individual\"} 37"))
             #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"singleton_dispatch\"} 6"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_entries 17"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_lookups_total{outcome=\"hit\"} 101"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_requests_total{outcome=\"committed\"} 79"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_requests_total{outcome=\"fallback\"} 4"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_insertions_total 93"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_removals_total{reason=\"capacity\"} 12"))
+            #expect(body.contains("im_v2_direct_room_log_fast_append_removals_total{reason=\"expired\"} 3"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_entries 31"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_lookups_total{outcome=\"hit\"} 101"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_lookups_total{outcome=\"miss\"} 9"))
+            #expect(body.contains("im_v2_direct_room_log_event_cache_pending_writes 5"))
+            #expect(body.contains("im_v2_direct_room_log_event_cache_dropped_writes_total 2"))
+            #expect(body.contains("im_v2_live_presence_renewal_pending_connections 4"))
+            #expect(body.contains("im_v2_live_presence_renewal_requests_total 1001"))
+            #expect(body.contains("im_v2_live_presence_renewal_batches_total{outcome=\"executed\"} 42"))
+            #expect(body.contains("im_v2_live_presence_renewal_largest_batch 64"))
             #expect(body.contains("im_v2_database_work_queued{class=\"sync\"} 1"))
             #expect(body.contains("im_v2_database_work_rejections_total{class=\"foreground_write\",reason=\"timeout\"} 3"))
             #expect(body.contains("im_v2_database_work_queue_wait_milliseconds_bucket{class=\"foreground_write\",le=\"25\"} 4"))

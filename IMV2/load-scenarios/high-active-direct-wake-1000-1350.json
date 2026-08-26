@@ -1,0 +1,24 @@
+{
+  "name": "high-active-direct-wake-1000-1350-v1",
+  "seed": 20260823,
+  "roomWarmupTimeoutSeconds": 180,
+  "completionDrainSeconds": 30,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 0,
+  "personas": [
+    { "name": "reader", "share": 0.45, "sendWeight": 0.1, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "regular_sender", "share": 0.35, "sendWeight": 1.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "high_frequency_sender", "share": 0.15, "sendWeight": 4.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 },
+    { "name": "heavy_sender", "share": 0.05, "sendWeight": 10.0, "roomLogReadWeight": 0.0, "syncPullWeight": 0.0 }
+  ],
+  "phases": [
+    {
+      "name": "sustained_direct_wake",
+      "durationSeconds": 60,
+      "messagesPerSecond": 1350,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0.0
+    }
+  ]
+}

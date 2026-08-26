@@ -5,6 +5,11 @@ import Foundation
 /// hit carries durable revision fences that PostgreSQL verifies before a
 /// message can be accepted.
 public actor V2DirectSendPolicyCache {
+    struct Update: Sendable {
+        let entry: Entry
+        let key: Key
+    }
+
     public struct Key: Hashable, Sendable {
         public let roomID: UUID
         public let senderID: UUID
@@ -114,16 +119,45 @@ public actor V2DirectSendPolicyCache {
         }
     }
 
-    private struct StoredEntry: Sendable {
+    public struct Snapshot: Equatable, Sendable {
+        public let entries: Int
+        public let hits: UInt64
+        public let misses: UInt64
+        public let insertions: UInt64
+        public let evictions: UInt64
+        public let expirations: UInt64
+    }
+
+    /// Actor-isolated intrusive LRU node. Dictionary lookup, recency refresh,
+    /// insertion and capacity eviction are all O(1); the previous
+    /// `Dictionary.min` eviction scanned every cached policy after the cache
+    /// reached capacity and created a sharp throughput cliff.
+    private final class Node {
+        let key: Key
         var value: Entry
         var expiresAt: ContinuousClock.Instant
-        var lastAccess: ContinuousClock.Instant
+        weak var previous: Node?
+        var next: Node?
+
+        init(key: Key, value: Entry, expiresAt: ContinuousClock.Instant) {
+            self.key = key
+            self.value = value
+            self.expiresAt = expiresAt
+        }
     }
 
     private let capacity: Int
     private let lifetime: Duration
     private let clock = ContinuousClock()
-    private var entries: [Key: StoredEntry] = [:]
+    private var entries: [Key: Node] = [:]
+    private var keysByRoomID: [UUID: Set<Key>] = [:]
+    private var mostRecent: Node?
+    private var leastRecent: Node?
+    private var hits: UInt64 = 0
+    private var misses: UInt64 = 0
+    private var insertions: UInt64 = 0
+    private var evictions: UInt64 = 0
+    private var expirations: UInt64 = 0
 
     public init(capacity: Int = 50_000, lifetime: Duration = .seconds(60)) {
         self.capacity = max(1, capacity)
@@ -132,34 +166,121 @@ public actor V2DirectSendPolicyCache {
 
     public func value(for key: Key) -> Entry? {
         let now = clock.now
-        guard var stored = entries[key] else { return nil }
-        guard stored.expiresAt > now else {
-            entries.removeValue(forKey: key)
+        guard let node = entries[key] else {
+            misses &+= 1
             return nil
         }
-        stored.lastAccess = now
-        entries[key] = stored
-        return stored.value
+        guard node.expiresAt > now else {
+            remove(node)
+            expirations &+= 1
+            misses &+= 1
+            return nil
+        }
+        moveToMostRecent(node)
+        hits &+= 1
+        return node.value
     }
 
     public func insert(_ value: Entry, for key: Key) {
         let now = clock.now
-        if entries[key] == nil, entries.count >= capacity,
-           let oldest = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key {
-            entries.removeValue(forKey: oldest)
+        if let existing = entries[key] {
+            existing.value = value
+            existing.expiresAt = now + lifetime
+            moveToMostRecent(existing)
+            return
         }
-        entries[key] = .init(value: value, expiresAt: now + lifetime, lastAccess: now)
+        if entries.count >= capacity, let leastRecent {
+            remove(leastRecent)
+            evictions &+= 1
+        }
+        let node = Node(key: key, value: value, expiresAt: now + lifetime)
+        entries[key] = node
+        keysByRoomID[key.roomID, default: []].insert(key)
+        attachAsMostRecent(node)
+        insertions &+= 1
+    }
+
+    /// Applies a committed micro-batch in its durable order using one actor
+    /// hop. Repeated keys are intentional: the last committed revision is the
+    /// cache state that must remain visible.
+    func insert(_ updates: [Update]) {
+        for update in updates {
+            insert(update.entry, for: update.key)
+        }
     }
 
     public func invalidate(_ key: Key) {
-        entries.removeValue(forKey: key)
+        guard let node = entries[key] else { return }
+        remove(node)
     }
 
     public func invalidate(roomID: UUID) {
-        entries = entries.filter { $0.key.roomID != roomID }
+        guard let keys = keysByRoomID[roomID] else { return }
+        for key in keys {
+            if let node = entries[key] {
+                remove(node, updateRoomIndex: false)
+            }
+        }
+        keysByRoomID.removeValue(forKey: roomID)
     }
 
     public func removeAll() {
         entries.removeAll(keepingCapacity: true)
+        keysByRoomID.removeAll(keepingCapacity: true)
+        mostRecent = nil
+        leastRecent = nil
+    }
+
+    public func snapshot() -> Snapshot {
+        .init(
+            entries: entries.count,
+            hits: hits,
+            misses: misses,
+            insertions: insertions,
+            evictions: evictions,
+            expirations: expirations
+        )
+    }
+
+    private func moveToMostRecent(_ node: Node) {
+        guard mostRecent !== node else { return }
+        detach(node)
+        attachAsMostRecent(node)
+    }
+
+    private func attachAsMostRecent(_ node: Node) {
+        node.previous = nil
+        node.next = mostRecent
+        mostRecent?.previous = node
+        mostRecent = node
+        if leastRecent == nil {
+            leastRecent = node
+        }
+    }
+
+    private func detach(_ node: Node) {
+        if let previous = node.previous {
+            previous.next = node.next
+        } else {
+            mostRecent = node.next
+        }
+        if let next = node.next {
+            next.previous = node.previous
+        } else {
+            leastRecent = node.previous
+        }
+        node.previous = nil
+        node.next = nil
+    }
+
+    private func remove(_ node: Node, updateRoomIndex: Bool = true) {
+        detach(node)
+        entries.removeValue(forKey: node.key)
+        if updateRoomIndex {
+            keysByRoomID[node.key.roomID]?.remove(node.key)
+            if keysByRoomID[node.key.roomID]?.isEmpty == true {
+                keysByRoomID.removeValue(forKey: node.key.roomID)
+            }
+        }
     }
 }

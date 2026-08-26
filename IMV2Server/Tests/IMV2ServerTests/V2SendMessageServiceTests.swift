@@ -583,6 +583,74 @@ struct V2SendMessageServiceTests {
         _ = try await [first, second, third, fourth]
         #expect(await store.maximumInFlightBatchCount() == 2)
     }
+
+    @Test("room-keyed lanes are stable and execute independent rooms concurrently")
+    func shardedAdmissionKeepsRoomAffinityAndRunsLanesConcurrently() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = ConcurrentAtomicBatchTestStore()
+        let batcher = V2ShardedSendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .seconds(5),
+                maximumInFlightBatches: 2,
+                maximumPendingRequests: 4
+            ),
+            laneCount: 2
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        var roomsByLane = [[RoomID](), [RoomID]()]
+        var candidate = 1
+        while roomsByLane.contains(where: { $0.count < 2 }) {
+            let roomID = try RoomID(String(format:
+                "10000000-0000-0000-0000-%012d", candidate
+            ))
+            let lane = V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: roomID, laneCount: 2
+            )
+            if roomsByLane[lane].count < 2 {
+                roomsByLane[lane].append(roomID)
+            }
+            candidate += 1
+        }
+        for room in roomsByLane.joined() {
+            #expect(V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: room, laneCount: 2
+            ) == V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: room, laneCount: 2
+            ))
+        }
+        let senderID = try UserID("10000000-0000-0000-0000-000000000100")
+        let rooms = roomsByLane.joined().map { $0 }
+        let tasks = rooms.enumerated().map { index, roomID in
+            Task {
+                try await service.send(.init(
+                    roomID: roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try ClientMessageID(String(format:
+                        "20000000-0000-0000-0000-%012d", index + 1
+                    )),
+                    text: "message-\(index)"
+                ))
+            }
+        }
+        for task in tasks {
+            _ = try await task.value
+        }
+
+        #expect(await store.maximumInFlightBatchCount() == 2)
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.laneCount == 2)
+        #expect(snapshot.pendingRequests == 0)
+        #expect(snapshot.inFlightBatches == 0)
+        #expect(snapshot.atomicBatchCommitted == 2)
+        #expect(snapshot.atomicBatchCommittedRequests == 4)
+    }
 }
 
 private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {

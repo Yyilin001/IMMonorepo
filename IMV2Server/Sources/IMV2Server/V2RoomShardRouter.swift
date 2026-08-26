@@ -30,6 +30,24 @@ public enum V2RoomShardRouteError: Error, Equatable, Sendable {
 /// control-plane directory, not a second source of message truth.
 public protocol V2RoomShardRouting: Sendable {
     func route(for roomID: RoomID) async throws -> V2RoomShardRoute
+    /// Resolves a bounded batch from the same durable owner directory. The
+    /// default preserves compatibility for routers which cannot provide a
+    /// set-based lookup; PostgreSQL implementations override it so routing
+    /// does not add one round trip per command to an append micro-batch.
+    func routes(for roomIDs: [RoomID]) async throws -> [RoomID: V2RoomShardRoute]
+}
+
+public extension V2RoomShardRouting {
+    func routes(for roomIDs: [RoomID]) async throws -> [RoomID: V2RoomShardRoute] {
+        var routes: [RoomID: V2RoomShardRoute] = [:]
+        routes.reserveCapacity(roomIDs.count)
+        for roomID in roomIDs {
+            if routes[roomID] == nil {
+                routes[roomID] = try await route(for: roomID)
+            }
+        }
+        return routes
+    }
 }
 
 /// Creation needs a stable pair fence because a direct-room request has no
@@ -75,6 +93,53 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
             throw V2RoomShardRouteError.roomNotFound
         }
         return try .init(shardID: legacy.roomShardID, epoch: 0)
+    }
+
+    public func routes(for roomIDs: [RoomID]) async throws -> [RoomID: V2RoomShardRoute] {
+        guard !roomIDs.isEmpty else { return [:] }
+        let uniqueRoomIDs = Array(Set(roomIDs))
+        let requestedRoomIDs: [(roomID: RoomID, uuid: UUID)] = try uniqueRoomIDs.map { roomID in
+            guard let uuid = UUID(uuidString: roomID.rawValue) else {
+                throw V2RoomShardRouteError.corruptPersistenceState
+            }
+            return (roomID, uuid)
+        }
+        guard let sql = database as? any SQLDatabase else {
+            throw V2RoomShardRouteError.corruptPersistenceState
+        }
+        let requestedJSON = try roomRouteUUIDJSON(requestedRoomIDs.map(\.uuid))
+        let explicitRows = try await sql.raw("""
+            SELECT route.room_id, route.room_shard_id, route.route_epoch
+            FROM im_v2.room_owner_routes AS route
+            INNER JOIN jsonb_array_elements_text(\(bind: requestedJSON)::jsonb) AS requested(room_id)
+              ON route.room_id = requested.room_id::uuid
+            """).all(decoding: RoutedRoomRow.self)
+        var routes: [RoomID: V2RoomShardRoute] = [:]
+        routes.reserveCapacity(requestedRoomIDs.count)
+        for row in explicitRows {
+            routes[try RoomID(row.roomID.uuidString)] = try .init(
+                shardID: row.roomShardID, epoch: row.routeEpoch
+            )
+        }
+        let legacyRoomIDs = requestedRoomIDs.compactMap { routes[$0.roomID] == nil ? $0.uuid : nil }
+        if !legacyRoomIDs.isEmpty {
+            let legacyJSON = try roomRouteUUIDJSON(legacyRoomIDs)
+            let legacyRows = try await sql.raw("""
+                SELECT room.room_id, room.room_shard_id
+                FROM im_v2.rooms AS room
+                INNER JOIN jsonb_array_elements_text(\(bind: legacyJSON)::jsonb) AS requested(room_id)
+                  ON room.room_id = requested.room_id::uuid
+                """).all(decoding: RoutedLegacyRoomRow.self)
+            for row in legacyRows {
+                routes[try RoomID(row.roomID.uuidString)] = try .init(
+                    shardID: row.roomShardID, epoch: 0
+                )
+            }
+        }
+        guard routes.count == requestedRoomIDs.count else {
+            throw V2RoomShardRouteError.roomNotFound
+        }
+        return routes
     }
 
     public func withDirectPairRoute<Result: Sendable>(
@@ -168,6 +233,26 @@ private struct RouteRow: Decodable {
     }
 }
 
+private struct RoutedRoomRow: Decodable {
+    let roomID: UUID
+    let roomShardID: String
+    let routeEpoch: Int64
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case roomShardID = "room_shard_id"
+        case routeEpoch = "route_epoch"
+    }
+}
+
+private struct RoutedLegacyRoomRow: Decodable {
+    let roomID: UUID
+    let roomShardID: String
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case roomShardID = "room_shard_id"
+    }
+}
+
 private struct LegacyRouteRow: Decodable {
     let roomShardID: String
     enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id" }
@@ -196,6 +281,10 @@ private func canonicalPair(_ first: UUID, _ second: UUID) -> CanonicalDirectPair
     first.uuidString.lowercased() < second.uuidString.lowercased()
         ? .init(lower: first, higher: second)
         : .init(lower: second, higher: first)
+}
+
+private func roomRouteUUIDJSON(_ values: [UUID]) throws -> String {
+    String(decoding: try JSONEncoder().encode(values.map(\.uuidString)), as: UTF8.self)
 }
 
 /// Stable control-plane advisory-lock namespace for a direct pair. It is

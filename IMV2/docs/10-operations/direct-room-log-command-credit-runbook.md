@@ -98,6 +98,16 @@ IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=32
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
 ```
 
+`IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT` is optional. It defaults
+to the historic `min(8, IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT)` limit.
+It may be raised only in a controlled A/B test and is bounded by the gateway's
+total foreground-write admission capacity. It neither changes authorization
+nor acknowledges before commit; it only lets more independent, already
+eligible append transactions compete for the existing bounded database pool.
+At each increment, require zero queue-overflow/rejections and compare P95,
+PostgreSQL wait events, WAL pressure, and foreground-pool queue depth before
+keeping the value.
+
 The `32` cap has two independent 1,500-online / 900-msg/s A/B samples on
 that host; see [the result](../09-capacity/direct-room-log-batch32-ab-2026-08-21.md).
 For an unmeasured topology, start at 8 or 16 and use the verification sequence
@@ -133,6 +143,35 @@ foreground-write database admission immediately around each actual atomic
 transaction, rather than consuming one admission permit for every request
 waiting to form that batch. This preserves the normal database overload
 backpressure while permitting one WAL commit to cover several requests.
+
+### Fast-append cache working set
+
+`IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES` bounds the durable-
+fenced snapshots used by the one-statement conditional append. It defaults to
+50,000 and accepts `1...1,048,576`. Size it for the number of active
+`(room, sender)` pairs seen during the entry TTL, not for the connection count.
+For example, 45,000 users sending in both directions can approach 90,000 keys;
+use 131,072 for that controlled load profile:
+
+```
+IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES=131072
+IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS=600
+```
+
+The TTL defaults to 600 seconds and accepts `1...3,600`. It must cover the
+measured revisit interval for the active `(room, sender)` working set. A
+60-second TTL is ineffective for a 90,000-key workload at 1,000 messages/s:
+the average revisit is about 90 seconds, so most snapshots expire immediately
+before their second use. Raising the TTL does not extend any authorization or
+lease. Those revisions and the current cursor are still checked atomically by
+PostgreSQL; a stale hint can only miss the conditional update and fall back.
+
+The cache is a process-local O(1) LRU and never authorizes a write by itself.
+Every fast append remains fenced by durable room, membership, policy, lease,
+and sequence revisions in PostgreSQL. Capacity or TTL eviction only causes a
+safe fallback to the complete transaction. Do not raise the bound blindly:
+compare entry count, capacity removals, process RSS, fast-append hit rate, and
+fallback count after warm-up.
 
 ## Control-plane admission isolation
 
@@ -200,6 +239,29 @@ Do not attempt to reclaim unused credits by decrementing the counter outside
 the normal admission-window reset/lease-renewal protocol. The bounded loss is
 the price paid to keep the durable limit authoritative under crashes.
 
+## Capacity-profile consistency
+
+The environment is not the command-window authority after a shard admission
+pool has been issued. The limits persisted in
+`shard_admission_pools(room_shard_id, capacity_profile_id)` are authoritative,
+and a capacity-profile identifier is immutable. Raising
+`IM_V2_MAX_COMMANDS_PER_WINDOW` while reusing the old
+`IM_V2_CAPACITY_PROFILE_ID` does not enlarge an existing durable window.
+
+Gateway startup verifies every existing pool for its configured profile ID
+against the configured command, fan-out, outstanding-unit, and outstanding-
+plan limits. Any mismatch fails readiness before the TLS listener starts.
+Treat that failure as a deployment/configuration error; never bypass it or
+reset a production counter in place.
+
+To change a limit, issue a new profile ID and new shard leases, migrate room
+profile IDs and their `room_admission` fences atomically through the control
+plane, verify that no migrated room still references the old fence, and only
+then start Gateways configured for the new profile. A disposable performance
+environment may reset its command-window counters as part of that explicit
+migration, but the reset and all before/after row-count assertions must be in
+the same transaction. Keep the old pools until rollback is no longer needed.
+
 ## Verification
 
 Scrape the loopback /metrics endpoint. When enabled, observe:
@@ -228,6 +290,14 @@ Scrape the loopback /metrics endpoint. When enabled, observe:
   revision or preflight check declined an otherwise eligible subset; it must
   remain low after a steady-state warm-up. These counters are diagnostics,
   not permission decisions.
+- im_v2_direct_room_log_fast_append_entries and
+  im_v2_direct_room_log_fast_append_removals_total: verify that the configured
+  cache covers the measured active `(room, sender)` working set. A continuously
+  rising `reason="capacity"` counter during a steady hold means cache churn.
+- im_v2_direct_room_log_fast_append_lookups_total and
+  im_v2_direct_room_log_fast_append_requests_total: compare cache hit rate and
+  committed/fallback fractions. A cache hit is only a candidate; PostgreSQL's
+  revision-fenced conditional statement remains the authority.
 
 For a controlled A/B run, reset the disposable message data and
 pg_stat_statements, hold connections, message rate, payload size, and gateway

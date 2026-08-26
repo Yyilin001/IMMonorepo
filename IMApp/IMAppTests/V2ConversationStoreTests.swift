@@ -2218,6 +2218,7 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
         subscriptionRoomIDs.append(roomID)
         return .notHybridRoom
     }
+    func applyLiveEvent(_: V2ActiveHybridGroupWake) -> Bool { false }
     func nextWake() async throws -> V2ActiveHybridGroupWake { throw CancellationError() }
     func unsubscribe(roomID _: String) {}
 
@@ -2245,6 +2246,7 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
         return .subscribed(highWatermark: 0)
     }
 
+    func applyLiveEvent(_: V2ActiveHybridGroupWake) -> Bool { false }
     func nextWake() async throws -> V2ActiveHybridGroupWake {
         try Task.checkCancellation()
         wakeCount += 1

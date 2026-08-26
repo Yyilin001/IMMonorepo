@@ -22,24 +22,33 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
               afterRoomSequence <= UInt64(Int64.max)
         else { throw V2GroupEventLogError.corruptPersistenceState }
 
-        // The cache is deliberately reached only after a fresh durable
-        // membership read. It never contains authority or is used to answer
-        // a partial range: a miss falls through to the established one-query
-        // durable implementation below.
+        // Inspect only local coverage before spending a database round trip on
+        // the cache path. A candidate contains no identity and is never
+        // returned without the same fresh durable membership fence as before.
+        // A definite local miss therefore goes straight to the complete,
+        // authorization-bearing query below instead of paying two SQL calls.
         if let directRoomLogEventCache,
-           let access = try await authorizedDirectRoomCacheAccess(
-               roomID: roomUUID,
-               actorUserID: actorUUID,
-               sql: sql
-           ), let cached = await directRoomLogEventCache.page(
+           let candidate = await directRoomLogEventCache.candidate(
                roomID: roomID,
-               actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
-               actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
-               currentHighWatermark: try groupEventUnsigned(access.roomSequence),
                afterRoomSequence: afterRoomSequence,
                pageSize: pageSize
            ) {
-            return cached
+            if let access = try await authorizedDirectRoomCacheAccess(
+                roomID: roomUUID,
+                actorUserID: actorUUID,
+                sql: sql
+            ) {
+                if let cached = await directRoomLogEventCache.page(
+                    candidate: candidate,
+                    actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
+                    actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
+                    currentHighWatermark: try groupEventUnsigned(access.roomSequence)
+                ) {
+                    return cached
+                }
+            } else {
+                await directRoomLogEventCache.recordMiss(roomID: roomID)
+            }
         }
 
         let rows = try await sql.raw("""

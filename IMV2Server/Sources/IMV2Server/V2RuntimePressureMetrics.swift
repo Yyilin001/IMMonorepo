@@ -54,9 +54,18 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// identifiers, so an adaptive rollout can be verified without a SQL
     /// inference or high-cardinality labels.
     public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
+    /// Aggregate LRU facts for the policy hint cache. This proves whether a
+    /// deployment is operating at capacity without exposing cache keys.
+    public let directSendPolicy: V2DirectSendPolicyCache.Snapshot?
+    /// Aggregate results from the conditional one-statement direct append.
+    /// It intentionally contains no room, user, operation, or policy labels.
+    public let directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot?
     /// Best-effort local direct-event cache facts. No room, user or event ID
     /// is exposed as a metric label.
     public let directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot?
+    /// Aggregate heartbeat renewal batching facts. Connection and user IDs are
+    /// intentionally absent to keep this operational metric low-cardinality.
+    public let livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot?
 
     public init(
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
@@ -65,7 +74,10 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot? = nil,
         directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil,
-        directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil
+        directSendPolicy: V2DirectSendPolicyCache.Snapshot? = nil,
+        directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot? = nil,
+        directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil,
+        livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot? = nil
     ) {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
@@ -73,7 +85,10 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
+        self.directSendPolicy = directSendPolicy
+        self.directRoomLogFastAppend = directRoomLogFastAppend
         self.directRoomLogEventCache = directRoomLogEventCache
+        self.livePresenceRenewals = livePresenceRenewals
     }
 }
 
@@ -87,8 +102,11 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let syncWakeCoalescer: V2SyncWakeCoalescer
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
-    private let directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher?
+    private let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
+    private let directSendPolicyCache: V2DirectSendPolicyCache?
+    private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache?
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
+    private let connectionRegistry: V2DeviceConnectionRegistry?
 
     public init(
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
@@ -96,8 +114,11 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         syncWakeCoalescer: V2SyncWakeCoalescer,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
-        directRoomLogAppendBatcher: V2SendMessageAdmissionBatcher? = nil,
-        directRoomLogEventCache: V2DirectRoomLogEventCache? = nil
+        directRoomLogAppendBatcher: (any V2SendMessageAdmission)? = nil,
+        directSendPolicyCache: V2DirectSendPolicyCache? = nil,
+        directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache? = nil,
+        directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
+        connectionRegistry: V2DeviceConnectionRegistry? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
@@ -105,7 +126,10 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
+        self.directSendPolicyCache = directSendPolicyCache
+        self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
         self.directRoomLogEventCache = directRoomLogEventCache
+        self.connectionRegistry = connectionRegistry
     }
 
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
@@ -114,7 +138,10 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         let credits = await shardAdmissionCommandCredits?.snapshot()
         let roomCredits = await roomAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
+        let directSendPolicy = await directSendPolicyCache?.snapshot()
+        let fastAppend = await directRoomLogFastAppendCache?.snapshot()
         let eventCache = await directRoomLogEventCache?.snapshot()
+        let livePresenceRenewals = await connectionRegistry?.livePresenceRenewalMetrics()
         return await .init(
             databaseWork: databaseWork,
             databasePools: databasePools,
@@ -122,7 +149,10 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             shardAdmissionCommandCredits: credits,
             roomAdmissionCommandCredits: roomCredits,
             directRoomLogAppendBatching: appendBatching,
-            directRoomLogEventCache: eventCache
+            directSendPolicy: directSendPolicy,
+            directRoomLogFastAppend: fastAppend,
+            directRoomLogEventCache: eventCache,
+            livePresenceRenewals: livePresenceRenewals
         )
     }
 }
@@ -284,12 +314,39 @@ public func v2RenderPrometheusRuntimePressureMetrics(
     }
     if let batching = snapshot.directRoomLogAppendBatching {
         lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_append_batch_lanes Independent room-keyed append scheduling lanes.",
+            "# TYPE im_v2_direct_room_log_append_batch_lanes gauge",
+            "im_v2_direct_room_log_append_batch_lanes \(batching.laneCount)",
             "# HELP im_v2_direct_room_log_append_batch_pending_requests Process-local direct append requests waiting for an atomic batch.",
             "# TYPE im_v2_direct_room_log_append_batch_pending_requests gauge",
             "im_v2_direct_room_log_append_batch_pending_requests \(batching.pendingRequests)",
+            "# HELP im_v2_direct_room_log_append_batch_busiest_lane_pending_requests Pending append requests in the busiest room-keyed lane.",
+            "# TYPE im_v2_direct_room_log_append_batch_busiest_lane_pending_requests gauge",
+            "im_v2_direct_room_log_append_batch_busiest_lane_pending_requests \(batching.busiestLanePendingRequests)",
             "# HELP im_v2_direct_room_log_append_batch_in_flight Batches currently holding one foreground database admission.",
             "# TYPE im_v2_direct_room_log_append_batch_in_flight gauge",
             "im_v2_direct_room_log_append_batch_in_flight \(batching.inFlightBatches)",
+            "# HELP im_v2_direct_room_log_append_batch_busiest_lane_in_flight Batches executing in the busiest room-keyed lane.",
+            "# TYPE im_v2_direct_room_log_append_batch_busiest_lane_in_flight gauge",
+            "im_v2_direct_room_log_append_batch_busiest_lane_in_flight \(batching.busiestLaneInFlightBatches)",
+            "# HELP im_v2_direct_room_log_append_batch_dequeued_requests_total Requests removed from staging for durable execution.",
+            "# TYPE im_v2_direct_room_log_append_batch_dequeued_requests_total counter",
+            "im_v2_direct_room_log_append_batch_dequeued_requests_total \(batching.dequeuedRequests)",
+            "# HELP im_v2_direct_room_log_append_batch_queue_wait_milliseconds_total Cumulative request time in append staging.",
+            "# TYPE im_v2_direct_room_log_append_batch_queue_wait_milliseconds_total counter",
+            "im_v2_direct_room_log_append_batch_queue_wait_milliseconds_total \(batching.queueWaitMillisecondsTotal)",
+            "# HELP im_v2_direct_room_log_append_batch_queue_wait_milliseconds_max Maximum request time observed in append staging since process start.",
+            "# TYPE im_v2_direct_room_log_append_batch_queue_wait_milliseconds_max gauge",
+            "im_v2_direct_room_log_append_batch_queue_wait_milliseconds_max \(batching.queueWaitMillisecondsMax)",
+            "# HELP im_v2_direct_room_log_append_batch_completed_total Durable append batches completed.",
+            "# TYPE im_v2_direct_room_log_append_batch_completed_total counter",
+            "im_v2_direct_room_log_append_batch_completed_total \(batching.completedBatches)",
+            "# HELP im_v2_direct_room_log_append_batch_execution_milliseconds_total Cumulative time from batch dispatch through durable completion.",
+            "# TYPE im_v2_direct_room_log_append_batch_execution_milliseconds_total counter",
+            "im_v2_direct_room_log_append_batch_execution_milliseconds_total \(batching.batchExecutionMillisecondsTotal)",
+            "# HELP im_v2_direct_room_log_append_batch_execution_milliseconds_max Maximum batch execution time observed since process start.",
+            "# TYPE im_v2_direct_room_log_append_batch_execution_milliseconds_max gauge",
+            "im_v2_direct_room_log_append_batch_execution_milliseconds_max \(batching.batchExecutionMillisecondsMax)",
             "# HELP im_v2_direct_room_log_append_batch_active_rooms Rooms currently serialized by an in-flight batch.",
             "# TYPE im_v2_direct_room_log_append_batch_active_rooms gauge",
             "im_v2_direct_room_log_append_batch_active_rooms \(batching.activeRooms)",
@@ -316,6 +373,47 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_direct_room_log_append_batch_cancellations_total \(batching.cancelledPendingRequests)",
         ])
     }
+    if let policy = snapshot.directSendPolicy {
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_send_policy_cache_entries Process-local durable-fenced direct policy snapshots.",
+            "# TYPE im_v2_direct_send_policy_cache_entries gauge",
+            "im_v2_direct_send_policy_cache_entries \(policy.entries)",
+            "# HELP im_v2_direct_send_policy_cache_lookups_total Direct policy cache lookup outcomes.",
+            "# TYPE im_v2_direct_send_policy_cache_lookups_total counter",
+            "im_v2_direct_send_policy_cache_lookups_total{outcome=\"hit\"} \(policy.hits)",
+            "im_v2_direct_send_policy_cache_lookups_total{outcome=\"miss\"} \(policy.misses)",
+            "# HELP im_v2_direct_send_policy_cache_insertions_total New direct policy cache keys inserted.",
+            "# TYPE im_v2_direct_send_policy_cache_insertions_total counter",
+            "im_v2_direct_send_policy_cache_insertions_total \(policy.insertions)",
+            "# HELP im_v2_direct_send_policy_cache_removals_total Direct policy cache removals by bounded reason.",
+            "# TYPE im_v2_direct_send_policy_cache_removals_total counter",
+            "im_v2_direct_send_policy_cache_removals_total{reason=\"capacity\"} \(policy.evictions)",
+            "im_v2_direct_send_policy_cache_removals_total{reason=\"expired\"} \(policy.expirations)",
+        ])
+    }
+    if let fastAppend = snapshot.directRoomLogFastAppend {
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_fast_append_entries Bounded process-local snapshots eligible for a conditional direct append.",
+            "# TYPE im_v2_direct_room_log_fast_append_entries gauge",
+            "im_v2_direct_room_log_fast_append_entries \(fastAppend.entries)",
+            "# HELP im_v2_direct_room_log_fast_append_lookups_total Candidate cache lookup outcomes.",
+            "# TYPE im_v2_direct_room_log_fast_append_lookups_total counter",
+            "im_v2_direct_room_log_fast_append_lookups_total{outcome=\"hit\"} \(fastAppend.lookupHits)",
+            "im_v2_direct_room_log_fast_append_lookups_total{outcome=\"miss\"} \(fastAppend.lookupMisses)",
+            "# HELP im_v2_direct_room_log_fast_append_requests_total Conditional append request outcomes.",
+            "# TYPE im_v2_direct_room_log_fast_append_requests_total counter",
+            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"attempted\"} \(fastAppend.attemptedAppends)",
+            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"committed\"} \(fastAppend.committedAppends)",
+            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"fallback\"} \(fastAppend.fallbackAppends)",
+            "# HELP im_v2_direct_room_log_fast_append_insertions_total New conditional append cache keys inserted.",
+            "# TYPE im_v2_direct_room_log_fast_append_insertions_total counter",
+            "im_v2_direct_room_log_fast_append_insertions_total \(fastAppend.insertions)",
+            "# HELP im_v2_direct_room_log_fast_append_removals_total Conditional append cache removals by bounded reason.",
+            "# TYPE im_v2_direct_room_log_fast_append_removals_total counter",
+            "im_v2_direct_room_log_fast_append_removals_total{reason=\"capacity\"} \(fastAppend.evictions)",
+            "im_v2_direct_room_log_fast_append_removals_total{reason=\"expired\"} \(fastAppend.expirations)",
+        ])
+    }
     if let eventCache = snapshot.directRoomLogEventCache {
         lines.append(contentsOf: [
             "# HELP im_v2_direct_room_log_event_cache_entries Bounded process-local plain direct event cache occupancy.",
@@ -334,6 +432,29 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# HELP im_v2_direct_room_log_event_cache_bypassed_events_total Committed events that do not satisfy the plain direct cache contract.",
             "# TYPE im_v2_direct_room_log_event_cache_bypassed_events_total counter",
             "im_v2_direct_room_log_event_cache_bypassed_events_total \(eventCache.bypassedIneligibleEvents)",
+            "# HELP im_v2_direct_room_log_event_cache_pending_writes Committed messages waiting for best-effort cache materialization.",
+            "# TYPE im_v2_direct_room_log_event_cache_pending_writes gauge",
+            "im_v2_direct_room_log_event_cache_pending_writes \(eventCache.pendingWrites)",
+            "# HELP im_v2_direct_room_log_event_cache_dropped_writes_total Cache accelerators dropped at the bounded post-commit mailbox.",
+            "# TYPE im_v2_direct_room_log_event_cache_dropped_writes_total counter",
+            "im_v2_direct_room_log_event_cache_dropped_writes_total \(eventCache.droppedWrites)",
+        ])
+    }
+    if let renewals = snapshot.livePresenceRenewals {
+        lines.append(contentsOf: [
+            "# HELP im_v2_live_presence_renewal_pending_connections Heartbeat lease renewals waiting in the bounded coalescing window.",
+            "# TYPE im_v2_live_presence_renewal_pending_connections gauge",
+            "im_v2_live_presence_renewal_pending_connections \(renewals.pendingConnections)",
+            "# HELP im_v2_live_presence_renewal_requests_total Heartbeat lease renewal requests submitted to the batcher.",
+            "# TYPE im_v2_live_presence_renewal_requests_total counter",
+            "im_v2_live_presence_renewal_requests_total \(renewals.submittedRequests)",
+            "# HELP im_v2_live_presence_renewal_batches_total Database renewal batch outcomes.",
+            "# TYPE im_v2_live_presence_renewal_batches_total counter",
+            "im_v2_live_presence_renewal_batches_total{outcome=\"executed\"} \(renewals.executedBatches)",
+            "im_v2_live_presence_renewal_batches_total{outcome=\"failed\"} \(renewals.failedBatches)",
+            "# HELP im_v2_live_presence_renewal_largest_batch Largest heartbeat renewal batch observed by this process.",
+            "# TYPE im_v2_live_presence_renewal_largest_batch gauge",
+            "im_v2_live_presence_renewal_largest_batch \(renewals.largestBatch)",
         ])
     }
     return lines.joined(separator: "\n") + "\n"

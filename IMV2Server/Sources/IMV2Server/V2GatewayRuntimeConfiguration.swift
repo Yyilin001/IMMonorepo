@@ -235,6 +235,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// sockets. This bounds per-connection queues, actors and TLS state.
     public let maximumConnections: Int
     public let authenticatedConnectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
+    public let livePresenceRenewalBatchSize: Int
+    public let livePresenceRenewalMaximumDelayMilliseconds: Int
     public let commandRateLimitPolicy: V2GatewayCommandRateLimitPolicy
     public let maximumQueuedInboundBytes: Int
     /// Complements the byte bound so a stream of one-byte TCP fragments cannot
@@ -343,6 +345,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// direct-message micro-batch; non-eligible commands transparently use
     /// the established single-command write path.
     public let directRoomLogAppendBatchSize: Int
+    /// Bounded number of append micro-batches that may execute concurrently.
+    /// The default preserves the original eight-batch deployment behavior;
+    /// a positive override is an explicitly measured throughput experiment,
+    /// never a client-controlled concurrency setting.
+    public let directRoomLogAppendBatchMaximumInFlightBatches: Int
+    /// Stable room-keyed scheduling lanes. The total in-flight and pending
+    /// budgets are divided across lanes instead of multiplied by this value.
+    public let directRoomLogAppendLaneCount: Int
     /// Maximum extra server-side queueing time for an append micro-batch.
     /// This has meaning only when `directRoomLogAppendBatchSize` is positive.
     public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
@@ -353,12 +363,27 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
     public let directRoomLogAppendBatchHighActivityMinimumRequests: Int?
     public let directRoomLogAppendBatchHighActivityWindowMilliseconds: Int?
+    /// Bounded LRU capacity for stable direct-message policy snapshots. The
+    /// cache is only an acceleration hint; durable revision fences remain in
+    /// every PostgreSQL append.
+    public let directSendPolicyCacheMaximumEntries: Int
+    /// Bounded LRU capacity for conditional room-log append snapshots. These
+    /// entries carry only revision-fenced hints; PostgreSQL remains the cursor,
+    /// membership and authorization authority for every accepted message.
+    public let directRoomLogFastAppendCacheMaximumEntries: Int
+    /// Lifetime for a revision-fenced conditional append hint. A stale entry
+    /// can only cause PostgreSQL to reject the fast attempt and fall back; it
+    /// can never authorize a message, so this may safely span sparse active
+    /// room revisit intervals while remaining bounded by the LRU capacity.
+    public let directRoomLogFastAppendCacheLifetimeSeconds: Int
     /// Zero disables the process-local direct event cache. Cached entries are
     /// never authorization state and are always validated against PostgreSQL
     /// before being served.
     public let directRoomLogEventCacheMaximumEntries: Int
     public let directRoomLogEventCacheMaximumBytes: Int
     public let directRoomLogEventCacheMaximumEntriesPerRoom: Int
+    public let directRoomLogEventCacheShardCount: Int
+    public let directRoomLogEventCacheMaximumPendingWrites: Int
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// Unreferenced immutable revisions remain recoverable for this grace.
     /// The default is seven days; deployments may lengthen it independently
@@ -426,6 +451,24 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         authenticatedConnectionAdmissionPolicy = .init(
             maximumConnectionsPerDevice: maximumConnectionsPerDevice,
             maximumConnectionsPerUser: maximumConnectionsPerUser
+        )
+        let parsedLivePresenceRenewalBatchSize = try Self.nonNegativeWithDefault(
+            "IM_V2_LIVE_PRESENCE_RENEWAL_BATCH_SIZE",
+            defaultValue: 256,
+            maximum: 1_024,
+            environment: environment
+        )
+        guard parsedLivePresenceRenewalBatchSize > 0 else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_LIVE_PRESENCE_RENEWAL_BATCH_SIZE"
+            )
+        }
+        livePresenceRenewalBatchSize = parsedLivePresenceRenewalBatchSize
+        livePresenceRenewalMaximumDelayMilliseconds = try Self.nonNegativeWithDefault(
+            "IM_V2_LIVE_PRESENCE_RENEWAL_MAX_DELAY_MS",
+            defaultValue: 2,
+            maximum: 100,
+            environment: environment
         )
         let deviceCommandsPerSecond = try Self.boundedPositive(
             "IM_V2_DEVICE_COMMANDS_PER_SECOND", maximum: 100_000, environment: environment
@@ -626,6 +669,53 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directRoomLogAppendBatchSize = parsedDirectRoomLogAppendBatchSize
+        let maximumAppendBatchConcurrency = databasePolicy.eventLoopThreads *
+            foregroundWriteDatabaseWorkLimit
+        let rawDirectRoomLogAppendBatchMaximumInFlight = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT", environment: environment
+        )
+        if let rawDirectRoomLogAppendBatchMaximumInFlight {
+            guard let parsedDirectRoomLogAppendBatchMaximumInFlight = Int(
+                rawDirectRoomLogAppendBatchMaximumInFlight
+            ),
+            parsedDirectRoomLogAppendBatchSize > 0,
+            (1 ... maximumAppendBatchConcurrency).contains(
+                parsedDirectRoomLogAppendBatchMaximumInFlight
+            )
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT"
+                )
+            }
+            directRoomLogAppendBatchMaximumInFlightBatches =
+                parsedDirectRoomLogAppendBatchMaximumInFlight
+        } else {
+            // Preserve the pre-existing application wiring exactly unless an
+            // operator deliberately opts in to a measured override.
+            directRoomLogAppendBatchMaximumInFlightBatches = min(
+                8,
+                foregroundWriteDatabaseWorkLimit
+            )
+        }
+        let rawDirectRoomLogAppendLaneCount = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_LANES", environment: environment
+        ) ?? "1"
+        guard let parsedDirectRoomLogAppendLaneCount = Int(rawDirectRoomLogAppendLaneCount),
+              parsedDirectRoomLogAppendLaneCount >= 1,
+              parsedDirectRoomLogAppendLaneCount <= 64,
+              parsedDirectRoomLogAppendLaneCount == 1 || (
+                  parsedDirectRoomLogAppendBatchSize > 0
+                      && parsedDirectRoomLogAppendLaneCount
+                          <= directRoomLogAppendBatchMaximumInFlightBatches
+                      && parsedDirectRoomLogAppendLaneCount
+                          <= foregroundWriteDatabaseWorkMaximumQueued
+              )
+        else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_APPEND_LANES"
+            )
+        }
+        directRoomLogAppendLaneCount = parsedDirectRoomLogAppendLaneCount
         let rawDirectRoomLogAppendBatchDelay = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
         ) ?? "2"
@@ -684,6 +774,43 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogAppendBatchHighActivityMinimumRequests = parsedHighActivityAppendMinimumRequests
             directRoomLogAppendBatchHighActivityWindowMilliseconds = parsedHighActivityAppendWindow
         }
+        let rawDirectSendPolicyCacheMaximumEntries = Self.optional(
+            "IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES", environment: environment
+        ) ?? "50000"
+        guard let parsedDirectSendPolicyCacheMaximumEntries = Int(
+            rawDirectSendPolicyCacheMaximumEntries
+        ), (1 ... 1_048_576).contains(parsedDirectSendPolicyCacheMaximumEntries) else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES"
+            )
+        }
+        directSendPolicyCacheMaximumEntries = parsedDirectSendPolicyCacheMaximumEntries
+        let rawDirectRoomLogFastAppendCacheMaximumEntries = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES",
+            environment: environment
+        ) ?? "50000"
+        guard let parsedDirectRoomLogFastAppendCacheMaximumEntries = Int(
+            rawDirectRoomLogFastAppendCacheMaximumEntries
+        ), (1 ... 1_048_576).contains(parsedDirectRoomLogFastAppendCacheMaximumEntries) else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES"
+            )
+        }
+        directRoomLogFastAppendCacheMaximumEntries =
+            parsedDirectRoomLogFastAppendCacheMaximumEntries
+        let rawDirectRoomLogFastAppendCacheLifetimeSeconds = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS",
+            environment: environment
+        ) ?? "600"
+        guard let parsedDirectRoomLogFastAppendCacheLifetimeSeconds = Int(
+            rawDirectRoomLogFastAppendCacheLifetimeSeconds
+        ), (1 ... 3_600).contains(parsedDirectRoomLogFastAppendCacheLifetimeSeconds) else {
+            throw V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS"
+            )
+        }
+        directRoomLogFastAppendCacheLifetimeSeconds =
+            parsedDirectRoomLogFastAppendCacheLifetimeSeconds
         let rawDirectRoomLogEventCacheEntries = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES", environment: environment
         ) ?? "0"
@@ -700,6 +827,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         if parsedDirectRoomLogEventCacheEntries == 0 {
             directRoomLogEventCacheMaximumBytes = 0
             directRoomLogEventCacheMaximumEntriesPerRoom = 0
+            directRoomLogEventCacheShardCount = 0
+            directRoomLogEventCacheMaximumPendingWrites = 0
         } else {
             let rawDirectRoomLogEventCacheBytes = Self.optional(
                 "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES", environment: environment
@@ -707,17 +836,29 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             let rawDirectRoomLogEventCacheEntriesPerRoom = Self.optional(
                 "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM", environment: environment
             ) ?? "64"
+            let rawDirectRoomLogEventCacheShardCount = Self.optional(
+                "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_SHARDS", environment: environment
+            ) ?? "16"
+            let rawDirectRoomLogEventCacheMaximumPendingWrites = Self.optional(
+                "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_PENDING_WRITES", environment: environment
+            ) ?? "4096"
             guard let parsedDirectRoomLogEventCacheBytes = Int(rawDirectRoomLogEventCacheBytes),
                   let parsedDirectRoomLogEventCacheEntriesPerRoom = Int(rawDirectRoomLogEventCacheEntriesPerRoom),
+                  let parsedDirectRoomLogEventCacheShardCount = Int(rawDirectRoomLogEventCacheShardCount),
+                  let parsedDirectRoomLogEventCacheMaximumPendingWrites = Int(rawDirectRoomLogEventCacheMaximumPendingWrites),
                   (1_048_576 ... 536_870_912).contains(parsedDirectRoomLogEventCacheBytes),
-                  (1 ... 512).contains(parsedDirectRoomLogEventCacheEntriesPerRoom)
+                  (1 ... 512).contains(parsedDirectRoomLogEventCacheEntriesPerRoom),
+                  (1 ... 64).contains(parsedDirectRoomLogEventCacheShardCount),
+                  (1 ... 131_072).contains(parsedDirectRoomLogEventCacheMaximumPendingWrites)
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM"
+                    "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_SHARDS/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_PENDING_WRITES"
                 )
             }
             directRoomLogEventCacheMaximumBytes = parsedDirectRoomLogEventCacheBytes
             directRoomLogEventCacheMaximumEntriesPerRoom = parsedDirectRoomLogEventCacheEntriesPerRoom
+            directRoomLogEventCacheShardCount = parsedDirectRoomLogEventCacheShardCount
+            directRoomLogEventCacheMaximumPendingWrites = parsedDirectRoomLogEventCacheMaximumPendingWrites
         }
         let rawFanoutPayloadWriteMode = Self.optional(
             "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment

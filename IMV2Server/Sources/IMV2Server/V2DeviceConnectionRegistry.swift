@@ -5,6 +5,7 @@ import IMV2Core
 /// consumer invokes this registry on every gateway replica.
 public actor V2DeviceConnectionRegistry {
     private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
+    private let livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
@@ -20,6 +21,7 @@ public actor V2DeviceConnectionRegistry {
     private var foregroundMutationByConnection: [UUID: UUID] = [:]
     private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
     private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
+    private var livePresenceRenewals: V2LivePresenceRenewalBatcher?
     private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
     private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
@@ -33,9 +35,11 @@ public actor V2DeviceConnectionRegistry {
         connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy = .init(
             maximumConnectionsPerDevice: 2,
             maximumConnectionsPerUser: 8
-        )
+        ),
+        livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init()
     ) {
         self.connectionAdmissionPolicy = connectionAdmissionPolicy
+        self.livePresenceRenewalConfiguration = livePresenceRenewalConfiguration
     }
 
     @discardableResult
@@ -233,6 +237,23 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
+    /// Routes a direct-event acceleration payload only to foreground streams
+    /// whose authenticated identity was one of the members captured by the
+    /// committing transaction.  A subscription alone is never authority.
+    public func notifyForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
+        let streams = streamsByForegroundGroup[event.roomID] ?? [:]
+        for (connectionID, stream) in streams {
+            guard let identity = identityByConnection[connectionID],
+                  event.recipientUserIDs.contains(identity.userID)
+            else { continue }
+            await stream.sendGroupEventAvailable(
+                roomID: event.roomID,
+                highWatermark: event.highWatermark,
+                directEvent: event
+            )
+        }
+    }
+
     public func connectionCount(for deviceID: DeviceID) -> Int { streamsByDevice[deviceID]?.count ?? 0 }
 
     public func connectionMetricsSnapshot() -> V2ConnectionMetricsSnapshot {
@@ -245,6 +266,19 @@ public actor V2DeviceConnectionRegistry {
 
     public func configureLivePresenceLeases(_ leases: any V2LivePresenceLeaseManaging) {
         livePresenceLeases = leases
+        livePresenceRenewals = .init(
+            leases: leases,
+            configuration: livePresenceRenewalConfiguration
+        )
+    }
+
+    public func livePresenceRenewalMetrics() async -> V2LivePresenceRenewalBatcher.Snapshot? {
+        await livePresenceRenewals?.snapshot()
+    }
+
+    public func finishLivePresenceRenewals() async {
+        await livePresenceRenewals?.finish()
+        livePresenceRenewals = nil
     }
 
     public func configureLiveActivityObservationAuthorizer(_ authorizer: any V2LiveActivityObservationAuthorizing) {
@@ -273,13 +307,28 @@ public actor V2DeviceConnectionRegistry {
               let lifecycle = lifecycleByConnection[connectionID]
         else { return false }
         guard let livePresenceLeases else { return true }
-        let lease: V2AuthenticatedConnectionLeaseOutcome
+        let refresh: V2LivePresenceLeaseRefresh
         do {
-            lease = try await livePresenceLeases.renewConnection(
-                identity: identity,
-                connectionID: connectionID,
-                now: Date()
-            )
+            if let livePresenceRenewals {
+                refresh = try await livePresenceRenewals.renew(
+                    identity: identity,
+                    connectionID: connectionID,
+                    now: Date()
+                )
+            } else {
+                let now = Date()
+                let outcome = try await livePresenceLeases.renewConnection(
+                    identity: identity,
+                    connectionID: connectionID,
+                    now: now
+                )
+                refresh = .init(
+                    outcome: outcome,
+                    allowsOnlinePresence: try await livePresenceLeases.allowsOnlinePresence(
+                        userID: identity.userID
+                    )
+                )
+            }
         } catch {
             await unregister(connectionID: connectionID)
             return false
@@ -288,11 +337,11 @@ public actor V2DeviceConnectionRegistry {
             await compensateStalePresence(connectionID: connectionID, identity: identity)
             return false
         }
-        guard case .accepted(let expiresAt) = lease else {
+        guard case .accepted(let expiresAt) = refresh.outcome else {
             await unregister(connectionID: connectionID)
             return false
         }
-        if (try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)) == true,
+        if refresh.allowsOnlinePresence,
            lifecycleByConnection[connectionID] == lifecycle {
             await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
         }

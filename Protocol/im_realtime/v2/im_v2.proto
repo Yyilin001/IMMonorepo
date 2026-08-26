@@ -621,6 +621,14 @@ message GroupEventUnsubscribe {
 message GroupEventAvailable {
   string room_id = 1;
   uint64 high_watermark = 2;
+  // Optional acceleration payload for a plain direct room-log event.  Its
+  // absence (and all group-room wakes) retains the original metadata-only
+  // contract.  Clients must accept it only when it is the next contiguous
+  // cursor event; otherwise they use GroupEventPull for durable recovery.
+  string source_event_id = 3;
+  uint64 room_sequence = 4;
+  string projection_kind = 5;
+  bytes event_payload = 6;
 }
 
 enum StrangerMessagePermission {

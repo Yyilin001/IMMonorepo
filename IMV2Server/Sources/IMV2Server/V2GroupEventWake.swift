@@ -46,6 +46,22 @@ public protocol V2GroupEventWakePublishing: Sendable {
 /// already-open detail view pulls the authorized room log.
 public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundHint(_ hint: V2GroupEventWake) async
+    func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async
+    func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async
+}
+
+extension V2ForegroundGroupEventHintPublishing {
+    /// Compatibility fallback for publishers that have not yet been upgraded
+    /// to carry a live payload across a process boundary.  Correctness stays
+    /// with the metadata wake and durable cursor pull.
+    public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
+        await publishForegroundHint(.init(roomID: event.roomID, highWatermark: event.highWatermark))
+    }
+
+    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
+        guard let event = V2DirectRoomLiveEvent(message) else { return }
+        await publishForegroundDirectEvent(event)
+    }
 }
 
 /// Runtime-owned mailbox for foreground hints. It coalesces watermarks per
@@ -55,24 +71,36 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
 public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPublishing {
     private let publisher: any V2ForegroundGroupEventHintPublishing
     private let maximumPendingRooms: Int
+    /// Live foreground sends are lossy accelerators, but a single serial
+    /// publisher must not become the throughput ceiling for unrelated rooms.
+    /// A modest bound protects the gateway executor and socket buffers while
+    /// retaining a batch boundary between successive mailbox drains.
+    private let maximumConcurrentPublications: Int
     private let signal: AsyncStream<Void>
     private let signalContinuation: AsyncStream<Void>.Continuation
-    private var pending: [RoomID: V2GroupEventWake] = [:]
+    private struct Pending: Sendable {
+        let wake: V2GroupEventWake
+        let directMessage: V2DirectRoomLiveEventDraft?
+    }
+
+    private var pending: [RoomID: Pending] = [:]
 
     public init(
         publisher: any V2ForegroundGroupEventHintPublishing,
-        maximumPendingRooms: Int = 256
+        maximumPendingRooms: Int = 256,
+        maximumConcurrentPublications: Int = 8
     ) {
-        precondition(maximumPendingRooms > 0)
+        precondition(maximumPendingRooms > 0 && maximumConcurrentPublications > 0)
         self.publisher = publisher
         self.maximumPendingRooms = maximumPendingRooms
+        self.maximumConcurrentPublications = maximumConcurrentPublications
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         signal = stream.stream
         signalContinuation = stream.continuation
     }
 
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {
-        if let existing = pending[hint.roomID], existing.highWatermark >= hint.highWatermark {
+        if let existing = pending[hint.roomID], existing.wake.highWatermark >= hint.highWatermark {
             return
         }
         if pending[hint.roomID] == nil,
@@ -83,7 +111,24 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
             // the newest work instead of growing with traffic history.
             pending.removeValue(forKey: bufferedRoom)
         }
-        pending[hint.roomID] = hint
+        pending[hint.roomID] = .init(wake: hint, directMessage: nil)
+        signalContinuation.yield()
+    }
+
+    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
+        guard let draft = V2DirectRoomLiveEventDraft(message) else { return }
+        if let existing = pending[draft.message.roomID], existing.wake.highWatermark >= draft.message.roomSequence {
+            return
+        }
+        if pending[draft.message.roomID] == nil,
+           pending.count >= maximumPendingRooms,
+           let bufferedRoom = pending.keys.first {
+            pending.removeValue(forKey: bufferedRoom)
+        }
+        pending[draft.message.roomID] = .init(
+            wake: .init(roomID: draft.message.roomID, highWatermark: draft.message.roomSequence),
+            directMessage: draft
+        )
         signalContinuation.yield()
     }
 
@@ -93,11 +138,32 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
     public func run() async {
         for await _ in signal {
             if Task.isCancelled { return }
-            let batch = pending.values
+            let batch = Array(pending.values)
             pending.removeAll(keepingCapacity: true)
-            for hint in batch {
+
+            // A later room event is only placed in a subsequent drain after
+            // this one has completed.  Within a drain, rooms are independent:
+            // clients still require exact cursor continuity and fall back to
+            // the durable log for a duplicate, a gap, or a dropped hint.
+            var lowerBound = 0
+            while lowerBound < batch.count {
                 if Task.isCancelled { return }
-                await publisher.publishForegroundHint(hint)
+                let upperBound = min(lowerBound + maximumConcurrentPublications, batch.count)
+                let slice = batch[lowerBound..<upperBound]
+                let publicationSink = publisher
+                await withTaskGroup(of: Void.self) { group in
+                    for item in slice {
+                        group.addTask {
+                            guard !Task.isCancelled else { return }
+                            if let event = item.directMessage?.materialized() {
+                                await publicationSink.publishForegroundDirectEvent(event)
+                            } else {
+                                await publicationSink.publishForegroundHint(item.wake)
+                            }
+                        }
+                    }
+                }
+                lowerBound = upperBound
             }
         }
     }
@@ -185,5 +251,14 @@ public struct V2LocalGroupEventWakePublisher: V2GroupEventWakePublishing, V2Fore
 
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {
         await registry.notifyForegroundGroupAvailable(roomID: hint.roomID, highWatermark: hint.highWatermark)
+    }
+
+    public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
+        await registry.notifyForegroundDirectEvent(event)
+    }
+
+    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
+        guard let event = V2DirectRoomLiveEvent(message) else { return }
+        await publishForegroundDirectEvent(event)
     }
 }

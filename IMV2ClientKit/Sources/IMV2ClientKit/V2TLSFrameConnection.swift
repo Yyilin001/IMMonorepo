@@ -50,15 +50,18 @@ public struct V2SyncAvailabilityHint: Equatable, Sendable {
     }
 }
 
-/// Non-authoritative foreground wake for one Hybrid room. The client follows
-/// it with its durable room-event cursor pull before changing local state.
+/// Non-authoritative foreground wake for one Hybrid room.  A contiguous
+/// direct-room event can be applied immediately; every absence, duplicate or
+/// gap still follows the durable room-event cursor pull.
 public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
     public let roomID: RoomID
     public let highWatermark: UInt64
+    public let liveEvent: V2ClientGroupEvent?
 
-    public init(roomID: RoomID, highWatermark: UInt64) {
+    public init(roomID: RoomID, highWatermark: UInt64, liveEvent: V2ClientGroupEvent? = nil) {
         self.roomID = roomID
         self.highWatermark = highWatermark
+        self.liveEvent = liveEvent
     }
 }
 
@@ -426,7 +429,11 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                     pendingAvailabilityHint = value
                 }
             case .groupEventAvailable(let hint):
-                let value = try V2GroupEventAvailabilityHint(roomID: .init(hint.roomID), highWatermark: hint.highWatermark)
+                let value = try V2GroupEventAvailabilityHint(
+                    roomID: .init(hint.roomID),
+                    highWatermark: hint.highWatermark,
+                    liveEvent: Self.liveGroupEvent(from: hint)
+                )
                 if let groupEventAvailabilityWaiter {
                     self.groupEventAvailabilityWaiter = nil
                     groupEventAvailabilityWaiter.resume(returning: value)
@@ -448,6 +455,25 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
         waiter.resume(returning: frame)
+    }
+
+    /// A malformed optional acceleration payload is never a transport error:
+    /// treating it as a normal metadata wake preserves the durable recovery
+    /// path and prevents an untrusted payload from advancing a cursor.
+    private static func liveGroupEvent(from hint: IMV2GroupEventAvailable) -> V2ClientGroupEvent? {
+        guard !hint.sourceEventID.isEmpty,
+              hint.roomSequence > 0,
+              hint.roomSequence == hint.highWatermark,
+              !hint.projectionKind.isEmpty,
+              !hint.eventPayload.isEmpty,
+              let sourceEventID = try? EventID(hint.sourceEventID)
+        else { return nil }
+        return .init(
+            sourceEventID: sourceEventID,
+            roomSequence: hint.roomSequence,
+            projectionKind: hint.projectionKind,
+            payload: hint.eventPayload
+        )
     }
 
     private func failRequest(_ requestID: UInt64) {

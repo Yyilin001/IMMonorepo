@@ -10,11 +10,25 @@ import IMV2Core
 /// retain per-room order inside the SQL batch. Independent rooms may run in
 /// parallel, but no room is admitted to a second in-flight batch until the
 /// first has committed or failed.
-public actor V2SendMessageAdmissionBatcher {
+public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     public struct Snapshot: Equatable, Sendable {
         public let pendingRequests: Int
         public let inFlightBatches: Int
         public let activeRooms: Int
+        /// Number of independently isolated batching lanes represented by
+        /// this snapshot. A single actor reports one; a keyed router sums its
+        /// lanes and also reports the busiest lane below.
+        public let laneCount: Int
+        public let busiestLanePendingRequests: Int
+        public let busiestLaneInFlightBatches: Int
+        /// Monotonic phase timings expose whether latency accumulates before
+        /// dequeue or after a batch starts its durable execution path.
+        public let dequeuedRequests: UInt64
+        public let queueWaitMillisecondsTotal: UInt64
+        public let queueWaitMillisecondsMax: UInt64
+        public let completedBatches: UInt64
+        public let batchExecutionMillisecondsTotal: UInt64
+        public let batchExecutionMillisecondsMax: UInt64
         public let stagingQueueFullRejections: UInt64
         public let cancelledPendingRequests: UInt64
         /// Delayed flushes that used the normal interactive latency budget.
@@ -50,6 +64,15 @@ public actor V2SendMessageAdmissionBatcher {
             pendingRequests: Int,
             inFlightBatches: Int,
             activeRooms: Int,
+            laneCount: Int = 1,
+            busiestLanePendingRequests: Int? = nil,
+            busiestLaneInFlightBatches: Int? = nil,
+            dequeuedRequests: UInt64 = 0,
+            queueWaitMillisecondsTotal: UInt64 = 0,
+            queueWaitMillisecondsMax: UInt64 = 0,
+            completedBatches: UInt64 = 0,
+            batchExecutionMillisecondsTotal: UInt64 = 0,
+            batchExecutionMillisecondsMax: UInt64 = 0,
             stagingQueueFullRejections: UInt64,
             cancelledPendingRequests: UInt64,
             baseDelayFlushes: UInt64,
@@ -66,6 +89,15 @@ public actor V2SendMessageAdmissionBatcher {
             self.pendingRequests = pendingRequests
             self.inFlightBatches = inFlightBatches
             self.activeRooms = activeRooms
+            self.laneCount = laneCount
+            self.busiestLanePendingRequests = busiestLanePendingRequests ?? pendingRequests
+            self.busiestLaneInFlightBatches = busiestLaneInFlightBatches ?? inFlightBatches
+            self.dequeuedRequests = dequeuedRequests
+            self.queueWaitMillisecondsTotal = queueWaitMillisecondsTotal
+            self.queueWaitMillisecondsMax = queueWaitMillisecondsMax
+            self.completedBatches = completedBatches
+            self.batchExecutionMillisecondsTotal = batchExecutionMillisecondsTotal
+            self.batchExecutionMillisecondsMax = batchExecutionMillisecondsMax
             self.stagingQueueFullRejections = stagingQueueFullRejections
             self.cancelledPendingRequests = cancelledPendingRequests
             self.baseDelayFlushes = baseDelayFlushes
@@ -145,6 +177,9 @@ public actor V2SendMessageAdmissionBatcher {
         let id: UUID
         let request: V2RoomWriteRequest
         let continuation: CheckedContinuation<V2SendMessageOutcome, any Error>
+        let enqueuedAt: ContinuousClock.Instant
+        var previousID: UUID?
+        var nextID: UUID?
     }
 
     private enum ScheduledDelay: Equatable, Sendable {
@@ -154,7 +189,13 @@ public actor V2SendMessageAdmissionBatcher {
 
     private let store: any V2AtomicRoomWriteBatchStore
     private let configuration: Configuration
-    private var pending: [Pending] = []
+    /// Intrusive FIFO storage keeps enqueue and cancellation O(1). Batch
+    /// selection still walks the staged requests in arrival order, but it no
+    /// longer copies the whole queue once or twice for every transaction.
+    private var pendingByID: [UUID: Pending] = [:]
+    private var pendingHeadID: UUID?
+    private var pendingTailID: UUID?
+    private var pendingCount = 0
     private var flushTask: Task<Void, Never>?
     private var inFlightBatchCount = 0
     private var activeRoomIDs: Set<RoomID> = []
@@ -170,6 +211,12 @@ public actor V2SendMessageAdmissionBatcher {
     private var atomicBatchFallbackRequests: UInt64 = 0
     private var atomicPreclassifiedIndividualRequests: UInt64 = 0
     private var singletonDispatches: UInt64 = 0
+    private var dequeuedRequests: UInt64 = 0
+    private var queueWaitMillisecondsTotal: UInt64 = 0
+    private var queueWaitMillisecondsMax: UInt64 = 0
+    private var completedBatches: UInt64 = 0
+    private var batchExecutionMillisecondsTotal: UInt64 = 0
+    private var batchExecutionMillisecondsMax: UInt64 = 0
     /// Use a monotonic clock so a wall-clock correction cannot accidentally
     /// put the batcher into high-activity mode or keep it there forever.
     private let clock = ContinuousClock()
@@ -197,11 +244,17 @@ public actor V2SendMessageAdmissionBatcher {
         flushTask?.cancel()
     }
 
-    public func snapshot() -> Snapshot {
+    public func snapshot() async -> Snapshot {
         .init(
-            pendingRequests: pending.count,
+            pendingRequests: pendingCount,
             inFlightBatches: inFlightBatchCount,
             activeRooms: activeRoomIDs.count,
+            dequeuedRequests: dequeuedRequests,
+            queueWaitMillisecondsTotal: queueWaitMillisecondsTotal,
+            queueWaitMillisecondsMax: queueWaitMillisecondsMax,
+            completedBatches: completedBatches,
+            batchExecutionMillisecondsTotal: batchExecutionMillisecondsTotal,
+            batchExecutionMillisecondsMax: batchExecutionMillisecondsMax,
             stagingQueueFullRejections: stagingQueueFullRejections,
             cancelledPendingRequests: cancelledPendingRequests,
             baseDelayFlushes: baseDelayFlushes,
@@ -222,17 +275,24 @@ public actor V2SendMessageAdmissionBatcher {
         let pendingID = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                guard pending.count < configuration.maximumPendingRequests else {
+                guard pendingCount < configuration.maximumPendingRequests else {
                     stagingQueueFullRejections &+= 1
                     continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
                     return
                 }
-                pending.append(.init(id: pendingID, request: request, continuation: continuation))
+                enqueuePending(.init(
+                    id: pendingID,
+                    request: request,
+                    continuation: continuation,
+                    enqueuedAt: clock.now,
+                    previousID: nil,
+                    nextID: nil
+                ))
                 recordArrival()
-                if pending.count == 1 {
+                if pendingCount == 1 {
                     scheduleDelayedFlush()
                 }
-                if pending.count >= configuration.maximumBatchSize {
+                if pendingCount >= configuration.maximumBatchSize {
                     flushTask?.cancel()
                     flushTask = nil
                     scheduledDelay = nil
@@ -343,50 +403,86 @@ public actor V2SendMessageAdmissionBatcher {
     /// owned by an in-flight batch remains in `remaining`, preserving the
     /// existing no-overtake rule across transactions.
     private func dequeueNextBatch() -> [Pending]? {
-        guard !pending.isEmpty else { return nil }
+        guard pendingCount > 0 else { return nil }
 
         var selected: [Pending] = []
+        defer { recordDequeued(selected) }
         var selectedRoomIDs = activeRoomIDs
-        var remaining: [Pending] = []
         selected.reserveCapacity(configuration.maximumBatchSize)
-        remaining.reserveCapacity(pending.count)
 
         // Fairness pass: pick at most one command per inactive room first.
-        for item in pending {
-            guard selected.count < configuration.maximumBatchSize,
-                  selectedRoomIDs.insert(item.request.command.roomID).inserted
-            else {
-                remaining.append(item)
-                continue
+        var cursor = pendingHeadID
+        while let itemID = cursor,
+              let item = pendingByID[itemID],
+              selected.count < configuration.maximumBatchSize
+        {
+            cursor = item.nextID
+            if selectedRoomIDs.insert(item.request.command.roomID).inserted,
+               let removed = removePending(itemID)
+            {
+                selected.append(removed)
             }
-            selected.append(item)
         }
         // Hot-room pass: after every selected room has had an opportunity to
         // enter this transaction, fill spare capacity only with commands for
         // those rooms.  Keeping commands for a newly seen room in
         // `remaining` gives it first-pass priority in the next transaction.
-        guard selected.count < configuration.maximumBatchSize else {
-            pending = remaining
-            return selected
-        }
+        guard selected.count < configuration.maximumBatchSize else { return selected }
         let batchRoomIDs = Set(selected.map(\.request.command.roomID))
-        var deferred: [Pending] = []
-        deferred.reserveCapacity(remaining.count)
-        for item in remaining {
-            guard selected.count < configuration.maximumBatchSize,
-                  batchRoomIDs.contains(item.request.command.roomID)
-            else {
-                deferred.append(item)
-                continue
+        cursor = pendingHeadID
+        while let itemID = cursor,
+              let item = pendingByID[itemID],
+              selected.count < configuration.maximumBatchSize
+        {
+            cursor = item.nextID
+            if batchRoomIDs.contains(item.request.command.roomID),
+               let removed = removePending(itemID)
+            {
+                selected.append(removed)
             }
-            selected.append(item)
         }
         guard !selected.isEmpty else { return nil }
-        pending = deferred
         return selected
     }
 
+    private func enqueuePending(_ item: Pending) {
+        var item = item
+        item.previousID = pendingTailID
+        if let tailID = pendingTailID, var tail = pendingByID[tailID] {
+            tail.nextID = item.id
+            pendingByID[tailID] = tail
+        } else {
+            pendingHeadID = item.id
+        }
+        pendingTailID = item.id
+        pendingByID[item.id] = item
+        pendingCount += 1
+    }
+
+    @discardableResult
+    private func removePending(_ id: UUID) -> Pending? {
+        guard let item = pendingByID.removeValue(forKey: id) else { return nil }
+        if let previousID = item.previousID, var previous = pendingByID[previousID] {
+            previous.nextID = item.nextID
+            pendingByID[previousID] = previous
+        } else {
+            pendingHeadID = item.nextID
+        }
+        if let nextID = item.nextID, var next = pendingByID[nextID] {
+            next.previousID = item.previousID
+            pendingByID[nextID] = next
+        } else {
+            pendingTailID = item.previousID
+        }
+        pendingCount -= 1
+        var detached = item
+        detached.previousID = nil
+        detached.nextID = nil
+        return detached
+    }
+
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
+        let executionStartedAt = clock.now
         Task {
             let results: [Result<V2SendMessageOutcome, any Error>]
             let disposition: BatchDisposition
@@ -410,7 +506,8 @@ public actor V2SendMessageAdmissionBatcher {
                         batch: batch,
                         roomIDs: roomIDs,
                         results: results,
-                        disposition: disposition
+                        disposition: disposition,
+                        executionStartedAt: executionStartedAt
                     )
                     return
                 }
@@ -425,7 +522,8 @@ public actor V2SendMessageAdmissionBatcher {
                 batch: batch,
                 roomIDs: roomIDs,
                 results: results,
-                disposition: disposition
+                disposition: disposition,
+                executionStartedAt: executionStartedAt
             )
         }
     }
@@ -568,9 +666,20 @@ public actor V2SendMessageAdmissionBatcher {
         batch: [Pending],
         roomIDs: Set<RoomID>,
         results: [Result<V2SendMessageOutcome, any Error>],
-        disposition: BatchDisposition
+        disposition: BatchDisposition,
+        executionStartedAt: ContinuousClock.Instant
     ) {
         precondition(inFlightBatchCount > 0)
+        let executionMilliseconds = elapsedMilliseconds(since: executionStartedAt)
+        completedBatches &+= 1
+        batchExecutionMillisecondsTotal = saturatingAdd(
+            batchExecutionMillisecondsTotal,
+            executionMilliseconds
+        )
+        batchExecutionMillisecondsMax = max(
+            batchExecutionMillisecondsMax,
+            executionMilliseconds
+        )
         inFlightBatchCount -= 1
         activeRoomIDs.subtract(roomIDs)
         switch disposition {
@@ -662,20 +771,57 @@ public actor V2SendMessageAdmissionBatcher {
     }
 
     private func cancelPendingRequest(_ pendingID: UUID) {
-        guard let index = pending.firstIndex(where: { $0.id == pendingID }) else {
+        guard let removed = removePending(pendingID) else {
             // The batch is already executing. Its durable operation keeps the
             // normal at-least-once/idempotent semantics; it cannot safely be
             // cancelled after dequeue.
             return
         }
-        let removed = pending.remove(at: index)
         cancelledPendingRequests &+= 1
         removed.continuation.resume(throwing: CancellationError())
-        if pending.isEmpty {
+        if pendingCount == 0 {
             flushTask?.cancel()
             flushTask = nil
             scheduledDelay = nil
         }
+    }
+
+    private func recordDequeued(_ batch: [Pending]) {
+        guard !batch.isEmpty else { return }
+        let now = clock.now
+        dequeuedRequests &+= UInt64(batch.count)
+        for item in batch {
+            let milliseconds = elapsedMilliseconds(from: item.enqueuedAt, to: now)
+            queueWaitMillisecondsTotal = saturatingAdd(
+                queueWaitMillisecondsTotal,
+                milliseconds
+            )
+            queueWaitMillisecondsMax = max(queueWaitMillisecondsMax, milliseconds)
+        }
+    }
+
+    private func elapsedMilliseconds(since instant: ContinuousClock.Instant) -> UInt64 {
+        elapsedMilliseconds(from: instant, to: clock.now)
+    }
+
+    private func elapsedMilliseconds(
+        from start: ContinuousClock.Instant,
+        to end: ContinuousClock.Instant
+    ) -> UInt64 {
+        let components = start.duration(to: end).components
+        guard components.seconds > 0 || components.attoseconds > 0 else { return 0 }
+        let seconds = UInt64(components.seconds)
+        let wholeMilliseconds = seconds.multipliedReportingOverflow(by: 1_000)
+        guard !wholeMilliseconds.overflow else { return .max }
+        let fractionalMilliseconds = UInt64(
+            components.attoseconds / 1_000_000_000_000_000
+        )
+        return saturatingAdd(wholeMilliseconds.partialValue, fractionalMilliseconds)
+    }
+
+    private func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? .max : result.partialValue
     }
 }
 

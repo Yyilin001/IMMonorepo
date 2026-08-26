@@ -159,6 +159,71 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return renewed == nil ? .rejected : .accepted(expiresAt: expiry)
     }
 
+    public func renewConnections(
+        _ requests: [V2LivePresenceLeaseRenewalRequest]
+    ) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        guard !requests.isEmpty else { return [:] }
+        guard let sql = database as? any SQLDatabase else {
+            throw V2LiveActivityStoreError.corruptPersistenceState
+        }
+
+        // A connection can have at most one renewal in a physical batch. If a
+        // caller races duplicate heartbeats, the newest observed time wins.
+        var unique: [UUID: V2LivePresenceLeaseRenewalRequest] = [:]
+        unique.reserveCapacity(requests.count)
+        for request in requests {
+            if (unique[request.connectionID]?.now ?? .distantPast) <= request.now {
+                unique[request.connectionID] = request
+            }
+        }
+        let rows = try unique.values.map { request in
+            (
+                connectionID: request.connectionID,
+                userID: try liveActivityUUID(request.identity.userID),
+                deviceID: try liveActivityUUID(request.identity.deviceID),
+                expiresAt: request.now.addingTimeInterval(onlineLease),
+                updatedAt: request.now
+            )
+        }
+        var query: SQLQueryString = """
+            WITH requested(connection_id, user_id, device_id, expires_at, updated_at) AS (VALUES
+            """
+        query += rows.map { row in
+            "(\(bind: row.connectionID), \(bind: row.userID), \(bind: row.deviceID), \(bind: row.expiresAt), \(bind: row.updatedAt))"
+        }.joined(separator: ",")
+        query += """
+            ), renewed AS (
+                UPDATE im_v2.user_live_presence_leases AS lease
+                SET expires_at = requested.expires_at,
+                    updated_at = requested.updated_at
+                FROM requested
+                WHERE lease.connection_id = requested.connection_id
+                  AND lease.user_id = requested.user_id
+                  AND lease.device_id = requested.device_id
+                  AND lease.expires_at > requested.updated_at
+                RETURNING lease.connection_id, lease.expires_at
+            )
+            SELECT requested.connection_id,
+                   renewed.expires_at,
+                   COALESCE(preference.allows_online_presence, TRUE) AS allows_online_presence
+            FROM requested
+            LEFT JOIN renewed USING (connection_id)
+            LEFT JOIN im_v2.user_live_activity_preferences AS preference
+              ON preference.user_id = requested.user_id
+            """
+
+        let resultRows = try await sql.raw(query).all(decoding: LiveActivityLeaseRefreshRow.self)
+        return Dictionary(uniqueKeysWithValues: resultRows.map { row in
+            let outcome: V2AuthenticatedConnectionLeaseOutcome = row.expiresAt.map {
+                .accepted(expiresAt: $0)
+            } ?? .rejected
+            return (
+                row.connectionID,
+                .init(outcome: outcome, allowsOnlinePresence: row.allowsOnlinePresence)
+            )
+        })
+    }
+
     public func removePresence(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
@@ -218,6 +283,16 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
 }
 
 private struct LiveActivityPreferenceRow: Decodable { let allowsOnlinePresence: Bool; let allowsTypingIndicators: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence", allowsTypingIndicators = "allows_typing_indicators", updatedAt = "updated_at" }; var preferences: V2LiveActivityPreferences { .init(allowsOnlinePresence: allowsOnlinePresence, allowsTypingIndicators: allowsTypingIndicators, updatedAt: updatedAt) } }
+private struct LiveActivityLeaseRefreshRow: Decodable {
+    let connectionID: UUID
+    let expiresAt: Date?
+    let allowsOnlinePresence: Bool
+    enum CodingKeys: String, CodingKey {
+        case connectionID = "connection_id"
+        case expiresAt = "expires_at"
+        case allowsOnlinePresence = "allows_online_presence"
+    }
+}
 private struct LiveActivityOnlinePreferenceRow: Decodable { let allowsOnlinePresence: Bool; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence" } }
 private struct LiveActivityTypingPreferenceRow: Decodable { let allowsTypingIndicators: Bool; enum CodingKeys: String, CodingKey { case allowsTypingIndicators = "allows_typing_indicators" } }
 private struct LiveActivityUserRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }

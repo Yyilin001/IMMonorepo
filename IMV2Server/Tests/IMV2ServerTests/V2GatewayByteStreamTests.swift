@@ -266,6 +266,59 @@ struct V2GatewayByteStreamTests {
         #expect(await recorder.count() == 1)
     }
 
+    @Test("a direct live payload is routed only to an authenticated captured recipient")
+    func routesDirectLivePayloadOnlyToRecipient() async throws {
+        let registry = V2DeviceConnectionRegistry()
+        let connectionID = UUID()
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ByteStreamCommandFake(),
+            connectionID: connectionID,
+            registry: registry
+        )
+        let recorder = OutboundFrameRecorder()
+        await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c02")
+        await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: roomID)
+        let direct = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 42,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e01"),
+            roomSequence: 42,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-a")]
+        )
+        await registry.notifyForegroundDirectEvent(direct)
+        let frame = try #require(await recorder.waitForFirst())
+        let wake = try decode(frame)
+        #expect(wake.groupEventAvailable.roomID == roomID.rawValue)
+        #expect(wake.groupEventAvailable.highWatermark == 42)
+        #expect(wake.groupEventAvailable.sourceEventID == direct.sourceEventID.rawValue)
+        #expect(wake.groupEventAvailable.roomSequence == 42)
+        #expect(wake.groupEventAvailable.projectionKind == "message")
+        #expect(wake.groupEventAvailable.eventPayload == direct.payload)
+
+        let otherRecipient = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 43,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e02"),
+            roomSequence: 43,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-b")]
+        )
+        await registry.notifyForegroundDirectEvent(otherRecipient)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await recorder.count() == 1)
+    }
+
     private func encoded(_ envelope: IMV2Envelope, version: UInt8) throws -> Data {
         try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
     }

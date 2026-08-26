@@ -55,9 +55,67 @@ public protocol V2LivePresenceLeaseManaging: Sendable {
         connectionID: UUID,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome
+    /// Renews a bounded set of independent connection leases and returns the
+    /// privacy decision read by the same database statement. Implementations
+    /// backed by one database should override this to collapse heartbeat write
+    /// and preference-read round trips without weakening either fence.
+    func renewConnections(
+        _ requests: [V2LivePresenceLeaseRenewalRequest]
+    ) async throws -> [UUID: V2LivePresenceLeaseRefresh]
     /// Returns whether another unexpired connection still keeps the user online.
     func removePresence(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date) async throws -> Bool
     func allowsOnlinePresence(userID: UserID) async throws -> Bool
+}
+
+public struct V2LivePresenceLeaseRenewalRequest: Sendable {
+    public let identity: V2AuthenticatedConnection
+    public let connectionID: UUID
+    public let now: Date
+
+    public init(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date) {
+        self.identity = identity
+        self.connectionID = connectionID
+        self.now = now
+    }
+}
+
+public struct V2LivePresenceLeaseRefresh: Equatable, Sendable {
+    public let outcome: V2AuthenticatedConnectionLeaseOutcome
+    public let allowsOnlinePresence: Bool
+
+    public init(
+        outcome: V2AuthenticatedConnectionLeaseOutcome,
+        allowsOnlinePresence: Bool
+    ) {
+        self.outcome = outcome
+        self.allowsOnlinePresence = allowsOnlinePresence
+    }
+}
+
+public extension V2LivePresenceLeaseManaging {
+    /// Correct compatibility path for in-memory and remote implementations.
+    /// PostgreSQL provides a single-statement override for the hot path.
+    func renewConnections(
+        _ requests: [V2LivePresenceLeaseRenewalRequest]
+    ) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        var refreshed: [UUID: V2LivePresenceLeaseRefresh] = [:]
+        refreshed.reserveCapacity(requests.count)
+        for request in requests {
+            let outcome = try await renewConnection(
+                identity: request.identity,
+                connectionID: request.connectionID,
+                now: request.now
+            )
+            let allowsOnlinePresence = try await allowsOnlinePresence(
+                userID: request.identity.userID
+            )
+            refreshed[request.connectionID] = .init(
+                outcome: outcome,
+                allowsOnlinePresence: allowsOnlinePresence
+            )
+        }
+        return refreshed
+    }
 }
 
 /// Registry-side delivery policy for best-effort activity.  The registry owns

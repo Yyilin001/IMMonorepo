@@ -91,6 +91,6 @@ public struct V2GroupEventLogService: Sendable {
     /// process is restarted, another gateway accepted the message, or the
     /// event does not fit the plain direct-message cache contract.
     public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async {
-        await directRoomLogEventCache?.recordCommittedPlainDirectMessage(message)
+        await directRoomLogEventCache?.enqueueCommittedPlainDirectMessage(message)
     }
 }

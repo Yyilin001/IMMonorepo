@@ -171,6 +171,22 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case replyTargetNotFound
 }
 
+/// Process-local admission boundary for durable message acceptance.
+///
+/// A deployment may use one batching actor or a stable set of room-keyed
+/// lanes.  Keeping the service dependent on this capability instead of one
+/// concrete actor lets independent rooms use multiple executors without
+/// weakening the per-room ordering contract.
+public protocol V2SendMessageAdmission: Sendable {
+    var managesForegroundWriteAdmission: Bool { get }
+
+    func accept(
+        _ request: V2RoomWriteRequest
+    ) async throws -> V2SendMessageOutcome
+
+    func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot
+}
+
 public struct V2AcceptanceIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
 
@@ -189,7 +205,7 @@ public struct V2AcceptanceIDFactory: Sendable {
 
 public struct V2SendMessageService: Sendable {
     private let store: any V2RoomWriteStore
-    private let batcher: V2SendMessageAdmissionBatcher?
+    private let batcher: (any V2SendMessageAdmission)?
     private let capacityProfile: V2CapacityProfile
     private let limits: V2MessageCommandLimits
     private let idFactory: V2AcceptanceIDFactory
@@ -208,7 +224,7 @@ public struct V2SendMessageService: Sendable {
         capacityProfile: V2CapacityProfile,
         limits: V2MessageCommandLimits,
         idFactory: V2AcceptanceIDFactory = .init(),
-        batcher: V2SendMessageAdmissionBatcher? = nil,
+        batcher: (any V2SendMessageAdmission)? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store

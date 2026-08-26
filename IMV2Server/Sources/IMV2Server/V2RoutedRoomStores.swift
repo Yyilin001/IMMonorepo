@@ -8,16 +8,38 @@ import IMV2Core
 public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let router: any V2RoomShardRouting
     private let stores: [String: any V2AtomicRoomWriteBatchStore]
+    /// Logical owner IDs may share one physical database during a staged
+    /// rollout.  Commands on such IDs can retain a single atomic append
+    /// transaction; commands on distinct keys never cross a physical owner.
+    private let physicalStoreKeyByShard: [String: String]
+    /// When deployment topology proves every logical owner is co-located, a
+    /// route lookup cannot influence the database selected for a command.
+    /// Bypassing the control-plane read in this case is therefore safe: the
+    /// owner store still authoritatively verifies room existence, membership,
+    /// admission and idempotency.  A topology with two physical locations
+    /// always leaves this nil and retains durable routing for every request.
+    private let singlePhysicalOwnerStore: (any V2AtomicRoomWriteBatchStore)?
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2AtomicRoomWriteBatchStore]
+        stores: [String: any V2AtomicRoomWriteBatchStore],
+        physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         guard !stores.isEmpty, stores.keys.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw V2RoomShardStorageRegistryError.invalidLocation
         }
+        let keys = physicalStoreKeyByShard ?? Dictionary(
+            uniqueKeysWithValues: stores.keys.map { ($0, $0) }
+        )
+        guard Set(keys.keys) == Set(stores.keys),
+              keys.values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        else { throw V2RoomShardStorageRegistryError.invalidLocation }
         self.router = router
         self.stores = stores
+        self.physicalStoreKeyByShard = keys
+        self.singlePhysicalOwnerStore = Set(keys.values).count == 1
+            ? stores.values.first
+            : nil
     }
 
     public func accept(
@@ -26,6 +48,12 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2SendMessageOutcome {
+        if let singlePhysicalOwnerStore {
+            return try await singlePhysicalOwnerStore.accept(
+                command: command, capacityProfile: capacityProfile,
+                identifiers: identifiers, now: now
+            )
+        }
         let store = try await store(for: command.roomID)
         return try await store.accept(
             command: command, capacityProfile: capacityProfile,
@@ -36,34 +64,59 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
     public func atomicBatchEligibility(
         requests: [V2RoomWriteRequest]
     ) async -> [Bool] {
-        var result: [Bool] = []
-        result.reserveCapacity(requests.count)
-        for request in requests {
-            do {
-                let store = try await store(for: request.command.roomID)
-                result.append(await store.atomicBatchEligibility(requests: [request])[0])
-            } catch {
-                // This classifier must not turn a route failure into a client
-                // acknowledgement. The ordinary path will surface the same
-                // durable error through its established retry boundary.
-                result.append(false)
-            }
+        guard !requests.isEmpty else { return [] }
+        if let singlePhysicalOwnerStore {
+            return await singlePhysicalOwnerStore.atomicBatchEligibility(requests: requests)
         }
-        return result
+        do {
+            let groups = try await groupedRequests(requests)
+            return await withTaskGroup(
+                of: [(Int, Bool)].self,
+                returning: [Bool].self
+            ) { group in
+                for (_, entries) in groups {
+                    guard let first = entries.first,
+                          let store = stores[first.route.shardID]
+                    else { return Array(repeating: false, count: requests.count) }
+                    group.addTask {
+                        let eligibility = await store.atomicBatchEligibility(
+                            requests: entries.map(\.request)
+                        )
+                        guard eligibility.count == entries.count else {
+                            return entries.map { ($0.index, false) }
+                        }
+                        return zip(entries, eligibility).map { ($0.0.index, $0.1) }
+                    }
+                }
+                var result = Array(repeating: false, count: requests.count)
+                for await entries in group {
+                    for (index, eligible) in entries { result[index] = eligible }
+                }
+                return result
+            }
+        } catch {
+            // This classifier must not turn a route failure into a client
+            // acknowledgement. The ordinary path will surface the same
+            // durable error through its established retry boundary.
+            return Array(repeating: false, count: requests.count)
+        }
     }
 
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
         guard !requests.isEmpty else { return [] }
-        var groups: [String: [(index: Int, request: V2RoomWriteRequest)]] = [:]
-        for (index, request) in requests.enumerated() {
-            let route = try await router.route(for: request.command.roomID)
-            guard stores[route.shardID] != nil else {
-                throw V2RoomShardStorageRegistryError.unknownShardID
+        if let singlePhysicalOwnerStore {
+            if requests.count == 1 {
+                let request = requests[0]
+                return [try await singlePhysicalOwnerStore.accept(
+                    command: request.command, capacityProfile: request.capacityProfile,
+                    identifiers: request.identifiers, now: request.now
+                )]
             }
-            groups[route.shardID, default: []].append((index, request))
+            return try await singlePhysicalOwnerStore.acceptAtomically(requests: requests)
         }
+        let groups = try await groupedRequests(requests)
 
         // Inputs in different owners are independent. Run those bounded
         // owner transactions concurrently, while each owner's PostgreSQL CTE
@@ -72,8 +125,10 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
             of: [(Int, V2SendMessageOutcome)].self,
             returning: [V2SendMessageOutcome].self
         ) { group in
-            for (shardID, entries) in groups {
-                guard let store = stores[shardID] else {
+            for (_, entries) in groups {
+                guard let first = entries.first,
+                      let store = stores[first.route.shardID]
+                else {
                     throw V2RoomShardStorageRegistryError.unknownShardID
                 }
                 group.addTask {
@@ -111,6 +166,21 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
             throw V2RoomShardStorageRegistryError.unknownShardID
         }
         return store
+    }
+
+    private func groupedRequests(
+        _ requests: [V2RoomWriteRequest]
+    ) async throws -> [String: [(index: Int, request: V2RoomWriteRequest, route: V2RoomShardRoute)]] {
+        let routes = try await router.routes(for: requests.map { $0.command.roomID })
+        var groups: [String: [(index: Int, request: V2RoomWriteRequest, route: V2RoomShardRoute)]] = [:]
+        for (index, request) in requests.enumerated() {
+            guard let route = routes[request.command.roomID],
+                  stores[route.shardID] != nil,
+                  let physicalKey = physicalStoreKeyByShard[route.shardID]
+            else { throw V2RoomShardStorageRegistryError.unknownShardID }
+            groups[physicalKey, default: []].append((index, request, route))
+        }
+        return groups
     }
 }
 
