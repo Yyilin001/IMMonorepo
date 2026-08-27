@@ -595,73 +595,114 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             ))
         }
 
-        var prepared: [FastPlainDirectRoomLogAppend] = []
-        prepared.reserveCapacity(candidates.count)
-        for candidate in candidates {
-            let request = candidate.request
-            let snapshot = candidate.snapshot
-            var roomCreditToken: V2RoomAdmissionCommandCreditPool.Token?
-            var shardCreditToken: V2ShardAdmissionCommandCreditPool.Token?
-            do {
-                if candidate.usesRoomAdmissionCredits,
-                   let roomAdmissionCommandCreditPool {
-                    switch try await roomAdmissionCommandCreditPool.acquire(
+        // Resolve each process-local admission layer with one actor entry. The
+        // established room-before-shard order is retained, while the common
+        // warm batch no longer creates two serial-executor jobs per message.
+        var roomAcquisitions = Array<V2RoomAdmissionCommandCreditPool.Acquisition?>(
+            repeating: nil,
+            count: candidates.count
+        )
+        let roomCreditIndices = candidates.indices.filter {
+            candidates[$0].usesRoomAdmissionCredits
+        }
+        if let roomAdmissionCommandCreditPool, !roomCreditIndices.isEmpty {
+            let acquisitions = try await roomAdmissionCommandCreditPool.acquire(
+                roomCreditIndices.map {
+                    let candidate = candidates[$0]
+                    return .init(
                         roomID: candidate.roomID,
-                        shardState: snapshot.shardState,
-                        now: request.now
-                    ) {
-                    case .granted(let token):
-                        roomCreditToken = token
-                    case .rateLimited, .unavailable:
-                        await releaseFastPlainDirectRoomLogCredits(prepared)
-                        return nil
-                    }
-                }
-
-                switch try await shardAdmissionCommandCreditPool.acquire(
-                    roomShardID: snapshot.roomShardID,
-                    capacityProfileID: snapshot.capacityProfileID,
-                    shardState: snapshot.shardState,
-                    now: request.now
-                ) {
-                case .granted(let token, _):
-                    shardCreditToken = token
-                case .rateLimited, .unavailable:
-                    if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                        await roomAdmissionCommandCreditPool.release(
-                            roomCreditToken, now: request.now
-                        )
-                    }
-                    await releaseFastPlainDirectRoomLogCredits(prepared)
-                    return nil
-                }
-                guard let acquiredShardCreditToken = shardCreditToken else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-
-                prepared.append(.init(
-                    originalIndex: candidate.originalIndex,
-                    request: request,
-                    roomID: candidate.roomID,
-                    senderID: candidate.senderID,
-                    cacheKey: candidate.cacheKey,
-                    snapshot: snapshot,
-                    usesRoomAdmissionCredits: candidate.usesRoomAdmissionCredits,
-                    roomCreditToken: roomCreditToken,
-                    shardCreditToken: acquiredShardCreditToken
-                ))
-            } catch {
-                if let shardCreditToken {
-                    await shardAdmissionCommandCreditPool.release(
-                        shardCreditToken, now: request.now
+                        shardState: candidate.snapshot.shardState,
+                        now: candidate.request.now
                     )
                 }
-                if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                    await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-                }
-                await releaseFastPlainDirectRoomLogCredits(prepared)
-                throw error
+            )
+            guard acquisitions.count == roomCreditIndices.count else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            for (index, acquisition) in zip(roomCreditIndices, acquisitions) {
+                roomAcquisitions[index] = acquisition
+            }
+            guard acquisitions.allSatisfy({
+                if case .granted = $0 { return true }
+                return false
+            }) else {
+                let granted = zip(roomCreditIndices, acquisitions).compactMap {
+                    index, acquisition -> (token: V2RoomAdmissionCommandCreditPool.Token, now: Date)? in
+                    guard case .granted(let token) = acquisition else { return nil }
+                    return (token, candidates[index].request.now)
+                }
+                await roomAdmissionCommandCreditPool.release(granted)
+                return nil
+            }
+        }
+
+        let shardAcquisitions: [V2ShardAdmissionCommandCreditPool.Acquisition]
+        do {
+            shardAcquisitions = try await shardAdmissionCommandCreditPool.acquire(
+                candidates.map { candidate in
+                    .init(
+                        roomShardID: candidate.snapshot.roomShardID,
+                        capacityProfileID: candidate.snapshot.capacityProfileID,
+                        shardState: candidate.snapshot.shardState,
+                        now: candidate.request.now
+                    )
+                }
+            )
+        } catch {
+            await releaseFastPlainDirectRoomLogRoomCredits(
+                candidates: candidates,
+                acquisitions: roomAcquisitions
+            )
+            throw error
+        }
+        guard shardAcquisitions.count == candidates.count else {
+            await releaseFastPlainDirectRoomLogRoomCredits(
+                candidates: candidates,
+                acquisitions: roomAcquisitions
+            )
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard shardAcquisitions.allSatisfy({
+            if case .granted = $0 { return true }
+            return false
+        }) else {
+            let granted: [V2ShardAdmissionCommandCreditPool.Token] =
+                shardAcquisitions.compactMap { acquisition in
+                guard case .granted(let token, _) = acquisition else { return nil }
+                return token
+            }
+            await shardAdmissionCommandCreditPool.release(granted, now: Date())
+            await releaseFastPlainDirectRoomLogRoomCredits(
+                candidates: candidates,
+                acquisitions: roomAcquisitions
+            )
+            return nil
+        }
+
+        var prepared: [FastPlainDirectRoomLogAppend] = []
+        prepared.reserveCapacity(candidates.count)
+        for index in candidates.indices {
+            let candidate = candidates[index]
+            let roomCreditToken: V2RoomAdmissionCommandCreditPool.Token?
+            if case .granted(let token)? = roomAcquisitions[index] {
+                roomCreditToken = token
+            } else {
+                roomCreditToken = nil
+            }
+            guard case .granted(let shardCreditToken, _) = shardAcquisitions[index] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            prepared.append(.init(
+                originalIndex: candidate.originalIndex,
+                request: candidate.request,
+                roomID: candidate.roomID,
+                senderID: candidate.senderID,
+                cacheKey: candidate.cacheKey,
+                snapshot: candidate.snapshot,
+                usesRoomAdmissionCredits: candidate.usesRoomAdmissionCredits,
+                roomCreditToken: roomCreditToken,
+                shardCreditToken: shardCreditToken
+            ))
         }
 
         let ordered = prepared.sorted {
@@ -773,6 +814,19 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 await roomAdmissionCommandCreditPool.release(roomCreditToken, now: append.request.now)
             }
         }
+    }
+
+    private func releaseFastPlainDirectRoomLogRoomCredits(
+        candidates: [FastPlainDirectRoomLogCandidate],
+        acquisitions: [V2RoomAdmissionCommandCreditPool.Acquisition?]
+    ) async {
+        guard let roomAdmissionCommandCreditPool else { return }
+        let granted = zip(candidates, acquisitions).compactMap {
+            candidate, acquisition -> (token: V2RoomAdmissionCommandCreditPool.Token, now: Date)? in
+            guard case .granted(let token)? = acquisition else { return nil }
+            return (token, candidate.request.now)
+        }
+        await roomAdmissionCommandCreditPool.release(granted)
     }
 
     private func fastPlainDirectPolicyIsEligible(

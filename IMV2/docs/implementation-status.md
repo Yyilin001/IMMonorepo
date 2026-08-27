@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-最后审阅：2026-08-18
+最后审阅：2026-08-27
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -35,7 +35,7 @@
 | TLS gateway 与协议 | TLS 1.3、protocol 19 协商、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
 | 账户与设备凭据 | 独立 account service、密码 cost-12、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
 | 公开身份与联系人 | required account kind、精确 handle 查询、资料更新、关系/屏蔽、按上下文资料读取、active roster 公开身份 | 仓库内已实现；HTTP/SQLite/PostgreSQL/iOS 测试 | 真机离线、多语言与人工无障碍验收 |
-| 私聊与普通群 | 幂等命令、事务准入、私聊 exact-two preplanned plan/unit/delivery、按用户公平微批、普通群 outbox/planner、lease/inbox/user sync | 双副本本机 PostgreSQL 集成已验证 | 代表性生产拓扑、A/B 和长稳态负载报告 |
+| 私聊与普通群 | 幂等命令、事务准入；私聊可选 logical room-log：普通 accepted event 由 message-row 承载并与其他 room event 合并读取；revision-fenced fast append、有序原子微批与批量 credit；普通群仍走 outbox/planner/lease/inbox/user sync | PostgreSQL 集成回归；R29 单 Gateway 50k 在线、500–5,000 msg/s 限定写入验证 | 显式 room-log 恢复拉取、混合消息、多 Gateway、故障和长稳态报告 |
 | 大群 Hybrid | 创建时固定 delivery mode；5,001...100,000 成员普通消息写 room log，显式 mention 才可靠 fan-out；客户端 cursor pull | 仓库内与 opt-in scale-shape 回归 | NATS 安全、持续负载、故障与设备可见延迟报告 |
 | 群管理与审核 | 成员 seek pagination、角色权限、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay | 仓库内已实现 | 生产审核 provider、operator 访问与保留政策 |
 | Sync 与 Snapshot V3 | per-user projection/checkpoint、statement-level checkpoint/effect capture、有界 artifact page、ACK-before-activate、独立 busy-drain compaction、retained floor、撤销设备清理 | 本机 PostgreSQL/ClientKit 故障回归 | 生产 replay window、存储阈值与长周期运行证据 |
@@ -73,6 +73,12 @@ bash IMV2/scripts/test_v2_local_environment_contract.sh
 
 高成本容量回归为显式 opt-in，见
 [`standard-100k.md`](09-capacity/standard-100k.md)。不得用普通 package 通过替代容量报告。
+
+当前最新的实测证据是
+[`R34 私聊 room-log 50,000 在线共享帧 A/B`](09-capacity/direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md)：
+限定的单 Gateway 普通私聊写入、实时 payload 与 hint-triggered room-log 恢复路径完成 5,000 msg/s，
+2,475,000 条发送全部 ACK。该场景没有独立固定的显式 room-log pull QPS，也未覆盖混合消息、
+长时间 soak 或多 Gateway，所以不能据此批准完整高活跃 IM、100k 或生产 SLO。
 
 ## 当前实施路线
 

@@ -23,6 +23,7 @@
 | Sync hint delivery concurrency | 64 |
 | 快速成功日志采样 | 10‰ |
 | 慢命令阈值 | 250 ms |
+| 慢/拒绝/失败诊断日志 burst | 每个封闭结果键 20 条/秒 |
 
 以上 Gateway 总连接 ceiling 为 `4 × 16 = 64`，但连接按需建立。Account、Operator 也各自按其 EventLoop 数乘每 loop ceiling 计算，不能再按一个长期 `app.db` 句柄估算。其他环境必须把所有进程、物理数据库 URL 和运维连接预算相加；不要让理论最大值等于 PostgreSQL `max_connections`。
 
@@ -54,7 +55,8 @@
 4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
    Delivery 的配置值是上限，不再是持续忙时固定值：空闲探测使用 1 lane，正常前台安全值为 4；只有前台 `in-flight = 0`、`queued = 0` 且连续满批时才逐级升到 8，一旦出现已接纳或排队的前台工作立即回落到 4。仅观察 queue 会在前台槽位已经占满但尚未形成队列时错误扩容，造成尾延迟放大。
 5. 启用 Sync wake coalescing。比较 Pull 平均 records、Pull QPS、hint delivered/drop 和消息可见延迟。
-6. 最后开启成功日志采样。Prometheus 计数不受采样影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
+6. 最后开启成功日志采样，并保持慢/拒绝/失败日志的有界 burst。两者都只控制结构化日志，
+   Prometheus 计数不受采样或限流影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
 7. 空库或 backfill/inline 三项精确审计已经为 0 的压测环境，叠加
    `docker-compose.gateway-shared.yml`，固定 `shared/shared + reference + preplanned`；旧库未完成
    审计时禁止直接套用。
@@ -75,7 +77,13 @@
 
 在 PostgreSQL 启用 `pg_stat_statements` 的环境中，按 total execution time、calls 和 mean time 检查 Top SQL。不要只凭一次 `EXPLAIN` 增加索引；候选索引必须在与生产数据分布相近的副本上用 `EXPLAIN (ANALYZE, BUFFERS, WAL)` 验证，并同时计算写放大和 relation size。
 
-私聊接受事务保持“大数据修改 CTE + 最终窄 shard 预留 UPDATE”两个语句。不要把 shard 预留合入主 CTE：单机 A/B 中，共享 shard 行锁使主 CTE mean time 从约 7.4 ms 增到 24.6 ms，350 msg/s 的消息 p95 从约 312 ms 回退到 1,994 ms。独立 UPDATE 仍处于同一数据库事务内，预留失败会回滚此前全部写入，不降低原子性。
+旧的无 credit 路径保持“大数据修改 CTE + 最终窄 shard 预留 UPDATE”两个语句；不要把共享 shard
+行预留直接合入每条消息的主 CTE：历史单机 A/B 中，这会使主 CTE mean time 从约 7.4 ms 增到
+24.6 ms，350 msg/s 的消息 p95 从约 312 ms 回退到 1,994 ms。启用 shard credit 后，Gateway 以
+有界批次预扣 durable 额度，普通消息事务只验证当前 lease/profile fence 并消费本地已扣额度；R29
+进一步把本地 credit actor 交互收敛为每个 micro-batch 一次。两种路径都不允许 ACK-before-commit，
+也不能靠取消 durable fence 换吞吐。当前证据见
+[`R29 50,000 在线梯度记录`](../09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md)。
 
 本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段使用
 同一统计纪元的前后快照计算差值，不要清空共享数据库统计：

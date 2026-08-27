@@ -1,6 +1,6 @@
 # V2 ADR 登记册
 
-最后审阅：2026-08-18
+最后审阅：2026-08-27
 维护者：V2 架构负责人
 
 本登记册对应架构规范第 11 节要求的初始 ADR 集合。`已接受`仅表示设计
@@ -17,8 +17,8 @@
 | sync projection checkpoint、日志保留与 compaction | [ADR-013](00-foundation/ADR-013-sync-checkpoint-and-log-retention.md) | 已接受并实施 | Snapshot V3、statement-level checkpoint/effect capture、独立 busy-drain compactor、set-based shared-payload GC、低游标 reset 及分片 copy/fingerprint 已实施；生产 replay window/阈值仍需容量校准 |
 | 消息投影正文单写与用户窄引用 | [ADR-014](00-foundation/ADR-014-shared-message-projection-state.md) | 已接受并实施 expand 阶段 | immutable shared state、双读写、bounded backfill、跨 shard copy、Snapshot/media join、GC/指标与在线 schema 变更已实现；生产灰度、真实数据审计和收益压测待执行 |
 | 私聊权威受众直达投递 | [ADR-015](00-foundation/ADR-015-direct-preplanned-fanout.md) | 已接受并实施，可配置灰度 | exact-two/one-unit 数据库约束、不可变 delivery identity、同事务 plan/unit/deliveries、双副本 target-user 公平微批、route 回退与 poison 隔离已集成验证；真实环境 A/B 与长稳态证据待执行 |
-| 私聊房间事件日志恢复 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) | 已接受，受运行时开关保护 | `room_log` 将 `message.accepted` 的可靠源收敛为 canonical `room_events`；客户端按 revision-fenced room cursor 恢复，在线提示仅为水线。已完成真实单机 1k 连接/400–800 msg/s 的短时读写证据，稳定点暂定不高于 600 msg/s；编辑、撤回、reaction 尚未切换，长时间 soak 待执行。详见 [benchmark](09-capacity/direct-room-log-benchmark-2026-08-19.md) |
-| 有序私聊 room-log 原子微批 | [ADR-018](00-foundation/ADR-018-ordered-direct-room-log-microbatch.md) | 已接受并实施，受运行时开关保护 | PostgreSQL set-based batch CTE、灰度开关、独立 room 与已建立 hot direct room 的同会话连续 cursor/额度集成回归均已落地；真实主机的干净数据 A/B 仍按 workload 执行。不得以循环单条事务冒充 WAL 优化。 |
+| 私聊房间事件日志恢复 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) | 已接受，受运行时开关保护 | `room_log` 提供统一 logical room-event cursor；普通私聊 accepted event 可由带显式 storage fence 的 `messages` 行承载，其他事件仍使用 `room_events`，读取端合并两者。R29 已完成单 Gateway 50k 在线、500–5,000 msg/s 的限定写入证据；显式 room-log pull、多 Gateway、混合消息和 soak 尚未闭环。详见 [R29 report](09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md) |
+| 有序私聊 room-log 原子微批 | [ADR-018](00-foundation/ADR-018-ordered-direct-room-log-microbatch.md) | 已接受并实施，受运行时开关保护 | PostgreSQL set-based batch CTE、锁内连续 sequence、bounded fairness/hot-room batch、revision-fenced fast cache 与每 micro-batch 一次的 credit actor 交互均已落地。R29 限定场景无拒绝完成 5,000 msg/s；不得以循环单条事务冒充批量化，也不得把未覆盖 pull 的结果外推为完整 IM 容量。 |
 | 单节点数据库工作负载隔离与投影批处理 | [ADR-016](09-capacity/ADR-016-single-node-runtime-workload-isolation.md) | 已接受并实施，可独立回滚 | 五类 pool 预算、foreground/Sync 短队列、Projection 并行与 accepted 批量 SQL、Sync hint 合并、Sync 往返压缩和运行压力指标已实现；真实环境对照压测待执行 |
 | 移动前后台与 Push wake | [ADR-008](00-foundation/ADR-008-mobile-lifecycle-and-push.md) | 待批准 | durable wake/预算、APNs provider、加密端点与 iOS 明确开关已实现；资格/活动策略与真实 APNs 发布证据待定 |
 | Auth、设备撤销、本地存储、媒体授权、日志脱敏 | [ADR-009](00-foundation/ADR-009-auth-local-storage-and-redaction.md) | 部分待批准 | auth/keychain 已实现；媒体授权待 ADR-002 |

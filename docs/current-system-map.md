@@ -18,16 +18,25 @@
 ```mermaid
 flowchart LR
     C["iOS App / ClientKit\n本地 outbox"] --> G["V2 TLS gateway"]
-    G --> T["PostgreSQL 原子事务\noperation · room event · room outbox · fan-out plan"]
-    T --> P["持久化 planner\n按 checkpoint 枚举"]
+    G --> T["PostgreSQL 原子事务\noperation · message · logical room event"]
+    T -->|"群聊 / planner"| P["room outbox + 持久化 planner\n按 checkpoint 枚举"]
     P --> D["持久化 delivery\nlease + 去重"]
     D --> S["目标 user store\nconsumer inbox + sync log"]
     S --> C
-    T -. "可选、尽力而为" .-> N["Core NATS hint"]
+    T -->|"私聊 preplanned"| D
+    T -->|"私聊 room_log"| R["按 room cursor 拉取\nmessage-row / room-events 合并"]
+    R --> C
+    T -. "可选、尽力而为" .-> N["Core NATS / room waterline hint"]
     N -. "只促使轮询；丢失或重复均可恢复" .-> P
+    N -. "只提示新 waterline" .-> R
 ```
 
-客户端先把用户命令写入本机 SQLite outbox；gateway 只在 PostgreSQL 原子事务成功后接受命令。房间事件、room outbox、冻结的受众或 fan-out plan 同事务落库。planner 与 delivery worker 使用可恢复的 lease、checkpoint、唯一 inbox key 和有界重试推进投影。任何实时提示只是提示：用户可见状态只从已持久化的 sync log 拉取并 ACK。
+客户端先把用户命令写入本机 SQLite outbox；gateway 只在 PostgreSQL 原子事务成功后接受命令。
+群聊及未切换的 mutation 通过 room outbox、fan-out plan、delivery 与 user sync 推进；私聊
+`message.accepted` 可配置为 preplanned delivery，或以 logical room-event cursor 恢复。普通纯文本
+`room_log` 形态由带 `accepted_event_storage='message_row'` 的 `messages` 行承载 accepted event，
+读取端与其他独立 `room_events` 行按 sequence 合并。任何实时提示都只是提示：丢失后必须由 durable
+sync cursor 或 room cursor 恢复，不能把 broker/hint 当作投递成功。
 
 消息 Snapshot 投影把同一 message revision 的完整正文保存在物理 user store 的
 `message_projection_states` 一次；`user_projection_versions` 只保留用户授权/MVCC 事实和
@@ -42,11 +51,13 @@ state 再写引用。Snapshot 和媒体授权通过用户引用 join state，sha
 
 - 群创建将初始成员、房间和操作结果作为一项幂等写入；成员变更由 owner 授权，移除允许 owner/admin（不得移除 owner），均携带 membership revision。
 - 每条需 fan-out 的事件在提交时固定受众规则：普通群事件按提交时成员资格枚举；成员移除等需要精确历史受众的事件保存冻结目标。随后成员变化不能扩大已经提交事件的可见范围。
-- 私聊 `message.accepted` 可从锁定的 direct pair 与提交 revision 上有效的两条 membership
-  直接创建一个 completion unit 和两个 durable delivery，不再等待 Planner 枚举。受众不是
-  客户端参数；目标数不等于 2 时整笔回滚，route 配置暂不可用时互斥回退原
-  `room_outbox -> Planner` 路径。两种路径共用 Inbox、同步、重试与 admission release；
-  灰度与审计见 [direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md)。
+- 私聊 `message.accepted` 有三个互斥部署模式：`planner` 是兼容路径；`preplanned` 从锁定的 direct
+  pair 与两条有效 membership 直接创建一个 completion unit 和两个 durable delivery；`room_log`
+  不创建这些 fan-out 工件，而由双方按 revision-fenced room cursor 恢复 logical event。三者都不
+  接受客户端指定受众，都执行 pair/block/陌生人策略、membership、冻结、容量、幂等和 lease fence。
+  当前 `room_log` 只切换 accepted message，编辑、撤回、reaction 与 moderation mutation 仍走既有
+  fan-out。设计和灰度见 [ADR-017](../IMV2/docs/00-foundation/ADR-017-direct-room-event-log.md) 与
+  [direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md)。
 - 群成员目录不是 fan-out payload；客户端只在打开成员管理时做认证后的 seek-pagination 查询。
 - 每个群成员目录条目都只携带公开 `@handle` 与显示名，并由 active-member 授权；App
   不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync

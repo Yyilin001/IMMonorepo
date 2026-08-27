@@ -7,8 +7,10 @@ import NIOPosix
 import Vapor
 #if canImport(Darwin)
 import Darwin
-#else
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 
 @main
@@ -252,7 +254,8 @@ enum IMV2ServerApp {
                     maximumDelay: .milliseconds(
                         configuration.livePresenceRenewalMaximumDelayMilliseconds
                     )
-                )
+                ),
+                foregroundFrameLimits: configuration.frameLimits
             )
             let syncWakeCoalescer = V2SyncWakeCoalescer(
                 downstream: connectionRegistry,
@@ -1560,7 +1563,7 @@ enum IMV2ServerApp {
             foregroundGroupEventHintTask.cancel()
             directRoomLogEventCacheTask.cancel()
             syncWakeCoalescerTask.cancel()
-            await foregroundGroupEventHints.finish()
+            foregroundGroupEventHints.finish()
             await directRoomLogEventCache?.finish()
             for task in userProjectionTasks { await task.value }
             for task in snapshotArtifactTasks { await task.value }

@@ -30,11 +30,21 @@ broker availability 指标；启用 NATS 前不能把这些缺失指标误解为
 并聚合为稳定的
 Prometheus 0.0.4 文本：网关命令计数/耗时、fan-out 整轮/relay/delivery 耗时、outbox/delivery
 进度及按 stage 的失败计数。它丢弃 trace ID，并对意外的负聚合数按零处理；
-测试断言指标中不存在 trace ID、room/user 字段或任意输入文本。该 exporter
+测试断言指标中不存在 trace ID、room/user 字段或任意输入文本。网关命令热路径使用短
+`Mutex` 临界区做精确整数累加，不会像 actor 那样让每条命令产生一次 serial-executor hop；
+scrape 只在锁内复制值快照，Prometheus 文本在锁外渲染。因此日志采样或限流不会丢失指标计数，
+并发 scrape 也不会在格式化期间阻塞命令接纳。该 exporter
 只通过独立的 `/metrics` HTTP listener 暴露：运行时强制
 `IM_V2_METRICS_HOST` 为 `127.0.0.1` 或 `::1`，且要求显式端口。采集器因此
 必须与服务在同一 host/pod 网络命名空间；该 endpoint 带 `no-store` 响应头，
 绝不能挂到公开媒体边缘或 realtime TLS 端口。
+
+结构化命令日志与精确指标是两个不同合同。低于慢命令阈值的成功命令按
+`IM_V2_COMMAND_FAST_SUCCESS_SAMPLE_PERMILLE` 采样；慢命令、拒绝和失败不走该采样，但按封闭的
+`(command, outcome, rejection)` 结果键由 `IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND` 限制
+日志 burst，默认每键每秒 20 条。该限制只保护日志 I/O，不能用日志条数计算请求量；请求量、结果和
+累计延迟必须读 Prometheus 精确 counter。排障时可以在受控短窗口提高限制，但不能通过无限打印诊断
+日志制造新的 Gateway 瓶颈。
 
 同一私有 endpoint 还会在每次抓取时读取进程内
 `V2DeviceConnectionRegistry` 的只读快照，并输出两个无标签 Gauge：

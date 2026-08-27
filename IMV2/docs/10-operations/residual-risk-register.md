@@ -1,6 +1,6 @@
 # V2 开放风险登记表
 
-最后审阅：2026-08-16
+最后审阅：2026-08-27
 
 本表只保留当前仓库无法诚实关闭的外部风险。已完成的重构和历史缺陷由测试与 Git 记录证明，
 不继续堆积在风险表中。任何“已实现”都不能替代下面的部署、设备、容量或审批证据。
@@ -15,6 +15,7 @@
 | R-006 | NATS 缺 TLS/NKey、broker 指标、重连/分区 soak；100k 缺批准的生产负载报告 | NATS 只提示，授权/完成/重试由 PostgreSQL/cursor 决定；所有 mailbox/ACK 有上限 | 完成认证、指标、故障/soak 与 [`standard-100k`](../09-capacity/standard-100k.md) 发布报告 |
 | R-007 | 逻辑 dump/restore 不证明 WAL/PITR、跨区恢复或批准的 RPO/RTO | 一次性 PostgreSQL drill 验证 schema 与 durable facts 可逻辑恢复 | 配置备份/WAL archive，执行时间点、密钥、故障转移和写入中断演练并批准 RPO/RTO |
 | R-008 | GitHub Actions 额度已耗尽，远端 workflow 当前不能提供执行结果 | `bash scripts/verify_v2.sh` 在本机覆盖 package、schema、双 PostgreSQL 与 iOS 门禁；不宣称云 CI 通过 | 恢复额度或受保护自托管 runner，并在干净 checkout 上运行同一受版本控制入口 |
+| R-009 | 私聊 room-log 已有 50k 在线、5,000 msg/s 的单 Gateway 写入证据，但缺显式恢复拉取、混合消息、多 Gateway、故障和长 soak，不能外推为完整高活跃 IM 容量 | PostgreSQL/cursor 保持权威；ACK-after-commit；有界 queue/credit/cache；未覆盖项在 [R29 report](../09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md) 中显式标注 | 在批准拓扑执行至少 30 分钟目标速率及数小时 soak，加入真实 room-log pull、混合消息、多设备/热点分布、两 Gateway 和 kill/failover，并以客户端可见延迟、零 gap/丢失及资源余量批准 SLO |
 
 ## 维护规则
 

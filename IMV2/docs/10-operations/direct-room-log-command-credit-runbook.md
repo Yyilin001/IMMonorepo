@@ -85,10 +85,14 @@ that cannot put two of its own commands into one SQL batch.
 ## Ordered append micro-batch
 
 `IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE` is a separate, default-off write
-optimization. It coalesces up to 2...32 already-established, plain direct
-messages for distinct rooms into one PostgreSQL transaction and one set-based
-append statement. It requires `room_log` and a nonzero shard-credit batch
-size. The batch staging queue is bounded by
+optimization. The runtime accepts `2...128` and coalesces already-established,
+plain direct messages into bounded PostgreSQL transactions and set-based append
+statements. The normal fairness pass first selects at most one command per
+inactive room, then may use spare capacity for later commands from those same
+hot rooms without allowing them to overtake an in-flight transaction. The
+strict conditional fast-append statement accepts distinct rooms; a same-room
+combination uses the complete ordered batch path or safely falls back. It
+requires `room_log` and a nonzero shard-credit batch size. The batch staging queue is bounded by
 `IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED`; it must never be made
 unbounded to increase apparent throughput. For the measured 8-vCPU,
 single-Gateway high-activity profile, use:
@@ -108,11 +112,13 @@ At each increment, require zero queue-overflow/rejections and compare P95,
 PostgreSQL wait events, WAL pressure, and foreground-pool queue depth before
 keeping the value.
 
-The `32` cap has two independent 1,500-online / 900-msg/s A/B samples on
+The `32` setting has two independent 1,500-online / 900-msg/s A/B samples on
 that host; see [the result](../09-capacity/direct-room-log-batch32-ab-2026-08-21.md).
 For an unmeasured topology, start at 8 or 16 and use the verification sequence
-below before raising it. A cap changes only batching efficiency, never the
-durability boundary or ACK-before-commit rule.
+below before raising it to 32, 64 or 128. The accepted runtime maximum is not a
+recommendation: each increase expands transaction work, rollback scope and WAL
+burst size and therefore requires its own A/B. A cap changes only batching
+efficiency, never the durability boundary or ACK-before-commit rule.
 
 The base delay is bounded to 1...25 ms. Keep the normal interactive base at
 2 ms: a permanently larger value trades every isolated send's latency for
@@ -163,13 +169,18 @@ measured revisit interval for the active `(room, sender)` working set. A
 60-second TTL is ineffective for a 90,000-key workload at 1,000 messages/s:
 the average revisit is about 90 seconds, so most snapshots expire immediately
 before their second use. Raising the TTL does not extend any authorization or
-lease. Those revisions and the current cursor are still checked atomically by
-PostgreSQL; a stale hint can only miss the conditional update and fall back.
+lease. The cache does **not** store room or timeline cursors. PostgreSQL locks
+the current room row and allocates the next sequence from that row; the cached
+membership, direct-pair, user-policy, profile/capacity and shard-lease facts are
+accepted only when their durable revisions still match. A stale hint can only
+make the conditional statement affect no row and fall back.
 
 The cache is a process-local O(1) LRU and never authorizes a write by itself.
-Every fast append remains fenced by durable room, membership, policy, lease,
-and sequence revisions in PostgreSQL. Capacity or TTL eviction only causes a
-safe fallback to the complete transaction. Do not raise the bound blindly:
+Every fast append remains fenced by the durable current room row, membership,
+direct-pair/user-policy revisions, active profiles, room admission and shard
+lease in PostgreSQL. Room/timeline sequence is allocated while holding the room
+row lock rather than compared to a cache snapshot. Capacity or TTL eviction only
+causes a safe fallback to the complete transaction. Do not raise the bound blindly:
 compare entry count, capacity removals, process RSS, fast-append hit rate, and
 fallback count after warm-up.
 
@@ -201,8 +212,10 @@ message workload only after warmup completes.
 
 A request with media, mentions,
 reply/forward state, content review, stranger quota consumption, an initial
-reply marker, profile/capability mutation, a duplicate room in the batch, or
-an existing operation transparently falls back to the ordinary transaction.
+reply marker, profile/capability mutation or an existing operation transparently
+falls back to the complete transaction. Multiple commands for one room are only
+batched when their durable preflight proves the ordered no-side-effect shape;
+otherwise they also fall back before a partial commit.
 Each fallback has its own bounded foreground admission and outcome; one
 fallback failure must not fail another request in the same staging batch.
 No client-visible ACK is sent until the selected append batch commits. Set the
@@ -234,6 +247,10 @@ pure admission reducer by presenting its effective local state.
   normal exact per-message reservation protocol.
 - The feature applies only to fixed two-member direct rooms in room_log mode.
   Planner and group paths are unchanged.
+- Batch issue/commit/release methods cross each process-local actor once per
+  bounded micro-batch. An implementation that loops `await acquire(...)` once
+  per message inside the batch recreates a serial-executor backlog and is not
+  equivalent to the R29 design.
 
 Do not attempt to reclaim unused credits by decrementing the counter outside
 the normal admission-window reset/lease-renewal protocol. The bounded loss is
@@ -309,8 +326,8 @@ optimizations change at the same time. Record message p50/p95/p99, accepted
 rate, `pg_stat_statements` calls/mean time for the append CTE, WAL bytes per
 accepted fact, and database admission queue peaks.
 
-The shard-admission update/query count should approach one reservation per 32
-accepted direct-room-log commands (per shard), not one tail update per
+The shard-admission update/query count should approach one reservation per
+configured credit batch of accepted direct-room-log commands (per shard), not one tail update per
 message. Compare accepted rate and p95/p99 latency as well; this optimization
 cannot remove the subsequent message/event/index/WAL work.
 
@@ -347,6 +364,43 @@ for a high-activity steady-state profile, record the committed-request fraction
 after bilateral conversations have been warmed. A low committed fraction means
 the next optimisation is batch eligibility coverage, not a larger delay or a
 larger PostgreSQL connection pool.
+
+## 2026-08-27 R29 sustained-gradient result
+
+R29 removed the remaining per-message shard-credit actor entry from an already
+coalesced append batch, changed the fast cache to stable revision facts only,
+and allocated sequences from the locked PostgreSQL room row. A 50,000-online,
+single-Gateway gradient from 500 through 5,000 msg/s completed with 2,475,000
+ACKs for 2,475,000 scheduled messages, zero workload failures/rejections and a
+fully drained queue. Message P95 across the five load partitions was 212--216
+ms and P99 was 279--285 ms. The full topology, server/database metrics,
+comparison limits and excluded workloads are recorded in
+[the R29 capacity report](../09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md).
+
+This is not a general production SLO: it used one Gateway, disabled content
+review, plain direct messages, no explicit room-log pull QPS and 90-second rate
+steps. Keep explicit pull, mixed message shapes, multi-Gateway credit waste,
+lease rollover and long soak as separate release gates.
+
+## 50k 梯度 A/B 前置校验
+
+长时间容量测试在建立连接前必须同时验证以下条件；任一不满足都应 fail fast，不能等到 50,000
+连接建立后再把围栏失败误判为性能回退：
+
+1. 所有 access token 的最早到期时间晚于预计测试结束时间至少 2 分钟。Gateway 会在后续命令中
+   继续执行 session expiry fence；“认证时尚未过期”不足以覆盖整轮测试。
+2. `shard_admission_pools.valid_until` 覆盖预计结束时间加 30 分钟，且每个 load shard 的
+   `command_window_limit - command_window_used` 大于该分片预计消息数并保留 credit batch 浪费余量。
+3. 记录 `messages` 的行数、heap/index 总大小、`pg_stat_bgwriter` 与上次 checkpoint 时间。A/B
+   必须从相同数据快照或明确清理过的 disposable 状态开始，并让 checkpoint 相位一致。
+4. 监控必须采集精确指标名
+   `im_v2_direct_room_log_append_batch_in_flight` 与
+   `im_v2_direct_room_log_append_batch_execution_milliseconds_max`，同时记录 pending、queue wait、
+   PostgreSQL CPU/active/lock/IO wait、WAL 增量和 checkpoint 日志。
+
+2026-08-27 的受控 A/B 中，共享前台帧版本在相同清库与 checkpoint 条件下完成 2,475,000 / 2,475,000
+ACK、0 failure；控制组出现 2,451 次 `SERVER_BUSY`。完整证据见
+[R34 50,000 在线共享帧 A/B](../09-capacity/direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md)。
 
 ## Rollback
 

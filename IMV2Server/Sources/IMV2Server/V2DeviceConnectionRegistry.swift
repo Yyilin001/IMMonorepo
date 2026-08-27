@@ -1,9 +1,19 @@
 import Foundation
 import IMV2Core
+import Synchronization
 
 /// Process-local index of authenticated live connections. A durable revocation
 /// consumer invokes this registry on every gateway replica.
 public actor V2DeviceConnectionRegistry {
+    /// Foreground notifications are the high-frequency path. Keep their
+    /// immutable routing snapshots outside the registry actor so unrelated
+    /// rooms do not queue behind connection lifecycle and presence work.
+    private nonisolated let foregroundRoutes = V2ForegroundConnectionRoutes()
+    /// Every stream created by one Gateway uses this process-wide frame
+    /// contract. When supplied, foreground broadcasts encode once and share
+    /// immutable bytes; tests and alternate embeddings may omit it and retain
+    /// the per-stream compatibility path.
+    private let foregroundFrameLimits: V2FrameLimits?
     private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     private let livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
@@ -36,10 +46,12 @@ public actor V2DeviceConnectionRegistry {
             maximumConnectionsPerDevice: 2,
             maximumConnectionsPerUser: 8
         ),
-        livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init()
+        livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init(),
+        foregroundFrameLimits: V2FrameLimits? = nil
     ) {
         self.connectionAdmissionPolicy = connectionAdmissionPolicy
         self.livePresenceRenewalConfiguration = livePresenceRenewalConfiguration
+        self.foregroundFrameLimits = foregroundFrameLimits
     }
 
     @discardableResult
@@ -187,7 +199,7 @@ public actor V2DeviceConnectionRegistry {
     }
 
     public func subscribeForegroundGroup(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
-        guard identityByConnection[connectionID] != nil,
+        guard let identity = identityByConnection[connectionID],
               let lifecycle = lifecycleByConnection[connectionID]
         else { return }
         let mutation = UUID()
@@ -199,6 +211,12 @@ public actor V2DeviceConnectionRegistry {
         }
         if foregroundGroupByConnection[connectionID] == roomID {
             streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
+            foregroundRoutes.upsert(
+                connectionID: connectionID,
+                roomID: roomID,
+                userID: identity.userID,
+                stream: stream
+            )
             return
         }
         await removeForegroundGroupSubscription(connectionID: connectionID)
@@ -208,6 +226,12 @@ public actor V2DeviceConnectionRegistry {
         foregroundGroupByConnection[connectionID] = roomID
         let wasInactive = streamsByForegroundGroup[roomID] == nil
         streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
+        foregroundRoutes.upsert(
+            connectionID: connectionID,
+            roomID: roomID,
+            userID: identity.userID,
+            stream: stream
+        )
         if wasInactive, let foregroundGroupInterestManager {
             try? await foregroundGroupInterestManager.activate(roomID: roomID)
             if streamsByForegroundGroup[roomID] == nil {
@@ -230,28 +254,52 @@ public actor V2DeviceConnectionRegistry {
 
     /// Core routing is allowed to duplicate or lose this hint. Each stream
     /// receives only a room waterline and must cursor-pull durable events.
-    public func notifyForegroundGroupAvailable(roomID: RoomID, highWatermark: UInt64) async {
-        let streams = streamsByForegroundGroup[roomID].map { Array($0.values) } ?? []
-        for stream in streams {
-            await stream.sendGroupEventAvailable(roomID: roomID, highWatermark: highWatermark)
+    public nonisolated func notifyForegroundGroupAvailable(
+        roomID: RoomID,
+        highWatermark: UInt64
+    ) async {
+        let streams = foregroundRoutes.streams(roomID: roomID)
+        let prepared = foregroundFrameLimits.flatMap {
+            V2PreparedGatewayGroupEventAvailable(
+                roomID: roomID,
+                highWatermark: highWatermark,
+                directEvent: nil,
+                frameLimits: $0
+            )
         }
+        await Self.publishForeground(
+            streams,
+            roomID: roomID,
+            highWatermark: highWatermark,
+            prepared: prepared
+        )
     }
 
     /// Routes a direct-event acceleration payload only to foreground streams
     /// whose authenticated identity was one of the members captured by the
     /// committing transaction.  A subscription alone is never authority.
-    public func notifyForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
-        let streams = streamsByForegroundGroup[event.roomID] ?? [:]
-        for (connectionID, stream) in streams {
-            guard let identity = identityByConnection[connectionID],
-                  event.recipientUserIDs.contains(identity.userID)
-            else { continue }
-            await stream.sendGroupEventAvailable(
+    public nonisolated func notifyForegroundDirectEvent(
+        _ event: V2DirectRoomLiveEvent
+    ) async {
+        let streams = foregroundRoutes.streams(
+            roomID: event.roomID,
+            recipientUserIDs: event.recipientUserIDs
+        )
+        let prepared = foregroundFrameLimits.flatMap {
+            V2PreparedGatewayGroupEventAvailable(
                 roomID: event.roomID,
                 highWatermark: event.highWatermark,
-                directEvent: event
+                directEvent: event,
+                frameLimits: $0
             )
         }
+        await Self.publishForeground(
+            streams,
+            roomID: event.roomID,
+            highWatermark: event.highWatermark,
+            directEvent: event,
+            prepared: prepared
+        )
     }
 
     public func connectionCount(for deviceID: DeviceID) -> Int { streamsByDevice[deviceID]?.count ?? 0 }
@@ -597,6 +645,7 @@ public actor V2DeviceConnectionRegistry {
 
     private func removeForegroundGroupSubscription(connectionID: UUID) async {
         guard let roomID = foregroundGroupByConnection.removeValue(forKey: connectionID) else { return }
+        foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
         streamsByForegroundGroup[roomID]?.removeValue(forKey: connectionID)
         if streamsByForegroundGroup[roomID]?.isEmpty == true {
             streamsByForegroundGroup.removeValue(forKey: roomID)
@@ -606,6 +655,61 @@ public actor V2DeviceConnectionRegistry {
                     try? await foregroundGroupInterestManager.activate(roomID: roomID)
                 }
             }
+        }
+    }
+
+    /// Socket actors are independent once the authorized stream snapshot has
+    /// been captured. Direct rooms normally have only one or two local streams;
+    /// creating a task group for every message costs more than those sequential
+    /// actor hops and creates scheduler pressure at high message rates. Larger
+    /// groups still publish in bounded waves so one slow stream cannot serialize
+    /// the whole room and the gateway cannot create an unbounded task burst.
+    private nonisolated static func publishForeground(
+        _ streams: [V2GatewayByteStream],
+        roomID: RoomID,
+        highWatermark: UInt64,
+        directEvent: V2DirectRoomLiveEvent? = nil,
+        prepared: V2PreparedGatewayGroupEventAvailable? = nil
+    ) async {
+        let sequentialWriteLimit = 4
+        if streams.count <= sequentialWriteLimit {
+            for stream in streams {
+                if Task.isCancelled { return }
+                if let prepared {
+                    await stream.sendGroupEventAvailable(prepared)
+                } else {
+                    await stream.sendGroupEventAvailable(
+                        roomID: roomID,
+                        highWatermark: highWatermark,
+                        directEvent: directEvent
+                    )
+                }
+            }
+            return
+        }
+
+        let maximumConcurrentWrites = 16
+        var lowerBound = 0
+        while lowerBound < streams.count {
+            if Task.isCancelled { return }
+            let upperBound = min(lowerBound + maximumConcurrentWrites, streams.count)
+            await withTaskGroup(of: Void.self) { group in
+                for stream in streams[lowerBound..<upperBound] {
+                    group.addTask {
+                        guard !Task.isCancelled else { return }
+                        if let prepared {
+                            await stream.sendGroupEventAvailable(prepared)
+                        } else {
+                            await stream.sendGroupEventAvailable(
+                                roomID: roomID,
+                                highWatermark: highWatermark,
+                                directEvent: directEvent
+                            )
+                        }
+                    }
+                }
+            }
+            lowerBound = upperBound
         }
     }
 
@@ -638,6 +742,82 @@ public actor V2DeviceConnectionRegistry {
             + typingMutationByConnection.count
     }
 
+}
+
+/// Sharded, lock-backed foreground routing snapshot. Subscription authority is
+/// still established by `V2DeviceConnectionRegistry`; entries here contain
+/// only the already-authenticated user identity needed to fence a direct live
+/// payload and the process-local stream reference used for best-effort hints.
+private final class V2ForegroundConnectionRoutes: Sendable {
+    private struct Entry: Sendable {
+        let userID: UserID
+        let stream: V2GatewayByteStream
+    }
+
+    private struct State: Sendable {
+        var entriesByRoom: [RoomID: [UUID: Entry]] = [:]
+    }
+
+    private final class Shard: Sendable {
+        let state = Mutex(State())
+    }
+
+    private let shards: [Shard]
+
+    init(shardCount: Int = 16) {
+        precondition(shardCount > 0)
+        shards = (0..<shardCount).map { _ in Shard() }
+    }
+
+    func upsert(
+        connectionID: UUID,
+        roomID: RoomID,
+        userID: UserID,
+        stream: V2GatewayByteStream
+    ) {
+        shard(for: roomID).state.withLock {
+            $0.entriesByRoom[roomID, default: [:]][connectionID] = .init(
+                userID: userID,
+                stream: stream
+            )
+        }
+    }
+
+    func remove(connectionID: UUID, roomID: RoomID) {
+        shard(for: roomID).state.withLock { state in
+            state.entriesByRoom[roomID]?.removeValue(forKey: connectionID)
+            if state.entriesByRoom[roomID]?.isEmpty == true {
+                state.entriesByRoom.removeValue(forKey: roomID)
+            }
+        }
+    }
+
+    func streams(roomID: RoomID) -> [V2GatewayByteStream] {
+        shard(for: roomID).state.withLock {
+            $0.entriesByRoom[roomID].map { Array($0.values.map(\.stream)) } ?? []
+        }
+    }
+
+    func streams(
+        roomID: RoomID,
+        recipientUserIDs: Set<UserID>
+    ) -> [V2GatewayByteStream] {
+        shard(for: roomID).state.withLock { state in
+            guard let entries = state.entriesByRoom[roomID] else { return [] }
+            return entries.values.compactMap {
+                recipientUserIDs.contains($0.userID) ? $0.stream : nil
+            }
+        }
+    }
+
+    private func shard(for roomID: RoomID) -> Shard {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in roomID.rawValue.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return shards[Int(hash % UInt64(shards.count))]
+    }
 }
 
 private struct V2LiveObservationKey: Hashable, Sendable {

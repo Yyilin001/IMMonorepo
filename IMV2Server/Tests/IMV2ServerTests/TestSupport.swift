@@ -43,8 +43,9 @@ struct V2DiscardingTelemetrySink: V2TelemetrySink {
     func record(_: V2TelemetryEvent) async {}
 }
 
-struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHintPublishing {
-    func publishForegroundHint(_: V2GroupEventWake) async {}
+struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHintSubmitting {
+    func submitForegroundHint(_: V2GroupEventWake) {}
+    func submitForegroundDirectMessage(_: V2AcceptedMessage) {}
 }
 
 private struct V2UnsupportedGatewayTestDependency: Error,
@@ -108,7 +109,7 @@ func makeGatewayDomainCommandHandler(
     directMessaging: V2DirectMessagingService? = nil,
     groupAudienceImports: V2GroupAudienceImportService? = nil,
     groupEventLog: V2GroupEventLogService? = nil,
-    foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing = V2DiscardingForegroundGroupEventHintPublisher(),
+    foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting = V2DiscardingForegroundGroupEventHintPublisher(),
     membershipDirectory: V2RoomMembershipDirectoryService? = nil,
     socialRelationships: V2SocialRelationshipService? = nil,
     moderation: V2ModerationService? = nil,
@@ -149,7 +150,7 @@ func makeGatewayDomainCommandHandler(
 }
 
 struct V2AllowingGatewayCommandAdmission: V2AuthenticatedGatewayCommandAdmitting {
-    func admit(identity _: V2AuthenticatedConnection, now _: Date) async -> Bool {
+    func admit(identity _: V2AuthenticatedConnection, now _: Date) -> Bool {
         true
     }
 }

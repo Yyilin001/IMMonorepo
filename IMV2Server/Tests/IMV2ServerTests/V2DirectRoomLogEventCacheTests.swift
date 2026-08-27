@@ -192,10 +192,10 @@ struct V2DirectRoomLogEventCacheTests {
             shardCount: 1,
             maximumPendingWrites: 1
         ))
-        await cache.enqueueCommittedPlainDirectMessage(
+        cache.enqueueCommittedPlainDirectMessage(
             try message(roomID: roomID, sequence: 1, membershipRevision: 1)
         )
-        await cache.enqueueCommittedPlainDirectMessage(
+        cache.enqueueCommittedPlainDirectMessage(
             try message(roomID: roomID, sequence: 2, membershipRevision: 1)
         )
         var snapshot = await cache.snapshot()

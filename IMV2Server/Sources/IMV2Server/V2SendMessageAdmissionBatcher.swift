@@ -225,6 +225,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// put the batcher into high-activity mode or keep it there forever.
     private let clock = ContinuousClock()
     private var recentArrivalInstants: [ContinuousClock.Instant] = []
+    /// Logical head for the bounded arrival window. Advancing it is O(1);
+    /// occasional compaction replaces `Array.removeFirst` on every hot append.
+    private var recentArrivalHead = 0
 
     /// The generic gateway command handler must not acquire a second
     /// foreground-write permit around a request that this batcher owns. A
@@ -360,28 +363,34 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func isHighActivity() -> Bool {
         guard let policy = configuration.adaptiveDelayPolicy else { return false }
         pruneArrivalHistory()
-        return recentArrivalInstants.count >= policy.minimumRequestsInWindow
+        return recentArrivalInstants.count - recentArrivalHead
+            >= policy.minimumRequestsInWindow
     }
 
     private func pruneArrivalHistory() {
         guard let policy = configuration.adaptiveDelayPolicy else {
             recentArrivalInstants.removeAll(keepingCapacity: false)
+            recentArrivalHead = 0
             return
         }
         let cutoff = clock.now - policy.observationWindow
-        if let firstRetained = recentArrivalInstants.firstIndex(where: { $0 >= cutoff }) {
-            if firstRetained > 0 {
-                recentArrivalInstants.removeFirst(firstRetained)
-            }
-        } else {
-            recentArrivalInstants.removeAll(keepingCapacity: true)
+        while recentArrivalHead < recentArrivalInstants.count,
+              recentArrivalInstants[recentArrivalHead] < cutoff {
+            recentArrivalHead += 1
         }
         // Once the threshold is met, older in-window samples no longer alter
         // the decision. Retaining only the most recent threshold keeps memory
         // bounded even if a gateway is intentionally driven very hard.
         let maximumSamples = policy.minimumRequestsInWindow
-        if recentArrivalInstants.count > maximumSamples {
-            recentArrivalInstants.removeFirst(recentArrivalInstants.count - maximumSamples)
+        let retainedCount = recentArrivalInstants.count - recentArrivalHead
+        if retainedCount > maximumSamples {
+            recentArrivalHead += retainedCount - maximumSamples
+        }
+        // Bound stale storage without shifting the array on every arrival.
+        if recentArrivalHead >= 256,
+           recentArrivalHead * 2 >= recentArrivalInstants.count {
+            recentArrivalInstants.removeFirst(recentArrivalHead)
+            recentArrivalHead = 0
         }
     }
 
@@ -549,11 +558,15 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         // This is intentionally checked here rather than relying only on the
         // PostgreSQL classifier, so every store implementation receives the
         // same ordering guarantee.
+        var seenRooms: Set<RoomID> = []
+        var firstPartitionByRoom: [RoomID: V2AtomicRoomWriteBatchPartition] = [:]
         for index in partitions.indices {
-            for priorIndex in partitions.indices where priorIndex < index {
-                guard batch[priorIndex].request.command.roomID
-                    == batch[index].request.command.roomID else { continue }
-                guard partitions[priorIndex] != partitions[index] else { continue }
+            let roomID = batch[index].request.command.roomID
+            if seenRooms.insert(roomID).inserted {
+                if let partition = partitions[index] {
+                    firstPartitionByRoom[roomID] = partition
+                }
+            } else if firstPartitionByRoom[roomID] != partitions[index] {
                 let execution = await executeAtomic(batch)
                 return .init(
                     results: execution.results,

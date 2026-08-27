@@ -9784,6 +9784,77 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 promotedHotRooms: 1
             ))
 
+            // The accelerated append path resolves one whole micro-batch with
+            // one actor entry. A partial capacity result preserves order, and
+            // returning the granted prefix cannot restore durable capacity.
+            let batchRoomID = UUID(
+                uuidString: "00000000-0000-0000-0000-00000000c203"
+            )!
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms
+                    (room_id, room_shard_id, capacity_profile_id, delivery_mode)
+                VALUES (
+                    \(bind: batchRoomID),
+                    'rooms-room-credit-test',
+                    'room-credit-test',
+                    'standard_fanout'
+                )
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_admission
+                    (room_id, eligible_member_count, command_window_limit,
+                     fanout_window_limit, max_outstanding_fanout_units,
+                     max_outstanding_plans, shard_lease_id,
+                     shard_lease_generation)
+                VALUES (\(bind: batchRoomID), 2, 2, 10, 10, 10, \(bind: leaseID), 1)
+                """).run()
+            let batchCredits = V2RoomAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 32
+            )
+            let batchRequest = V2RoomAdmissionCommandCreditPool.BatchRequest(
+                roomID: batchRoomID,
+                shardState: state,
+                now: now
+            )
+            let firstBatch = try await batchCredits.acquire(
+                [batchRequest, batchRequest, batchRequest]
+            )
+            let grantedPrefix: [V2RoomAdmissionCommandCreditPool.Token] =
+                firstBatch.compactMap { acquisition in
+                    guard case .granted(let token) = acquisition else { return nil }
+                    return token
+                }
+            #expect(grantedPrefix.count == 2)
+            guard case .rateLimited = firstBatch[2] else {
+                Issue.record("the batched room credit pool oversold the room window")
+                return
+            }
+            await batchCredits.release(grantedPrefix.map { ($0, now) })
+
+            let reusedBatch = try await batchCredits.acquire([batchRequest, batchRequest])
+            let reusedTokens: [V2RoomAdmissionCommandCreditPool.Token] =
+                reusedBatch.compactMap { acquisition in
+                    guard case .granted(let token) = acquisition else { return nil }
+                    return token
+                }
+            #expect(reusedTokens.count == 2)
+            await batchCredits.commit(reusedTokens)
+            guard case .rateLimited = try await batchCredits.acquire(
+                roomID: batchRoomID,
+                shardState: state,
+                now: now
+            ) else {
+                Issue.record("returned room credits were durably oversold")
+                return
+            }
+            #expect(await batchCredits.snapshot() == .init(
+                activeCredits: 0, inFlightCredits: 0,
+                batchReservations: 1, databaseCreditsReserved: 2,
+                committedCredits: 2, returnedCredits: 2,
+                expiredCreditsDiscarded: 0, capacityRejections: 2,
+                promotedHotRooms: 0
+            ))
+
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
         } catch {

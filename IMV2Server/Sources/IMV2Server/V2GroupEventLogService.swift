@@ -90,7 +90,7 @@ public struct V2GroupEventLogService: Sendable {
     /// committed. The durable cursor log remains the recovery path if this
     /// process is restarted, another gateway accepted the message, or the
     /// event does not fit the plain direct-message cache contract.
-    public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async {
-        await directRoomLogEventCache?.enqueueCommittedPlainDirectMessage(message)
+    public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) {
+        directRoomLogEventCache?.enqueueCommittedPlainDirectMessage(message)
     }
 }

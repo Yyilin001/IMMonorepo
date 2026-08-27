@@ -319,6 +319,58 @@ struct V2GatewayByteStreamTests {
         #expect(await recorder.count() == 1)
     }
 
+    @Test("a direct live payload reaches every small-fanout local stream exactly once")
+    func routesDirectLivePayloadToSmallFanoutStreams() async throws {
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        // Supplying the process-wide frame contract exercises the production
+        // encode-once broadcast path rather than the compatibility fallback.
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: frameLimits)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c03")
+        let recorders = [OutboundFrameRecorder(), OutboundFrameRecorder()]
+
+        for recorder in recorders {
+            let connectionID = UUID()
+            let stream = V2GatewayByteStream(
+                frameLimits: frameLimits,
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+                handler: ByteStreamCommandFake(),
+                connectionID: connectionID,
+                registry: registry
+            )
+            await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
+            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+            await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: roomID)
+        }
+
+        let direct = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 44,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e03"),
+            roomSequence: 44,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-a")]
+        )
+        await registry.notifyForegroundDirectEvent(direct)
+
+        var encodedFrames: [Data] = []
+        for recorder in recorders {
+            let frame = try #require(await recorder.waitForFirst())
+            encodedFrames.append(frame)
+            let wake = try decode(frame)
+            #expect(wake.groupEventAvailable.sourceEventID == direct.sourceEventID.rawValue)
+            #expect(await recorder.count() == 1)
+        }
+        #expect(encodedFrames.count == 2)
+        #expect(encodedFrames[0] == encodedFrames[1])
+    }
+
     private func encoded(_ envelope: IMV2Envelope, version: UInt8) throws -> Data {
         try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
     }

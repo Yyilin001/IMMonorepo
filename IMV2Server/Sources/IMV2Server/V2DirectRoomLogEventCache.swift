@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Synchronization
 
 /// A bounded process-local acceleration cache for plain, canonical direct
 /// room-log events. It is deliberately not an authorization cache: callers
@@ -212,12 +213,12 @@ public final class V2DirectRoomLogEventCache: Sendable {
     /// Hot-path entry point used after a durable message commit. The accepted
     /// response waits only for one bounded shard-mailbox append; JSON creation,
     /// ordering and LRU mutation run in the runtime-owned writer task.
-    public func enqueueCommittedPlainDirectMessage(_ message: V2AcceptedMessage) async {
+    public func enqueueCommittedPlainDirectMessage(_ message: V2AcceptedMessage) {
         guard Self.isEligible(message) else {
-            await lane(for: message.roomID).cache.recordBypass()
+            lane(for: message.roomID).mailbox.recordBypass()
             return
         }
-        await lane(for: message.roomID).mailbox.enqueue(message)
+        lane(for: message.roomID).mailbox.enqueue(message)
     }
 
     /// Own this loop with one runtime task. Each lane is drained by one child,
@@ -232,7 +233,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
     }
 
     public func finish() async {
-        for lane in lanes { await lane.mailbox.finish() }
+        for lane in lanes { lane.mailbox.finish() }
     }
 
     /// Captures contiguous local coverage without consulting or carrying
@@ -302,7 +303,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
             for lane in lanes {
                 group.addTask {
                     let cache = await lane.cache.snapshot()
-                    let mailbox = await lane.mailbox.snapshot()
+                    let mailbox = lane.mailbox.snapshot()
                     return cache + mailbox
                 }
             }
@@ -319,7 +320,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
     private static func run(lane: Lane) async {
         for await _ in lane.mailbox.signals {
             if Task.isCancelled { return }
-            let messages = await lane.mailbox.drain()
+            let messages = lane.mailbox.drain()
             for message in messages {
                 if Task.isCancelled { return }
                 guard let prepared = prepare(message) else {
@@ -374,54 +375,79 @@ public final class V2DirectRoomLogEventCache: Sendable {
     }
 }
 
-private actor V2DirectRoomLogEventCacheMailbox {
-    nonisolated let signals: AsyncStream<Void>
+private final class V2DirectRoomLogEventCacheMailbox: Sendable {
+    private struct State: Sendable {
+        var pending: [V2AcceptedMessage]
+        var dropped: UInt64 = 0
+        var bypassed: UInt64 = 0
+        var finished = false
+    }
+
+    let signals: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
     private let maximumPending: Int
-    private var pending: [V2AcceptedMessage] = []
-    private var dropped: UInt64 = 0
+    private let state: Mutex<State>
 
     init(maximumPending: Int) {
         precondition(maximumPending > 0)
         self.maximumPending = maximumPending
+        var pending: [V2AcceptedMessage] = []
         pending.reserveCapacity(maximumPending)
+        state = Mutex(.init(pending: pending))
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         signals = stream.stream
         continuation = stream.continuation
     }
 
     func enqueue(_ message: V2AcceptedMessage) {
-        guard pending.count < maximumPending else {
-            dropped &+= 1
-            return
+        let accepted = state.withLock { state in
+            guard !state.finished else { return false }
+            guard state.pending.count < maximumPending else {
+                state.dropped &+= 1
+                return false
+            }
+            state.pending.append(message)
+            return true
         }
-        pending.append(message)
-        continuation.yield()
+        if accepted { continuation.yield() }
+    }
+
+    func recordBypass() {
+        state.withLock { $0.bypassed &+= 1 }
     }
 
     func drain() -> [V2AcceptedMessage] {
-        guard !pending.isEmpty else { return [] }
-        let batch = pending
-        pending.removeAll(keepingCapacity: true)
-        return batch
+        state.withLock { state in
+            guard !state.pending.isEmpty else { return [] }
+            let batch = state.pending
+            state.pending.removeAll(keepingCapacity: true)
+            return batch
+        }
     }
 
     func snapshot() -> V2DirectRoomLogEventCache.Snapshot {
-        .init(
-            cachedEvents: 0,
-            cachedRooms: 0,
-            cachedBytes: 0,
-            hits: 0,
-            misses: 0,
-            bypassedIneligibleEvents: 0,
-            pendingWrites: pending.count,
-            droppedWrites: dropped
-        )
+        state.withLock {
+            .init(
+                cachedEvents: 0,
+                cachedRooms: 0,
+                cachedBytes: 0,
+                hits: 0,
+                misses: 0,
+                bypassedIneligibleEvents: $0.bypassed,
+                pendingWrites: $0.pending.count,
+                droppedWrites: $0.dropped
+            )
+        }
     }
 
     func finish() {
-        pending.removeAll(keepingCapacity: false)
-        continuation.finish()
+        let shouldFinish = state.withLock { state in
+            guard !state.finished else { return false }
+            state.finished = true
+            state.pending.removeAll(keepingCapacity: false)
+            return true
+        }
+        if shouldFinish { continuation.finish() }
     }
 }
 

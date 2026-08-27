@@ -1,6 +1,45 @@
 import Foundation
 import IMV2Core
 
+/// One immutable server-push frame shared by every authorized local recipient
+/// that negotiated the same protocol version. The bytes carry no
+/// connection-specific state: audience selection and transport lifecycle
+/// checks remain outside this value.
+struct V2PreparedGatewayGroupEventAvailable: Sendable {
+    let protocolVersion: UInt8
+    let bytes: Data
+
+    init?(
+        roomID: RoomID,
+        highWatermark: UInt64,
+        directEvent: V2DirectRoomLiveEvent?,
+        frameLimits: V2FrameLimits,
+        protocolVersion: UInt8 = UInt8(IMV2ProtocolVersion.current)
+    ) {
+        var envelope = IMV2Envelope()
+        envelope.requestID = 0
+        envelope.protocolVersion = UInt32(protocolVersion)
+        envelope.groupEventAvailable = .init()
+        envelope.groupEventAvailable.roomID = roomID.rawValue
+        envelope.groupEventAvailable.highWatermark = highWatermark
+        if let directEvent,
+           directEvent.roomID == roomID,
+           directEvent.highWatermark == highWatermark {
+            envelope.groupEventAvailable.sourceEventID = directEvent.sourceEventID.rawValue
+            envelope.groupEventAvailable.roomSequence = directEvent.roomSequence
+            envelope.groupEventAvailable.projectionKind = directEvent.projectionKind
+            envelope.groupEventAvailable.eventPayload = directEvent.payload
+        }
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(
+            envelope,
+            frameVersion: protocolVersion
+        ), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
+        else { return nil }
+        self.protocolVersion = protocolVersion
+        self.bytes = bytes
+    }
+}
+
 /// The transport-neutral half of a gateway connection. TLS is deliberately
 /// terminated outside this actor; callers feed only decrypted bytes and write
 /// the returned bytes back to the same connection. This keeps framing,
@@ -187,6 +226,18 @@ public actor V2GatewayByteStream {
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
         else { return }
         await outboundWriter(bytes)
+    }
+
+    /// Sends a frame encoded once for a process-local authorized audience.
+    /// The stream still fences the write by its authenticated negotiation and
+    /// current transport callback; a stale or differently-versioned stream
+    /// cannot consume shared bytes.
+    func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async {
+        guard let version = await session.authenticatedProtocolVersion(),
+              version == prepared.protocolVersion,
+              let outboundWriter
+        else { return }
+        await outboundWriter(prepared.bytes)
     }
 
     public func sendPresenceState(_ state: V2PresenceState) async {

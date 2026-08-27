@@ -38,14 +38,14 @@ struct V2GroupEventWakeRelayTests {
         let dispatcher = V2ForegroundGroupEventHintDispatcher(publisher: publisher)
 
         // Enqueue before the runtime-owned worker begins to make the
-        // coalescing contract deterministic; command handlers only await
-        // these actor-local calls, never the publisher's I/O.
+        // coalescing contract deterministic; command handlers perform only a
+        // bounded process-local submit and never await the publisher's I/O.
         await dispatcher.publishForegroundHint(.init(roomID: roomID, highWatermark: 7))
         await dispatcher.publishForegroundHint(.init(roomID: roomID, highWatermark: 9))
         let task = Task { await dispatcher.run() }
 
         #expect(await publisher.next() == .init(roomID: roomID, highWatermark: 9))
-        await dispatcher.finish()
+        dispatcher.finish()
         await task.value
     }
 
@@ -63,8 +63,8 @@ struct V2GroupEventWakeRelayTests {
             )
         }
 
-        #expect(await dispatcher.pendingRoomCount() == 2)
-        await dispatcher.finish()
+        #expect(dispatcher.pendingRoomCount() == 2)
+        dispatcher.finish()
     }
 }
 

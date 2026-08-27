@@ -138,11 +138,11 @@ protocol V2GatewayGroupAudienceImportHandling: Sendable {
 protocol V2GatewayGroupEventLogHandling: Sendable {
     func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage
     func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription
-    func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async
+    func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage)
 }
 
 extension V2GatewayGroupEventLogHandling {
-    func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) async {}
+    func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) {}
 }
 
 protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
@@ -202,7 +202,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let directMessaging: any V2GatewayDirectMessagingHandling
     private let groupAudienceImports: any V2GatewayGroupAudienceImportHandling
     private let groupEventLog: any V2GatewayGroupEventLogHandling
-    private let foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing
+    private let foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting
     private let membershipDirectory: any V2GatewayRoomMembershipDirectoryHandling
     private let socialRelationships: any V2GatewaySocialRelationshipHandling
     private let moderation: any V2GatewayModerationHandling
@@ -220,7 +220,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     private let maximumGroupEventPagePayloadBytes: Int
     private let now: @Sendable () -> Date
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
         self.membership = membership
@@ -258,7 +258,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         directMessagingHandler: any V2GatewayDirectMessagingHandling,
         groupAudienceImportHandler: any V2GatewayGroupAudienceImportHandling,
         groupEventLogHandler: any V2GatewayGroupEventLogHandling,
-        foregroundGroupEventHints: any V2ForegroundGroupEventHintPublishing,
+        foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
         membershipDirectoryHandler: any V2GatewayRoomMembershipDirectoryHandling,
         socialRelationshipHandler: any V2GatewaySocialRelationshipHandling,
         moderationHandler: any V2GatewayModerationHandling,
@@ -644,14 +644,17 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         }
         switch outcome {
         case .accepted(let message):
-            await groupEventLog.recordCommittedDirectRoomLogMessage(message)
+            groupEventLog.recordCommittedDirectRoomLogMessage(message)
             if V2DirectRoomLiveEventDraft(message) != nil {
                 // Best effort and post-commit only. The dispatcher validates
                 // and queues immutable acceptance data, then serializes the
                 // optional payload off this accepted-send hot path.
-                await foregroundGroupEventHints.publishForegroundDirectMessage(message)
+                foregroundGroupEventHints.submitForegroundDirectMessage(message)
             } else if message.groupDeliveryMode != nil || message.usesRoomEventLog {
-                await foregroundGroupEventHints.publishForegroundHint(.init(roomID: message.roomID, highWatermark: message.roomSequence))
+                foregroundGroupEventHints.submitForegroundHint(.init(
+                    roomID: message.roomID,
+                    highWatermark: message.roomSequence
+                ))
             }
             return acceptedMessageEnvelope(message)
         case .idempotent(let message):

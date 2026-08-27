@@ -2,6 +2,7 @@ import AsyncKit
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+import Synchronization
 import Testing
 
 @Suite("V2 gateway domain command handler")
@@ -394,7 +395,7 @@ struct V2GatewayDomainCommandHandlerTests {
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
 
         #expect(response.messageAccepted.roomSequence == 9)
-        #expect(await hints.values() == [.init(roomID: fixture.roomID, highWatermark: 9)])
+        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 9)])
     }
 
     @Test("an accepted direct room-log message emits only a best-effort foreground watermark hint")
@@ -426,7 +427,7 @@ struct V2GatewayDomainCommandHandlerTests {
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
 
         #expect(response.messageAccepted.roomSequence == 10)
-        #expect(await hints.values() == [.init(roomID: fixture.roomID, highWatermark: 10)])
+        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 10)])
     }
 
     @Test("invalid sync state is returned as a stable protocol error")
@@ -883,14 +884,24 @@ private struct GatewayPoolTimeoutMessageStore: V2RoomWriteStore {
     }
 }
 
-private actor GatewayForegroundHintRecorder: V2ForegroundGroupEventHintPublishing {
-    private var hints: [V2GroupEventWake] = []
+private final class GatewayForegroundHintRecorder:
+    V2ForegroundGroupEventHintSubmitting,
+    Sendable
+{
+    private let hints = Mutex<[V2GroupEventWake]>([])
 
-    func publishForegroundHint(_ hint: V2GroupEventWake) {
-        hints.append(hint)
+    func submitForegroundHint(_ hint: V2GroupEventWake) {
+        hints.withLock { $0.append(hint) }
     }
 
-    func values() -> [V2GroupEventWake] { hints }
+    func submitForegroundDirectMessage(_ message: V2AcceptedMessage) {
+        submitForegroundHint(.init(
+            roomID: message.roomID,
+            highWatermark: message.roomSequence
+        ))
+    }
+
+    func values() -> [V2GroupEventWake] { hints.withLock { $0 } }
 }
 
 private actor GatewayMembershipStore: V2RoomMembershipStore {

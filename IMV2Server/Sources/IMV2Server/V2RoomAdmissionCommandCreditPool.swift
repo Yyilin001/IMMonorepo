@@ -13,6 +13,17 @@ import SQLKit
 /// durable window. The shard-lease fence prevents stale credits surviving a
 /// room's shard lease replacement.
 public actor V2RoomAdmissionCommandCreditPool {
+  /// Immutable input for one append micro-batch reservation pass.
+  ///
+  /// The shard state remains an authoritative preflight snapshot. The pool
+  /// still fences every issued token to its exact durable shard lease; this
+  /// wrapper only removes one cross-actor job per message from the hot path.
+  struct BatchRequest: Sendable {
+    let roomID: UUID
+    let shardState: ShardAdmissionState
+    let now: Date
+  }
+
   public struct Token: Hashable, Sendable {
     fileprivate let id: UInt64
     fileprivate let key: Key
@@ -180,6 +191,35 @@ public actor V2RoomAdmissionCommandCreditPool {
     return .granted(token)
   }
 
+  /// Issues a bounded set of room credits with one cross-actor call.
+  ///
+  /// A throwing suffix returns every locally issued prefix token. Durable
+  /// reservations intentionally remain charged, preserving the conservative
+  /// crash and retry semantics of the scalar API.
+  func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
+    precondition(requests.count <= 128)
+    guard !requests.isEmpty else { return [] }
+
+    var acquisitions: [Acquisition] = []
+    acquisitions.reserveCapacity(requests.count)
+    do {
+      for request in requests {
+        acquisitions.append(try await acquire(
+          roomID: request.roomID,
+          shardState: request.shardState,
+          now: request.now
+        ))
+      }
+      return acquisitions
+    } catch {
+      for (acquisition, request) in zip(acquisitions, requests) {
+        guard case .granted(let token) = acquisition else { continue }
+        release(token, now: request.now)
+      }
+      throw error
+    }
+  }
+
   /// Call only after the enclosing canonical message transaction commits.
   public func commit(_ token: Token) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
@@ -219,6 +259,13 @@ public actor V2RoomAdmissionCommandCreditPool {
       expiredCreditsDiscarded += 1
       credits.removeValue(forKey: token.key)
     }
+  }
+
+  /// Returns a failed append micro-batch with one actor hop. A distinct time
+  /// is retained for every token so expiry behavior exactly matches the scalar
+  /// path even when a batch was assembled across a timer boundary.
+  func release(_ tokens: [(token: Token, now: Date)]) {
+    for item in tokens { release(item.token, now: item.now) }
   }
 
   public func snapshot() -> Snapshot {

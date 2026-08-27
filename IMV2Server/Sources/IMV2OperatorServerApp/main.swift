@@ -7,8 +7,10 @@ import NIOPosix
 import Vapor
 #if canImport(Darwin)
 import Darwin
-#else
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 
 /// A deliberately separate operator-only process. It has no public TLS

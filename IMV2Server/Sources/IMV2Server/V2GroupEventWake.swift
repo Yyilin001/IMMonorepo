@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Synchronization
 
 /// Metadata-only work emitted after a Hybrid room event is committed. The
 /// payload deliberately excludes event content and recipient identity.
@@ -50,6 +51,15 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async
 }
 
+/// Non-suspending post-commit boundary used by the Gateway acceptance path.
+/// Implementations must only perform bounded process-local enqueue work. Any
+/// broker, socket, serialization, or retry work belongs to a runtime-owned
+/// consumer behind this boundary.
+public protocol V2ForegroundGroupEventHintSubmitting: Sendable {
+    func submitForegroundHint(_ hint: V2GroupEventWake)
+    func submitForegroundDirectMessage(_ message: V2AcceptedMessage)
+}
+
 extension V2ForegroundGroupEventHintPublishing {
     /// Compatibility fallback for publishers that have not yet been upgraded
     /// to carry a live payload across a process boundary.  Correctness stays
@@ -68,7 +78,11 @@ extension V2ForegroundGroupEventHintPublishing {
 /// room and deliberately returns from `publishForegroundHint` before broker
 /// I/O begins, keeping a sender's acceptance response independent from an
 /// optional NATS connection or a slow local socket write.
-public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPublishing {
+public final class V2ForegroundGroupEventHintDispatcher:
+    V2ForegroundGroupEventHintPublishing,
+    V2ForegroundGroupEventHintSubmitting,
+    Sendable
+{
     private let publisher: any V2ForegroundGroupEventHintPublishing
     private let maximumPendingRooms: Int
     /// Live foreground sends are lossy accelerators, but a single serial
@@ -83,7 +97,11 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
         let directMessage: V2DirectRoomLiveEventDraft?
     }
 
-    private var pending: [RoomID: Pending] = [:]
+    private struct State: Sendable {
+        var pending: [RoomID: Pending] = [:]
+        var finished = false
+    }
+    private let state = Mutex(State())
 
     public init(
         publisher: any V2ForegroundGroupEventHintPublishing,
@@ -100,36 +118,56 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
     }
 
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {
-        if let existing = pending[hint.roomID], existing.wake.highWatermark >= hint.highWatermark {
-            return
-        }
-        if pending[hint.roomID] == nil,
-           pending.count >= maximumPendingRooms,
-           let bufferedRoom = pending.keys.first {
-            // Hints are deliberately lossy and durable cursor pulls are the
-            // recovery path. Bound memory under a many-room burst by keeping
-            // the newest work instead of growing with traffic history.
-            pending.removeValue(forKey: bufferedRoom)
-        }
-        pending[hint.roomID] = .init(wake: hint, directMessage: nil)
-        signalContinuation.yield()
+        submitForegroundHint(hint)
     }
 
     public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
+        submitForegroundDirectMessage(message)
+    }
+
+    public func submitForegroundHint(_ hint: V2GroupEventWake) {
+        let accepted = state.withLock { state in
+            guard !state.finished else { return false }
+            if let existing = state.pending[hint.roomID],
+               existing.wake.highWatermark >= hint.highWatermark {
+                return false
+            }
+            if state.pending[hint.roomID] == nil,
+               state.pending.count >= maximumPendingRooms,
+               let bufferedRoom = state.pending.keys.first {
+                // Hints are deliberately lossy and durable cursor pulls are
+                // the recovery path. Keep the newest bounded room set.
+                state.pending.removeValue(forKey: bufferedRoom)
+            }
+            state.pending[hint.roomID] = .init(wake: hint, directMessage: nil)
+            return true
+        }
+        if accepted { signalContinuation.yield() }
+    }
+
+    public func submitForegroundDirectMessage(_ message: V2AcceptedMessage) {
         guard let draft = V2DirectRoomLiveEventDraft(message) else { return }
-        if let existing = pending[draft.message.roomID], existing.wake.highWatermark >= draft.message.roomSequence {
-            return
+        let accepted = state.withLock { state in
+            guard !state.finished else { return false }
+            if let existing = state.pending[draft.message.roomID],
+               existing.wake.highWatermark >= draft.message.roomSequence {
+                return false
+            }
+            if state.pending[draft.message.roomID] == nil,
+               state.pending.count >= maximumPendingRooms,
+               let bufferedRoom = state.pending.keys.first {
+                state.pending.removeValue(forKey: bufferedRoom)
+            }
+            state.pending[draft.message.roomID] = .init(
+                wake: .init(
+                    roomID: draft.message.roomID,
+                    highWatermark: draft.message.roomSequence
+                ),
+                directMessage: draft
+            )
+            return true
         }
-        if pending[draft.message.roomID] == nil,
-           pending.count >= maximumPendingRooms,
-           let bufferedRoom = pending.keys.first {
-            pending.removeValue(forKey: bufferedRoom)
-        }
-        pending[draft.message.roomID] = .init(
-            wake: .init(roomID: draft.message.roomID, highWatermark: draft.message.roomSequence),
-            directMessage: draft
-        )
-        signalContinuation.yield()
+        if accepted { signalContinuation.yield() }
     }
 
     /// Called by one task whose lifetime is owned by the gateway runtime.
@@ -138,8 +176,11 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
     public func run() async {
         for await _ in signal {
             if Task.isCancelled { return }
-            let batch = Array(pending.values)
-            pending.removeAll(keepingCapacity: true)
+            let batch = state.withLock { state in
+                let batch = Array(state.pending.values)
+                state.pending.removeAll(keepingCapacity: true)
+                return batch
+            }
 
             // A later room event is only placed in a subsequent drain after
             // this one has completed.  Within a drain, rooms are independent:
@@ -169,11 +210,16 @@ public actor V2ForegroundGroupEventHintDispatcher: V2ForegroundGroupEventHintPub
     }
 
     public func finish() {
-        pending.removeAll(keepingCapacity: false)
-        signalContinuation.finish()
+        let shouldFinish = state.withLock { state in
+            guard !state.finished else { return false }
+            state.finished = true
+            state.pending.removeAll(keepingCapacity: false)
+            return true
+        }
+        if shouldFinish { signalContinuation.finish() }
     }
 
-    func pendingRoomCount() -> Int { pending.count }
+    func pendingRoomCount() -> Int { state.withLock { $0.pending.count } }
 }
 
 public struct V2GroupEventWakeRelayReport: Equatable, Sendable {
