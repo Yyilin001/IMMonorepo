@@ -299,7 +299,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     }
 
     public func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let traceID = UUID()
+        let traceID = V2SecureProcessUUIDGenerator.shared.makeOne()
         let command = v2TelemetryCommand(for: envelope)
         let startedAt = now()
         do {

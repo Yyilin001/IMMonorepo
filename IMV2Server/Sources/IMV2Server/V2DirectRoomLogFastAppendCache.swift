@@ -60,14 +60,16 @@ public actor V2DirectRoomLogFastAppendCache {
         }
     }
 
-    /// The last committed room cursor plus the immutable-by-revision policy
-    /// snapshot required to construct a conditional append attempt.
+    /// The immutable-by-revision policy snapshot required to construct a
+    /// conditional append attempt. Room cursors deliberately do not live in
+    /// this entry: another producer may advance a direct room at any time,
+    /// while PostgreSQL can safely allocate the next sequence under its room
+    /// row lock. Coupling that high-churn cursor to the stable policy made a
+    /// valid authorization cache miss whenever the peer sent a message.
     public struct Entry: Sendable, Equatable {
         public let policy: V2DirectSendPolicyCache.Entry
         public let roomShardID: String
         public let capacityProfileID: String
-        public let expectedRoomSequence: Int64
-        public let expectedTimelineSequence: Int64
         public let membershipRevision: Int64
         public let shardState: ShardAdmissionState
 
@@ -75,33 +77,14 @@ public actor V2DirectRoomLogFastAppendCache {
             policy: V2DirectSendPolicyCache.Entry,
             roomShardID: String,
             capacityProfileID: String,
-            expectedRoomSequence: Int64,
-            expectedTimelineSequence: Int64,
             membershipRevision: Int64,
             shardState: ShardAdmissionState
         ) {
             self.policy = policy
             self.roomShardID = roomShardID
             self.capacityProfileID = capacityProfileID
-            self.expectedRoomSequence = expectedRoomSequence
-            self.expectedTimelineSequence = expectedTimelineSequence
             self.membershipRevision = membershipRevision
             self.shardState = shardState
-        }
-
-        func advancing(
-            roomSequence: Int64,
-            timelineSequence: Int64
-        ) -> Self {
-            .init(
-                policy: policy,
-                roomShardID: roomShardID,
-                capacityProfileID: capacityProfileID,
-                expectedRoomSequence: roomSequence,
-                expectedTimelineSequence: timelineSequence,
-                membershipRevision: membershipRevision,
-                shardState: shardState
-            )
         }
     }
 
@@ -173,6 +156,12 @@ public actor V2DirectRoomLogFastAppendCache {
             values.append(value)
         }
         return values
+    }
+
+    /// Resolves a classifier batch with one actor hop while preserving the
+    /// exact scalar lookup, expiry and LRU semantics for every key.
+    public func values(for keys: [Key]) -> [Entry?] {
+        keys.map { value(for: $0) }
     }
 
     public func insert(_ entry: Entry, for key: Key) {

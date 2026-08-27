@@ -13,8 +13,20 @@ import SQLKit
 /// intentionally unsuitable for fan-out, outstanding-unit, or plan credits,
 /// whose release lifecycle needs durable per-work accounting.
 public actor V2ShardAdmissionCommandCreditPool {
+  /// Immutable input for one bounded micro-batch reservation pass.
+  ///
+  /// The values remain advisory process-local state. Every issued token was
+  /// already durably charged by this actor and the enclosing message SQL still
+  /// verifies the lease generation and every authorization revision.
+  struct BatchRequest: Sendable {
+    let roomShardID: String
+    let capacityProfileID: String
+    let shardState: ShardAdmissionState
+    let now: Date
+  }
+
   public struct Token: Hashable, Sendable {
-    fileprivate let id: UUID
+    fileprivate let id: UInt64
     fileprivate let key: Key
   }
 
@@ -43,9 +55,9 @@ public actor V2ShardAdmissionCommandCreditPool {
   }
 
   private struct Credits: Sendable {
-    let reservationID: UUID
+    let reservationID: UInt64
     var available: Int
-    var inFlight: Set<UUID>
+    var inFlight: Set<UInt64>
     var databaseCommandWindowUsed: Int
     let validUntil: Date
   }
@@ -53,8 +65,9 @@ public actor V2ShardAdmissionCommandCreditPool {
   private let database: any Database
   private let batchSize: Int
   private var credits: [Key: Credits] = [:]
-  private var tokenKeys: [UUID: Key] = [:]
+  private var tokenKeys: [UInt64: Key] = [:]
   private var pendingReservations: [Key: Task<Reservation?, Error>] = [:]
+  private var nextInternalID: UInt64 = 0
   private var batchReservations = 0
   private var databaseCreditsReserved = 0
   private var committedCredits = 0
@@ -94,45 +107,78 @@ public actor V2ShardAdmissionCommandCreditPool {
       generation: generation
     )
     discardExpiredCredits(now: now)
-
-    while (credits[key]?.available ?? 0) == 0 {
-      let grant = try await reserveBatchIfNeeded(for: key, now: now)
-      guard let grant else {
-        let rejection = try await rejection(for: key, now: now)
-        if case .rateLimited = rejection { capacityRejections += 1 }
+    if (credits[key]?.available ?? 0) == 0 {
+      if let rejection = try await replenishIfNeeded(
+        for: key,
+        validUntil: lease.validUntil,
+        now: now
+      ) {
         return rejection
       }
-      // Another caller can resume first while this actor awaits the
-      // shared reservation task. It owns the same grant, so never
-      // install it twice or reset credits already issued from it.
-      if credits[key]?.reservationID != grant.id {
-        credits[key] = .init(
-          reservationID: grant.id,
-          available: grant.count,
-          inFlight: [],
-          databaseCommandWindowUsed: grant.databaseCommandWindowUsed,
-          validUntil: lease.validUntil
-        )
-      }
-      // If a simultaneous caller spent the whole shared one-credit
-      // grant before this caller resumed, loop and reserve the next
-      // batch instead of resetting that caller's state.
     }
+    return try issueCredit(for: key, shardState: shardState, now: now)
+  }
 
-    guard var entry = credits[key], entry.validUntil > now, entry.available > 0 else {
-      throw V2ShardAdmissionCommandCreditError.corruptCreditState
+  /// Issues a bounded set of credits with one cross-actor call.
+  ///
+  /// Validates and issues already-reserved credits synchronously on the actor.
+  /// The method suspends only when a key actually needs another durable batch,
+  /// rather than once per message. This distinction is important at sustained
+  /// load: an `await acquire(...)` loop creates one serial-executor job for
+  /// every message even when 63 of 64 messages need no database work.
+  func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
+    precondition(requests.count <= 128)
+    guard !requests.isEmpty else { return [] }
+    if let cleanupTime = requests.map(\.now).max() {
+      discardExpiredCredits(now: cleanupTime)
     }
-    let token = Token(id: UUID(), key: key)
-    entry.available -= 1
-    entry.inFlight.insert(token.id)
-    credits[key] = entry
-    tokenKeys[token.id] = key
-    let effectiveShardState = try effectiveState(
-      from: shardState,
-      key: key,
-      databaseCommandWindowUsed: entry.databaseCommandWindowUsed
-    )
-    return .granted(token: token, effectiveShardState: effectiveShardState)
+    var acquisitions: [Acquisition] = []
+    acquisitions.reserveCapacity(requests.count)
+    do {
+      for request in requests {
+        guard let lease = request.shardState.lease,
+          let leaseID = UUID(uuidString: lease.id.rawValue),
+          let generation = Int64(exactly: lease.generation)
+        else {
+          throw V2ShardAdmissionCommandCreditError.corruptShardState
+        }
+        guard lease.validUntil > request.now else {
+          acquisitions.append(.unavailable(.expiredShardLease))
+          continue
+        }
+        let key = Key(
+          roomShardID: request.roomShardID,
+          capacityProfileID: request.capacityProfileID,
+          leaseID: leaseID,
+          generation: generation
+        )
+        if (credits[key]?.available ?? 0) == 0 {
+          if let rejection = try await replenishIfNeeded(
+            for: key,
+            validUntil: lease.validUntil,
+            now: request.now
+          ) {
+            acquisitions.append(rejection)
+            continue
+          }
+        }
+        acquisitions.append(try issueCredit(
+          for: key,
+          shardState: request.shardState,
+          now: request.now
+        ))
+      }
+      return acquisitions
+    } catch {
+      // A throwing suffix must not strand process-local in-flight tokens from
+      // an already granted prefix. Durable reservations remain conservatively
+      // charged, exactly like the scalar rollback path.
+      for (acquisition, request) in zip(acquisitions, requests) {
+        guard case .granted(let token, _) = acquisition else { continue }
+        release(token, now: request.now)
+      }
+      throw error
+    }
   }
 
   /// Finalizes a token only after the enclosing message transaction commits.
@@ -172,6 +218,12 @@ public actor V2ShardAdmissionCommandCreditPool {
     }
   }
 
+  /// Returns a rolled-back micro-batch with one actor hop. As with the
+  /// single-token path, durable reservations remain conservatively charged.
+  func release(_ tokens: [Token], now: Date) {
+    for token in tokens { release(token, now: now) }
+  }
+
   public func snapshot() -> Snapshot {
     .init(
       activeCredits: credits.values.reduce(into: 0) { $0 += $1.available },
@@ -192,6 +244,7 @@ public actor V2ShardAdmissionCommandCreditPool {
     if let pending = pendingReservations[key] {
       return try await pending.value
     }
+    let reservationID = makeInternalID()
     let task: Task<Reservation?, Error> = Task { [database, batchSize] in
       guard
         let grant = try await Self.reserveBatch(
@@ -201,7 +254,7 @@ public actor V2ShardAdmissionCommandCreditPool {
           now: now
         )
       else { return nil }
-      return Reservation(id: UUID(), grant: grant)
+      return Reservation(id: reservationID, grant: grant)
     }
     pendingReservations[key] = task
     defer { pendingReservations.removeValue(forKey: key) }
@@ -213,6 +266,60 @@ public actor V2ShardAdmissionCommandCreditPool {
     return grant
   }
 
+  /// Ensures at least one process-local credit exists for `key`. The common
+  /// path is synchronous; the actor yields only once per durable reservation
+  /// batch. Reentrant callers may consume a shared grant first, so the loop
+  /// deliberately rechecks availability after every suspension.
+  private func replenishIfNeeded(
+    for key: Key,
+    validUntil: Date,
+    now: Date
+  ) async throws -> Acquisition? {
+    while (credits[key]?.available ?? 0) == 0 {
+      let grant = try await reserveBatchIfNeeded(for: key, now: now)
+      guard let grant else {
+        let rejection = try await rejection(for: key, now: now)
+        if case .rateLimited = rejection { capacityRejections += 1 }
+        return rejection
+      }
+      // Another caller can resume first while this actor awaits the shared
+      // reservation task. Never reinstall the same grant or reset tokens that
+      // have already been issued from it.
+      if credits[key]?.reservationID != grant.id {
+        credits[key] = .init(
+          reservationID: grant.id,
+          available: grant.count,
+          inFlight: [],
+          databaseCommandWindowUsed: grant.databaseCommandWindowUsed,
+          validUntil: validUntil
+        )
+      }
+    }
+    return nil
+  }
+
+  /// Consumes one already-reserved credit without any suspension point.
+  private func issueCredit(
+    for key: Key,
+    shardState: ShardAdmissionState,
+    now: Date
+  ) throws -> Acquisition {
+    guard var entry = credits[key], entry.validUntil > now, entry.available > 0 else {
+      throw V2ShardAdmissionCommandCreditError.corruptCreditState
+    }
+    let token = Token(id: makeInternalID(), key: key)
+    entry.available -= 1
+    entry.inFlight.insert(token.id)
+    credits[key] = entry
+    tokenKeys[token.id] = key
+    let effectiveShardState = try effectiveState(
+      from: shardState,
+      key: key,
+      databaseCommandWindowUsed: entry.databaseCommandWindowUsed
+    )
+    return .granted(token: token, effectiveShardState: effectiveShardState)
+  }
+
   private func discardExpiredCredits(now: Date) {
     let expired = credits.filter { $0.value.validUntil <= now }
     for (key, entry) in expired {
@@ -220,6 +327,12 @@ public actor V2ShardAdmissionCommandCreditPool {
       for tokenID in entry.inFlight { tokenKeys.removeValue(forKey: tokenID) }
       credits.removeValue(forKey: key)
     }
+  }
+
+  private func makeInternalID() -> UInt64 {
+    nextInternalID &+= 1
+    precondition(nextInternalID != 0, "shard admission identity exhausted")
+    return nextInternalID
   }
 
   private func effectiveState(
@@ -331,7 +444,7 @@ private struct DatabaseCreditGrant: Decodable, Sendable {
 }
 
 private struct Reservation: Sendable {
-  let id: UUID
+  let id: UInt64
   let grant: DatabaseCreditGrant
 
   var count: Int { grant.count }

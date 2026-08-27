@@ -181,6 +181,16 @@ public actor V2DirectSendPolicyCache {
         return node.value
     }
 
+    /// Resolves one ordered micro-batch with a single actor hop.
+    ///
+    /// Each key still goes through `value(for:)`, so expiry, hit/miss
+    /// accounting and LRU recency are exactly the same as repeated scalar
+    /// lookups. The only removed work is the cross-executor suspension for
+    /// every message in an already-coalesced PostgreSQL batch.
+    func values(for keys: [Key]) -> [Entry?] {
+        keys.map { value(for: $0) }
+    }
+
     public func insert(_ value: Entry, for key: Key) {
         let now = clock.now
         if let existing = entries[key] {

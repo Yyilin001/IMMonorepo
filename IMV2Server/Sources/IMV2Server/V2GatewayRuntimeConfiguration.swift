@@ -282,10 +282,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let syncWakeCoalescingEnabled: Bool
     public let acceptedMessageProjectionBatchEnabled: Bool
     /// Successful command logs are sampled independently from complete
-    /// Prometheus accounting. Rejections, failures and slow commands remain
-    /// unsampled.
+    /// Prometheus accounting. Slow, rejected and failed command logs retain a
+    /// small per-result burst but are bounded so overload cannot turn stdout
+    /// formatting into a positive feedback loop.
     public let commandSuccessLogSamplePermille: Int
     public let commandSlowLogThresholdMilliseconds: Int
+    public let commandDiagnosticLogMaximumPerSecond: Int
     /// Maximum number of co-located target projections committed in one
     /// database transaction. Keeping this small bounds rollback work, lock
     /// hold time and WAL burst size.
@@ -591,6 +593,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         commandSlowLogThresholdMilliseconds = try Self.boundedPositive(
             "IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS", maximum: 300_000, environment: environment
         )
+        commandDiagnosticLogMaximumPerSecond = try Self.boundedPositive(
+            "IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND",
+            maximum: 10_000,
+            environment: environment
+        )
         let rawProjectionWriteMode = Self.optional(
             "IM_V2_MESSAGE_PROJECTION_WRITE_MODE", environment: environment
         )?.lowercased() ?? V2MessageProjectionWriteMode.dual.rawValue
@@ -658,7 +665,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE", environment: environment
         ) ?? "0"
         guard let parsedDirectRoomLogAppendBatchSize = Int(rawDirectRoomLogAppendBatchSize),
-              parsedDirectRoomLogAppendBatchSize == 0 || (2 ... 32).contains(parsedDirectRoomLogAppendBatchSize),
+              parsedDirectRoomLogAppendBatchSize == 0 || (2 ... 128).contains(parsedDirectRoomLogAppendBatchSize),
               parsedDirectRoomLogAppendBatchSize == 0 || (
                   parsedDirectFanoutMode == .roomLog
                       && parsedDirectRoomLogShardCreditBatchSize > 0

@@ -361,7 +361,11 @@ enum IMV2ServerApp {
                     logger: app.logger,
                     successSamplePermille: configuration.commandSuccessLogSamplePermille,
                     slowCommandThresholdMilliseconds:
-                        configuration.commandSlowLogThresholdMilliseconds
+                        configuration.commandSlowLogThresholdMilliseconds,
+                    diagnosticLogLimiter: .init(
+                        maximumPerSecond:
+                            configuration.commandDiagnosticLogMaximumPerSecond
+                    )
                 ),
                 prometheusTelemetry,
             ])
@@ -1635,13 +1639,16 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
     let logger: Logger
     let successSamplePermille: Int
     let slowCommandThresholdMilliseconds: Int
+    let diagnosticLogLimiter: V2CommandDiagnosticLogLimiter
 
     func record(_ event: V2TelemetryEvent) async {
         switch event {
         case .gatewayCommand(let traceID, let command, let outcome, let rejection, let elapsedMilliseconds):
             guard shouldLogGatewayCommand(
                 traceID: traceID,
+                command: command,
                 outcome: outcome,
+                rejection: rejection,
                 elapsedMilliseconds: elapsedMilliseconds
             ) else { return }
             logger.info("im_v2.gateway.command", metadata: [
@@ -1679,21 +1686,30 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
 
     private func shouldLogGatewayCommand(
         traceID: UUID,
+        command: V2GatewayTelemetryCommand,
         outcome: V2GatewayTelemetryOutcome,
+        rejection: V2GatewayTelemetryRejection?,
         elapsedMilliseconds: UInt64
     ) -> Bool {
         guard outcome == .accepted,
               elapsedMilliseconds < UInt64(slowCommandThresholdMilliseconds)
-        else { return true }
+        else {
+            return diagnosticLogLimiter.admit(
+                command: command,
+                outcome: outcome,
+                rejection: rejection
+            )
+        }
         guard successSamplePermille > 0 else { return false }
         guard successSamplePermille < 1_000 else { return true }
-        // Swift's `Hasher` is intentionally randomized per process. FNV over
-        // this already-random trace ID gives deterministic sampling without
-        // making identity or payload data part of the decision.
+        // FNV over the UUID's 16 raw bytes avoids allocating its 36-character
+        // string representation on every accepted command.
         var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in traceID.uuidString.utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
+        withUnsafeBytes(of: traceID.uuid) { bytes in
+            for byte in bytes {
+                hash ^= UInt64(byte)
+                hash &*= 1_099_511_628_211
+            }
         }
         return hash % 1_000 < UInt64(successSamplePermille)
     }

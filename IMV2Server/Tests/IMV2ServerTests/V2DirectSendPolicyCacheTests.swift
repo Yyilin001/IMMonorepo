@@ -46,6 +46,36 @@ struct V2DirectSendPolicyCacheTests {
         #expect(snapshot.misses == 1)
     }
 
+    @Test("batch lookup preserves scalar ordering, accounting and LRU recency")
+    func batchLookupMatchesScalarSemantics() async throws {
+        let cache = V2DirectSendPolicyCache(capacity: 3)
+        let first = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let second = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let missing = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let replacement = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let firstEntry = makeEntry(directPairRevision: 11)
+        let secondEntry = makeEntry(directPairRevision: 12)
+
+        await cache.insert(firstEntry, for: first)
+        await cache.insert(secondEntry, for: second)
+
+        let values = await cache.values(for: [first, missing, second, first])
+        #expect(values == [firstEntry, nil, secondEntry, firstEntry])
+
+        // The final repeated `first` access makes `second` the LRU entry.
+        await cache.insert(makeEntry(directPairRevision: 13), for: missing)
+        await cache.insert(makeEntry(directPairRevision: 14), for: replacement)
+        #expect(await cache.value(for: first) == firstEntry)
+        #expect(await cache.value(for: second) == nil)
+
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.entries == 3)
+        #expect(snapshot.insertions == 4)
+        #expect(snapshot.evictions == 1)
+        #expect(snapshot.hits == 4)
+        #expect(snapshot.misses == 2)
+    }
+
     @Test("reply-marker refinement preserves the durable revision fence")
     func replyMarkerRefinementAdvancesPairRevision() throws {
         let entry = makeEntry(

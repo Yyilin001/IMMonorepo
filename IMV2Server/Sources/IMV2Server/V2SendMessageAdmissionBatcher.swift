@@ -174,12 +174,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private struct Pending {
-        let id: UUID
+        let id: UInt64
         let request: V2RoomWriteRequest
         let continuation: CheckedContinuation<V2SendMessageOutcome, any Error>
         let enqueuedAt: ContinuousClock.Instant
-        var previousID: UUID?
-        var nextID: UUID?
+        var previousID: UInt64?
+        var nextID: UInt64?
     }
 
     private enum ScheduledDelay: Equatable, Sendable {
@@ -192,9 +192,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// Intrusive FIFO storage keeps enqueue and cancellation O(1). Batch
     /// selection still walks the staged requests in arrival order, but it no
     /// longer copies the whole queue once or twice for every transaction.
-    private var pendingByID: [UUID: Pending] = [:]
-    private var pendingHeadID: UUID?
-    private var pendingTailID: UUID?
+    private var pendingByID: [UInt64: Pending] = [:]
+    private var pendingHeadID: UInt64?
+    private var pendingTailID: UInt64?
+    /// Queue node identities never leave this actor or survive a restart.
+    /// A monotonic value is sufficient and avoids asking the OS for secure
+    /// entropy once per message merely to support O(1) cancellation.
+    private var nextPendingID: UInt64 = 0
     private var pendingCount = 0
     private var flushTask: Task<Void, Never>?
     private var inFlightBatchCount = 0
@@ -272,7 +276,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     public func accept(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
         try Task.checkCancellation()
-        let pendingID = UUID()
+        nextPendingID &+= 1
+        precondition(nextPendingID != 0, "pending request identity exhausted")
+        let pendingID = nextPendingID
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 guard pendingCount < configuration.maximumPendingRequests else {
@@ -460,7 +466,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     @discardableResult
-    private func removePending(_ id: UUID) -> Pending? {
+    private func removePending(_ id: UInt64) -> Pending? {
         guard let item = pendingByID.removeValue(forKey: id) else { return nil }
         if let previousID = item.previousID, var previous = pendingByID[previousID] {
             previous.nextID = item.nextID
@@ -493,10 +499,10 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 results = await acceptIndividually(batch)
                 disposition = .singleton
             } else {
-                let eligibility = await store.atomicBatchEligibility(
+                let partitions = await store.atomicBatchPartitions(
                     requests: batch.map(\.request)
                 )
-                guard eligibility.count == batch.count else {
+                guard partitions.count == batch.count else {
                     results = Array(
                         repeating: .failure(V2RoomWriteStoreError.corruptPersistenceState),
                         count: batch.count
@@ -513,7 +519,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 }
                 let partitioned = await executePartitioned(
                     batch: batch,
-                    eligibility: eligibility
+                    partitions: partitions
                 )
                 results = partitioned.results
                 disposition = partitioned.disposition
@@ -528,40 +534,74 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Preserves the atomic-store contract for the compatible subset while
-    /// independently admitting requests that were already known to need the
-    /// normal path.  The batcher has already selected distinct, inactive room
-    /// IDs, so splitting cannot reorder commands within a room.  An atomic
-    /// attempt that is rejected by a durable revision check still rolls back
-    /// as a unit and falls back only for that compatible subset.
+    /// Preserves the atomic-store contract for each compatible subset. Store
+    /// partitions execute serially inside one outer batch because distinct
+    /// room classes can still contend on shared shard-admission rows. An
+    /// atomic attempt rejected by a durable revision check rolls back as a
+    /// unit and falls back only for that compatible subset.
     private func executePartitioned(
         batch: [Pending],
-        eligibility: [Bool]
+        partitions: [V2AtomicRoomWriteBatchPartition?]
     ) async -> PartitionedExecution {
-        let eligibleIndices = eligibility.indices.filter { eligibility[$0] }
-        let individualIndices = eligibility.indices.filter { !eligibility[$0] }
-        let eligible = eligibleIndices.map { batch[$0] }
-        let individual = individualIndices.map { batch[$0] }
+        // A store classifier may observe a cache transition between commands
+        // for the same room. Never let that split one room across concurrent
+        // transactions: preserve the original atomic batch as the safe path.
+        // This is intentionally checked here rather than relying only on the
+        // PostgreSQL classifier, so every store implementation receives the
+        // same ordering guarantee.
+        for index in partitions.indices {
+            for priorIndex in partitions.indices where priorIndex < index {
+                guard batch[priorIndex].request.command.roomID
+                    == batch[index].request.command.roomID else { continue }
+                guard partitions[priorIndex] != partitions[index] else { continue }
+                let execution = await executeAtomic(batch)
+                return .init(
+                    results: execution.results,
+                    disposition: execution.disposition
+                )
+            }
+        }
 
-        guard eligible.count >= 2 else {
+        var indicesByPartition: [V2AtomicRoomWriteBatchPartition: [Int]] = [:]
+        var individualIndices: [Int] = []
+        for (index, partition) in partitions.enumerated() {
+            if let partition {
+                indicesByPartition[partition, default: []].append(index)
+            } else {
+                individualIndices.append(index)
+            }
+        }
+        // A one-item compatibility class cannot use the atomic-store
+        // contract, but it can still run concurrently with the real batches.
+        for indices in indicesByPartition.values where indices.count == 1 {
+            individualIndices.append(indices[0])
+        }
+        let atomicGroups = indicesByPartition.values.filter { $0.count >= 2 }
+        guard !atomicGroups.isEmpty else {
             return .init(
                 results: await acceptIndividually(batch),
-                disposition: .preclassified(
-                    requestCount: individual.count
-                )
+                disposition: .preclassified(requestCount: batch.count)
             )
         }
 
-        async let atomic = executeAtomic(eligible)
-        async let individualResults = acceptIndividually(individual)
-        let (atomicExecution, independentlyAccepted) = await (atomic, individualResults)
+        var atomicExecutions: [([Int], AtomicExecution)] = []
+        atomicExecutions.reserveCapacity(atomicGroups.count)
+        for indices in atomicGroups {
+            let execution = await executeAtomic(indices.map { batch[$0] })
+            atomicExecutions.append((indices, execution))
+        }
+        let independentlyAccepted = await acceptIndividually(
+            individualIndices.map { batch[$0] }
+        )
 
         var results = Array<Result<V2SendMessageOutcome, any Error>?>(
             repeating: nil,
             count: batch.count
         )
-        for (index, result) in zip(eligibleIndices, atomicExecution.results) {
-            results[index] = result
+        for (indices, execution) in atomicExecutions {
+            for (index, result) in zip(indices, execution.results) {
+                results[index] = result
+            }
         }
         for (index, result) in zip(individualIndices, independentlyAccepted) {
             results[index] = result
@@ -570,8 +610,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             results: results.map {
                 $0 ?? .failure(V2RoomWriteStoreError.corruptPersistenceState)
             },
-            disposition: atomicExecution.disposition.withPreclassifiedRequests(
-                individual.count
+            disposition: .multiplePartitions(
+                atomic: atomicExecutions.map { $0.1.disposition },
+                preclassifiedRequestCount: individualIndices.count
             )
         )
     }
@@ -696,6 +737,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         case .partitioned(let atomic, let preclassifiedRequestCount):
             applyAtomicDisposition(atomic)
             atomicPreclassifiedIndividualRequests &+= UInt64(preclassifiedRequestCount)
+        case .multiplePartitions(let atomic, let preclassifiedRequestCount):
+            for disposition in atomic { applyDisposition(disposition) }
+            atomicPreclassifiedIndividualRequests &+= UInt64(preclassifiedRequestCount)
         case .atomicFailed:
             atomicBatchAttempts &+= 1
         case .singleton:
@@ -720,6 +764,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         case fallback(requestCount: Int)
         case preclassified(requestCount: Int)
         case partitioned(atomic: AtomicBatchDisposition, preclassifiedRequestCount: Int)
+        case multiplePartitions(atomic: [BatchDisposition], preclassifiedRequestCount: Int)
         case atomicFailed
         case singleton
 
@@ -736,7 +781,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     atomic: .fallback(requestCount: requestCount),
                     preclassifiedRequestCount: count
                 )
-            case .atomicFailed, .singleton, .preclassified, .partitioned:
+            case .atomicFailed, .singleton, .preclassified, .partitioned,
+                 .multiplePartitions:
                 return self
             }
         }
@@ -770,7 +816,32 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    private func cancelPendingRequest(_ pendingID: UUID) {
+    private func applyDisposition(_ disposition: BatchDisposition) {
+        switch disposition {
+        case .atomicCommitted(let requestCount):
+            atomicBatchAttempts &+= 1
+            atomicBatchCommitted &+= 1
+            atomicBatchCommittedRequests &+= UInt64(requestCount)
+        case .fallback(let requestCount):
+            atomicBatchAttempts &+= 1
+            atomicBatchFallbacks &+= 1
+            atomicBatchFallbackRequests &+= UInt64(requestCount)
+        case .preclassified(let requestCount):
+            atomicPreclassifiedIndividualRequests &+= UInt64(requestCount)
+        case .partitioned(let atomic, let preclassifiedRequestCount):
+            applyAtomicDisposition(atomic)
+            atomicPreclassifiedIndividualRequests &+= UInt64(preclassifiedRequestCount)
+        case .multiplePartitions(let dispositions, let preclassifiedRequestCount):
+            for nested in dispositions { applyDisposition(nested) }
+            atomicPreclassifiedIndividualRequests &+= UInt64(preclassifiedRequestCount)
+        case .atomicFailed:
+            atomicBatchAttempts &+= 1
+        case .singleton:
+            singletonDispatches &+= 1
+        }
+    }
+
+    private func cancelPendingRequest(_ pendingID: UInt64) {
         guard let removed = removePending(pendingID) else {
             // The batch is already executing. Its durable operation keeps the
             // normal at-least-once/idempotent semantics; it cannot safely be

@@ -133,6 +133,12 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(appendBatchConfiguration.directRoomLogAppendLaneCount == 1)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
 
+        var largerAppendBatch = appendBatch
+        largerAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "64"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(largerAppendBatch)
+        ).directRoomLogAppendBatchSize == 64)
+
         var shardedAppendBatch = appendBatch
         shardedAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_LANES"] = "4"
         #expect(try V2GatewayRuntimeConfiguration(
@@ -388,7 +394,7 @@ struct V2GatewayRuntimeConfigurationTests {
         }
 
         var oversizedAppendBatch = credits
-        oversizedAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "33"
+        oversizedAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "129"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"
         )) {
@@ -699,6 +705,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.acceptedMessageProjectionBatchEnabled)
         #expect(configuration.commandSuccessLogSamplePermille == 10)
         #expect(configuration.commandSlowLogThresholdMilliseconds == 250)
+        #expect(configuration.commandDiagnosticLogMaximumPerSecond == 20)
         #expect(configuration.fanoutDeliveryCommitBatchSize == 128)
         #expect(configuration.crossStoreFanoutDeliveryCommitBatchSize == 256)
         #expect(configuration.crossStoreFanoutDeliveryCommitConcurrency == 2)
@@ -1043,6 +1050,7 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED": "true",
             "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE": "10",
             "IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS": "250",
+            "IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND": "20",
             "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "128",
             "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "256",
             "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY": "2",

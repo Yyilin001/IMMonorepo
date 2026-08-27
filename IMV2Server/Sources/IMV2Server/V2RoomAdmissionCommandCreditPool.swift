@@ -14,7 +14,7 @@ import SQLKit
 /// room's shard lease replacement.
 public actor V2RoomAdmissionCommandCreditPool {
   public struct Token: Hashable, Sendable {
-    fileprivate let id: UUID
+    fileprivate let id: UInt64
     fileprivate let key: Key
   }
 
@@ -46,9 +46,9 @@ public actor V2RoomAdmissionCommandCreditPool {
   }
 
   private struct Credits: Sendable {
-    let reservationID: UUID
+    let reservationID: UInt64
     var available: Int
-    var inFlight: Set<UUID>
+    var inFlight: Set<UInt64>
     let validUntil: Date
   }
 
@@ -68,8 +68,9 @@ public actor V2RoomAdmissionCommandCreditPool {
   private let maximumTrackedRooms = 8_192
   private var credits: [Key: Credits] = [:]
   private var heatByRoom: [UUID: Heat] = [:]
-  private var tokenKeys: [UUID: Key] = [:]
+  private var tokenKeys: [UInt64: Key] = [:]
   private var pendingReservations: [Key: Task<Reservation?, Error>] = [:]
+  private var nextInternalID: UInt64 = 0
   private var batchReservations = 0
   private var databaseCreditsReserved = 0
   private var committedCredits = 0
@@ -96,6 +97,13 @@ public actor V2RoomAdmissionCommandCreditPool {
       return false
     }
     return heat.committedCount >= promotionCommitCount
+  }
+
+  /// Resolves one append micro-batch with a single actor entry. This remains
+  /// only a process-local heat hint: every selected command still has to
+  /// acquire a revision-fenced durable room credit after PostgreSQL preflight.
+  func shouldUseCredits(roomIDs: [UUID], now: Date) -> [Bool] {
+    roomIDs.map { shouldUseCredits(roomID: $0, now: now) }
   }
 
   /// Records a successfully committed normal direct append. It is deliberately
@@ -164,7 +172,7 @@ public actor V2RoomAdmissionCommandCreditPool {
     guard var entry = credits[key], entry.validUntil > now, entry.available > 0 else {
       throw V2RoomAdmissionCommandCreditError.corruptCreditState
     }
-    let token = Token(id: UUID(), key: key)
+    let token = Token(id: makeInternalID(), key: key)
     entry.available -= 1
     entry.inFlight.insert(token.id)
     credits[key] = entry
@@ -237,11 +245,12 @@ public actor V2RoomAdmissionCommandCreditPool {
     for key: Key
   ) async throws -> Reservation? {
     if let pending = pendingReservations[key] { return try await pending.value }
+    let reservationID = makeInternalID()
     let task: Task<Reservation?, Error> = Task { [database, batchSize] in
       guard let grant = try await Self.reserveBatch(
         database: database, key: key, batchSize: batchSize
       ) else { return nil }
-      return Reservation(id: UUID(), count: grant)
+      return Reservation(id: reservationID, count: grant)
     }
     pendingReservations[key] = task
     defer { pendingReservations.removeValue(forKey: key) }
@@ -259,6 +268,12 @@ public actor V2RoomAdmissionCommandCreditPool {
       for tokenID in entry.inFlight { tokenKeys.removeValue(forKey: tokenID) }
       credits.removeValue(forKey: key)
     }
+  }
+
+  private func makeInternalID() -> UInt64 {
+    nextInternalID &+= 1
+    precondition(nextInternalID != 0, "room admission identity exhausted")
+    return nextInternalID
   }
 
   private func rejection(for key: Key) async throws -> Acquisition {
@@ -319,7 +334,7 @@ public enum V2RoomAdmissionCommandCreditError: Error, Sendable {
 }
 
 private struct Reservation: Sendable {
-  let id: UUID
+  let id: UInt64
   let count: Int
 }
 

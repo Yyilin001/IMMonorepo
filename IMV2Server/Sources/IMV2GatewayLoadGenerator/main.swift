@@ -274,6 +274,12 @@ private struct LoadScenario: Decodable, Sendable {
     /// before transport teardown. This is not part of a phase's throughput:
     /// its outcome is recorded separately in the report.
     let completionDrainSeconds: Int?
+    /// Keep already-drained connections open for a bounded interval before
+    /// teardown. Partitioned runs use the same value so an early worker cannot
+    /// create a connection-close storm while a peer worker is still draining
+    /// its last protocol responses. This hold never retries or schedules
+    /// messages and therefore cannot hide an unsustainable offered rate.
+    let postDrainHoldSeconds: Int?
     let sendDispatch: ScenarioSendDispatch?
     let maximumQueuedMessagesPerConnection: Int?
     let personas: [Persona]
@@ -285,6 +291,8 @@ private struct LoadScenario: Decodable, Sendable {
               scenario.roomWarmupTimeoutSeconds > 0,
               (scenario.completionDrainSeconds ?? 10) >= 0,
               (scenario.completionDrainSeconds ?? 10) <= 60,
+              (scenario.postDrainHoldSeconds ?? 0) >= 0,
+              (scenario.postDrainHoldSeconds ?? 0) <= 60,
               (scenario.maximumSteadyStateQueuedMessages ?? 0) >= 0,
               (scenario.maximumSteadyStateQueuedMessages ?? 0) <= (scenario.maximumQueuedMessagesPerConnection ?? 0) * 5_000,
               !scenario.personas.isEmpty,
@@ -602,6 +610,13 @@ private struct LoadRun {
                             inFlight: pending.inFlight
                         )
                     }
+                }
+                if scenarioDrain?.drained == true,
+                   let postDrainHoldSeconds = scenario.postDrainHoldSeconds,
+                   postDrainHoldSeconds > 0 {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(postDrainHoldSeconds) * 1_000_000_000
+                    )
                 }
             } else {
                 for second in 1...configuration.holdSeconds {
@@ -1992,6 +2007,7 @@ private struct LoadReport: Encodable {
     let maximumQueuedScenarioMessagesPerConnection: Int?
     let scenarioPhases: [ScenarioPhaseReport]
     let scenarioDrain: ScenarioDrainReport?
+    let scenarioPostDrainHoldSeconds: Int?
     let terminalError: String?
 
     init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?) {
@@ -2062,6 +2078,7 @@ private struct LoadReport: Encodable {
         }
         self.scenarioPhases = scenarioPhases
         self.scenarioDrain = scenarioDrain
+        scenarioPostDrainHoldSeconds = configuration.scenario?.postDrainHoldSeconds
         self.terminalError = terminalError.map(String.init(describing:))
     }
 

@@ -1,9 +1,73 @@
 import Foundation
+import Synchronization
 @testable import IMV2Server
 import Testing
 
 @Suite("V2 Prometheus telemetry exporter")
 struct V2PrometheusTelemetrySinkTests {
+    @Test("command diagnostic logging keeps an exact bounded burst per result key")
+    func boundsCommandDiagnosticLogging() {
+        let now = Mutex<UInt64>(1_000_000_000)
+        let limiter = V2CommandDiagnosticLogLimiter(
+            maximumPerSecond: 2,
+            nowNanoseconds: { now.withLock { $0 } }
+        )
+
+        #expect(limiter.admit(
+            command: .sendMessage,
+            outcome: .rejected,
+            rejection: .serverBusy
+        ))
+        #expect(limiter.admit(
+            command: .sendMessage,
+            outcome: .rejected,
+            rejection: .serverBusy
+        ))
+        #expect(!limiter.admit(
+            command: .sendMessage,
+            outcome: .rejected,
+            rejection: .serverBusy
+        ))
+        #expect(limiter.admit(
+            command: .sendMessage,
+            outcome: .rejected,
+            rejection: .rateLimited
+        ))
+
+        now.withLock { $0 = 2_000_000_000 }
+        #expect(limiter.admit(
+            command: .sendMessage,
+            outcome: .rejected,
+            rejection: .serverBusy
+        ))
+    }
+
+    @Test("command diagnostic logging remains bounded under concurrent callers")
+    func serializesConcurrentCommandDiagnosticLogging() async {
+        let limiter = V2CommandDiagnosticLogLimiter(
+            maximumPerSecond: 20,
+            nowNanoseconds: { 1_000_000_000 }
+        )
+        let admitted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<200 {
+                group.addTask {
+                    limiter.admit(
+                        command: .sendMessage,
+                        outcome: .rejected,
+                        rejection: .serverBusy
+                    )
+                }
+            }
+            var count = 0
+            for await result in group where result {
+                count += 1
+            }
+            return count
+        }
+
+        #expect(admitted == 20)
+    }
+
     @Test("exporter aggregates only closed labels and never renders trace IDs")
     func aggregatesPrivacySafeMetrics() async throws {
         let sink = V2PrometheusTelemetrySink()
@@ -48,6 +112,44 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(!metrics.contains(trace.uuidString))
         #expect(!metrics.contains("room_id"))
         #expect(!metrics.contains("user_id"))
+    }
+
+    @Test("exporter keeps exact counters under concurrent gateway recording")
+    func aggregatesConcurrentGatewayCommandsExactly() async {
+        let sink = V2PrometheusTelemetrySink()
+        let taskCount = 100
+        let recordsPerTask = 100
+
+        await withTaskGroup(of: Void.self) { group in
+            for task in 0..<taskCount {
+                group.addTask {
+                    for record in 0..<recordsPerTask {
+                        await sink.record(.gatewayCommand(
+                            traceID: UUID(
+                                uuidString: String(
+                                    format: "00000000-0000-0000-%04X-%012X",
+                                    task,
+                                    record
+                                )
+                            )!,
+                            command: .sendMessage,
+                            outcome: .accepted,
+                            rejection: nil,
+                            elapsedMilliseconds: 1
+                        ))
+                    }
+                }
+            }
+        }
+
+        let metrics = await sink.renderPrometheus()
+        let expected = taskCount * recordsPerTask
+        #expect(metrics.contains(
+            "im_v2_gateway_commands_total{command=\"send_message\",outcome=\"accepted\",rejection=\"none\"} \(expected)"
+        ))
+        #expect(metrics.contains(
+            "im_v2_gateway_command_duration_milliseconds_sum{command=\"send_message\",outcome=\"accepted\",rejection=\"none\"} \(expected)"
+        ))
     }
 
     @Test("transport metrics retain only aggregate queue pressure and closed closure reasons")

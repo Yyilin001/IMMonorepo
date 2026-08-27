@@ -84,8 +84,6 @@ struct V2DirectRoomLogFastAppendCacheTests {
             ),
             roomShardID: "rooms-load-00",
             capacityProfileID: "loadtest-v17",
-            expectedRoomSequence: sequence,
-            expectedTimelineSequence: sequence,
             membershipRevision: 1,
             shardState: ShardAdmissionState(
                 lease: ShardAdmissionLease(

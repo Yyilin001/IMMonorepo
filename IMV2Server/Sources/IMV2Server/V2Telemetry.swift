@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 import Synchronization
 
 /// A deliberately small observability boundary. Its fields are enumerated or
@@ -158,7 +159,7 @@ public func v2RenderPrometheusGatewayTransportMetrics(_ snapshot: V2GatewayTrans
     return lines.joined(separator: "\n") + "\n"
 }
 
-public enum V2GatewayTelemetryCommand: String, CaseIterable, Equatable, Sendable {
+public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable {
     case sendMessage = "send_message"
     case changeRoomMembership = "change_room_membership"
     case withdrawMessage = "withdraw_message"
@@ -183,7 +184,7 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Equatable, Sendable
     case unsupported = "unsupported"
 }
 
-public enum V2GatewayTelemetryOutcome: String, CaseIterable, Equatable, Sendable {
+public enum V2GatewayTelemetryOutcome: String, CaseIterable, Hashable, Sendable {
     case accepted
     case rejected
     case failed
@@ -191,7 +192,7 @@ public enum V2GatewayTelemetryOutcome: String, CaseIterable, Equatable, Sendable
 
 /// Error codes are intentionally a closed, protocol-level vocabulary. The
 /// server must not use exception descriptions as telemetry dimensions.
-public enum V2GatewayTelemetryRejection: String, CaseIterable, Equatable, Sendable {
+public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendable {
     case invalidArgument = "INVALID_ARGUMENT"
     case forbidden = "FORBIDDEN"
     case notFound = "NOT_FOUND"
@@ -248,6 +249,73 @@ public enum V2FanoutTelemetryStage: String, CaseIterable, Equatable, Sendable {
     case pipeline
 }
 
+/// Bounds repeated command diagnostics without weakening exact metrics.
+///
+/// Expected overload responses and slow accepts can arrive thousands of times
+/// per second. Writing every occurrence to a synchronous stdout handler burns
+/// the CPU needed to drain the queue and creates a positive feedback loop.
+/// This limiter admits the first bounded burst independently for every closed
+/// command/result key in each one-second window. Prometheus still records all
+/// events, so the log remains a source of representative trace IDs rather than
+/// an unreliable counter.
+public final class V2CommandDiagnosticLogLimiter: Sendable {
+    private struct Key: Hashable, Sendable {
+        let command: V2GatewayTelemetryCommand
+        let outcome: V2GatewayTelemetryOutcome
+        let rejection: V2GatewayTelemetryRejection?
+    }
+
+    private struct Bucket: Sendable {
+        var window: UInt64
+        var admitted: Int
+    }
+
+    private struct State: Sendable {
+        var buckets: [Key: Bucket] = [:]
+    }
+
+    private let maximumPerSecond: Int
+    private let nowNanoseconds: @Sendable () -> UInt64
+    private let state = Mutex(State())
+
+    public init(maximumPerSecond: Int) {
+        precondition(maximumPerSecond > 0)
+        self.maximumPerSecond = maximumPerSecond
+        nowNanoseconds = { DispatchTime.now().uptimeNanoseconds }
+    }
+
+    init(
+        maximumPerSecond: Int,
+        nowNanoseconds: @escaping @Sendable () -> UInt64
+    ) {
+        precondition(maximumPerSecond > 0)
+        self.maximumPerSecond = maximumPerSecond
+        self.nowNanoseconds = nowNanoseconds
+    }
+
+    public func admit(
+        command: V2GatewayTelemetryCommand,
+        outcome: V2GatewayTelemetryOutcome,
+        rejection: V2GatewayTelemetryRejection?
+    ) -> Bool {
+        let window = nowNanoseconds() / 1_000_000_000
+        let key = Key(command: command, outcome: outcome, rejection: rejection)
+        return state.withLock { state in
+            var bucket = state.buckets[key] ?? .init(window: window, admitted: 0)
+            if bucket.window != window {
+                bucket = .init(window: window, admitted: 0)
+            }
+            guard bucket.admitted < maximumPerSecond else {
+                state.buckets[key] = bucket
+                return false
+            }
+            bucket.admitted += 1
+            state.buckets[key] = bucket
+            return true
+        }
+    }
+}
+
 /// Sends the same privacy-reviewed event to several sinks. This keeps the
 /// production structured log and the metrics aggregate in lockstep without
 /// giving either sink access to request payloads or identifiers.
@@ -269,7 +337,15 @@ public struct V2CompositeTelemetrySink: V2TelemetrySink {
 /// only the established telemetry event vocabulary: correlation IDs are
 /// discarded, and no user, room, device, token, payload, URL, or exception
 /// text can become a metric label.
-public actor V2PrometheusTelemetrySink: V2TelemetrySink {
+/// A finite-cardinality metrics accumulator shared by every gateway command.
+///
+/// Command telemetry is a very hot path. An actor made every command suspend
+/// and enqueue on one executor even though the mutation below is only a few
+/// integer additions. A short `Mutex` critical section preserves exact
+/// counters while avoiding that scheduler hop. Rendering first takes a value
+/// snapshot and formats outside the lock, so a scrape cannot stall command
+/// acceptance while it builds the Prometheus text document.
+public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
     private struct GatewayKey: Hashable, Sendable {
         let command: V2GatewayTelemetryCommand
         let outcome: V2GatewayTelemetryOutcome
@@ -286,62 +362,72 @@ public actor V2PrometheusTelemetrySink: V2TelemetrySink {
         }
     }
 
-    private var gateway: [GatewayKey: CounterAndDuration] = [:]
-    private var fanoutRuns = CounterAndDuration()
-    private var fanoutRelayRuns = CounterAndDuration()
-    private var fanoutDeliveryRuns = CounterAndDuration()
-    private var fanoutFailures: [V2FanoutTelemetryStage: UInt64] = [:]
-    private var fanoutOutboxClaimed: UInt64 = 0
-    private var fanoutOutboxPublished: UInt64 = 0
-    private var fanoutOutboxReleased: UInt64 = 0
-    private var fanoutOutboxPaused: UInt64 = 0
-    private var fanoutDeliveriesClaimed: UInt64 = 0
-    private var fanoutDeliveriesCommitted: UInt64 = 0
-    private var fanoutDeliveriesStale: UInt64 = 0
-    private var fanoutDeliveriesStaleRoute: UInt64 = 0
-    private var fanoutDeliveriesReleased: UInt64 = 0
-    private var fanoutDeliveriesPaused: UInt64 = 0
+    private struct Storage: Sendable {
+        var gateway: [GatewayKey: CounterAndDuration] = [:]
+        var fanoutRuns = CounterAndDuration()
+        var fanoutRelayRuns = CounterAndDuration()
+        var fanoutDeliveryRuns = CounterAndDuration()
+        var fanoutFailures: [V2FanoutTelemetryStage: UInt64] = [:]
+        var fanoutOutboxClaimed: UInt64 = 0
+        var fanoutOutboxPublished: UInt64 = 0
+        var fanoutOutboxReleased: UInt64 = 0
+        var fanoutOutboxPaused: UInt64 = 0
+        var fanoutDeliveriesClaimed: UInt64 = 0
+        var fanoutDeliveriesCommitted: UInt64 = 0
+        var fanoutDeliveriesStale: UInt64 = 0
+        var fanoutDeliveriesStaleRoute: UInt64 = 0
+        var fanoutDeliveriesReleased: UInt64 = 0
+        var fanoutDeliveriesPaused: UInt64 = 0
+    }
+
+    private let storage = Mutex(Storage())
 
     public init() {}
 
-    public func record(_ event: V2TelemetryEvent) {
-        switch event {
-        case let .gatewayCommand(_, command, outcome, rejection, elapsedMilliseconds):
-            let key = GatewayKey(command: command, outcome: outcome, rejection: rejection)
-            var aggregate = gateway[key, default: .init()]
-            aggregate.add(elapsedMilliseconds: elapsedMilliseconds)
-            gateway[key] = aggregate
+    public func record(_ event: V2TelemetryEvent) async {
+        storage.withLock { storage in
+            switch event {
+            case let .gatewayCommand(_, command, outcome, rejection, elapsedMilliseconds):
+                let key = GatewayKey(command: command, outcome: outcome, rejection: rejection)
+                var aggregate = storage.gateway[key, default: .init()]
+                aggregate.add(elapsedMilliseconds: elapsedMilliseconds)
+                storage.gateway[key] = aggregate
 
-        case let .fanoutProgress(_, claimedOutboxRows, publishedOutboxRows, releasedOutboxRows, pausedOutboxRows, claimedDeliveries, committedDeliveries, staleDeliveries, staleRouteDeliveries, releasedDeliveries, pausedDeliveries, relayElapsedMilliseconds, deliveryElapsedMilliseconds, elapsedMilliseconds):
-            fanoutRuns.add(elapsedMilliseconds: elapsedMilliseconds)
-            fanoutRelayRuns.add(elapsedMilliseconds: relayElapsedMilliseconds)
-            fanoutDeliveryRuns.add(elapsedMilliseconds: deliveryElapsedMilliseconds)
-            fanoutOutboxClaimed = v2SaturatingAdd(fanoutOutboxClaimed, v2NonNegative(claimedOutboxRows))
-            fanoutOutboxPublished = v2SaturatingAdd(fanoutOutboxPublished, v2NonNegative(publishedOutboxRows))
-            fanoutOutboxReleased = v2SaturatingAdd(fanoutOutboxReleased, v2NonNegative(releasedOutboxRows))
-            fanoutOutboxPaused = v2SaturatingAdd(fanoutOutboxPaused, v2NonNegative(pausedOutboxRows))
-            fanoutDeliveriesClaimed = v2SaturatingAdd(fanoutDeliveriesClaimed, v2NonNegative(claimedDeliveries))
-            fanoutDeliveriesCommitted = v2SaturatingAdd(fanoutDeliveriesCommitted, v2NonNegative(committedDeliveries))
-            fanoutDeliveriesStale = v2SaturatingAdd(fanoutDeliveriesStale, v2NonNegative(staleDeliveries))
-            fanoutDeliveriesStaleRoute = v2SaturatingAdd(fanoutDeliveriesStaleRoute, v2NonNegative(staleRouteDeliveries))
-            fanoutDeliveriesReleased = v2SaturatingAdd(fanoutDeliveriesReleased, v2NonNegative(releasedDeliveries))
-            fanoutDeliveriesPaused = v2SaturatingAdd(fanoutDeliveriesPaused, v2NonNegative(pausedDeliveries))
+            case let .fanoutProgress(_, claimedOutboxRows, publishedOutboxRows, releasedOutboxRows, pausedOutboxRows, claimedDeliveries, committedDeliveries, staleDeliveries, staleRouteDeliveries, releasedDeliveries, pausedDeliveries, relayElapsedMilliseconds, deliveryElapsedMilliseconds, elapsedMilliseconds):
+                storage.fanoutRuns.add(elapsedMilliseconds: elapsedMilliseconds)
+                storage.fanoutRelayRuns.add(elapsedMilliseconds: relayElapsedMilliseconds)
+                storage.fanoutDeliveryRuns.add(elapsedMilliseconds: deliveryElapsedMilliseconds)
+                storage.fanoutOutboxClaimed = v2SaturatingAdd(storage.fanoutOutboxClaimed, v2NonNegative(claimedOutboxRows))
+                storage.fanoutOutboxPublished = v2SaturatingAdd(storage.fanoutOutboxPublished, v2NonNegative(publishedOutboxRows))
+                storage.fanoutOutboxReleased = v2SaturatingAdd(storage.fanoutOutboxReleased, v2NonNegative(releasedOutboxRows))
+                storage.fanoutOutboxPaused = v2SaturatingAdd(storage.fanoutOutboxPaused, v2NonNegative(pausedOutboxRows))
+                storage.fanoutDeliveriesClaimed = v2SaturatingAdd(storage.fanoutDeliveriesClaimed, v2NonNegative(claimedDeliveries))
+                storage.fanoutDeliveriesCommitted = v2SaturatingAdd(storage.fanoutDeliveriesCommitted, v2NonNegative(committedDeliveries))
+                storage.fanoutDeliveriesStale = v2SaturatingAdd(storage.fanoutDeliveriesStale, v2NonNegative(staleDeliveries))
+                storage.fanoutDeliveriesStaleRoute = v2SaturatingAdd(storage.fanoutDeliveriesStaleRoute, v2NonNegative(staleRouteDeliveries))
+                storage.fanoutDeliveriesReleased = v2SaturatingAdd(storage.fanoutDeliveriesReleased, v2NonNegative(releasedDeliveries))
+                storage.fanoutDeliveriesPaused = v2SaturatingAdd(storage.fanoutDeliveriesPaused, v2NonNegative(pausedDeliveries))
 
-        case let .fanoutFailure(_, stage, _):
-            fanoutFailures[stage] = v2SaturatingAdd(fanoutFailures[stage, default: 0], 1)
+            case let .fanoutFailure(_, stage, _):
+                storage.fanoutFailures[stage] = v2SaturatingAdd(
+                    storage.fanoutFailures[stage, default: 0],
+                    1
+                )
+            }
         }
     }
 
     /// Produces a stable Prometheus 0.0.4 text document suitable for a
     /// private metrics listener. Callers must not expose it on the public
     /// media edge or realtime gateway listener.
-    public func renderPrometheus() -> String {
+    public func renderPrometheus() async -> String {
+        let storage = storage.withLock { $0 }
         var lines: [String] = [
             "# HELP im_v2_gateway_commands_total Gateway commands by closed result vocabulary.",
             "# TYPE im_v2_gateway_commands_total counter",
         ]
-        for key in gateway.keys.sorted(by: v2GatewayMetricOrder) {
-            let aggregate = gateway[key]!
+        for key in storage.gateway.keys.sorted(by: v2GatewayMetricOrder) {
+            let aggregate = storage.gateway[key]!
             let rejection = key.rejection?.rawValue ?? "none"
             let labels = "command=\"\(key.command.rawValue)\",outcome=\"\(key.outcome.rawValue)\",rejection=\"\(rejection)\""
             lines.append("im_v2_gateway_commands_total{\(labels)} \(aggregate.count)")
@@ -352,36 +438,36 @@ public actor V2PrometheusTelemetrySink: V2TelemetrySink {
         lines += [
             "# HELP im_v2_fanout_runs_total Durable fan-out pipeline runs.",
             "# TYPE im_v2_fanout_runs_total counter",
-            "im_v2_fanout_runs_total \(fanoutRuns.count)",
-            "im_v2_fanout_run_duration_milliseconds_sum \(fanoutRuns.elapsedMilliseconds)",
-            "im_v2_fanout_run_duration_milliseconds_count \(fanoutRuns.count)",
+            "im_v2_fanout_runs_total \(storage.fanoutRuns.count)",
+            "im_v2_fanout_run_duration_milliseconds_sum \(storage.fanoutRuns.elapsedMilliseconds)",
+            "im_v2_fanout_run_duration_milliseconds_count \(storage.fanoutRuns.count)",
             "# HELP im_v2_fanout_relay_duration_milliseconds Aggregate outbox relay phase duration.",
             "# TYPE im_v2_fanout_relay_duration_milliseconds summary",
-            "im_v2_fanout_relay_duration_milliseconds_sum \(fanoutRelayRuns.elapsedMilliseconds)",
-            "im_v2_fanout_relay_duration_milliseconds_count \(fanoutRelayRuns.count)",
+            "im_v2_fanout_relay_duration_milliseconds_sum \(storage.fanoutRelayRuns.elapsedMilliseconds)",
+            "im_v2_fanout_relay_duration_milliseconds_count \(storage.fanoutRelayRuns.count)",
             "# HELP im_v2_fanout_delivery_duration_milliseconds Aggregate delivery phase duration.",
             "# TYPE im_v2_fanout_delivery_duration_milliseconds summary",
-            "im_v2_fanout_delivery_duration_milliseconds_sum \(fanoutDeliveryRuns.elapsedMilliseconds)",
-            "im_v2_fanout_delivery_duration_milliseconds_count \(fanoutDeliveryRuns.count)",
+            "im_v2_fanout_delivery_duration_milliseconds_sum \(storage.fanoutDeliveryRuns.elapsedMilliseconds)",
+            "im_v2_fanout_delivery_duration_milliseconds_count \(storage.fanoutDeliveryRuns.count)",
             "# HELP im_v2_fanout_outbox_rows_total Aggregate durable outbox progression.",
             "# TYPE im_v2_fanout_outbox_rows_total counter",
-            "im_v2_fanout_outbox_rows_total{state=\"claimed\"} \(fanoutOutboxClaimed)",
-            "im_v2_fanout_outbox_rows_total{state=\"published\"} \(fanoutOutboxPublished)",
-            "im_v2_fanout_outbox_rows_total{state=\"released\"} \(fanoutOutboxReleased)",
-            "im_v2_fanout_outbox_rows_total{state=\"paused\"} \(fanoutOutboxPaused)",
+            "im_v2_fanout_outbox_rows_total{state=\"claimed\"} \(storage.fanoutOutboxClaimed)",
+            "im_v2_fanout_outbox_rows_total{state=\"published\"} \(storage.fanoutOutboxPublished)",
+            "im_v2_fanout_outbox_rows_total{state=\"released\"} \(storage.fanoutOutboxReleased)",
+            "im_v2_fanout_outbox_rows_total{state=\"paused\"} \(storage.fanoutOutboxPaused)",
             "# HELP im_v2_fanout_deliveries_total Aggregate delivery progression.",
             "# TYPE im_v2_fanout_deliveries_total counter",
-            "im_v2_fanout_deliveries_total{state=\"claimed\"} \(fanoutDeliveriesClaimed)",
-            "im_v2_fanout_deliveries_total{state=\"committed\"} \(fanoutDeliveriesCommitted)",
-            "im_v2_fanout_deliveries_total{state=\"stale\"} \(fanoutDeliveriesStale)",
-            "im_v2_fanout_deliveries_total{state=\"stale_route\"} \(fanoutDeliveriesStaleRoute)",
-            "im_v2_fanout_deliveries_total{state=\"released\"} \(fanoutDeliveriesReleased)",
-            "im_v2_fanout_deliveries_total{state=\"paused\"} \(fanoutDeliveriesPaused)",
+            "im_v2_fanout_deliveries_total{state=\"claimed\"} \(storage.fanoutDeliveriesClaimed)",
+            "im_v2_fanout_deliveries_total{state=\"committed\"} \(storage.fanoutDeliveriesCommitted)",
+            "im_v2_fanout_deliveries_total{state=\"stale\"} \(storage.fanoutDeliveriesStale)",
+            "im_v2_fanout_deliveries_total{state=\"stale_route\"} \(storage.fanoutDeliveriesStaleRoute)",
+            "im_v2_fanout_deliveries_total{state=\"released\"} \(storage.fanoutDeliveriesReleased)",
+            "im_v2_fanout_deliveries_total{state=\"paused\"} \(storage.fanoutDeliveriesPaused)",
             "# HELP im_v2_fanout_failures_total Fan-out failures by closed stage vocabulary.",
             "# TYPE im_v2_fanout_failures_total counter",
         ]
         for stage in V2FanoutTelemetryStage.allCases {
-            lines.append("im_v2_fanout_failures_total{stage=\"\(stage.rawValue)\"} \(fanoutFailures[stage, default: 0])")
+            lines.append("im_v2_fanout_failures_total{stage=\"\(stage.rawValue)\"} \(storage.fanoutFailures[stage, default: 0])")
         }
         return lines.joined(separator: "\n") + "\n"
     }

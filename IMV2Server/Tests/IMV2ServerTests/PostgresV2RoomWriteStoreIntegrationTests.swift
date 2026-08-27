@@ -9274,6 +9274,69 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // room batch at this point.
             #expect(hotRoomAdmission.commandWindowUsed == 7)
             #expect(hotRoomAdmission.fanoutWindowUsed == 0)
+
+            // Force a cache-cold, shard-only set append so the store must use
+            // the batched actor acquisition path rather than the conditional
+            // fast append. Both independent rooms retain the complete durable
+            // authorization and projection graph.
+            let shardOnlyWriter = PostgresV2RoomWriteStore(
+                database: app.db(.psql),
+                strangerMessagePolicy: try .init(
+                    maximumMessagesPerWindow: 10,
+                    window: 86_400
+                ),
+                shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                contentReviewMode: .disabled,
+                directFanoutMode: .roomLog,
+                directRoomLogAdmissionMode: .shardOnly,
+                directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache(),
+                shardAdmissionCommandCreditPool: shardCredits
+            )
+            let shardOnlyBatch = try await shardOnlyWriter.acceptAtomically(requests: [
+                .init(
+                    command: try .init(
+                        roomID: room.roomID,
+                        senderUserID: senderID,
+                        clientMessageID: try .init(
+                            "00000000-0000-0000-0000-00000000c060"
+                        ),
+                        text: "分片批量额度第一条",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c061"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c062"),
+                        planID: .init("00000000-0000-0000-0000-00000000c063")
+                    ),
+                    now: now
+                ),
+                .init(
+                    command: try .init(
+                        roomID: secondRoom.roomID,
+                        senderUserID: senderID,
+                        clientMessageID: try .init(
+                            "00000000-0000-0000-0000-00000000c064"
+                        ),
+                        text: "分片批量额度第二条",
+                        limits: try .init(maxUTF8Bytes: 64)
+                    ),
+                    capacityProfile: profile,
+                    identifiers: try .init(
+                        messageID: .init("00000000-0000-0000-0000-00000000c065"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c066"),
+                        planID: .init("00000000-0000-0000-0000-00000000c067")
+                    ),
+                    now: now
+                ),
+            ])
+            #expect(shardOnlyBatch.count == 2)
+            #expect(shardOnlyBatch.allSatisfy {
+                if case .accepted(let message) = $0 {
+                    return message.usesRoomEventLog
+                }
+                return false
+            })
             try await sql.raw("""
                 DELETE FROM im_v2.user_relationships
                 WHERE lower_user_id = \(bind: senderUUID)
@@ -9339,7 +9402,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 accepted.roomSequence + 4,
                 accepted.roomSequence + 5,
                 accepted.roomSequence + 6,
-                accepted.roomSequence + 7
+                accepted.roomSequence + 7,
+                accepted.roomSequence + 8
             ])
             #expect(recipientPage.events == senderPage.events)
             #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
@@ -9393,8 +9457,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
             }
 
-            #expect(try await count("im_v2.messages", on: sql) == 12)
-            // Eleven ordinary direct messages are materialized from the
+            #expect(try await count("im_v2.messages", on: sql) == 14)
+            // Thirteen ordinary direct messages are materialized from the
             // message row itself. The reviewed message intentionally retains
             // the complete room-event write graph.
             #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
@@ -9421,14 +9485,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'rooms-primary' AND capacity_profile_id = 'standard'
                 """).first(decoding: CapacityRow.self))
-            // Twelve accepted commands reserve seven database credit batches;
+            // Fourteen accepted commands reserve eight database credit batches;
             // the cold and warm room-log appends still preserve the
             // same conservatively durable command capacity.
-            #expect(creditedAdmission.commandWindowUsed == 14)
+            #expect(creditedAdmission.commandWindowUsed == 16)
             let creditSnapshot = await shardCredits.snapshot()
-            #expect(creditSnapshot.batchReservations == 7)
-            #expect(creditSnapshot.databaseCreditsReserved == 14)
-            #expect(creditSnapshot.committedCredits == 12)
+            #expect(creditSnapshot.batchReservations == 8)
+            #expect(creditSnapshot.databaseCreditsReserved == 16)
+            #expect(creditSnapshot.committedCredits == 14)
 
             let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
@@ -9526,6 +9590,80 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 batchReservations: 1, databaseCreditsReserved: 2,
                 committedCredits: 2, returnedCredits: 0,
                 expiredCreditsDiscarded: 0, capacityRejections: 1
+            ))
+
+            // A micro-batch crosses the credit actor once but preserves the
+            // exact per-request result order. Returning the granted prefix is
+            // process-local only; the durable row remains conservatively
+            // charged and can never be oversold.
+            let batchLeaseID = UUID(
+                uuidString: "00000000-0000-0000-0000-00000000c102"
+            )!
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-credit-batch-test', 'credit-batch-test', \(bind: batchLeaseID), 1,
+                        \(bind: now.addingTimeInterval(600)), 2, 10, 10, 10)
+                """).run()
+            let batchState = try ShardAdmissionState(
+                lease: .init(
+                    id: try .init(batchLeaseID.uuidString), generation: 1,
+                    validUntil: now.addingTimeInterval(600),
+                    commandWindow: try .init(limit: 2),
+                    fanoutWindow: try .init(limit: 10),
+                    maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10
+                ),
+                outstandingFanoutUnits: 0, outstandingPlans: 0
+            )
+            let batchCredits = V2ShardAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 2
+            )
+            let batchRequest = V2ShardAdmissionCommandCreditPool.BatchRequest(
+                roomShardID: "rooms-credit-batch-test",
+                capacityProfileID: "credit-batch-test",
+                shardState: batchState,
+                now: now
+            )
+            let firstBatch = try await batchCredits.acquire(
+                [batchRequest, batchRequest, batchRequest]
+            )
+            #expect(firstBatch.count == 3)
+            let grantedPrefix: [V2ShardAdmissionCommandCreditPool.Token] =
+                firstBatch.compactMap { acquisition in
+                guard case .granted(let token, _) = acquisition else { return nil }
+                return token
+            }
+            #expect(grantedPrefix.count == 2)
+            guard case .rateLimited = firstBatch[2] else {
+                Issue.record("the batched credit pool oversold the shard window")
+                return
+            }
+            await batchCredits.release(grantedPrefix, now: now)
+
+            let reusedBatch = try await batchCredits.acquire([batchRequest, batchRequest])
+            let reusedTokens: [V2ShardAdmissionCommandCreditPool.Token] =
+                reusedBatch.compactMap { acquisition in
+                guard case .granted(let token, _) = acquisition else { return nil }
+                return token
+            }
+            #expect(reusedTokens.count == 2)
+            await batchCredits.commit(reusedTokens)
+            guard case .rateLimited = try await batchCredits.acquire(
+                roomShardID: "rooms-credit-batch-test",
+                capacityProfileID: "credit-batch-test",
+                shardState: batchState,
+                now: now
+            ) else {
+                Issue.record("returned batch credits were durably oversold")
+                return
+            }
+            #expect(await batchCredits.snapshot() == .init(
+                activeCredits: 0, inFlightCredits: 0,
+                batchReservations: 1, databaseCreditsReserved: 2,
+                committedCredits: 2, returnedCredits: 2,
+                expiredCreditsDiscarded: 0, capacityRejections: 2
             ))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()

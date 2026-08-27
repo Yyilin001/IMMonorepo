@@ -1,0 +1,54 @@
+{
+  "name": "online-50000-mixed-gradient-500-to-5000-v1",
+  "seed": 20260826,
+  "roomWarmupTimeoutSeconds": 900,
+  "completionDrainSeconds": 30,
+  "postDrainHoldSeconds": 10,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 50,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 4,
+  "personas": [
+    {
+      "name": "reader",
+      "share": 0.45,
+      "sendWeight": 0.1,
+      "roomLogReadWeight": 1.0,
+      "syncPullWeight": 1.0
+    },
+    {
+      "name": "regular_sender",
+      "share": 0.35,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 1.0,
+      "syncPullWeight": 0.5
+    },
+    {
+      "name": "high_frequency_sender",
+      "share": 0.15,
+      "sendWeight": 4.0,
+      "roomLogReadWeight": 0.5,
+      "syncPullWeight": 0.25
+    },
+    {
+      "name": "heavy_sender",
+      "share": 0.05,
+      "sendWeight": 10.0,
+      "roomLogReadWeight": 0.25,
+      "syncPullWeight": 0.1
+    }
+  ],
+  "phases": [
+    {"name":"barrier","durationSeconds":30,"messagesPerSecond":0,"roomLogReadsPerSecond":0,"syncPullsPerSecond":0,"reconnectPercentPerMinute":0},
+    {"name":"rate-0500","durationSeconds":90,"messagesPerSecond":500,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-1000","durationSeconds":90,"messagesPerSecond":1000,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-1500","durationSeconds":90,"messagesPerSecond":1500,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-2000","durationSeconds":90,"messagesPerSecond":2000,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-2500","durationSeconds":90,"messagesPerSecond":2500,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-3000","durationSeconds":90,"messagesPerSecond":3000,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-3500","durationSeconds":90,"messagesPerSecond":3500,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-4000","durationSeconds":90,"messagesPerSecond":4000,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-4500","durationSeconds":90,"messagesPerSecond":4500,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05},
+    {"name":"rate-5000","durationSeconds":90,"messagesPerSecond":5000,"roomLogReadsPerSecond":0,"syncPullsPerSecond":100,"reconnectPercentPerMinute":0.05}
+  ]
+}

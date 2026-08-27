@@ -1,5 +1,7 @@
+import Crypto
 import Foundation
 import IMV2Core
+import Synchronization
 
 /// Values that are available only after a transport has authenticated the
 /// caller.  The public protocol decoder must never be allowed to supply the
@@ -132,6 +134,14 @@ public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
         requests: [V2RoomWriteRequest]
     ) async -> [Bool]
 
+    /// Advisory compatibility key for each request. Equal non-nil keys may
+    /// share one atomic store call; different keys remain independently
+    /// batched instead of forcing the faster class through the slower SQL
+    /// graph. `nil` retains the ordinary one-command path.
+    func atomicBatchPartitions(
+        requests: [V2RoomWriteRequest]
+    ) async -> [V2AtomicRoomWriteBatchPartition?]
+
     func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome]
@@ -146,6 +156,28 @@ public extension V2AtomicRoomWriteBatchStore {
     ) async -> [Bool] {
         Array(repeating: true, count: requests.count)
     }
+
+
+    func atomicBatchPartitions(
+        requests: [V2RoomWriteRequest]
+    ) async -> [V2AtomicRoomWriteBatchPartition?] {
+        let eligibility = await atomicBatchEligibility(requests: requests)
+        guard eligibility.count == requests.count else {
+            return Array(repeating: nil, count: requests.count)
+        }
+        return eligibility.map { $0 ? .standard : nil }
+    }
+}
+
+/// Opaque, store-defined compatibility class. It never represents an
+/// authorization result; PostgreSQL remains authoritative for every class.
+public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable {
+    public static let standard = Self(rawValue: 0)
+    public static let accelerated = Self(rawValue: 1)
+
+    public let rawValue: UInt8
+
+    public init(rawValue: UInt8) { self.rawValue = rawValue }
 }
 
 /// A batch implementation may decline a shape that cannot preserve the
@@ -188,19 +220,91 @@ public protocol V2SendMessageAdmission: Sendable {
 }
 
 public struct V2AcceptanceIDFactory: Sendable {
-    private let makeUUID: @Sendable () -> UUID
+    private let makeIdentifiers: @Sendable () throws -> V2AcceptanceIdentifiers
 
-    public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
-        self.makeUUID = makeUUID
+    /// Production identifiers come from one process-secret HMAC expansion.
+    /// This preserves independent, unpredictable UUIDv4 values while avoiding
+    /// Linux Foundation's open/read/close sequence for every individual UUID.
+    public init() {
+        let generator = V2SecureProcessUUIDGenerator.shared
+        makeIdentifiers = {
+            let identifiers = generator.makeTriple()
+            return try V2AcceptanceIdentifiers(
+                messageID: MessageID(identifiers.0.uuidString),
+                eventID: EventID(identifiers.1.uuidString),
+                planID: FanoutPlanID(identifiers.2.uuidString)
+            )
+        }
+    }
+
+    /// Deterministic injection remains available for domain tests.
+    public init(makeUUID: @escaping @Sendable () -> UUID) {
+        makeIdentifiers = {
+            try V2AcceptanceIdentifiers(
+                messageID: MessageID(makeUUID().uuidString),
+                eventID: EventID(makeUUID().uuidString),
+                planID: FanoutPlanID(makeUUID().uuidString)
+            )
+        }
     }
 
     public func make() throws -> V2AcceptanceIdentifiers {
-        try V2AcceptanceIdentifiers(
-            messageID: MessageID(makeUUID().uuidString),
-            eventID: EventID(makeUUID().uuidString),
-            planID: FanoutPlanID(makeUUID().uuidString)
+        try makeIdentifiers()
+    }
+}
+
+/// A process-local CSPRNG expansion for the three public identifiers created
+/// by one accepted message. The 256-bit key is seeded by the platform secure
+/// random source once. HMAC-SHA512 then gives every counter value a fresh
+/// 512-bit pseudorandom block; separate 16-byte regions are formatted as
+/// standards-compliant UUIDv4 values. No key, counter or derived relationship
+/// is exposed, and a process restart receives a new key.
+/// `SymmetricKey` in swift-crypto has immutable storage but its Linux module
+/// does not yet declare `Sendable`. Concurrent operations only read that key;
+/// the sole mutable field is the stdlib atomic counter.
+final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
+    static let shared = V2SecureProcessUUIDGenerator()
+
+    private let key = SymmetricKey(size: .bits256)
+    private let counter = Atomic<UInt64>(0)
+
+    func makeOne() -> UUID {
+        let authenticationCode = nextAuthenticationCode()
+        return v2UUIDv4(authenticationCode, offset: 0)
+    }
+
+    func makeTriple() -> (UUID, UUID, UUID) {
+        let authenticationCode = nextAuthenticationCode()
+        return (
+            v2UUIDv4(authenticationCode, offset: 0),
+            v2UUIDv4(authenticationCode, offset: 16),
+            v2UUIDv4(authenticationCode, offset: 32)
         )
     }
+
+    private func nextAuthenticationCode() -> [UInt8] {
+        let increment = counter.wrappingAdd(1, ordering: .relaxed)
+        precondition(increment.newValue != 0, "acceptance identifier space exhausted")
+        var input = increment.newValue.bigEndian
+        return withUnsafeBytes(of: &input) { bytes in
+            Array(HMAC<SHA512>.authenticationCode(for: Data(bytes), using: key))
+        }
+    }
+}
+
+private func v2UUIDv4<Bytes: RandomAccessCollection>(
+    _ bytes: Bytes,
+    offset: Int
+) -> UUID where Bytes.Element == UInt8, Bytes.Index == Int {
+    precondition(offset >= 0 && bytes.count >= offset + 16)
+    let version = (bytes[offset + 6] & 0x0f) | 0x40
+    let variant = (bytes[offset + 8] & 0x3f) | 0x80
+    return UUID(uuid: (
+        bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+        bytes[offset + 4], bytes[offset + 5], version, bytes[offset + 7],
+        variant, bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
+        bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
+    ))
 }
 
 public struct V2SendMessageService: Sendable {

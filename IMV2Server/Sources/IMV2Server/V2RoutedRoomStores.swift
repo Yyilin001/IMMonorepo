@@ -102,6 +102,46 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         }
     }
 
+    public func atomicBatchPartitions(
+        requests: [V2RoomWriteRequest]
+    ) async -> [V2AtomicRoomWriteBatchPartition?] {
+        guard !requests.isEmpty else { return [] }
+        if let singlePhysicalOwnerStore {
+            return await singlePhysicalOwnerStore.atomicBatchPartitions(requests: requests)
+        }
+        do {
+            let groups = try await groupedRequests(requests)
+            return await withTaskGroup(
+                of: [(Int, V2AtomicRoomWriteBatchPartition?)].self,
+                returning: [V2AtomicRoomWriteBatchPartition?].self
+            ) { group in
+                for (_, entries) in groups {
+                    guard let first = entries.first,
+                          let store = stores[first.route.shardID]
+                    else { return Array(repeating: nil, count: requests.count) }
+                    group.addTask {
+                        let partitions = await store.atomicBatchPartitions(
+                            requests: entries.map(\.request)
+                        )
+                        guard partitions.count == entries.count else {
+                            return entries.map { ($0.index, nil) }
+                        }
+                        return zip(entries, partitions).map { ($0.0.index, $0.1) }
+                    }
+                }
+                var result = Array<V2AtomicRoomWriteBatchPartition?>(
+                    repeating: nil, count: requests.count
+                )
+                for await entries in group {
+                    for (index, partition) in entries { result[index] = partition }
+                }
+                return result
+            }
+        } catch {
+            return Array(repeating: nil, count: requests.count)
+        }
+    }
+
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
