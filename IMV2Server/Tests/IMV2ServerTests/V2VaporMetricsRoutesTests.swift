@@ -141,8 +141,27 @@ struct V2VaporMetricsRoutesTests {
                 atomicBatchFallbacks: 4,
                 atomicBatchCommittedRequests: 141,
                 atomicBatchFallbackRequests: 29,
+                atomicBatchFallbackReasons: [
+                    .requestShape: 3,
+                    .preflightMismatch: 1,
+                ],
+                sameRoomDeferredRequests: 23,
                 atomicPreclassifiedIndividualRequests: 37,
                 singletonDispatches: 6
+            ),
+            directRoomLogAppendStages: .init(histograms: [
+                .transaction: .init(
+                    samples: 3,
+                    sumMilliseconds: 77,
+                    maximumMilliseconds: 51,
+                    cumulativeBuckets: [.milliseconds32: 2, .milliseconds64: 3]
+                )
+            ]),
+            gatewayEventLoopLag: .init(
+                samples: 4,
+                sumMilliseconds: 19,
+                maximumMilliseconds: 11,
+                cumulativeBuckets: [.milliseconds8: 3, .milliseconds16: 4]
             ),
             directSendPolicy: .init(
                 entries: 49_999, hits: 211, misses: 31,
@@ -189,7 +208,16 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"committed\"} 141"))
             #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"preclassified_individual\"} 37"))
             #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"singleton_dispatch\"} 6"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"request_shape\"} 3"))
+            #expect(body.contains("im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"preflight_mismatch\"} 1"))
+            #expect(body.contains("im_v2_direct_room_log_append_same_room_deferred_requests_total 23"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
+            #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_bucket{stage=\"transaction\",le=\"32\"} 2"))
+            #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_count{stage=\"transaction\"} 3"))
+            #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_max{stage=\"transaction\"} 51"))
+            #expect(body.contains("im_v2_gateway_event_loop_lag_milliseconds_bucket{le=\"8\"} 3"))
+            #expect(body.contains("im_v2_gateway_event_loop_lag_milliseconds_count 4"))
+            #expect(body.contains("im_v2_gateway_event_loop_lag_milliseconds_max 11"))
             #expect(body.contains("im_v2_direct_room_log_fast_append_entries 17"))
             #expect(body.contains("im_v2_direct_room_log_fast_append_lookups_total{outcome=\"hit\"} 101"))
             #expect(body.contains("im_v2_direct_room_log_fast_append_requests_total{outcome=\"committed\"} 79"))

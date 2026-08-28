@@ -139,12 +139,14 @@ def relation_delta(before: Path, after: Path) -> None:
     current_rows = read_rows(after, filename)
     counter_columns = (
         "seq_scan", "idx_scan", "n_tup_ins", "n_tup_upd", "n_tup_del",
+        "n_tup_hot_upd", "n_tup_newpage_upd",
         "heap_blks_read", "heap_blks_hit", "idx_blks_read", "idx_blks_hit",
     )
     fields = list(keys) + [
         "current_total_bytes", "delta_total_bytes", "current_n_live_tup",
         "current_n_dead_tup",
     ] + [f"delta_{column}" for column in counter_columns]
+    fields += ["interval_hot_update_percent", "interval_newpage_update_percent"]
     output: list[dict[str, str]] = []
     for current in current_rows:
         key = tuple(current[column] for column in keys)
@@ -166,8 +168,52 @@ def relation_delta(before: Path, after: Path) -> None:
             if change < 0:
                 fail(f"relation counter moved backwards for {key}: {column}")
             row[f"delta_{column}"] = formatted(change)
+        updates = decimal(row["delta_n_tup_upd"])
+        row["interval_hot_update_percent"] = (
+            formatted(decimal(row["delta_n_tup_hot_upd"]) * 100 / updates)
+            if updates else "0"
+        )
+        row["interval_newpage_update_percent"] = (
+            formatted(decimal(row["delta_n_tup_newpage_upd"]) * 100 / updates)
+            if updates else "0"
+        )
         output.append(row)
     output.sort(key=lambda row: abs(decimal(row["delta_total_bytes"])), reverse=True)
+    write_rows(after / f"delta_{filename}", fields, output)
+
+
+def index_delta(before: Path, after: Path) -> None:
+    filename = "indexes.csv"
+    keys = ("schemaname", "indexrelname")
+    previous = keyed(read_rows(before, filename), keys)
+    current_rows = read_rows(after, filename)
+    counter_columns = (
+        "idx_scan", "idx_tup_read", "idx_tup_fetch",
+        "idx_blks_read", "idx_blks_hit",
+    )
+    fields = list(keys) + [
+        "relname", "current_index_bytes", "delta_index_bytes",
+    ] + [f"delta_{column}" for column in counter_columns]
+    output: list[dict[str, str]] = []
+    for current in current_rows:
+        key = tuple(current[column] for column in keys)
+        old = previous.get(key, {})
+        current_size = decimal(current["index_bytes"])
+        old_size = decimal(old.get("index_bytes"))
+        row = {
+            "schemaname": current["schemaname"],
+            "indexrelname": current["indexrelname"],
+            "relname": current["relname"],
+            "current_index_bytes": formatted(current_size),
+            "delta_index_bytes": formatted(current_size - old_size),
+        }
+        for column in counter_columns:
+            change = decimal(current.get(column)) - decimal(old.get(column))
+            if change < 0:
+                fail(f"index counter moved backwards for {key}: {column}")
+            row[f"delta_{column}"] = formatted(change)
+        output.append(row)
+    output.sort(key=lambda row: abs(decimal(row["delta_index_bytes"])), reverse=True)
     write_rows(after / f"delta_{filename}", fields, output)
 
 
@@ -178,6 +224,10 @@ def main() -> None:
     after = Path(sys.argv[2])
     verify_counter_epochs(before, after)
     counter_delta(before, after, "database.csv", ("datname",), ("numbackends",))
+    counter_delta(
+        before, after, "bgwriter.csv", (),
+        sort_column="delta_buffers_backend",
+    )
     counter_delta(before, after, "wal.csv", (), sort_column="delta_wal_bytes")
     counter_delta(
         before, after, "io.csv", ("backend_type", "object", "context"),
@@ -185,6 +235,7 @@ def main() -> None:
     )
     statement_delta(before, after)
     relation_delta(before, after)
+    index_delta(before, after)
 
 
 if __name__ == "__main__":

@@ -15,12 +15,12 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         let stream = try streamFixture()
 
         let registration = Task {
-            await registry.register(stream, connectionID: connectionID, identity: identity)
+            try await registry.register(stream, connectionID: connectionID, identity: identity)
         }
         await leases.waitUntilRefreshStarts()
         await registry.unregister(connectionID: connectionID)
         await leases.resumeRefresh()
-        _ = await registration.value
+        _ = try await registration.value
 
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
         #expect(await leases.activeConnectionIDs().isEmpty)
@@ -36,7 +36,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         let stream = try streamFixture()
 
         let registration = Task {
-            await registry.register(
+            try await registry.register(
                 stream,
                 connectionID: connectionID,
                 identity: identity
@@ -46,7 +46,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         await registry.unregister(connectionID: connectionID)
         await leases.resumePreferenceLookup()
 
-        #expect(await !registration.value)
+        #expect(try await !registration.value)
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
         #expect(await leases.activeConnectionIDs().isEmpty)
     }
@@ -61,7 +61,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000d05")
         let target = try UserID("00000000-0000-0000-0000-000000000d06")
         let stream = try streamFixture()
-        await registry.register(stream, connectionID: connectionID, identity: identity)
+        try await registry.register(stream, connectionID: connectionID, identity: identity)
 
         let subscription = Task {
             await registry.subscribePresence(
@@ -91,7 +91,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
             let connectionID = UUID(
                 uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, UInt8(index / 256), UInt8(index % 256))
             )
-            await registry.register(stream, connectionID: connectionID, identity: identity)
+            try await registry.register(stream, connectionID: connectionID, identity: identity)
             await registry.unregister(connectionID: connectionID)
         }
 

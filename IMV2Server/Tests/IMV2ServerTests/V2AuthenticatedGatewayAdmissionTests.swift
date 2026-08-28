@@ -55,12 +55,12 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let second = try identity(user: 1, device: 2)
         let third = try identity(user: 1, device: 3)
 
-        #expect(await registry.register(try stream(), connectionID: firstID, identity: first))
-        #expect(await !registry.register(try stream(), connectionID: UUID(), identity: first))
-        #expect(await registry.register(try stream(), connectionID: secondID, identity: second))
-        #expect(await !registry.register(try stream(), connectionID: thirdID, identity: third))
+        #expect(try await registry.register(try stream(), connectionID: firstID, identity: first))
+        #expect(try await !registry.register(try stream(), connectionID: UUID(), identity: first))
+        #expect(try await registry.register(try stream(), connectionID: secondID, identity: second))
+        #expect(try await !registry.register(try stream(), connectionID: thirdID, identity: third))
         await registry.unregister(connectionID: firstID)
-        #expect(await registry.register(try stream(), connectionID: thirdID, identity: third))
+        #expect(try await registry.register(try stream(), connectionID: thirdID, identity: third))
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 2)
     }
 
@@ -71,10 +71,10 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let first = try identity(user: 1, device: 1)
         let second = try identity(user: 2, device: 2)
 
-        #expect(await registry.register(
+        #expect(try await registry.register(
             try stream(), connectionID: connectionID, identity: first
         ))
-        #expect(await !registry.register(
+        #expect(try await !registry.register(
             try stream(), connectionID: connectionID, identity: second
         ))
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 1)
@@ -90,7 +90,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
         await registry.configureLivePresenceLeases(leases)
         let connectionID = UUID()
 
-        #expect(await registry.register(
+        #expect(try await registry.register(
             try stream(),
             connectionID: connectionID,
             identity: try identity(user: 1, device: 1)
@@ -105,6 +105,21 @@ struct V2AuthenticatedGatewayAdmissionTests {
 
         await registry.unregister(connectionID: connectionID)
         #expect(await leases.activeConnectionIDs().isEmpty)
+    }
+
+    @Test("presence admission storage failures are not disguised as quota rejections")
+    func propagatesPresenceAdmissionFailure() async throws {
+        let registry = V2DeviceConnectionRegistry()
+        await registry.configureLivePresenceLeases(FailingPresenceAdmissionLeases())
+
+        await #expect(throws: PresenceAdmissionFixtureError.unavailable) {
+            try await registry.register(
+                try stream(),
+                connectionID: UUID(),
+                identity: try identity(user: 1, device: 1)
+            )
+        }
+        #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
     }
 
     private func identity(user: Int, device: Int) throws -> V2AuthenticatedConnection {
@@ -128,6 +143,33 @@ struct V2AuthenticatedGatewayAdmissionTests {
             registry: V2DeviceConnectionRegistry()
         )
     }
+}
+
+private enum PresenceAdmissionFixtureError: Error { case unavailable }
+
+private actor FailingPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
+    func admitConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID _: UUID,
+        policy _: V2AuthenticatedConnectionAdmissionPolicy,
+        now _: Date
+    ) throws -> V2AuthenticatedConnectionLeaseOutcome {
+        throw PresenceAdmissionFixtureError.unavailable
+    }
+
+    func renewConnection(
+        identity _: V2AuthenticatedConnection,
+        connectionID _: UUID,
+        now _: Date
+    ) -> V2AuthenticatedConnectionLeaseOutcome { .rejected }
+
+    func removePresence(
+        identity _: V2AuthenticatedConnection,
+        connectionID _: UUID,
+        now _: Date
+    ) -> Bool { false }
+
+    func allowsOnlinePresence(userID _: UserID) -> Bool { true }
 }
 
 private actor HiddenPresenceAdmissionLeases: V2LivePresenceLeaseManaging {

@@ -12,6 +12,13 @@ services:
     restart: unless-stopped
     mem_limit: 8g
     shm_size: 2g
+    # PostgreSQL uses one OS process per client connection in addition to
+    # checkpointer, WAL, autovacuum and parallel-worker processes. The base
+    # laptop limit of 128 cannot satisfy this overlay's max_connections=150
+    # and caused connection resets before the database reached a CPU or I/O
+    # limit during a 50k authentication ramp. Keep max_connections as the
+    # database admission bound and leave process headroom for its workers.
+    pids_limit: 256
     command:
       - postgres
       - -c
@@ -41,11 +48,38 @@ services:
       - -c
       - min_wal_size=1GB
       - -c
-      - max_wal_size=4GB
+      # A sustained 5,000 msg/s profile emits about 5.9 GB of WAL in 18
+      # minutes. Four GB caused size-driven checkpoints, while a 15-minute
+      # timed checkpoint landed in the highest-rate phase and regenerated
+      # roughly 0.5 million full-page images. Ten GB keeps this 30-minute
+      # interval below PostgreSQL's soft WAL checkpoint threshold while
+      # retaining a bounded WAL/disk budget.
+      - max_wal_size=10GB
       - -c
-      - checkpoint_timeout=15min
+      # Compress only full-page images. fsync, full_page_writes and
+      # synchronous_commit remain enabled, so this changes cost, not the
+      # acknowledged durability contract.
+      - wal_compression=lz4
+      - -c
+      # Longer intervals reduce first-write-after-checkpoint full-page image
+      # churn. Durability remains synchronous; the trade-off is a longer
+      # crash-recovery window, which the 10-GB WAL bound keeps finite.
+      - checkpoint_timeout=30min
       - -c
       - checkpoint_completion_target=0.9
+      - -c
+      # The default writer repeatedly reached its 100-page cap and left
+      # millions of buffer writes to foreground PostgreSQL backends. Run
+      # smaller, more frequent rounds with enough headroom to keep reusable
+      # buffers clean. Profile deltas must prove this reduces buffers_backend
+      # without creating an I/O storm.
+      - bgwriter_delay=50ms
+      - -c
+      - bgwriter_lru_maxpages=1000
+      - -c
+      - bgwriter_lru_multiplier=4.0
+      - -c
+      - bgwriter_flush_after=512kB
       - -c
       - random_page_cost=1.1
       - -c
@@ -66,7 +100,12 @@ services:
   gateway:
     restart: unless-stopped
     mem_limit: 3g
+    # The process stops accepting new sockets first and cooperatively drains
+    # service tasks for at most 20 seconds. Keep Docker's outer grace larger
+    # so normal shutdown cannot be turned into SIGKILL/exit 137.
+    stop_grace_period: 30s
     environment:
+      IM_V2_SHUTDOWN_GRACE_MS: 20000
       # A delivery pass holds one PostgreSQL connection while it leases rows,
       # then performs commit-sized projection transactions. The generic 100k
       # profile permits much larger claims, but that burst can monopolize this

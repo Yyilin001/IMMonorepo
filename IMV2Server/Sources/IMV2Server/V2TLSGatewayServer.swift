@@ -81,13 +81,64 @@ private final class V2GatewayConnectionLease: Sendable {
 private final class V2GatewayConnectionLeaseHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     private let lease: V2GatewayConnectionLease
+    private let registry: V2GatewayChildChannelRegistry
+    private let channel: V2GatewayTrackedChannel
 
-    init(lease: V2GatewayConnectionLease) { self.lease = lease }
+    init(
+        lease: V2GatewayConnectionLease,
+        registry: V2GatewayChildChannelRegistry,
+        channel: any Channel
+    ) {
+        self.lease = lease
+        self.registry = registry
+        self.channel = .init(channel)
+    }
     func channelInactive(context: ChannelHandlerContext) {
         lease.release()
+        registry.remove(channel)
         context.fireChannelInactive()
     }
-    func handlerRemoved(context _: ChannelHandlerContext) { lease.release() }
+    func handlerRemoved(context _: ChannelHandlerContext) {
+        lease.release()
+        registry.remove(channel)
+    }
+}
+
+/// Channel is event-loop confined but its `close()` operation is explicitly
+/// thread-safe. This narrow wrapper lets shutdown retain only the operation it
+/// needs without making handlers or application state unchecked-Sendable.
+private struct V2GatewayTrackedChannel: @unchecked Sendable {
+    let channel: any Channel
+    let identity: ObjectIdentifier
+
+    init(_ channel: any Channel) {
+        self.channel = channel
+        identity = ObjectIdentifier(channel)
+    }
+}
+
+private final class V2GatewayChildChannelRegistry: Sendable {
+    private let channels = Mutex([ObjectIdentifier: V2GatewayTrackedChannel]())
+
+    func insert(_ channel: any Channel) {
+        let tracked = V2GatewayTrackedChannel(channel)
+        channels.withLock { $0[tracked.identity] = tracked }
+    }
+
+    func remove(_ channel: V2GatewayTrackedChannel) {
+        _ = channels.withLock { $0.removeValue(forKey: channel.identity) }
+    }
+
+    func closeAll() async {
+        let snapshot = channels.withLock { Array($0.values) }
+        await withTaskGroup(of: Void.self) { group in
+            for tracked in snapshot {
+                group.addTask {
+                    try? await tracked.channel.close().get()
+                }
+            }
+        }
+    }
 }
 
 /// Injects a fresh session/handler graph for every connection. It deliberately
@@ -108,11 +159,18 @@ public final class V2TLSGatewayServer {
     private let sslContext: NIOSSLContext
     private let connectionFactory: V2GatewayConnectionFactory
     private let maximumConnections: Int
+    private let listenBacklog: Int32
+    private let acceptBatchSize: UInt
     private let maximumQueuedInboundBytes: Int
     private let maximumQueuedInboundChunks: Int
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
+    private let eventLoopLagMetrics: V2EventLoopLagMetrics?
+    private let childChannels = V2GatewayChildChannelRegistry()
+    /// Keep accept work off the child channel group so a coordinated reconnect
+    /// cannot consume one of the event loops serving established TLS streams.
+    private let acceptorGroup: MultiThreadedEventLoopGroup
     private let group: MultiThreadedEventLoopGroup
     private var channel: Channel?
 
@@ -120,15 +178,20 @@ public final class V2TLSGatewayServer {
         configuration: V2TLSListenerConfiguration,
         connectionFactory: V2GatewayConnectionFactory,
         maximumConnections: Int,
+        listenBacklog: Int,
+        acceptBatchSize: Int,
         maximumQueuedInboundBytes: Int,
         maximumQueuedInboundChunks: Int,
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
         transportMetrics: any V2GatewayTransportMetricsRecorder,
+        eventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         eventLoopThreads: Int = System.coreCount
     ) throws {
         precondition(
             maximumConnections > 0 &&
+            listenBacklog > 0 && listenBacklog <= Int(Int32.max) &&
+            acceptBatchSize > 0 &&
             maximumQueuedInboundBytes > 0 &&
             maximumQueuedInboundChunks > 0 &&
             authenticationTimeoutMilliseconds > 0 &&
@@ -139,39 +202,66 @@ public final class V2TLSGatewayServer {
         self.sslContext = try .init(configuration: configuration.makeTLSConfiguration())
         self.connectionFactory = connectionFactory
         self.maximumConnections = maximumConnections
+        self.listenBacklog = Int32(listenBacklog)
+        self.acceptBatchSize = UInt(acceptBatchSize)
         self.maximumQueuedInboundBytes = maximumQueuedInboundBytes
         self.maximumQueuedInboundChunks = maximumQueuedInboundChunks
         self.authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
         self.idleTimeoutMilliseconds = idleTimeoutMilliseconds
         self.transportMetrics = transportMetrics
+        self.eventLoopLagMetrics = eventLoopLagMetrics
+        self.acceptorGroup = .init(numberOfThreads: 1)
         self.group = .init(numberOfThreads: eventLoopThreads)
+        eventLoopLagMetrics?.start(on: self.group)
     }
 
-    deinit { try? group.syncShutdownGracefully() }
+    deinit {
+        eventLoopLagMetrics?.stop()
+        try? group.syncShutdownGracefully()
+        try? acceptorGroup.syncShutdownGracefully()
+    }
 
     public func bind() async throws {
         guard channel == nil else { throw V2TLSGatewayServerError.alreadyBound }
         let sslContext = sslContext
         let factory = connectionFactory
         let admission = V2GatewayConnectionAdmission(maximumConnections: maximumConnections)
+        let listenBacklog = listenBacklog
+        let acceptBatchSize = acceptBatchSize
         let inboundLimit = maximumQueuedInboundBytes
         let inboundChunkLimit = maximumQueuedInboundChunks
         let authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
         let idleTimeoutMilliseconds = idleTimeoutMilliseconds
         let transportMetrics = transportMetrics
-        let channel = try await ServerBootstrap(group: group)
+        let childChannels = childChannels
+        let channel = try await ServerBootstrap(group: acceptorGroup, childGroup: group)
+            .serverChannelOption(ChannelOptions.backlog, value: listenBacklog)
+            .serverChannelOption(ChannelOptions.maxMessagesPerRead, value: acceptBatchSize)
+            // After an abrupt process exit, accepted TCP sockets can remain
+            // in TIME_WAIT.  Allow the replacement process to reclaim the
+            // listener immediately without permitting two live listeners to
+            // bind the same address.
+            .serverChannelOption(
+                ChannelOptions.socketOption(.so_reuseaddr),
+                value: 1
+            )
             .childChannelInitializer { channel in
                 guard admission.acquire() else {
                     transportMetrics.connectionRejected(reason: .connectionLimit)
                     return channel.close()
                 }
                 let lease = V2GatewayConnectionLease(admission: admission)
+                childChannels.insert(channel)
                 // This closure is already invoked on the child EventLoop.
                 // Both handlers are deliberately loop-confined and therefore
                 // must use NIO's synchronous pipeline view rather than the
                 // cross-concurrency `ChannelHandler & Sendable` overload.
                 return channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.addHandler(V2GatewayConnectionLeaseHandler(lease: lease))
+                    try channel.pipeline.syncOperations.addHandler(V2GatewayConnectionLeaseHandler(
+                        lease: lease,
+                        registry: childChannels,
+                        channel: channel
+                    ))
                     try channel.pipeline.syncOperations.addHandler(NIOSSLServerHandler(context: sslContext))
                     try channel.pipeline.syncOperations.addHandler(
                         V2NIOGatewayChannelHandler(
@@ -185,6 +275,7 @@ public final class V2TLSGatewayServer {
                     )
                 }.flatMapError { error in
                     lease.release()
+                    childChannels.remove(.init(channel))
                     return channel.eventLoop.makeFailedFuture(error)
                 }
             }
@@ -194,11 +285,20 @@ public final class V2TLSGatewayServer {
     }
 
     public func shutdown() async throws {
-        if let channel {
-            self.channel = nil
-            try await channel.close().get()
-        }
+        eventLoopLagMetrics?.stop()
+        try await stopAccepting()
+        await childChannels.closeAll()
         try await group.shutdownGracefully()
+        try await acceptorGroup.shutdownGracefully()
+    }
+
+    /// Closes only the public listener. Existing child channels remain alive
+    /// until `shutdown()` so in-flight commands can finish during the bounded
+    /// application drain, while no new work enters the process.
+    public func stopAccepting() async throws {
+        guard let channel else { return }
+        self.channel = nil
+        try await channel.close().get()
     }
 
     public func waitUntilClosed() async throws {

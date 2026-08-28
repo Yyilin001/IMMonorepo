@@ -38,6 +38,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directRoomLogEventCacheMaximumPendingWrites == 0)
         #expect(defaults.livePresenceRenewalBatchSize == 256)
         #expect(defaults.livePresenceRenewalMaximumDelayMilliseconds == 2)
+        #expect(defaults.shutdownGraceMilliseconds == 20_000)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
@@ -676,6 +677,8 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.frameLimits.maximumPayloadBytes == 65_536)
         #expect(configuration.maximumProtobufMessageDepth == 32)
         #expect(configuration.maximumConnections == 10_000)
+        #expect(configuration.listenBacklog == 4_096)
+        #expect(configuration.acceptBatchSize == 256)
         #expect(configuration.authenticatedConnectionAdmissionPolicy.maximumConnectionsPerDevice == 2)
         #expect(configuration.authenticatedConnectionAdmissionPolicy.maximumConnectionsPerUser == 8)
         #expect(configuration.commandRateLimitPolicy.deviceBurst == 64)
@@ -1017,6 +1020,8 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH": "32",
             "IM_V2_MAX_IN_FLIGHT_REQUESTS": "32",
             "IM_V2_MAX_CONNECTIONS": "10000",
+            "IM_V2_LISTEN_BACKLOG": "4096",
+            "IM_V2_ACCEPT_BATCH_SIZE": "256",
             "IM_V2_MAX_CONNECTIONS_PER_DEVICE": "2",
             "IM_V2_MAX_CONNECTIONS_PER_USER": "8",
             "IM_V2_DEVICE_COMMANDS_PER_SECOND": "32",

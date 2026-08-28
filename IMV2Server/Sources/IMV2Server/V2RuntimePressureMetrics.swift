@@ -54,6 +54,12 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// identifiers, so an adaptive rollout can be verified without a SQL
     /// inference or high-cardinality labels.
     public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
+    /// Fixed-stage latency histograms for the authoritative shard-only direct
+    /// append transaction. Stage names are an enum, never dynamic SQL or
+    /// relation identifiers.
+    public let directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot?
+    /// Scheduler delay observed on the TLS child-channel EventLoop group.
+    public let gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot?
     /// Aggregate LRU facts for the policy hint cache. This proves whether a
     /// deployment is operating at capacity without exposing cache keys.
     public let directSendPolicy: V2DirectSendPolicyCache.Snapshot?
@@ -74,6 +80,8 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot? = nil,
         directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil,
+        directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot? = nil,
+        gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot? = nil,
         directSendPolicy: V2DirectSendPolicyCache.Snapshot? = nil,
         directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil,
@@ -85,6 +93,8 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
+        self.directRoomLogAppendStages = directRoomLogAppendStages
+        self.gatewayEventLoopLag = gatewayEventLoopLag
         self.directSendPolicy = directSendPolicy
         self.directRoomLogFastAppend = directRoomLogFastAppend
         self.directRoomLogEventCache = directRoomLogEventCache
@@ -103,6 +113,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
+    private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
+    private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
     private let directSendPolicyCache: V2DirectSendPolicyCache?
     private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache?
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
@@ -115,6 +127,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
         directRoomLogAppendBatcher: (any V2SendMessageAdmission)? = nil,
+        directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
+        gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         directSendPolicyCache: V2DirectSendPolicyCache? = nil,
         directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
@@ -126,6 +140,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
+        self.directRoomLogAppendStageMetrics = directRoomLogAppendStageMetrics
+        self.gatewayEventLoopLagMetrics = gatewayEventLoopLagMetrics
         self.directSendPolicyCache = directSendPolicyCache
         self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
         self.directRoomLogEventCache = directRoomLogEventCache
@@ -138,6 +154,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         let credits = await shardAdmissionCommandCredits?.snapshot()
         let roomCredits = await roomAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
+        let appendStages = directRoomLogAppendStageMetrics?.snapshot()
+        let eventLoopLag = gatewayEventLoopLagMetrics?.snapshot()
         let directSendPolicy = await directSendPolicyCache?.snapshot()
         let fastAppend = await directRoomLogFastAppendCache?.snapshot()
         let eventCache = await directRoomLogEventCache?.snapshot()
@@ -149,6 +167,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             shardAdmissionCommandCredits: credits,
             roomAdmissionCommandCredits: roomCredits,
             directRoomLogAppendBatching: appendBatching,
+            directRoomLogAppendStages: appendStages,
+            gatewayEventLoopLag: eventLoopLag,
             directSendPolicy: directSendPolicy,
             directRoomLogFastAppend: fastAppend,
             directRoomLogEventCache: eventCache,
@@ -365,12 +385,67 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_direct_room_log_append_atomic_requests_total{outcome=\"shape_fallback\"} \(batching.atomicBatchFallbackRequests)",
             "im_v2_direct_room_log_append_atomic_requests_total{outcome=\"preclassified_individual\"} \(batching.atomicPreclassifiedIndividualRequests)",
             "im_v2_direct_room_log_append_atomic_requests_total{outcome=\"singleton_dispatch\"} \(batching.singletonDispatches)",
+            "# HELP im_v2_direct_room_log_append_atomic_fallback_reasons_total Atomic subsets rolled back before commit by bounded store reason.",
+            "# TYPE im_v2_direct_room_log_append_atomic_fallback_reasons_total counter",
+        ])
+        for reason in V2AtomicRoomWriteBatchError.Reason.allCases {
+            lines.append(
+                "im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"\(reason.rawValue)\"} \(batching.atomicBatchFallbackReasons[reason, default: 0])"
+            )
+        }
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_append_same_room_deferred_requests_total Later same-room commands serialized into subsequent unique-room waves.",
+            "# TYPE im_v2_direct_room_log_append_same_room_deferred_requests_total counter",
+            "im_v2_direct_room_log_append_same_room_deferred_requests_total \(batching.sameRoomDeferredRequests)",
             "# HELP im_v2_direct_room_log_append_batch_rejections_total Requests rejected because the bounded staging queue is full.",
             "# TYPE im_v2_direct_room_log_append_batch_rejections_total counter",
             "im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} \(batching.stagingQueueFullRejections)",
             "# HELP im_v2_direct_room_log_append_batch_cancellations_total Staged requests removed before durable acceptance because their caller was cancelled.",
             "# TYPE im_v2_direct_room_log_append_batch_cancellations_total counter",
             "im_v2_direct_room_log_append_batch_cancellations_total \(batching.cancelledPendingRequests)",
+        ])
+    }
+    if let stages = snapshot.directRoomLogAppendStages {
+        lines.append(contentsOf: [
+            "# HELP im_v2_direct_room_log_append_stage_milliseconds Fixed-stage latency inside the authoritative direct append path.",
+            "# TYPE im_v2_direct_room_log_append_stage_milliseconds histogram",
+        ])
+        for stage in V2DirectRoomLogAppendStage.allCases {
+            let latency = stages.value(for: stage)
+            for bucket in V2RuntimeLatencyBucket.allCases {
+                lines.append(
+                    "im_v2_direct_room_log_append_stage_milliseconds_bucket{stage=\"\(stage.rawValue)\",le=\"\(bucket.rawValue)\"} \(latency.count(atOrBelow: bucket))"
+                )
+            }
+            lines.append(
+                "im_v2_direct_room_log_append_stage_milliseconds_bucket{stage=\"\(stage.rawValue)\",le=\"+Inf\"} \(latency.samples)"
+            )
+            lines.append(
+                "im_v2_direct_room_log_append_stage_milliseconds_sum{stage=\"\(stage.rawValue)\"} \(latency.sumMilliseconds)"
+            )
+            lines.append(
+                "im_v2_direct_room_log_append_stage_milliseconds_count{stage=\"\(stage.rawValue)\"} \(latency.samples)"
+            )
+            lines.append(
+                "im_v2_direct_room_log_append_stage_milliseconds_max{stage=\"\(stage.rawValue)\"} \(latency.maximumMilliseconds)"
+            )
+        }
+    }
+    if let lag = snapshot.gatewayEventLoopLag {
+        lines.append(contentsOf: [
+            "# HELP im_v2_gateway_event_loop_lag_milliseconds Delay of a low-frequency task scheduled on TLS child-channel EventLoops.",
+            "# TYPE im_v2_gateway_event_loop_lag_milliseconds histogram",
+        ])
+        for bucket in V2RuntimeLatencyBucket.allCases {
+            lines.append(
+                "im_v2_gateway_event_loop_lag_milliseconds_bucket{le=\"\(bucket.rawValue)\"} \(lag.count(atOrBelow: bucket))"
+            )
+        }
+        lines.append(contentsOf: [
+            "im_v2_gateway_event_loop_lag_milliseconds_bucket{le=\"+Inf\"} \(lag.samples)",
+            "im_v2_gateway_event_loop_lag_milliseconds_sum \(lag.sumMilliseconds)",
+            "im_v2_gateway_event_loop_lag_milliseconds_count \(lag.samples)",
+            "im_v2_gateway_event_loop_lag_milliseconds_max \(lag.maximumMilliseconds)",
         ])
     }
     if let policy = snapshot.directSendPolicy {

@@ -213,9 +213,10 @@ message workload only after warmup completes.
 A request with media, mentions,
 reply/forward state, content review, stranger quota consumption, an initial
 reply marker, profile/capability mutation or an existing operation transparently
-falls back to the complete transaction. Multiple commands for one room are only
-batched when their durable preflight proves the ordered no-side-effect shape;
-otherwise they also fall back before a partial commit.
+falls back to the complete transaction. A cache-cold or revision-mismatched
+plain message follows the same rule. Multiple commands for one room do not use
+the conditional set append, because that statement advances one cursor per
+room; they fall back to ordered one-command appends before a partial commit.
 Each fallback has its own bounded foreground admission and outcome; one
 fallback failure must not fail another request in the same staging batch.
 No client-visible ACK is sent until the selected append batch commits. Set the
@@ -227,6 +228,14 @@ Before the gateway issues a local credit, it atomically increments the
 command window counter by a bounded batch in PostgreSQL. The message
 transaction then consumes an already charged credit and keeps the ordinary
 pure admission reducer by presenting its effective local state.
+
+Only a revision-fenced warm append may request such a credit, and it must do
+so **before** opening its canonical message transaction. Cold, rich and cache-
+mismatch paths perform an exact conditional shard increment as the final SQL
+statement in their canonical transaction. Do not move a credit-pool refill
+behind room or policy locks: the refill uses an independently committed SQL
+statement and borrowing it from the same bounded foreground pool can make all
+outer transactions wait for connections they already hold.
 
 - No request can exceed the durable command-window limit.
 - `shard_only` does not weaken authorization: room locking, active membership,
@@ -248,9 +257,10 @@ pure admission reducer by presenting its effective local state.
 - The feature applies only to fixed two-member direct rooms in room_log mode.
   Planner and group paths are unchanged.
 - Batch issue/commit/release methods cross each process-local actor once per
-  bounded micro-batch. An implementation that loops `await acquire(...)` once
-  per message inside the batch recreates a serial-executor backlog and is not
-  equivalent to the R29 design.
+  bounded warm micro-batch and always outside the PostgreSQL transaction. An
+  implementation that loops `await acquire(...)` once per message—or performs
+  any credit acquire while holding a database transaction—recreates a serial-
+  executor/connection-pool backlog and is not equivalent to this design.
 
 Do not attempt to reclaim unused credits by decrementing the counter outside
 the normal admission-window reset/lease-renewal protocol. The bounded loss is
@@ -392,7 +402,10 @@ lease rollover and long soak as separate release gates.
 2. `shard_admission_pools.valid_until` 覆盖预计结束时间加 30 分钟，且每个 load shard 的
    `command_window_limit - command_window_used` 大于该分片预计消息数并保留 credit batch 浪费余量。
 3. 记录 `messages` 的行数、heap/index 总大小、`pg_stat_bgwriter` 与上次 checkpoint 时间。A/B
-   必须从相同数据快照或明确清理过的 disposable 状态开始，并让 checkpoint 相位一致。
+   必须从相同数据快照或明确清理过的 disposable 状态开始，并让 checkpoint 相位一致。不能只记录
+   “测试窗口内发生过 checkpoint”：应分别记录测试开始时 checkpoint 是否正在进行、最近一次开始/完成
+   时间、完成耗时和测试窗口内的 WAL/FPI 增量。若一轮在 checkpoint 外、另一轮在 checkpoint 内，
+   该结果只能用于诊断，不能用于代码 A/B。
 4. 监控必须采集精确指标名
    `im_v2_direct_room_log_append_batch_in_flight` 与
    `im_v2_direct_room_log_append_batch_execution_milliseconds_max`，同时记录 pending、queue wait、
@@ -401,6 +414,13 @@ lease rollover and long soak as separate release gates.
 2026-08-27 的受控 A/B 中，共享前台帧版本在相同清库与 checkpoint 条件下完成 2,475,000 / 2,475,000
 ACK、0 failure；控制组出现 2,451 次 `SERVER_BUSY`。完整证据见
 [R34 50,000 在线共享帧 A/B](../09-capacity/direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md)。
+
+当 `checkpoint_timeout=30min` 且 `checkpoint_completion_target=0.9` 时，一次定时 checkpoint 的写入可被
+摊到约 27 分钟；持续脏页负载下，这并不代表存在 30 分钟的无 checkpoint 稳定窗口。2026-08-28 的
+历史数据复测在 4,500 msg/s 先出现 WAL/FPI、backend buffer 与 append queue 突刺，而非 CPU、内存、
+连接或锁等待耗尽。后续容量试验必须使用 `scripts/preflight_v2_postgres_load_test.sh` 和前后 profile，
+并按 [R36 checkpoint 诊断报告](../09-capacity/direct-room-log-50000-checkpoint-r36-2026-08-28.md)
+区分连接容量、checkpoint 外吞吐和 checkpoint 内稳态吞吐。
 
 ## Rollback
 

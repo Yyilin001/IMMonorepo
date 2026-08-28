@@ -337,12 +337,27 @@ private struct LoadCredential: Decodable, Sendable {
         var credentials: [Self] = []
         var devices = Set<String>()
         for line in content.split(whereSeparator: \ .isNewline) {
-            let credential = try decoder.decode(Self.self, from: Data(line.utf8))
-            guard !credential.userID.isEmpty,
-                  !credential.deviceID.isEmpty,
-                  !credential.accessToken.isEmpty,
-                  devices.insert(credential.deviceID).inserted
+            let decoded = try decoder.decode(Self.self, from: Data(line.utf8))
+            guard let userID = UUID(uuidString: decoded.userID),
+                  let deviceID = UUID(uuidString: decoded.deviceID),
+                  !decoded.accessToken.isEmpty
             else { throw LoadError.invalidCredentialFile }
+            let targetRoomIDs = try decoded.targetRoomIDs?.map { rawRoomID in
+                guard let roomID = UUID(uuidString: rawRoomID) else {
+                    throw LoadError.invalidCredentialFile
+                }
+                return roomID.uuidString
+            }
+            let credential = Self(
+                userID: userID.uuidString,
+                deviceID: deviceID.uuidString,
+                accessToken: decoded.accessToken,
+                accessTokenExpiresAtMilliseconds: decoded.accessTokenExpiresAtMilliseconds,
+                targetRoomIDs: targetRoomIDs
+            )
+            guard devices.insert(credential.deviceID).inserted else {
+                throw LoadError.invalidCredentialFile
+            }
             credentials.append(credential)
         }
         guard !credentials.isEmpty else { throw LoadError.invalidCredentialFile }
@@ -519,6 +534,8 @@ private struct LoadRun {
         tls.trustRoots = .certificates(try NIOSSLCertificate.fromPEMFile(configuration.caPath))
         let sslContext = try NIOSSLContext(configuration: tls)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: configuration.eventLoops)
+        let eventLoopLagMetrics = V2EventLoopLagMetrics()
+        eventLoopLagMetrics.start(on: group)
         let statistics = LoadStatistics()
         let startedAt = Date()
         var slots: [LoadConnectionSlot] = []
@@ -634,8 +651,10 @@ private struct LoadRun {
         }
 
         await close(channels: slots.compactMap(\.channel))
+        eventLoopLagMetrics.stop()
+        let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -2003,6 +2022,7 @@ private struct LoadReport: Encodable {
     let messageLatency: Percentiles
     let syncPullLatency: Percentiles
     let roomEventPullLatency: Percentiles
+    let eventLoopLag: LoadEventLoopLagReport
     let scenarioName: String?
     let scenarioRateScale: Double?
     let scenarioSendDispatch: String?
@@ -2012,7 +2032,7 @@ private struct LoadReport: Encodable {
     let scenarioPostDrainHoldSeconds: Int?
     let terminalError: String?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?) {
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -2072,6 +2092,7 @@ private struct LoadReport: Encodable {
         messageLatency = state.messageLatency.percentiles
         syncPullLatency = state.syncPullLatency.percentiles
         roomEventPullLatency = state.roomEventPullLatency.percentiles
+        self.eventLoopLag = .init(snapshot: eventLoopLag)
         scenarioName = configuration.scenario?.name
         scenarioRateScale = configuration.scenario.map { _ in configuration.scenarioRateScale }
         scenarioSendDispatch = configuration.scenario.map { _ in configuration.scenarioSendDispatch.rawValue }
@@ -2085,7 +2106,25 @@ private struct LoadReport: Encodable {
     }
 
     var summary: String {
-        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) messages_skipped=\(messagesSkipped) scenario_queue_max=\(maximumQueuedScenarioMessages) room_event_hints=\(roomEventAvailabilityHintsReceived) room_event_live_payloads=\(roomEventLivePayloadsApplied) room_event_pulls=\(roomEventPullsSent) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) messages_skipped=\(messagesSkipped) scenario_queue_max=\(maximumQueuedScenarioMessages) room_event_hints=\(roomEventAvailabilityHintsReceived) room_event_live_payloads=\(roomEventLivePayloadsApplied) room_event_pulls=\(roomEventPullsSent) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) event_loop_lag_max_ms=\(eventLoopLag.maximumMilliseconds) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+    }
+}
+
+private struct LoadEventLoopLagReport: Encodable {
+    let samples: UInt64
+    let sumMilliseconds: UInt64
+    let maximumMilliseconds: UInt64
+    let cumulativeBucketsMilliseconds: [String: UInt64]
+
+    init(snapshot: V2RuntimeLatencyHistogramSnapshot) {
+        samples = snapshot.samples
+        sumMilliseconds = snapshot.sumMilliseconds
+        maximumMilliseconds = snapshot.maximumMilliseconds
+        cumulativeBucketsMilliseconds = Dictionary(uniqueKeysWithValues:
+            V2RuntimeLatencyBucket.allCases.map { bucket in
+                (String(bucket.rawValue), snapshot.count(atOrBelow: bucket))
+            }
+        )
     }
 }
 

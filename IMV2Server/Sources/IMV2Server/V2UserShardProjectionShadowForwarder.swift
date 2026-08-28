@@ -9,6 +9,22 @@ import SQLKit
 /// while a migration still writes at source. The source operation ID is the
 /// durable retry key, so a lost response can safely repeat the mirror without
 /// allocating another target sequence.
+public struct V2UserShardProjectionShadowRequest: Sendable {
+    public let userID: UserID
+    public let sourceEventID: EventID
+    public let projectionKinds: Set<String>
+
+    public init(
+        userID: UserID,
+        sourceEventID: EventID,
+        projectionKinds: Set<String>
+    ) {
+        self.userID = userID
+        self.sourceEventID = sourceEventID
+        self.projectionKinds = projectionKinds
+    }
+}
+
 public protocol V2UserShardProjectionShadowing: Sendable {
     /// Writes the existing control-plane record to the user's live write
     /// owner, and mirrors it to an in-flight migration target when needed.
@@ -16,20 +32,48 @@ public protocol V2UserShardProjectionShadowing: Sendable {
     /// for a best-effort live sync hint. `nil` means no requested source
     /// projection existed in the control store.
     func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64?
+
+    /// Mirrors a bounded committed micro-batch. The result preserves request
+    /// order and has the same semantics as calling the scalar method for each
+    /// request. Concrete stores may collapse routing fences and source reads
+    /// into set-based operations; the default keeps existing adapters correct.
+    func shadowIfForwarding(
+        _ requests: [V2UserShardProjectionShadowRequest]
+    ) async throws -> [UInt64?]
+}
+
+public extension V2UserShardProjectionShadowing {
+    func shadowIfForwarding(
+        _ requests: [V2UserShardProjectionShadowRequest]
+    ) async throws -> [UInt64?] {
+        var results: [UInt64?] = []
+        results.reserveCapacity(requests.count)
+        for request in requests {
+            results.append(try await shadowIfForwarding(
+                userID: request.userID,
+                sourceEventID: request.sourceEventID,
+                projectionKinds: request.projectionKinds
+            ))
+        }
+        return results
+    }
 }
 
 public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
     private let registry: any V2UserShardStorageResolving
     private let routeFence: any V2UserShardRouteFencing
+    private let batchRouteFence: (any V2UserShardRouteBatchFencing)?
     private let coLocatedControlBuckets: Set<String>
 
     public init(
         registry: any V2UserShardStorageResolving,
         routeFence: any V2UserShardRouteFencing,
+        batchRouteFence: (any V2UserShardRouteBatchFencing)? = nil,
         coLocatedControlBuckets: Set<String> = []
     ) {
         self.registry = registry
         self.routeFence = routeFence
+        self.batchRouteFence = batchRouteFence
         self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
@@ -47,6 +91,36 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 userID: userID, sourceEventID: sourceEventID,
                 projectionKinds: projectionKinds, route: route,
                 controlDatabase: fencedDatabase, migration: migration
+            )
+        }
+    }
+
+    public func shadowIfForwarding(
+        _ requests: [V2UserShardProjectionShadowRequest]
+    ) async throws -> [UInt64?] {
+        guard !requests.isEmpty else { return [] }
+        guard requests.count <= 1_024, let batchRouteFence else {
+            var results: [UInt64?] = []
+            results.reserveCapacity(requests.count)
+            for request in requests {
+                results.append(try await shadowIfForwarding(
+                    userID: request.userID,
+                    sourceEventID: request.sourceEventID,
+                    projectionKinds: request.projectionKinds
+                ))
+            }
+            return results
+        }
+        return try await batchRouteFence.withCurrentRoutes(
+            for: requests.map(\.userID)
+        ) { routes, fencedDatabase in
+            guard routes.count == requests.count else {
+                throw V2UserShardRouterError.resultCountMismatch
+            }
+            return try await shadowBatch(
+                requests: requests,
+                routes: routes,
+                controlDatabase: fencedDatabase
             )
         }
     }
@@ -106,6 +180,161 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         }
         return liveSequence
     }
+
+    /// Common co-located topology: acquire every cutover fence once, load all
+    /// migration/source rows with two set queries, and reuse the source Sync
+    /// sequence as the already-materialized live result. Remote routes and
+    /// active forwarding migrations retain the same target transactions and
+    /// idempotency checks as the scalar path.
+    private func shadowBatch(
+        requests: [V2UserShardProjectionShadowRequest],
+        routes: [V2UserShardRoute],
+        controlDatabase: any Database
+    ) async throws -> [UInt64?] {
+        guard let sql = controlDatabase as? any SQLDatabase else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let flattened = try requests.enumerated().flatMap { ordinal, request in
+            guard let userID = UUID(uuidString: request.userID.rawValue),
+                  let sourceEventID = UUID(uuidString: request.sourceEventID.rawValue)
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return request.projectionKinds.sorted().map {
+                ShadowBatchInput(
+                    ordinal: ordinal,
+                    userID: userID,
+                    sourceEventID: sourceEventID,
+                    projectionKind: $0
+                )
+            }
+        }
+        guard flattened.count <= 2_048 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+
+        let uniqueUserIDs = Array(Set(requests.map(\.userID.rawValue))).sorted()
+        let userIDsJSON = try shadowJSON(uniqueUserIDs)
+        let migrationRows = try await sql.raw("""
+            WITH requested AS (
+                SELECT value::uuid AS user_id
+                FROM jsonb_array_elements_text(\(bind: userIDsJSON)::jsonb)
+                     AS values(value)
+            )
+            SELECT migration.user_id, migration.phase,
+                   migration.source_bucket, migration.target_bucket
+            FROM im_v2.user_shard_migrations AS migration
+            JOIN requested USING (user_id)
+            """).all(decoding: ShadowBatchMigrationRow.self)
+        var migrations: [UserID: ShadowMigration] = [:]
+        for row in migrationRows {
+            let userID = try UserID(row.userID.uuidString)
+            guard migrations[userID] == nil else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            migrations[userID] = row.record
+        }
+
+        var sourceRowsByOrdinal: [[ShadowSourceRow]] = Array(
+            repeating: [], count: requests.count
+        )
+        if !flattened.isEmpty {
+            let inputJSON = try shadowJSON(flattened)
+            let sourceRows = try await sql.raw("""
+                WITH input AS MATERIALIZED (
+                    SELECT input.ordinal, input.user_id,
+                           input.source_event_id, input.projection_kind
+                    FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                        ordinal integer,
+                        user_id uuid,
+                        source_event_id uuid,
+                        projection_kind text
+                    )
+                )
+                SELECT input.ordinal, effect.user_sync_sequence,
+                       effect.projection_kind,
+                       effect.payload::text AS payload_json,
+                       effect.created_at
+                FROM input
+                JOIN im_v2.user_projection_effects AS effect
+                  ON effect.user_id = input.user_id
+                 AND effect.source_event_id = input.source_event_id
+                 AND effect.projection_kind = input.projection_kind
+                ORDER BY input.ordinal, input.projection_kind
+                """).all(decoding: ShadowBatchSourceRow.self)
+            for row in sourceRows {
+                guard sourceRowsByOrdinal.indices.contains(row.ordinal) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                sourceRowsByOrdinal[row.ordinal].append(row.record)
+            }
+        }
+
+        var results = Array<UInt64?>(repeating: nil, count: requests.count)
+        for index in requests.indices {
+            let request = requests[index]
+            let route = routes[index]
+            let migration = migrations[request.userID]
+            let sourceRows = sourceRowsByOrdinal[index]
+            guard sourceRows.count <= request.projectionKinds.count else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            var current = try registry.location(for: route.bucket)
+            let currentIsCoLocated = coLocatedControlBuckets.contains(route.bucket)
+            if currentIsCoLocated {
+                current = try .init(
+                    bucket: current.bucket,
+                    database: controlDatabase,
+                    schema: current.schema
+                )
+            }
+
+            var liveSequence: UInt64?
+            for row in sourceRows {
+                let sequence: UInt64
+                if currentIsCoLocated {
+                    sequence = try shadowUnsigned(row.sequence)
+                } else {
+                    let projector = try PostgresV2UserShardFanoutProjector(
+                        database: current.database,
+                        schema: current.schema
+                    )
+                    sequence = try await projector.projectAllocated(
+                        userID: request.userID,
+                        sourceEventID: request.sourceEventID,
+                        projectionKind: row.projectionKind,
+                        payloadJSON: row.payloadJSON,
+                        createdAt: row.createdAt
+                    )
+                }
+                liveSequence = max(liveSequence ?? 0, sequence)
+                if let migration,
+                   (migration.phase == .forwarding || migration.phase == .verified),
+                   migration.sourceBucket == route.bucket {
+                    var target = try registry.location(for: migration.targetBucket)
+                    if coLocatedControlBuckets.contains(migration.targetBucket) {
+                        target = try .init(
+                            bucket: target.bucket,
+                            database: controlDatabase,
+                            schema: target.schema
+                        )
+                    }
+                    let targetProjector = try PostgresV2UserShardFanoutProjector(
+                        database: target.database,
+                        schema: target.schema
+                    )
+                    _ = try await targetProjector.mirror(.init(
+                        userID: request.userID,
+                        sequence: sequence,
+                        sourceEventID: request.sourceEventID,
+                        projectionKind: row.projectionKind,
+                        payloadJSON: row.payloadJSON,
+                        createdAt: row.createdAt
+                    ))
+                }
+            }
+            results[index] = liveSequence
+        }
+        return results
+    }
 }
 
 private struct ShadowSourceRow: Decodable {
@@ -135,4 +364,69 @@ private struct ShadowMigrationRow: Decodable {
         case sourceBucket = "source_bucket"
         case targetBucket = "target_bucket"
     }
+}
+
+private struct ShadowBatchInput: Encodable {
+    let ordinal: Int
+    let userID: UUID
+    let sourceEventID: UUID
+    let projectionKind: String
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case userID = "user_id"
+        case sourceEventID = "source_event_id"
+        case projectionKind = "projection_kind"
+    }
+}
+
+private struct ShadowBatchMigrationRow: Decodable {
+    let userID: UUID
+    let phase: V2UserShardMigrationPhase
+    let sourceBucket: String
+    let targetBucket: String
+    var record: ShadowMigration {
+        .init(phase: phase, sourceBucket: sourceBucket, targetBucket: targetBucket)
+    }
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case phase
+        case sourceBucket = "source_bucket"
+        case targetBucket = "target_bucket"
+    }
+}
+
+private struct ShadowBatchSourceRow: Decodable {
+    let ordinal: Int
+    let sequence: Int64
+    let projectionKind: String
+    let payloadJSON: String
+    let createdAt: Date
+    var record: ShadowSourceRow {
+        .init(
+            sequence: sequence,
+            projectionKind: projectionKind,
+            payloadJSON: payloadJSON,
+            createdAt: createdAt
+        )
+    }
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case sequence = "user_sync_sequence"
+        case projectionKind = "projection_kind"
+        case payloadJSON = "payload_json"
+        case createdAt = "created_at"
+    }
+}
+
+private func shadowJSON<T: Encodable>(_ value: T) throws -> String {
+    let data = try JSONEncoder().encode(value)
+    guard let json = String(data: data, encoding: .utf8) else {
+        throw V2RoomWriteStoreError.corruptPersistenceState
+    }
+    return json
+}
+
+private func shadowUnsigned(_ value: Int64) throws -> UInt64 {
+    guard value > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    return UInt64(value)
 }

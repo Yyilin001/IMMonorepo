@@ -234,6 +234,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// Hard process-local admission ceiling, including unauthenticated TLS
     /// sockets. This bounds per-connection queues, actors and TLS state.
     public let maximumConnections: Int
+    /// Kernel listen queue requested by the TLS listener. Keeping this
+    /// explicit avoids SwiftNIO's deliberately conservative default of 128,
+    /// which is too small for coordinated reconnects on a high-online IM
+    /// gateway. The effective value is still capped by the host's somaxconn.
+    public let listenBacklog: Int
+    /// Maximum sockets accepted from one listener-read readiness event.
+    /// SwiftNIO defaults to four, which is intentionally conservative but
+    /// leaves a large listen queue draining too slowly during reconnects.
+    public let acceptBatchSize: Int
     public let authenticatedConnectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     public let livePresenceRenewalBatchSize: Int
     public let livePresenceRenewalMaximumDelayMilliseconds: Int
@@ -246,6 +255,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// idle timeout it cannot be extended by trickling bytes.
     public let authenticationTimeoutMilliseconds: Int
     public let idleTimeoutMilliseconds: Int
+    /// Maximum cooperative drain time after the public listener has closed.
+    /// A hard deadline prevents a database operation that has not observed
+    /// cancellation from exceeding the container termination grace period.
+    public let shutdownGraceMilliseconds: Int
     public let capabilityProfile: String
     public let workerBatchSize: Int
     public let workerPollIntervalMilliseconds: Int
@@ -439,6 +452,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         maximumProtobufMessageDepth = try Self.positive("IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH", environment: environment)
         connectionLimits = try .init(maximumInFlightRequests: try Self.integer("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
         maximumConnections = try Self.boundedPositive("IM_V2_MAX_CONNECTIONS", maximum: 1_000_000, environment: environment)
+        listenBacklog = try Self.boundedPositive("IM_V2_LISTEN_BACKLOG", maximum: 1_000_000, environment: environment)
+        acceptBatchSize = try Self.boundedPositive("IM_V2_ACCEPT_BATCH_SIZE", maximum: 4_096, environment: environment)
         let maximumConnectionsPerDevice = try Self.boundedPositive(
             "IM_V2_MAX_CONNECTIONS_PER_DEVICE", maximum: 64, environment: environment
         )
@@ -508,6 +523,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         maximumQueuedInboundChunks = try Self.boundedPositive("IM_V2_MAX_QUEUED_INBOUND_CHUNKS", maximum: 4_096, environment: environment)
         authenticationTimeoutMilliseconds = try Self.boundedPositive("IM_V2_AUTHENTICATION_TIMEOUT_MS", maximum: 300_000, environment: environment)
         idleTimeoutMilliseconds = try Self.positive("IM_V2_IDLE_TIMEOUT_MS", environment: environment)
+        shutdownGraceMilliseconds = try Self.nonNegativeWithDefault(
+            "IM_V2_SHUTDOWN_GRACE_MS",
+            defaultValue: 20_000,
+            maximum: 120_000,
+            environment: environment
+        )
+        guard shutdownGraceMilliseconds > 0 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_SHUTDOWN_GRACE_MS")
+        }
         workerBatchSize = try Self.positive("IM_V2_WORKER_BATCH_SIZE", environment: environment)
         workerPollIntervalMilliseconds = try Self.positive("IM_V2_WORKER_POLL_INTERVAL_MS", environment: environment)
         userProjectionConcurrency = try Self.boundedPositive(

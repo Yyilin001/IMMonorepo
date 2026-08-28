@@ -1,21 +1,14 @@
-import Dispatch
 import FluentPostgresDriver
 import Foundation
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#elseif canImport(Musl)
-import Musl
-#endif
 
 @main
 enum IMV2ServerApp {
     static func main() async throws {
+        V2ProcessTerminationSignal.install()
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
@@ -137,14 +130,10 @@ enum IMV2ServerApp {
                     )
                 }
             }
-            let foregroundShardLocations = try shardLocations(for: .foreground)
             let syncShardLocations = try shardLocations(for: .sync)
             let deliveryShardLocations = try shardLocations(for: .delivery)
             let projectionShardLocations = try shardLocations(for: .projection)
             let maintenanceShardLocations = try shardLocations(for: .maintenance)
-            let userShardStorage = try V2StaticUserShardStorageRegistry(
-                locations: foregroundShardLocations
-            )
             var roomShardDatabases: [String: any Database] = [:]
             for storage in configuration.roomShardStorage {
                 guard let shardDatabase = databaseForRole(
@@ -316,6 +305,8 @@ enum IMV2ServerApp {
             }
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
+            let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
+            let gatewayEventLoopLagMetrics = V2EventLoopLagMetrics()
             let directRoomLogShardAdmissionCredits:
                 V2ShardAdmissionCommandCreditPool? =
                 configuration.directRoomLogShardAdmissionCreditBatchSize > 0
@@ -382,15 +373,24 @@ enum IMV2ServerApp {
             let userShardMigrations = PostgresV2UserShardMigrationStore(
                 database: deliveryDatabase
             )
+            // Projection shadowing is post-commit cross-store delivery work.
+            // Acquiring its route fence from the foreground pool can create a
+            // pool self-starvation cycle during a first-message burst: every
+            // append waits for a shadow fence while foreground connections are
+            // occupied by the same burst. Advisory locks are database-global,
+            // so the delivery pool preserves the exact cutover fence while
+            // isolating this bounded follow-up work from message persistence.
             let userShardShadowForwarder = V2PostgresUserShardProjectionShadowForwarder(
-                registry: userShardStorage,
-                routeFence: userShardRouter,
+                registry: deliveryUserShardStorage,
+                routeFence: deliveryUserShardRouter,
+                batchRouteFence: deliveryUserShardRouter,
                 coLocatedControlBuckets: coLocatedControlBuckets
             )
             let maintenanceUserShardShadowForwarder =
                 V2PostgresUserShardProjectionShadowForwarder(
                     registry: maintenanceUserShardStorage,
                     routeFence: maintenanceUserShardRouter,
+                    batchRouteFence: maintenanceUserShardRouter,
                     coLocatedControlBuckets: coLocatedControlBuckets
                 )
             let directRoomLogEventCache: V2DirectRoomLogEventCache? =
@@ -427,7 +427,8 @@ enum IMV2ServerApp {
                     directSendPolicyCache: directSendPolicyCache,
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
-                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
+                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
+                    appendStageMetrics: directRoomLogAppendStageMetrics
                 )
                 directMessagingStore = PostgresV2DirectMessagingStore(
                     database: database, shadowForwarder: userShardShadowForwarder
@@ -465,7 +466,7 @@ enum IMV2ServerApp {
                         configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
                         ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize)
                         : nil
-                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder, contentReviewMode: configuration.contentReviewMode, directFanoutMode: configuration.directFanoutMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, payloadWriteMode: configuration.fanoutPayloadWriteMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits)
+                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder, contentReviewMode: configuration.contentReviewMode, directFanoutMode: configuration.directFanoutMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, payloadWriteMode: configuration.fanoutPayloadWriteMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits, appendStageMetrics: directRoomLogAppendStageMetrics)
                     let direct = PostgresV2DirectMessagingStore(database: ownerDatabase, shadowForwarder: userShardShadowForwarder)
                     let events = PostgresV2GroupEventLogStore(database: ownerDatabase, directRoomLogEventCache: directRoomLogEventCache)
                     roomWriteStoresByPhysicalLocation[physicalLocationKey] = write
@@ -542,6 +543,8 @@ enum IMV2ServerApp {
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCredits: directRoomLogRoomAdmissionCredits,
                     directRoomLogAppendBatcher: directRoomLogAppendBatcher,
+                    directRoomLogAppendStageMetrics: directRoomLogAppendStageMetrics,
+                    gatewayEventLoopLagMetrics: gatewayEventLoopLagMetrics,
                     directSendPolicyCache: directSendPolicyCache,
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     directRoomLogEventCache: directRoomLogEventCache,
@@ -697,7 +700,8 @@ enum IMV2ServerApp {
                     directSendPolicyCache: directSendPolicyCache,
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
-                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits
+                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
+                    appendStageMetrics: directRoomLogAppendStageMetrics
                 ),
                 capacityProfile: configuration.capacityProfile,
                 limits: configuration.messageLimits
@@ -890,11 +894,14 @@ enum IMV2ServerApp {
                 configuration: configuration.tls,
                 connectionFactory: factory,
                 maximumConnections: configuration.maximumConnections,
+                listenBacklog: configuration.listenBacklog,
+                acceptBatchSize: configuration.acceptBatchSize,
                 maximumQueuedInboundBytes: configuration.maximumQueuedInboundBytes,
                 maximumQueuedInboundChunks: configuration.maximumQueuedInboundChunks,
                 authenticationTimeoutMilliseconds: configuration.authenticationTimeoutMilliseconds,
                 idleTimeoutMilliseconds: configuration.idleTimeoutMilliseconds,
-                transportMetrics: transportMetrics
+                transportMetrics: transportMetrics,
+                eventLoopLagMetrics: gatewayEventLoopLagMetrics
             )
             // A newly named replica has no live sockets yet. Record its
             // current revocation watermark before any client can authenticate
@@ -925,7 +932,9 @@ enum IMV2ServerApp {
                 await foregroundGroupEventHints.run()
             }
             let directRoomLogEventCacheTask = Task {
-                await directRoomLogEventCache?.run()
+                if let directRoomLogEventCache {
+                    await directRoomLogEventCache.run()
+                }
             }
             let syncWakeCoalescerTask = Task {
                 if configuration.syncWakeCoalescingEnabled {
@@ -1545,7 +1554,13 @@ enum IMV2ServerApp {
                     }
                 }
             }
-            await TerminationSignal.wait()
+            await V2ProcessTerminationSignal.wait()
+            logger.notice("IM V2 shutdown signal received")
+            // Stop admitting new sockets before cancelling background work.
+            // Existing channels remain alive for the bounded cooperative
+            // drain and are closed by the full server shutdown below.
+            try await server.stopAccepting()
+            logger.notice("IM V2 public listener closed")
             userProjectionTasks.forEach { $0.cancel() }
             snapshotArtifactTasks.forEach { $0.cancel() }
             messageProjectionBackfillTasks.forEach { $0.cancel() }
@@ -1565,30 +1580,44 @@ enum IMV2ServerApp {
             syncWakeCoalescerTask.cancel()
             foregroundGroupEventHints.finish()
             await directRoomLogEventCache?.finish()
-            for task in userProjectionTasks { await task.value }
-            for task in snapshotArtifactTasks { await task.value }
-            for task in messageProjectionBackfillTasks { await task.value }
-            for task in messageProjectionStateBodyCompactionTasks { await task.value }
-            for task in fanoutPayloadReferenceBackfillTasks { await task.value }
-            await fanoutPlanningTask.value
-            await fanoutDeliveryTask.value
-            await fanoutCompletionReleaseTask.value
-            await contentReviewTask.value
-            await pushWakeTask.value
-            await revokedDeviceProjectionCleanupTask.value
-            await controlPlaneHousekeepingTask.value
-            await syncLogCompactionTask.value
-            await maintenanceTask.value
-            await foregroundGroupEventHintTask.value
-            await directRoomLogEventCacheTask.value
-            await syncWakeCoalescerTask.value
+            var serviceTasks: [Task<Void, Never>] = []
+            serviceTasks.append(contentsOf: userProjectionTasks)
+            serviceTasks.append(contentsOf: snapshotArtifactTasks)
+            serviceTasks.append(contentsOf: messageProjectionBackfillTasks)
+            serviceTasks.append(contentsOf: messageProjectionStateBodyCompactionTasks)
+            serviceTasks.append(contentsOf: fanoutPayloadReferenceBackfillTasks)
+            serviceTasks.append(contentsOf: [
+                fanoutPlanningTask,
+                fanoutDeliveryTask,
+                fanoutCompletionReleaseTask,
+                contentReviewTask,
+                pushWakeTask,
+                revokedDeviceProjectionCleanupTask,
+                controlPlaneHousekeepingTask,
+                syncLogCompactionTask,
+                maintenanceTask,
+                foregroundGroupEventHintTask,
+                directRoomLogEventCacheTask,
+                syncWakeCoalescerTask,
+            ])
+            let drained = await v2WaitForTaskDrain(
+                serviceTasks,
+                timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
+            )
+            if !drained {
+                logger.warning("IM V2 service-task drain reached its shutdown deadline")
+            }
+            logger.notice("IM V2 service-task drain finished", metadata: ["drained": "\(drained)"])
             await connectionRegistry.finishLivePresenceRenewals()
             await connectionRegistry.detachForegroundGroupInterestManager()
             await connectionRegistry.detachLiveActivityBroker()
             await natsLiveActivityBroker?.shutdown()
             await natsGroupWakeBroker?.shutdown()
+            logger.notice("IM V2 broker and presence shutdown finished")
             try await server.shutdown()
+            logger.notice("IM V2 TLS event loops shut down")
             try await app.asyncShutdown()
+            logger.notice("IM V2 Vapor application shut down")
             try await applicationEventLoops.shutdownGracefully()
         } catch {
             await natsLiveActivityBroker?.shutdown()
@@ -1715,19 +1744,5 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
             }
         }
         return hash % 1_000 < UInt64(successSamplePermille)
-    }
-}
-
-private enum TerminationSignal {
-    static func wait() async {
-        await withCheckedContinuation { continuation in
-            signal(SIGTERM, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-            source.setEventHandler {
-                source.cancel()
-                continuation.resume()
-            }
-            source.resume()
-        }
     }
 }

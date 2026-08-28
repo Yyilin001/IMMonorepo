@@ -52,6 +52,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         public let atomicBatchFallbacks: UInt64
         public let atomicBatchCommittedRequests: UInt64
         public let atomicBatchFallbackRequests: UInt64
+        /// Bounded reasons reported by the authoritative store when an
+        /// attempted atomic subset rolled back before any durable commit.
+        public let atomicBatchFallbackReasons: [V2AtomicRoomWriteBatchError.Reason: UInt64]
+        /// Later commands for a room that were deliberately kept behind the
+        /// first command and executed in a subsequent unique-room wave.
+        public let sameRoomDeferredRequests: UInt64
         /// Requests known before the atomic attempt to require the ordinary
         /// durable path.  They do not make an otherwise compatible batch
         /// abandon its shared transaction.
@@ -83,6 +89,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             atomicBatchFallbacks: UInt64 = 0,
             atomicBatchCommittedRequests: UInt64 = 0,
             atomicBatchFallbackRequests: UInt64 = 0,
+            atomicBatchFallbackReasons: [V2AtomicRoomWriteBatchError.Reason: UInt64] = [:],
+            sameRoomDeferredRequests: UInt64 = 0,
             atomicPreclassifiedIndividualRequests: UInt64 = 0,
             singletonDispatches: UInt64 = 0
         ) {
@@ -108,6 +116,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             self.atomicBatchFallbacks = atomicBatchFallbacks
             self.atomicBatchCommittedRequests = atomicBatchCommittedRequests
             self.atomicBatchFallbackRequests = atomicBatchFallbackRequests
+            self.atomicBatchFallbackReasons = atomicBatchFallbackReasons
+            self.sameRoomDeferredRequests = sameRoomDeferredRequests
             self.atomicPreclassifiedIndividualRequests = atomicPreclassifiedIndividualRequests
             self.singletonDispatches = singletonDispatches
         }
@@ -213,6 +223,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private var atomicBatchFallbacks: UInt64 = 0
     private var atomicBatchCommittedRequests: UInt64 = 0
     private var atomicBatchFallbackRequests: UInt64 = 0
+    private var atomicBatchFallbackReasons: [V2AtomicRoomWriteBatchError.Reason: UInt64] = [:]
+    private var sameRoomDeferredRequests: UInt64 = 0
     private var atomicPreclassifiedIndividualRequests: UInt64 = 0
     private var singletonDispatches: UInt64 = 0
     private var dequeuedRequests: UInt64 = 0
@@ -272,6 +284,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             atomicBatchFallbacks: atomicBatchFallbacks,
             atomicBatchCommittedRequests: atomicBatchCommittedRequests,
             atomicBatchFallbackRequests: atomicBatchFallbackRequests,
+            atomicBatchFallbackReasons: atomicBatchFallbackReasons,
+            sameRoomDeferredRequests: sameRoomDeferredRequests,
             atomicPreclassifiedIndividualRequests: atomicPreclassifiedIndividualRequests,
             singletonDispatches: singletonDispatches
         )
@@ -497,6 +511,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
+        sameRoomDeferredRequests &+= UInt64(batch.count - roomIDs.count)
         let executionStartedAt = clock.now
         Task {
             let results: [Result<V2SendMessageOutcome, any Error>]
@@ -543,89 +558,96 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Preserves the atomic-store contract for each compatible subset. Store
-    /// partitions execute serially inside one outer batch because distinct
-    /// room classes can still contend on shared shard-admission rows. An
-    /// atomic attempt rejected by a durable revision check rolls back as a
-    /// unit and falls back only for that compatible subset.
+    /// Preserves the atomic-store contract for each compatible subset.
+    ///
+    /// PostgreSQL's room-log statements advance one durable cursor per room,
+    /// so one store call must never contain the same room twice.  The staging
+    /// selector may nevertheless include later commands for a hot room to
+    /// avoid starving it behind colder traffic.  Execute those commands as
+    /// ordered, unique-room waves: a later command from one room cannot begin
+    /// before its predecessor has completed, while unrelated rooms still
+    /// retain set-based transaction amortisation inside every wave.
+    ///
+    /// Compatibility partitions execute serially inside a wave because they
+    /// can still contend on shared shard-admission rows. An atomic attempt
+    /// rejected by a durable revision check rolls back as a unit and falls
+    /// back only for that compatible subset.
     private func executePartitioned(
         batch: [Pending],
         partitions: [V2AtomicRoomWriteBatchPartition?]
     ) async -> PartitionedExecution {
-        // A store classifier may observe a cache transition between commands
-        // for the same room. Never let that split one room across concurrent
-        // transactions: preserve the original atomic batch as the safe path.
-        // This is intentionally checked here rather than relying only on the
-        // PostgreSQL classifier, so every store implementation receives the
-        // same ordering guarantee.
-        var seenRooms: Set<RoomID> = []
-        var firstPartitionByRoom: [RoomID: V2AtomicRoomWriteBatchPartition] = [:]
-        for index in partitions.indices {
-            let roomID = batch[index].request.command.roomID
-            if seenRooms.insert(roomID).inserted {
-                if let partition = partitions[index] {
-                    firstPartitionByRoom[roomID] = partition
-                }
-            } else if firstPartitionByRoom[roomID] != partitions[index] {
-                let execution = await executeAtomic(batch)
-                return .init(
-                    results: execution.results,
-                    disposition: execution.disposition
-                )
-            }
-        }
-
-        var indicesByPartition: [V2AtomicRoomWriteBatchPartition: [Int]] = [:]
-        var individualIndices: [Int] = []
-        for (index, partition) in partitions.enumerated() {
-            if let partition {
-                indicesByPartition[partition, default: []].append(index)
-            } else {
-                individualIndices.append(index)
-            }
-        }
-        // A one-item compatibility class cannot use the atomic-store
-        // contract, but it can still run concurrently with the real batches.
-        for indices in indicesByPartition.values where indices.count == 1 {
-            individualIndices.append(indices[0])
-        }
-        let atomicGroups = indicesByPartition.values.filter { $0.count >= 2 }
-        guard !atomicGroups.isEmpty else {
-            return .init(
-                results: await acceptIndividually(batch),
-                disposition: .preclassified(requestCount: batch.count)
-            )
-        }
-
-        var atomicExecutions: [([Int], AtomicExecution)] = []
-        atomicExecutions.reserveCapacity(atomicGroups.count)
-        for indices in atomicGroups {
-            let execution = await executeAtomic(indices.map { batch[$0] })
-            atomicExecutions.append((indices, execution))
-        }
-        let independentlyAccepted = await acceptIndividually(
-            individualIndices.map { batch[$0] }
-        )
-
         var results = Array<Result<V2SendMessageOutcome, any Error>?>(
             repeating: nil,
             count: batch.count
         )
-        for (indices, execution) in atomicExecutions {
-            for (index, result) in zip(indices, execution.results) {
-                results[index] = result
+        var dispositions: [BatchDisposition] = []
+        var preclassifiedRequestCount = 0
+        var remainingIndices = Array(batch.indices)
+
+        while !remainingIndices.isEmpty {
+            var waveRoomIDs: Set<RoomID> = []
+            var waveIndices: [Int] = []
+            var deferredIndices: [Int] = []
+            waveIndices.reserveCapacity(remainingIndices.count)
+            deferredIndices.reserveCapacity(remainingIndices.count)
+            for index in remainingIndices {
+                let roomID = batch[index].request.command.roomID
+                if waveRoomIDs.insert(roomID).inserted {
+                    waveIndices.append(index)
+                } else {
+                    deferredIndices.append(index)
+                }
+            }
+            remainingIndices = deferredIndices
+
+            // Retain first-seen partition order instead of relying on
+            // Dictionary iteration. This keeps lock acquisition and test
+            // behaviour deterministic across processes and Swift versions.
+            var orderedPartitions: [V2AtomicRoomWriteBatchPartition] = []
+            var indicesByPartition: [V2AtomicRoomWriteBatchPartition: [Int]] = [:]
+            var individualIndices: [Int] = []
+            for index in waveIndices {
+                guard let partition = partitions[index] else {
+                    individualIndices.append(index)
+                    continue
+                }
+                if indicesByPartition[partition] == nil {
+                    orderedPartitions.append(partition)
+                }
+                indicesByPartition[partition, default: []].append(index)
+            }
+
+            for partition in orderedPartitions {
+                guard let indices = indicesByPartition[partition] else { continue }
+                if indices.count == 1 {
+                    individualIndices.append(indices[0])
+                    continue
+                }
+                let execution = await executeAtomic(indices.map { batch[$0] })
+                for (index, result) in zip(indices, execution.results) {
+                    results[index] = result
+                }
+                dispositions.append(execution.disposition)
+            }
+
+            if !individualIndices.isEmpty {
+                let independentlyAccepted = await acceptIndividually(
+                    individualIndices.map { batch[$0] }
+                )
+                for (index, result) in zip(individualIndices, independentlyAccepted) {
+                    results[index] = result
+                }
+                preclassifiedRequestCount += individualIndices.count
             }
         }
-        for (index, result) in zip(individualIndices, independentlyAccepted) {
-            results[index] = result
-        }
+
         return .init(
             results: results.map {
                 $0 ?? .failure(V2RoomWriteStoreError.corruptPersistenceState)
             },
             disposition: .multiplePartitions(
-                atomic: atomicExecutions.map { $0.1.disposition },
-                preclassifiedRequestCount: individualIndices.count
+                atomic: dispositions,
+                preclassifiedRequestCount: preclassifiedRequestCount
             )
         )
     }
@@ -642,13 +664,64 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 results: outcomes.map(Result.success),
                 disposition: .atomicCommitted(requestCount: batch.count)
             )
-        } catch V2AtomicRoomWriteBatchError.unsupportedRequestShape {
+        } catch let batchError as V2AtomicRoomWriteBatchError {
+            if let isolated = validatedIsolatedRequestIndices(
+                batchError.isolatedRequestIndices,
+                batchCount: batch.count
+            ) {
+                let isolatedSet = Set(isolated)
+                let compatibleIndices = batch.indices.filter {
+                    !isolatedSet.contains($0)
+                }
+                // Retrying one remaining request atomically is impossible and
+                // provides no batching benefit. In that degenerate case the
+                // existing scalar fallback remains the bounded behavior.
+                if compatibleIndices.count >= 2 {
+                    let compatibleExecution = await executeAtomic(
+                        compatibleIndices.map { batch[$0] }
+                    )
+                    let isolatedResults = await acceptIndividually(
+                        isolated.map { batch[$0] }
+                    )
+                    var results = Array<Result<V2SendMessageOutcome, any Error>?>(
+                        repeating: nil,
+                        count: batch.count
+                    )
+                    for (index, result) in zip(
+                        compatibleIndices,
+                        compatibleExecution.results
+                    ) {
+                        results[index] = result
+                    }
+                    for (index, result) in zip(isolated, isolatedResults) {
+                        results[index] = result
+                    }
+                    return .init(
+                        results: results.map {
+                            $0 ?? .failure(V2RoomWriteStoreError.corruptPersistenceState)
+                        },
+                        disposition: .multiplePartitions(
+                            atomic: [
+                                .fallback(
+                                    requestCount: batch.count,
+                                    reason: batchError.reason
+                                ),
+                                compatibleExecution.disposition,
+                            ],
+                            preclassifiedRequestCount: isolated.count
+                        )
+                    )
+                }
+            }
             // The transaction rolled back before committing anything. Only
             // this compatible subset retries individually; requests rejected
             // by the advisory classifier are already using that same path.
             return .init(
                 results: await acceptIndividually(batch),
-                disposition: .fallback(requestCount: batch.count)
+                disposition: .fallback(
+                    requestCount: batch.count,
+                    reason: batchError.reason
+                )
             )
         } catch {
             return .init(
@@ -656,6 +729,18 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 disposition: .atomicFailed
             )
         }
+    }
+
+    private func validatedIsolatedRequestIndices(
+        _ indices: [Int],
+        batchCount: Int
+    ) -> [Int]? {
+        guard !indices.isEmpty, indices.count < batchCount else { return nil }
+        let unique = Set(indices)
+        guard unique.count == indices.count,
+              unique.allSatisfy({ (0..<batchCount).contains($0) })
+        else { return nil }
+        return unique.sorted()
     }
 
     private func acceptIndividually(
@@ -741,10 +826,11 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             atomicBatchAttempts &+= 1
             atomicBatchCommitted &+= 1
             atomicBatchCommittedRequests &+= UInt64(requestCount)
-        case .fallback(let requestCount):
+        case .fallback(let requestCount, let reason):
             atomicBatchAttempts &+= 1
             atomicBatchFallbacks &+= 1
             atomicBatchFallbackRequests &+= UInt64(requestCount)
+            atomicBatchFallbackReasons[reason, default: 0] &+= 1
         case .preclassified(let requestCount):
             atomicPreclassifiedIndividualRequests &+= UInt64(requestCount)
         case .partitioned(let atomic, let preclassifiedRequestCount):
@@ -774,7 +860,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     private enum BatchDisposition: Sendable {
         case atomicCommitted(requestCount: Int)
-        case fallback(requestCount: Int)
+        case fallback(requestCount: Int, reason: V2AtomicRoomWriteBatchError.Reason)
         case preclassified(requestCount: Int)
         case partitioned(atomic: AtomicBatchDisposition, preclassifiedRequestCount: Int)
         case multiplePartitions(atomic: [BatchDisposition], preclassifiedRequestCount: Int)
@@ -789,9 +875,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     atomic: .committed(requestCount: requestCount),
                     preclassifiedRequestCount: count
                 )
-            case .fallback(let requestCount):
+            case .fallback(let requestCount, let reason):
                 return .partitioned(
-                    atomic: .fallback(requestCount: requestCount),
+                    atomic: .fallback(requestCount: requestCount, reason: reason),
                     preclassifiedRequestCount: count
                 )
             case .atomicFailed, .singleton, .preclassified, .partitioned,
@@ -803,7 +889,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     private enum AtomicBatchDisposition: Sendable {
         case committed(requestCount: Int)
-        case fallback(requestCount: Int)
+        case fallback(requestCount: Int, reason: V2AtomicRoomWriteBatchError.Reason)
     }
 
     private struct AtomicExecution: Sendable {
@@ -822,10 +908,11 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             atomicBatchAttempts &+= 1
             atomicBatchCommitted &+= 1
             atomicBatchCommittedRequests &+= UInt64(requestCount)
-        case .fallback(let requestCount):
+        case .fallback(let requestCount, let reason):
             atomicBatchAttempts &+= 1
             atomicBatchFallbacks &+= 1
             atomicBatchFallbackRequests &+= UInt64(requestCount)
+            atomicBatchFallbackReasons[reason, default: 0] &+= 1
         }
     }
 
@@ -835,10 +922,11 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             atomicBatchAttempts &+= 1
             atomicBatchCommitted &+= 1
             atomicBatchCommittedRequests &+= UInt64(requestCount)
-        case .fallback(let requestCount):
+        case .fallback(let requestCount, let reason):
             atomicBatchAttempts &+= 1
             atomicBatchFallbacks &+= 1
             atomicBatchFallbackRequests &+= UInt64(requestCount)
+            atomicBatchFallbackReasons[reason, default: 0] &+= 1
         case .preclassified(let requestCount):
             atomicPreclassifiedIndividualRequests &+= UInt64(requestCount)
         case .partitioned(let atomic, let preclassifiedRequestCount):

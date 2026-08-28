@@ -55,7 +55,7 @@ public actor V2DeviceConnectionRegistry {
     }
 
     @discardableResult
-    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async -> Bool {
+    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async throws -> Bool {
         // A connection ID is one lifecycle token, not an idempotency key.
         // Accepting a duplicate while the first registration is suspended
         // would let a different stream inherit its identity and lease.
@@ -79,7 +79,10 @@ public actor V2DeviceConnectionRegistry {
             )
         } catch {
             rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
-            return false
+            // A storage or pool failure is not a connection-limit decision.
+            // Preserve the original error so transport telemetry can identify
+            // the failing dependency instead of reporting a false quota hit.
+            throw error
         }
         guard lifecycleByConnection[connectionID] == lifecycle else {
             await compensateStalePresence(connectionID: connectionID, identity: identity)

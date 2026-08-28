@@ -151,6 +151,16 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
             atomicBatchFallbackRequests: saturatingSum(
                 snapshots.map(\.atomicBatchFallbackRequests)
             ),
+            atomicBatchFallbackReasons: Dictionary(uniqueKeysWithValues:
+                V2AtomicRoomWriteBatchError.Reason.allCases.map { reason in
+                    (reason, saturatingSum(snapshots.map {
+                        $0.atomicBatchFallbackReasons[reason, default: 0]
+                    }))
+                }
+            ),
+            sameRoomDeferredRequests: saturatingSum(
+                snapshots.map(\.sameRoomDeferredRequests)
+            ),
             atomicPreclassifiedIndividualRequests: saturatingSum(
                 snapshots.map(\.atomicPreclassifiedIndividualRequests)
             ),

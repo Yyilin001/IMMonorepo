@@ -271,7 +271,7 @@ public actor V2GatewayByteStream {
     private func registerAuthenticatedDeviceIfNeeded() async throws {
         guard registeredIdentity == nil, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
-        let accepted = await registry.register(self, connectionID: connectionID, identity: identity)
+        let accepted = try await registry.register(self, connectionID: connectionID, identity: identity)
         guard accepted, registeredIdentity == identity, !transportClosed else {
             if registeredIdentity == identity { registeredIdentity = nil }
             await registry.unregister(connectionID: connectionID)

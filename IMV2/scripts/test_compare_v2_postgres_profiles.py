@@ -27,11 +27,23 @@ def read_csv(directory: Path, name: str) -> list[dict[str, str]]:
 def fixture(directory: Path, multiplier: int, reset: str = "epoch-a") -> None:
     write_csv(directory, "counter_epochs.csv", [
         {"counter": counter, "stats_reset": reset}
-        for counter in ("database", "io", "statements", "wal")
+        for counter in ("bgwriter", "database", "io", "statements", "wal")
     ])
     write_csv(directory, "database.csv", [{
         "datname": "im_v2", "numbackends": 3,
         "xact_commit": 10 * multiplier, "temp_bytes": 2 * multiplier,
+    }])
+    write_csv(directory, "bgwriter.csv", [{
+        "checkpoints_timed": 1 * multiplier,
+        "checkpoints_req": 0,
+        "checkpoint_write_time": 100 * multiplier,
+        "checkpoint_sync_time": 2 * multiplier,
+        "buffers_checkpoint": 20 * multiplier,
+        "buffers_clean": 30 * multiplier,
+        "maxwritten_clean": 4 * multiplier,
+        "buffers_backend": 5 * multiplier,
+        "buffers_backend_fsync": 0,
+        "buffers_alloc": 40 * multiplier,
     }])
     write_csv(directory, "wal.csv", [{
         "wal_records": 11 * multiplier, "wal_bytes": 101 * multiplier,
@@ -55,8 +67,18 @@ def fixture(directory: Path, multiplier: int, reset: str = "epoch-a") -> None:
         "total_bytes": 1_000 - 100 * multiplier, "n_live_tup": 20,
         "n_dead_tup": 2, "seq_scan": 1 * multiplier,
         "idx_scan": 2 * multiplier, "n_tup_ins": 3 * multiplier,
-        "n_tup_upd": 0, "n_tup_del": 0, "heap_blks_read": 0,
+        "n_tup_upd": 10 * multiplier, "n_tup_del": 0,
+        "n_tup_hot_upd": 8 * multiplier,
+        "n_tup_newpage_upd": 2 * multiplier, "heap_blks_read": 0,
         "heap_blks_hit": 4 * multiplier, "idx_blks_read": 0,
+        "idx_blks_hit": 5 * multiplier,
+    }])
+    write_csv(directory, "indexes.csv", [{
+        "schemaname": "im_v2", "relname": "messages",
+        "indexrelname": "messages_pkey",
+        "index_bytes": 2_000 - 100 * multiplier,
+        "idx_scan": 2 * multiplier, "idx_tup_read": 3 * multiplier,
+        "idx_tup_fetch": 1 * multiplier, "idx_blks_read": 0,
         "idx_blks_hit": 5 * multiplier,
     }])
 
@@ -81,6 +103,12 @@ class ProfileDeltaTests(unittest.TestCase):
             self.assertEqual(statement["interval_mean_exec_ms"], "4")
             relation = read_csv(after, "delta_relations.csv")[0]
             self.assertEqual(relation["delta_total_bytes"], "-200")
+            self.assertEqual(relation["interval_hot_update_percent"], "80")
+            self.assertEqual(relation["interval_newpage_update_percent"], "20")
+            bgwriter = read_csv(after, "delta_bgwriter.csv")[0]
+            self.assertEqual(bgwriter["delta_buffers_backend"], "10")
+            index = read_csv(after, "delta_indexes.csv")[0]
+            self.assertEqual(index["delta_index_bytes"], "-200")
 
     def test_rejects_counter_reset_between_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

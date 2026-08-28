@@ -60,6 +60,17 @@ public protocol V2UserShardRouteFencing: Sendable {
     ) async throws -> Result
 }
 
+/// Acquires the same cutover fence for a bounded set of users in one control
+/// transaction. Implementations must lock users in a stable order: callers
+/// use this boundary to replace thousands of independent route round trips,
+/// not to weaken the per-user cutover invariant.
+public protocol V2UserShardRouteBatchFencing: Sendable {
+    func withCurrentRoutes<Result: Sendable>(
+        for userIDs: [UserID],
+        _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
+    ) async throws -> Result
+}
+
 public enum V2UserShardRouterError: Error, Equatable, Sendable {
     case invalidRoute
     case resultCountMismatch
@@ -91,6 +102,13 @@ public struct V2PostgresUserShardRouter: V2UserShardRouter {
     public func routes(for users: [UserID]) async throws -> [V2UserShardRoute] {
         guard !users.isEmpty else { return [] }
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return try await routes(for: users, sql: sql)
+    }
+
+    private func routes(
+        for users: [UserID],
+        sql: any SQLDatabase
+    ) async throws -> [V2UserShardRoute] {
         let requestedJSON = try String(data: JSONEncoder().encode(users.map(\.rawValue)), encoding: .utf8)
         guard let requestedJSON else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let rows = try await sql.raw("""
@@ -138,6 +156,52 @@ extension V2PostgresUserShardRouter: V2UserShardRouteFencing {
                 readFallbackBucket: override?.readFallbackBucket ?? configuration.defaultReadFallbackBucket
             )
             return try await operation(route, transaction)
+        }
+    }
+}
+
+extension V2PostgresUserShardRouter: V2UserShardRouteBatchFencing {
+    public func withCurrentRoutes<Result: Sendable>(
+        for userIDs: [UserID],
+        _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
+    ) async throws -> Result {
+        guard !userIDs.isEmpty else {
+            return try await database.transaction { transaction in
+                try await operation([], transaction)
+            }
+        }
+        let uniqueUserIDs = Array(Set(userIDs.map(\.rawValue))).sorted()
+        guard uniqueUserIDs.count <= 1_024,
+              uniqueUserIDs.allSatisfy({ UUID(uuidString: $0) != nil }),
+              let requestedJSON = String(
+                  data: try JSONEncoder().encode(uniqueUserIDs),
+                  encoding: .utf8
+              )
+        else { throw V2UserShardRouterError.invalidRoute }
+
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            // Materialization and the outer ordering make every participant
+            // acquire multi-user fences in the same order. PostgreSQL's
+            // transaction-level advisory locks are released automatically on
+            // commit or rollback.
+            try await sql.raw("""
+                WITH ordered_users AS MATERIALIZED (
+                    SELECT value
+                    FROM jsonb_array_elements_text(\(bind: requestedJSON)::jsonb)
+                         AS requested(value)
+                    ORDER BY value
+                )
+                SELECT pg_advisory_xact_lock_shared(
+                    hashtextextended(ordered_users.value, 0)
+                )
+                FROM ordered_users
+                ORDER BY ordered_users.value
+                """).run()
+            let routes = try await routes(for: userIDs, sql: sql)
+            return try await operation(routes, transaction)
         }
     }
 }

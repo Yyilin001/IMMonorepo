@@ -1,4 +1,3 @@
-import Dispatch
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
@@ -6,17 +5,11 @@ import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#elseif canImport(Musl)
-import Musl
-#endif
 
 @main
 enum IMV2AccountServerApp {
     static func main() async throws {
+        V2ProcessTerminationSignal.install()
         let configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
@@ -214,7 +207,7 @@ enum IMV2AccountServerApp {
             ).register(on: app)
             try await app.startup()
             app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
-            await TerminationSignal.wait()
+            await V2ProcessTerminationSignal.wait()
             await runtimeTasks.cancelAndWait()
             try await app.asyncShutdown()
             try await applicationEventLoops.shutdownGracefully()
@@ -249,19 +242,6 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
     func value(for key: String) -> String? { ProcessInfo.processInfo.environment[key] }
 }
 
-private enum TerminationSignal {
-    static func wait() async {
-        await withCheckedContinuation { continuation in
-            signal(SIGTERM, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-            source.setEventHandler {
-                source.cancel()
-                continuation.resume()
-            }
-            source.resume()
-        }
-    }
-}
 
 /// Owns unstructured process tasks that must start before `Application.startup`
 /// can complete. Every normal and exceptional exit cancels and joins the set

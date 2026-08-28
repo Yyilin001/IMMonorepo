@@ -186,8 +186,41 @@ public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable {
 /// batcher then retries the original immutable requests through the ordinary
 /// per-command path.  This is distinct from a storage error: it is never
 /// exposed to a client and never acknowledges a partial batch.
-public enum V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
-    case unsupportedRequestShape
+///
+/// Reasons are deliberately low-cardinality operational dimensions. They
+/// must never contain a room, user, operation or policy identifier.
+public struct V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
+    public enum Reason: String, CaseIterable, Hashable, Sendable {
+        case unspecified
+        case incompatibleConfiguration = "incompatible_configuration"
+        case requestShape = "request_shape"
+        case duplicateOperation = "duplicate_operation"
+        case duplicateRoom = "duplicate_room"
+        case preflightMismatch = "preflight_mismatch"
+        case authorizationState = "authorization_state"
+        case roomKindMismatch = "room_kind_mismatch"
+        case capacityProfileMismatch = "capacity_profile_mismatch"
+        case roomFrozen = "room_frozen"
+        case roomCreditModeMismatch = "room_credit_mode_mismatch"
+        case admissionState = "admission_state"
+        case conditionalWriteMismatch = "conditional_write_mismatch"
+    }
+
+    /// Source-compatible value for stores that do not yet expose a bounded
+    /// reason. New production rejection sites should prefer `init(reason:)`.
+    public static let unsupportedRequestShape = Self(reason: .unspecified)
+
+    public let reason: Reason
+    /// Input-relative indices that are known to be individually incompatible
+    /// while the rest of the rolled-back batch may still use the atomic path.
+    /// This never carries an identifier and is validated by the batcher before
+    /// it is used to isolate exceptional requests.
+    public let isolatedRequestIndices: [Int]
+
+    public init(reason: Reason, isolatedRequestIndices: [Int] = []) {
+        self.reason = reason
+        self.isolatedRequestIndices = isolatedRequestIndices
+    }
 }
 
 public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
@@ -220,15 +253,19 @@ public protocol V2SendMessageAdmission: Sendable {
 }
 
 public struct V2AcceptanceIDFactory: Sendable {
-    private let makeIdentifiers: @Sendable () throws -> V2AcceptanceIdentifiers
+    private let makeIdentifiers: @Sendable (Date) throws -> V2AcceptanceIdentifiers
 
     /// Production identifiers come from one process-secret HMAC expansion.
-    /// This preserves independent, unpredictable UUIDv4 values while avoiding
-    /// Linux Foundation's open/read/close sequence for every individual UUID.
+    /// Accepted entities use RFC 9562 UUIDv7 values: their shared millisecond
+    /// prefix keeps PostgreSQL B-tree inserts local while each value retains
+    /// 74 independently pseudorandom bits. The accepted timestamp is already
+    /// part of the public message contract, so the UUID reveals no additional
+    /// time precision. Linux also avoids Foundation's open/read/close sequence
+    /// for every individual UUID.
     public init() {
         let generator = V2SecureProcessUUIDGenerator.shared
-        makeIdentifiers = {
-            let identifiers = generator.makeTriple()
+        makeIdentifiers = { acceptedAt in
+            let identifiers = generator.makeOrderedTriple(at: acceptedAt)
             return try V2AcceptanceIdentifiers(
                 messageID: MessageID(identifiers.0.uuidString),
                 eventID: EventID(identifiers.1.uuidString),
@@ -239,7 +276,7 @@ public struct V2AcceptanceIDFactory: Sendable {
 
     /// Deterministic injection remains available for domain tests.
     public init(makeUUID: @escaping @Sendable () -> UUID) {
-        makeIdentifiers = {
+        makeIdentifiers = { _ in
             try V2AcceptanceIdentifiers(
                 messageID: MessageID(makeUUID().uuidString),
                 eventID: EventID(makeUUID().uuidString),
@@ -248,8 +285,8 @@ public struct V2AcceptanceIDFactory: Sendable {
         }
     }
 
-    public func make() throws -> V2AcceptanceIdentifiers {
-        try makeIdentifiers()
+    public func make(at acceptedAt: Date) throws -> V2AcceptanceIdentifiers {
+        try makeIdentifiers(acceptedAt)
     }
 }
 
@@ -267,19 +304,35 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
 
     private let key = SymmetricKey(size: .bits256)
     private let counter = Atomic<UInt64>(0)
+    private let lastOrderedUnixMilliseconds = Mutex<UInt64>(0)
 
     func makeOne() -> UUID {
         let authenticationCode = nextAuthenticationCode()
         return v2UUIDv4(authenticationCode, offset: 0)
     }
 
-    func makeTriple() -> (UUID, UUID, UUID) {
+    func makeOrderedTriple(at date: Date) -> (UUID, UUID, UUID) {
+        let unixMilliseconds = orderedUnixMilliseconds(for: date)
         let authenticationCode = nextAuthenticationCode()
         return (
-            v2UUIDv4(authenticationCode, offset: 0),
-            v2UUIDv4(authenticationCode, offset: 16),
-            v2UUIDv4(authenticationCode, offset: 32)
+            v2UUIDv7(authenticationCode, offset: 0, unixMilliseconds: unixMilliseconds),
+            v2UUIDv7(authenticationCode, offset: 16, unixMilliseconds: unixMilliseconds),
+            v2UUIDv7(authenticationCode, offset: 32, unixMilliseconds: unixMilliseconds)
         )
+    }
+
+    /// A backwards wall-clock adjustment must not send new B-tree keys back
+    /// into an older range. UUID uniqueness still comes from the HMAC output;
+    /// this clamp only preserves the ordered prefix within one process.
+    private func orderedUnixMilliseconds(for date: Date) -> UInt64 {
+        let milliseconds = date.timeIntervalSince1970 * 1_000
+        precondition(milliseconds.isFinite && milliseconds >= 0)
+        let candidate = UInt64(milliseconds.rounded(.down))
+        precondition(candidate <= 0x0000_ffff_ffff_ffff, "UUIDv7 timestamp exhausted")
+        return lastOrderedUnixMilliseconds.withLock { previous in
+            previous = max(previous, candidate)
+            return previous
+        }
     }
 
     private func nextAuthenticationCode() -> [UInt8] {
@@ -303,6 +356,31 @@ private func v2UUIDv4<Bytes: RandomAccessCollection>(
         bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
         bytes[offset + 4], bytes[offset + 5], version, bytes[offset + 7],
         variant, bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
+        bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
+    ))
+}
+
+/// RFC 9562 section 5.7 layout. Bytes 0...5 are the 48-bit Unix millisecond
+/// timestamp; all remaining non-version/non-variant bits come directly from
+/// the process-secret HMAC expansion.
+private func v2UUIDv7<Bytes: RandomAccessCollection>(
+    _ bytes: Bytes,
+    offset: Int,
+    unixMilliseconds: UInt64
+) -> UUID where Bytes.Element == UInt8, Bytes.Index == Int {
+    precondition(offset >= 0 && bytes.count >= offset + 16)
+    precondition(unixMilliseconds <= 0x0000_ffff_ffff_ffff)
+    let versionAndRandom = (bytes[offset + 6] & 0x0f) | 0x70
+    let variantAndRandom = (bytes[offset + 8] & 0x3f) | 0x80
+    return UUID(uuid: (
+        UInt8(truncatingIfNeeded: unixMilliseconds >> 40),
+        UInt8(truncatingIfNeeded: unixMilliseconds >> 32),
+        UInt8(truncatingIfNeeded: unixMilliseconds >> 24),
+        UInt8(truncatingIfNeeded: unixMilliseconds >> 16),
+        UInt8(truncatingIfNeeded: unixMilliseconds >> 8),
+        UInt8(truncatingIfNeeded: unixMilliseconds),
+        versionAndRandom, bytes[offset + 7],
+        variantAndRandom, bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
         bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
     ))
 }
@@ -351,11 +429,12 @@ public struct V2SendMessageService: Sendable {
             replyTo: request.replyTo,
             limits: limits
         )
+        let acceptedAt = now()
         let prepared = V2RoomWriteRequest(
             command: command,
             capacityProfile: capacityProfile,
-            identifiers: try idFactory.make(),
-            now: now()
+            identifiers: try idFactory.make(at: acceptedAt),
+            now: acceptedAt
         )
         if let batcher {
             return try await batcher.accept(prepared)

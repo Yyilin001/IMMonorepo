@@ -1,23 +1,16 @@
-import Dispatch
 import FluentPostgresDriver
 import Foundation
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#elseif canImport(Musl)
-import Musl
-#endif
 
 /// A deliberately separate operator-only process. It has no public TLS
 /// gateway listener, account-factor route, media edge or metrics endpoint.
 @main
 enum IMV2OperatorServerApp {
     static func main() async throws {
+        V2ProcessTerminationSignal.install()
         let configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
@@ -147,7 +140,7 @@ enum IMV2OperatorServerApp {
                 "host": "\(configuration.listener.host)",
                 "port": "\(configuration.listener.port)",
             ])
-            await TerminationSignal.wait()
+            await V2ProcessTerminationSignal.wait()
             try await app.asyncShutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
@@ -178,18 +171,4 @@ private func postgresDatabaseConfiguration(
 
 private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
     func value(for key: String) -> String? { ProcessInfo.processInfo.environment[key] }
-}
-
-private enum TerminationSignal {
-    static func wait() async {
-        await withCheckedContinuation { continuation in
-            signal(SIGTERM, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-            source.setEventHandler {
-                source.cancel()
-                continuation.resume()
-            }
-            source.resume()
-        }
-    }
 }

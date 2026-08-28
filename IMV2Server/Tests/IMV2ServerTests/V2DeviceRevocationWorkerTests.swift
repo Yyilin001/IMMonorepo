@@ -80,7 +80,7 @@ struct V2DeviceRevocationWorkerTests {
         await stream.setDeviceRevocationHandler {
             await closeRecorder.recordClose()
         }
-        await registry.register(
+        try await registry.register(
             stream,
             connectionID: UUID(uuidString: "00000000-0000-0000-0000-000000000713")!,
             identity: .init(userID: user, deviceID: device, capabilityProfile: "base")

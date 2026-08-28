@@ -36,6 +36,7 @@ if [[ "${action}" == 'reset' ]]; then
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 SELECT pg_stat_statements_reset();
 SELECT pg_stat_reset();
+SELECT pg_stat_reset_shared('bgwriter');
 SELECT pg_stat_reset_shared('wal');
 SQL
   printf 'Disposable PostgreSQL profile counters reset\n'
@@ -87,8 +88,14 @@ SELECT current_timestamp AS captured_at,
        current_setting('wal_compression') AS wal_compression,
        current_setting('checkpoint_timeout') AS checkpoint_timeout,
        current_setting('checkpoint_completion_target') AS checkpoint_completion_target,
+       current_setting('checkpoint_flush_after') AS checkpoint_flush_after,
+       current_setting('backend_flush_after') AS backend_flush_after,
        current_setting('max_wal_size') AS max_wal_size,
        current_setting('min_wal_size') AS min_wal_size,
+       current_setting('bgwriter_delay') AS bgwriter_delay,
+       current_setting('bgwriter_lru_maxpages') AS bgwriter_lru_maxpages,
+       current_setting('bgwriter_lru_multiplier') AS bgwriter_lru_multiplier,
+       current_setting('bgwriter_flush_after') AS bgwriter_flush_after,
        current_setting('autovacuum') AS autovacuum,
        current_setting('autovacuum_max_workers') AS autovacuum_max_workers
 " > "${profile_directory}/settings.csv"
@@ -96,6 +103,8 @@ SELECT current_timestamp AS captured_at,
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
 SELECT 'database' AS counter, stats_reset
 FROM pg_stat_database WHERE datname = current_database()
+UNION ALL
+SELECT 'bgwriter', stats_reset FROM pg_stat_bgwriter
 UNION ALL
 SELECT 'wal', stats_reset FROM pg_stat_wal
 UNION ALL
@@ -113,6 +122,17 @@ SELECT datname, numbackends, xact_commit, xact_rollback,
 FROM pg_stat_database
 WHERE datname = current_database()
 " > "${profile_directory}/database.csv"
+
+# PostgreSQL 16 keeps both checkpointer and background-writer counters in
+# pg_stat_bgwriter. Capture explicit columns so the delta tool can distinguish
+# foreground buffer writes from deliberately paced background/checkpoint work.
+psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
+SELECT checkpoints_timed, checkpoints_req,
+       checkpoint_write_time, checkpoint_sync_time,
+       buffers_checkpoint, buffers_clean, maxwritten_clean,
+       buffers_backend, buffers_backend_fsync, buffers_alloc
+FROM pg_stat_bgwriter
+" > "${profile_directory}/bgwriter.csv"
 
 psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
 SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full,
@@ -158,6 +178,7 @@ SELECT schemaname, relname,
        pg_total_relation_size(relid) AS total_bytes,
        n_live_tup, n_dead_tup,
        seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del,
+       n_tup_hot_upd, n_tup_newpage_upd,
        heap_blks_read, heap_blks_hit,
        idx_blks_read, idx_blks_hit
 FROM pg_stat_user_tables
@@ -165,6 +186,20 @@ JOIN pg_statio_user_tables USING (relid, schemaname, relname)
 WHERE schemaname = 'im_v2'
 ORDER BY total_bytes DESC
 " > "${profile_directory}/relations.csv"
+
+psql "${database_url}" -v ON_ERROR_STOP=1 --csv -c "
+SELECT index_stats.schemaname, index_stats.relname,
+       index_stats.indexrelname,
+       pg_relation_size(index_stats.indexrelid) AS index_bytes,
+       index_stats.idx_scan, index_stats.idx_tup_read,
+       index_stats.idx_tup_fetch,
+       io.idx_blks_read, io.idx_blks_hit
+FROM pg_stat_user_indexes AS index_stats
+JOIN pg_statio_user_indexes AS io
+  USING (schemaname, relname, indexrelname)
+WHERE index_stats.schemaname = 'im_v2'
+ORDER BY index_bytes DESC, index_stats.indexrelname
+" > "${profile_directory}/indexes.csv"
 
 if [[ "${action}" == 'baseline' ]]; then
   printf 'PostgreSQL profile baseline written to %s; no server counters were reset\n' "${profile_directory}"

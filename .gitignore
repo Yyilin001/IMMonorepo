@@ -12,6 +12,7 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+.build-linux-*/
 .swiftpm/xcode/
 .swiftpm/xcode/package.xcworkspace/xcuserdata/
 

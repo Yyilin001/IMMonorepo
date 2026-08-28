@@ -110,7 +110,13 @@ public struct V2ForwardMessagesService: Sendable {
                 do {
                     let clientID = try await clientMessageID(actor: actorUserID, operation: operationID, source: source.messageID, target: target)
                     let request = try V2SendMessageCommand(roomID: target, senderUserID: actorUserID, clientMessageID: clientID, text: content.text, media: content.media, entities: content.entities, forwardedFrom: .init(messageID: source.messageID, senderUserID: content.senderUserID), limits: limits)
-                    let outcome = try await writeStore.accept(command: request, capacityProfile: capacityProfile, identifiers: try acceptanceIDs.make(), now: now())
+                    let acceptedAt = now()
+                    let outcome = try await writeStore.accept(
+                        command: request,
+                        capacityProfile: capacityProfile,
+                        identifiers: try acceptanceIDs.make(at: acceptedAt),
+                        now: acceptedAt
+                    )
                     switch outcome {
                     case .accepted(let message), .idempotent(let message):
                         try await markResult(actor: actorUserID, operation: operationID, source: source.messageID, target: target, message: message.messageID)
