@@ -124,6 +124,13 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     private var lruNodes: [TrackedIdentity: LRUNode] = [:]
     private var leastRecentlyUsed: TrackedIdentity?
     private var mostRecentlyUsed: TrackedIdentity?
+    /// Recency has no observable effect until the bounded map must evict.
+    /// Building and mutating two intrusive-LRU nodes for every command made
+    /// the normal, comfortably-under-capacity case pay four extra dictionary
+    /// writes. Keep exact last-use time in the token buckets and materialize
+    /// the LRU once, immediately before the first possible eviction. From
+    /// that point onward every access is tracked exactly as before.
+    private var recencyTrackingEnabled = false
 
     init(policy: V2GatewayCommandRateLimitPolicy) { self.policy = policy }
 
@@ -144,8 +151,10 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
             ensureCapacity(deviceID: identity.deviceID, userID: identity.userID)
             devices[identity.deviceID] = device
             users[identity.userID] = user
-            touch(.device(identity.deviceID))
-            touch(.user(identity.userID))
+            if recencyTrackingEnabled {
+                touch(.device(identity.deviceID))
+                touch(.user(identity.userID))
+            }
             return false
         }
         device.tokens -= 1
@@ -153,8 +162,10 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
         ensureCapacity(deviceID: identity.deviceID, userID: identity.userID)
         devices[identity.deviceID] = device
         users[identity.userID] = user
-        touch(.device(identity.deviceID))
-        touch(.user(identity.userID))
+        if recencyTrackingEnabled {
+            touch(.device(identity.deviceID))
+            touch(.user(identity.userID))
+        }
         return true
     }
 
@@ -177,8 +188,47 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
 
     private func ensureCapacity(deviceID: DeviceID, userID: UserID) {
         let additions = (devices[deviceID] == nil ? 1 : 0) + (users[userID] == nil ? 1 : 0)
+        if devices.count + users.count + additions > policy.maximumTrackedIdentities,
+           !recencyTrackingEnabled {
+            enableRecencyTracking()
+        }
         while devices.count + users.count + additions > policy.maximumTrackedIdentities {
             precondition(evictLeastRecentlyUsed(excluding: deviceID, userID: userID))
+        }
+    }
+
+    /// Reconstructs the exact access order from the buckets' last refill
+    /// timestamp. `refilledAt` is advanced on every positive elapsed access,
+    /// so no rate-limit state is discarded or refreshed by this transition.
+    /// Equal timestamps use a stable identity key only to make eviction and
+    /// tests reproducible; either ordering has identical quota semantics.
+    private func enableRecencyTracking() {
+        precondition(!recencyTrackingEnabled)
+        var identities: [(identity: TrackedIdentity, lastUsedAt: Date)] = []
+        identities.reserveCapacity(devices.count + users.count)
+        identities.append(contentsOf: devices.map {
+            (.device($0.key), $0.value.refilledAt)
+        })
+        identities.append(contentsOf: users.map {
+            (.user($0.key), $0.value.refilledAt)
+        })
+        identities.sort {
+            if $0.lastUsedAt != $1.lastUsedAt {
+                return $0.lastUsedAt < $1.lastUsedAt
+            }
+            return stableIdentityKey($0.identity) < stableIdentityKey($1.identity)
+        }
+        lruNodes.removeAll(keepingCapacity: true)
+        leastRecentlyUsed = nil
+        mostRecentlyUsed = nil
+        for item in identities { touch(item.identity) }
+        recencyTrackingEnabled = true
+    }
+
+    private func stableIdentityKey(_ identity: TrackedIdentity) -> String {
+        switch identity {
+        case .device(let deviceID): "device:" + deviceID.rawValue
+        case .user(let userID): "user:" + userID.rawValue
         }
     }
 

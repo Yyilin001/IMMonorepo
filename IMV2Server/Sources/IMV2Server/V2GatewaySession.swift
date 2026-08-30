@@ -32,6 +32,25 @@ public enum V2GatewaySessionError: Error, Equatable, Sendable {
 /// and a validated protobuf envelope; it never sees TLS bytes or credentials.
 public protocol V2GatewayCommandHandler: Sendable {
     func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope
+    /// Production transports supply their process-local connection identity
+    /// so post-commit accelerators can suppress an echo to the exact request
+    /// origin without suppressing the sender's other devices. Domain
+    /// correctness must never depend on this optional transport hint.
+    func handle(
+        envelope: IMV2Envelope,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?
+    ) async throws -> IMV2Envelope
+}
+
+extension V2GatewayCommandHandler {
+    public func handle(
+        envelope: IMV2Envelope,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID _: UUID?
+    ) async throws -> IMV2Envelope {
+        try await handle(envelope: envelope, identity: identity)
+    }
 }
 
 /// One fully validated request/response exchange. The session owns protobuf
@@ -85,13 +104,19 @@ public actor V2GatewaySession {
     /// process-local subscriptions without becoming a second codec boundary.
     func receive(
         _ frame: V2Frame,
-        handler: any V2GatewayCommandHandler
+        handler: any V2GatewayCommandHandler,
+        originatingConnectionID: UUID? = nil
     ) async throws -> V2GatewaySessionExchange {
         let envelope = try decode(frame)
         let response: V2GatewaySessionResponse
         switch state.phase {
         case .authenticated:
-            response = try await receiveAuthenticated(frame, envelope: envelope, handler: handler)
+            response = try await receiveAuthenticated(
+                frame,
+                envelope: envelope,
+                handler: handler,
+                originatingConnectionID: originatingConnectionID
+            )
         default:
             response = try await receiveBootstrap(frame, envelope: envelope)
         }
@@ -173,13 +198,19 @@ public actor V2GatewaySession {
     }
 
     public func receiveAuthenticated(_ frame: V2Frame, handler: any V2GatewayCommandHandler) async throws -> V2Frame {
-        try await receiveAuthenticated(frame, envelope: decode(frame), handler: handler).frame
+        try await receiveAuthenticated(
+            frame,
+            envelope: decode(frame),
+            handler: handler,
+            originatingConnectionID: nil
+        ).frame
     }
 
     private func receiveAuthenticated(
         _ frame: V2Frame,
         envelope: IMV2Envelope,
-        handler: any V2GatewayCommandHandler
+        handler: any V2GatewayCommandHandler,
+        originatingConnectionID: UUID?
     ) async throws -> V2GatewaySessionResponse {
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
@@ -202,7 +233,11 @@ public actor V2GatewaySession {
                 response.heartbeatAck = .init()
                 response.heartbeatAck.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)
             } else {
-                response = try await handler.handle(envelope: envelope, identity: identity)
+                response = try await handler.handle(
+                    envelope: envelope,
+                    identity: identity,
+                    originatingConnectionID: originatingConnectionID
+                )
             }
             response.requestID = envelope.requestID
             response.protocolVersion = UInt32(version)

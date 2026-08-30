@@ -9240,7 +9240,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             #expect(
                 creditsAfterMixedFastMiss.returnedCredits
-                    == creditsBeforeMixedFastMiss.returnedCredits
+                    == creditsBeforeMixedFastMiss.returnedCredits + 2
             )
             let projectionRecordsBeforeSteadyStateBatch = try await sql.raw("""
                 SELECT COUNT(*)::bigint AS value
@@ -9300,7 +9300,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 fastAppendAfterSteadyStateBatch.committedAppends
                     == fastAppendBeforeSteadyStateBatch.committedAppends + 2
             )
-            #expect(fastAppendAfterSteadyStateBatch.fallbackAppends == 0)
+            #expect(
+                fastAppendAfterSteadyStateBatch.fallbackAppends
+                    == fastAppendBeforeSteadyStateBatch.fallbackAppends
+            )
             // A same-room set cannot use the conditional batch statement,
             // because it advances one cursor per room. The batcher must fall
             // back to the ordered one-command fast path; both credit
@@ -9369,7 +9372,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            #expect(hotRoomAdmission.commandWindowUsed == 8)
+            #expect(hotRoomAdmission.commandWindowUsed == 9)
             #expect(hotRoomAdmission.fanoutWindowUsed == 0)
 
             // A cache-cold shard-only set uses the same final aggregate gate;
@@ -9624,7 +9627,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            #expect(roomAdmission.commandWindowUsed == 10)
+            #expect(roomAdmission.commandWindowUsed == 9)
             #expect(roomAdmission.fanoutWindowUsed == 0)
             let creditedAdmission = try #require(try await sql.raw("""
                 SELECT command_window_used, fanout_window_used
@@ -9812,6 +9815,62 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 committedCredits: 2, returnedCredits: 2,
                 expiredCreditsDiscarded: 0, capacityRejections: 2
             ))
+
+            // Concurrent waiters may all observe one completed reservation.
+            // Retiring that shared task before returning the grant prevents
+            // an exhausted waiter from synchronously re-reading the same
+            // completed task forever and monopolizing the credit-pool actor.
+            let concurrentLeaseID = UUID(
+                uuidString: "00000000-0000-0000-0000-00000000c103"
+            )!
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('rooms-credit-concurrent-test', 'credit-concurrent-test',
+                        \(bind: concurrentLeaseID), 1,
+                        \(bind: now.addingTimeInterval(600)), 64, 64, 64, 64)
+                """).run()
+            let concurrentState = try ShardAdmissionState(
+                lease: .init(
+                    id: try .init(concurrentLeaseID.uuidString), generation: 1,
+                    validUntil: now.addingTimeInterval(600),
+                    commandWindow: try .init(limit: 64),
+                    fanoutWindow: try .init(limit: 64),
+                    maxOutstandingFanoutUnits: 64, maxOutstandingPlans: 64
+                ),
+                outstandingFanoutUnits: 0, outstandingPlans: 0
+            )
+            let concurrentCredits = V2ShardAdmissionCommandCreditPool(
+                database: app.db(.psql), batchSize: 1
+            )
+            let concurrentTokens = try await withThrowingTaskGroup(
+                of: V2ShardAdmissionCommandCreditPool.Token.self,
+                returning: [V2ShardAdmissionCommandCreditPool.Token].self
+            ) { group in
+                for _ in 0..<64 {
+                    group.addTask {
+                        let acquisition = try await concurrentCredits.acquire(
+                            roomShardID: "rooms-credit-concurrent-test",
+                            capacityProfileID: "credit-concurrent-test",
+                            shardState: concurrentState,
+                            now: now
+                        )
+                        guard case .granted(let token, _) = acquisition else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                        return token
+                    }
+                }
+                return try await group.reduce(into: []) { $0.append($1) }
+            }
+            #expect(concurrentTokens.count == 64)
+            await concurrentCredits.commit(concurrentTokens)
+            let concurrentSnapshot = await concurrentCredits.snapshot()
+            #expect(concurrentSnapshot.batchReservations == 64)
+            #expect(concurrentSnapshot.databaseCreditsReserved == 64)
+            #expect(concurrentSnapshot.committedCredits == 64)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -10936,6 +10995,505 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("reciprocal first sends promote both direct-room cache directions without weakening revision fences")
+    func reciprocalFirstSendsPromoteBothFastAppendDirections() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_250_000)
+            let profile = try V2CapacityProfile(id: "reciprocal-fast", limits: .init(
+                maxEligibleMembers: 10,
+                maxCommandsPerWindow: 100,
+                maxFanoutUnitsPerWindow: 100,
+                maxOutstandingFanoutUnits: 100,
+                maxOutstandingPlans: 100,
+                maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 1
+            ))
+            let lease = UUID(uuidString: "00000000-0000-0000-0002-000000000001")!
+            let firstUUID = UUID(uuidString: "00000000-0000-0000-0002-000000000002")!
+            let secondUUID = UUID(uuidString: "00000000-0000-0000-0002-000000000003")!
+            let first = try UserID(firstUUID.uuidString)
+            let second = try UserID(secondUUID.uuidString)
+            try await sql.raw("""
+                INSERT INTO im_v2.shard_admission_pools
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                     command_window_limit, fanout_window_limit,
+                     max_outstanding_fanout_units, max_outstanding_plans)
+                VALUES ('reciprocal-shard', \(bind: profile.id), \(bind: lease), 1,
+                        \(bind: now.addingTimeInterval(600)), 100, 100, 100, 100)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, created_at, updated_at)
+                VALUES
+                    (\(bind: firstUUID), 'reciprocal01', '双向一', 1, \(bind: now), \(bind: now)),
+                    (\(bind: secondUUID), 'reciprocal02', '双向二', 1, \(bind: now), \(bind: now))
+                """).run()
+            let direct = try V2DirectMessagingService(
+                store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                capacityProfile: profile,
+                roomShardID: "reciprocal-shard",
+                now: { now }
+            )
+            guard case .opened(let room) = try await direct.open(
+                actorUserID: first,
+                operationID: try .init("00000000-0000-0000-0002-000000000004"),
+                targetUserID: second
+            ) else {
+                Issue.record("expected reciprocal direct room")
+                return
+            }
+
+            let fastCache = V2DirectRoomLogFastAppendCache()
+            let writer = PostgresV2RoomWriteStore(
+                database: app.db(.psql),
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 2, window: 86_400),
+                shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                contentReviewMode: .disabled,
+                directFanoutMode: .roomLog,
+                directRoomLogAdmissionMode: .shardOnly,
+                directRoomLogFastAppendCache: fastCache,
+                shardAdmissionCommandCreditPool: .init(database: app.db(.psql), batchSize: 4)
+            )
+            let messages = V2SendMessageService(
+                store: writer,
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 64),
+                now: { now }
+            )
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: first,
+                clientMessageID: try .init("00000000-0000-0000-0002-000000000011"),
+                text: "一方首次发送"
+            )) else {
+                Issue.record("expected first-send acceptance")
+                return
+            }
+
+            // Once this sender's first marker is durable, a one-sided
+            // stranger conversation can use the conditional append. The
+            // statement must consume the exact same durable quota row before
+            // advancing the room cursor.
+            let beforeStrangerFastAppend = await fastCache.snapshot()
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: first,
+                clientMessageID: try .init("00000000-0000-0000-0002-000000000012"),
+                text: "一方额度内快速发送"
+            )) else {
+                Issue.record("expected quota-bearing fast append")
+                return
+            }
+            let afterStrangerFastAppend = await fastCache.snapshot()
+            #expect(
+                afterStrangerFastAppend.committedAppends
+                    == beforeStrangerFastAppend.committedAppends + 1
+            )
+            let quota = try #require(try await sql.raw("""
+                SELECT message_count::bigint AS value
+                FROM im_v2.stranger_message_windows
+                WHERE sender_user_id = \(bind: firstUUID)
+                  AND recipient_user_id = \(bind: secondUUID)
+                """).first(decoding: CountRow.self))
+            #expect(quota.value == 2)
+
+            let beforeQuotaDenial = await fastCache.snapshot()
+            do {
+                _ = try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: first,
+                    clientMessageID: try .init("00000000-0000-0000-0002-000000000013"),
+                    text: "超出陌生人额度"
+                ))
+                Issue.record("expected exact stranger quota denial")
+                return
+            } catch V2RoomWriteStoreError.strangerMessageLimitReached {
+                // The gateway maps this domain error to RATE_LIMITED. Keeping
+                // it as an error at the service boundary is the existing API.
+            }
+            let afterQuotaDenial = await fastCache.snapshot()
+            #expect(afterQuotaDenial.fallbackAppends == beforeQuotaDenial.fallbackAppends + 1)
+
+            // A reply changes the business rule: this pair is no longer a
+            // one-sided stranger conversation, so later messages correctly
+            // stop consuming the exhausted stranger window.
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: second,
+                clientMessageID: try .init("00000000-0000-0000-0002-000000000014"),
+                text: "另一方首次发送"
+            )) else {
+                Issue.record("expected reciprocal first-send acceptance")
+                return
+            }
+
+            // The quota denial deliberately invalidated this direction's
+            // conditional snapshot because all SQL predicate misses share
+            // the conservative fallback path. Reload it once; retaining a
+            // possibly stale authorization entry merely to avoid this miss
+            // would be unsafe.
+            guard case .accepted = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: first,
+                clientMessageID: try .init("00000000-0000-0000-0002-000000000015"),
+                text: "回复后重新装载缓存"
+            )) else {
+                Issue.record("expected post-reply cache reload")
+                return
+            }
+
+            let beforeSteadyState = await fastCache.snapshot()
+            for (actor, clientID, text) in [
+                (first, "00000000-0000-0000-0002-000000000016", "一方稳定发送"),
+                (second, "00000000-0000-0000-0002-000000000017", "另一方稳定发送"),
+            ] {
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: actor,
+                    clientMessageID: try .init(clientID),
+                    text: text
+                )) else {
+                    Issue.record("expected steady-state acceptance")
+                    return
+                }
+            }
+            let afterSteadyState = await fastCache.snapshot()
+            #expect(afterSteadyState.committedAppends == beforeSteadyState.committedAppends + 2)
+            #expect(afterSteadyState.fallbackAppends == beforeSteadyState.fallbackAppends)
+
+            // A durable block increments the pair revision. The cached fast
+            // append must miss that revision fence, fall back to the complete
+            // authorization path, and deny the command.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_blocks (blocker_user_id, blocked_user_id, created_at)
+                VALUES (\(bind: secondUUID), \(bind: firstUUID), \(bind: now))
+                """).run()
+            try await sql.raw("""
+                UPDATE im_v2.direct_room_pairs
+                SET direct_policy_revision = direct_policy_revision + 1
+                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                """).run()
+            let beforeBlockedSend = await fastCache.snapshot()
+            let blocked = try await messages.send(.init(
+                roomID: room.roomID,
+                actorUserID: first,
+                clientMessageID: try .init("00000000-0000-0000-0002-000000000018"),
+                text: "缓存不能越过封禁"
+            ))
+            guard case .denied(let denial) = blocked else {
+                Issue.record("revision-fenced fast cache bypassed a durable block")
+                return
+            }
+            #expect(denial.reason == .generic)
+            let afterBlockedSend = await fastCache.snapshot()
+            #expect(afterBlockedSend.fallbackAppends == beforeBlockedSend.fallbackAppends + 1)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("overlapping multi-shard batches reserve capacity without deadlocks")
+    func overlappingMultiShardBatchesUseDeterministicLockOrder() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false
+            else { throw TestConfigurationError.schemaAlreadyExists }
+            try await installSchema(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_300_000)
+            let profile = try V2CapacityProfile(id: "deadlock-profile", limits: .init(
+                maxEligibleMembers: 10,
+                maxCommandsPerWindow: 10_000,
+                maxFanoutUnitsPerWindow: 10_000,
+                maxOutstandingFanoutUnits: 10_000,
+                maxOutstandingPlans: 10_000,
+                maxEnumerationPageSize: 10,
+                maxPlannerConcurrency: 1,
+                maxDeliveryConcurrency: 1,
+                retryAfterSeconds: 1
+            ))
+            let shardIDs = ["deadlock-shard-a", "deadlock-shard-b", "deadlock-shard-c"]
+            for (index, shardID) in shardIDs.enumerated() {
+                let leaseID = UUID(uuidString: String(
+                    format: "00000000-0000-0000-0000-%012d",
+                    900 + index
+                ))!
+                try await sql.raw("""
+                    INSERT INTO im_v2.shard_admission_pools
+                        (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
+                         command_window_limit, fanout_window_limit,
+                         max_outstanding_fanout_units, max_outstanding_plans)
+                    VALUES (\(bind: shardID), \(bind: profile.id), \(bind: leaseID), 1,
+                            \(bind: now.addingTimeInterval(600)), 10000, 10000, 10000, 10000)
+                    """).run()
+            }
+
+            let users = (0 ..< 12).map { index in
+                UUID(uuidString: String(
+                    format: "00000000-0000-0000-0001-%012d",
+                    index + 1
+                ))!
+            }
+            for (index, user) in users.enumerated() {
+                try await sql.raw("""
+                    INSERT INTO im_v2.public_user_profiles
+                        (user_id, public_handle, display_name, revision, created_at, updated_at)
+                    VALUES (\(bind: user), \(bind: String(format: "deadlock%02d", index)),
+                            \(bind: "并发用户\(index)"), 1, \(bind: now), \(bind: now))
+                    """).run()
+            }
+
+            var roomActors: [(roomID: RoomID, actorUserID: UserID)] = []
+            for shardIndex in shardIDs.indices {
+                let direct = try V2DirectMessagingService(
+                    store: PostgresV2DirectMessagingStore(database: app.db(.psql)),
+                    capacityProfile: profile,
+                    roomShardID: shardIDs[shardIndex],
+                    now: { now }
+                )
+                for pairIndex in 0 ..< 2 {
+                    let userIndex = shardIndex * 4 + pairIndex * 2
+                    let actor = try UserID(users[userIndex].uuidString)
+                    let target = try UserID(users[userIndex + 1].uuidString)
+                    let outcome = try await direct.open(
+                        actorUserID: actor,
+                        operationID: try .init(UUID().uuidString),
+                        targetUserID: target
+                    )
+                    guard case .opened(let room) = outcome else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    roomActors.append((room.roomID, actor))
+                }
+            }
+            // Each transaction overlaps two shard rows, while no room or user
+            // row overlaps another transaction. Any wait cycle therefore
+            // comes specifically from inconsistent shard-row lock ordering.
+            let batches = [
+                [roomActors[0], roomActors[2]],
+                [roomActors[3], roomActors[4]],
+                [roomActors[5], roomActors[1]],
+            ]
+            let deadlocksBefore = try #require(try await sql.raw("""
+                SELECT deadlocks::bigint AS value
+                FROM pg_stat_database
+                WHERE datname = current_database()
+                """).first(decoding: CountRow.self)).value
+            let messagesBefore = try await count("im_v2.messages", on: sql)
+            let shardUsageBefore = try #require(try await sql.raw("""
+                SELECT SUM(command_window_used)::bigint AS value
+                FROM im_v2.shard_admission_pools
+                WHERE capacity_profile_id = \(bind: profile.id)
+                """).first(decoding: CountRow.self)).value
+
+            let rounds = 32
+            for round in 0 ..< rounds {
+                let gate = V2IntegrationAsyncBarrier(parties: batches.count)
+                let writers = try batches.map { _ in
+                    PostgresV2RoomWriteStore(
+                        database: app.db(.psql),
+                        strangerMessagePolicy: try .init(
+                            maximumMessagesPerWindow: 10_000,
+                            window: 86_400
+                        ),
+                        shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                        contentReviewMode: .disabled,
+                        directFanoutMode: .roomLog,
+                        directRoomLogAdmissionMode: .shardOnly,
+                        directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache(),
+                        shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool(
+                            database: app.db(.psql),
+                            batchSize: 2
+                        )
+                    )
+                }
+                let acceptedCount = try await withThrowingTaskGroup(of: Int.self) { group in
+                    for index in batches.indices {
+                        let batch = batches[index]
+                        let writer = writers[index]
+                        group.addTask {
+                            await gate.wait()
+                            let requests = try batch.enumerated().map { itemIndex, target in
+                                V2RoomWriteRequest(
+                                    command: try .init(
+                                        roomID: target.roomID,
+                                        senderUserID: target.actorUserID,
+                                        clientMessageID: .init(UUID().uuidString),
+                                        text: "有序锁并发批次 \(round)-\(index)-\(itemIndex)",
+                                        limits: .init(maxUTF8Bytes: 128)
+                                    ),
+                                    capacityProfile: profile,
+                                    identifiers: try .init(
+                                        messageID: .init(UUID().uuidString),
+                                        eventID: .init(UUID().uuidString),
+                                        planID: .init(UUID().uuidString)
+                                    ),
+                                    now: now.addingTimeInterval(Double(round))
+                                )
+                            }
+                            return try await writer.acceptAtomically(requests: requests).count
+                        }
+                    }
+                    var total = 0
+                    for try await count in group { total += count }
+                    return total
+                }
+                #expect(acceptedCount == 6)
+            }
+
+            let deadlocksAfter = try #require(try await sql.raw("""
+                SELECT deadlocks::bigint AS value
+                FROM pg_stat_database
+                WHERE datname = current_database()
+                """).first(decoding: CountRow.self)).value
+            #expect(deadlocksAfter == deadlocksBefore)
+            #expect(try await count("im_v2.messages", on: sql) - messagesBefore == rounds * 6)
+            let shardUsageAfter = try #require(try await sql.raw("""
+                SELECT SUM(command_window_used)::bigint AS value
+                FROM im_v2.shard_admission_pools
+                WHERE capacity_profile_id = \(bind: profile.id)
+                """).first(decoding: CountRow.self)).value
+            #expect(shardUsageAfter - shardUsageBefore == Int64(rounds * 6))
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("concurrent independent presence admissions must all materialize their leases")
+    func concurrentIndependentPresenceAdmissionsMaterializeLeases() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(
+                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 8),
+                as: .psql,
+                isDefault: true
+            )
+            guard let sql = app.db(.psql) as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
+                .first(decoding: ExistsRow.self))?.exists == false else {
+                throw TestConfigurationError.schemaAlreadyExists
+            }
+            try await installSchema(on: sql)
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let admissionCount = 256
+            let users = (0..<admissionCount).map {
+                UUID(uuidString: String(format: "00000000-0000-0000-0001-%012x", $0))!
+            }
+            let devices = (0..<admissionCount).map {
+                UUID(uuidString: String(format: "00000000-0000-0000-0002-%012x", $0))!
+            }
+            try await sql.raw("""
+                INSERT INTO im_v2.auth_devices
+                    (user_id, device_id, created_at, last_active_at)
+                SELECT input.user_id, input.device_id, \(bind: now), \(bind: now)
+                FROM unnest(\(bind: users)::uuid[], \(bind: devices)::uuid[])
+                     AS input(user_id, device_id)
+                """).run()
+            let identities = try zip(users, devices).map { user, device in
+                try V2AuthenticatedConnection(
+                    userID: .init(user.uuidString),
+                    deviceID: .init(device.uuidString),
+                    capabilityProfile: "base"
+                )
+            }
+            let store = PostgresV2LiveActivityStore(database: app.db(.psql))
+            let policy = V2AuthenticatedConnectionAdmissionPolicy(
+                maximumConnectionsPerDevice: 2,
+                maximumConnectionsPerUser: 8
+            )
+            let outcomes = try await withThrowingTaskGroup(
+                of: V2AuthenticatedConnectionLeaseOutcome.self,
+                returning: [V2AuthenticatedConnectionLeaseOutcome].self
+            ) { group in
+                for (index, identity) in identities.enumerated() {
+                    group.addTask {
+                        try await store.admitConnection(
+                            identity: identity,
+                            connectionID: UUID(
+                                uuidString: String(
+                                    format: "00000000-0000-0000-0003-%012x", index
+                                )
+                            )!,
+                            policy: policy,
+                            now: now
+                        )
+                    }
+                }
+                var result: [V2AuthenticatedConnectionLeaseOutcome] = []
+                result.reserveCapacity(admissionCount)
+                for try await outcome in group { result.append(outcome) }
+                return result
+            }
+            #expect(outcomes.count == admissionCount)
+            #expect(outcomes.allSatisfy { outcome in
+                outcome == .accepted(expiresAt: now.addingTimeInterval(90))
+            })
+            #expect(
+                try await count("im_v2.user_live_presence_leases", on: sql)
+                    == admissionCount
+            )
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
     @Test("an expired presence lease must reacquire the global connection budget")
     func expiredPresenceLeaseCannotResurrectPastTheConnectionLimit() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -10954,18 +11512,27 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let user = UUID(uuidString: "00000000-0000-0000-0000-0000000008c1")!
             let device = UUID(uuidString: "00000000-0000-0000-0000-0000000008c2")!
+            let peerUser = UUID(uuidString: "00000000-0000-0000-0000-0000000008d1")!
+            let peerDevice = UUID(uuidString: "00000000-0000-0000-0000-0000000008d2")!
             try await sql.raw("""
                 INSERT INTO im_v2.auth_devices
                     (user_id, device_id, created_at, last_active_at)
-                VALUES (\(bind: user), \(bind: device), \(bind: now), \(bind: now))
+                VALUES (\(bind: user), \(bind: device), \(bind: now), \(bind: now)),
+                       (\(bind: peerUser), \(bind: peerDevice), \(bind: now), \(bind: now))
                 """).run()
             let identity = try V2AuthenticatedConnection(
                 userID: .init(user.uuidString),
                 deviceID: .init(device.uuidString),
                 capabilityProfile: "base"
             )
+            let peerIdentity = try V2AuthenticatedConnection(
+                userID: .init(peerUser.uuidString),
+                deviceID: .init(peerDevice.uuidString),
+                capabilityProfile: "base"
+            )
             let firstConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008c3")!
             let replacementConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008c4")!
+            let peerConnection = UUID(uuidString: "00000000-0000-0000-0000-0000000008d3")!
             let policy = V2AuthenticatedConnectionAdmissionPolicy(
                 maximumConnectionsPerDevice: 1,
                 maximumConnectionsPerUser: 1
@@ -10975,6 +11542,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await store.admitConnection(
                 identity: identity,
                 connectionID: firstConnection,
+                policy: policy,
+                now: now
+            ) == .accepted(expiresAt: now.addingTimeInterval(10)))
+            #expect(try await store.admitConnection(
+                identity: peerIdentity,
+                connectionID: peerConnection,
                 policy: policy,
                 now: now
             ) == .accepted(expiresAt: now.addingTimeInterval(10)))
@@ -10988,14 +11561,36 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     (user_id, allows_online_presence, allows_typing_indicators, updated_at)
                 VALUES (\(bind: user), FALSE, TRUE, \(bind: now.addingTimeInterval(1)))
                 """).run()
-            let batched = try await store.renewConnections([.init(
-                identity: identity,
-                connectionID: firstConnection,
-                now: now.addingTimeInterval(1.5)
-            )])
+            let batched = try await store.renewConnections([
+                .init(
+                    identity: identity,
+                    connectionID: firstConnection,
+                    now: now.addingTimeInterval(1.25)
+                ),
+                .init(
+                    identity: identity,
+                    connectionID: firstConnection,
+                    now: now.addingTimeInterval(1.5)
+                ),
+                .init(
+                    identity: peerIdentity,
+                    connectionID: peerConnection,
+                    now: now.addingTimeInterval(1.5)
+                ),
+            ])
+            #expect(batched.count == 2)
             #expect(batched[firstConnection] == .init(
                 outcome: .accepted(expiresAt: now.addingTimeInterval(11.5)),
                 allowsOnlinePresence: false
+            ))
+            #expect(batched[peerConnection] == .init(
+                outcome: .accepted(expiresAt: now.addingTimeInterval(11.5)),
+                allowsOnlinePresence: true
+            ))
+            #expect(try await !store.removePresence(
+                identity: peerIdentity,
+                connectionID: peerConnection,
+                now: now.addingTimeInterval(1.5)
             ))
 
             let afterExpiry = now.addingTimeInterval(12)
@@ -13152,6 +13747,25 @@ private struct StaticUserShardRouteFence: V2UserShardRouteFencing {
         _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result
     ) async throws -> Result {
         try await operation(route, database)
+    }
+}
+private actor V2IntegrationAsyncBarrier {
+    private let parties: Int
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    init(parties: Int) {
+        precondition(parties > 0)
+        self.parties = parties
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+            guard continuations.count == parties else { return }
+            let ready = continuations
+            continuations.removeAll(keepingCapacity: false)
+            for continuation in ready { continuation.resume() }
+        }
     }
 }
 private enum TestConfigurationError: Error {

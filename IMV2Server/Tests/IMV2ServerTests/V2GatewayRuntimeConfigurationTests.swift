@@ -131,8 +131,41 @@ struct V2GatewayRuntimeConfigurationTests {
         )
         #expect(appendBatchConfiguration.directRoomLogAppendBatchSize == 32)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumInFlightBatches == 8)
+        #expect(appendBatchConfiguration.directRoomLogAppendMaximumPendingRequests == 288)
         #expect(appendBatchConfiguration.directRoomLogAppendLaneCount == 1)
         #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
+
+        var burstSizedAppendBatch = appendBatch
+        burstSizedAppendBatch[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+        ] = "4096"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(burstSizedAppendBatch)
+        ).directRoomLogAppendMaximumPendingRequests == 4_096)
+
+        var appendPendingWithoutBatching = credits
+        appendPendingWithoutBatching[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+        ] = "4096"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(appendPendingWithoutBatching)
+            )
+        }
+
+        var undersizedAppendPending = appendBatch
+        undersizedAppendPending[
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+        ] = "31"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(undersizedAppendPending)
+            )
+        }
 
         var largerAppendBatch = appendBatch
         largerAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"] = "64"
@@ -212,6 +245,13 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(eventCacheConfiguration.directRoomLogEventCacheMaximumEntriesPerRoom == 32)
         #expect(eventCacheConfiguration.directRoomLogEventCacheShardCount == 8)
         #expect(eventCacheConfiguration.directRoomLogEventCacheMaximumPendingWrites == 2_048)
+
+        var largeEventCache = roomLog
+        largeEventCache["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"] = "262144"
+        largeEventCache["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES"] = "268435456"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(largeEventCache)
+        ).directRoomLogEventCacheMaximumEntries == 262_144)
 
         var largerPolicyCache = runtimeValues
         largerPolicyCache["IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES"] = "131072"

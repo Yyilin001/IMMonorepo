@@ -6,9 +6,9 @@ import IMV2Core
 /// Every room is routed to exactly one lane for the lifetime of this value,
 /// so commands for that room retain the existing FIFO and no-overtake
 /// guarantees. Independent rooms can progress on separate actor executors.
-/// The configured database concurrency and pending-request budgets are split
-/// across lanes; sharding therefore adds parallel scheduling without silently
-/// increasing PostgreSQL pressure or retained request memory.
+/// Database concurrency is split across lanes. Pending requests instead use
+/// one process-wide limiter, so skewed room hashes can borrow idle capacity
+/// without silently increasing PostgreSQL pressure or retained request memory.
 public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission, Sendable {
     private let lanes: [V2SendMessageAdmissionBatcher]
 
@@ -25,14 +25,12 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         precondition(laneCount <= configuration.maximumPendingRequests)
 
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
+        let sharedPendingCapacity = V2SharedSendMessagePendingCapacity(
+            maximum: configuration.maximumPendingRequests
+        )
         lanes = (0 ..< laneCount).map { laneIndex in
             let inFlight = Self.portion(
                 total: configuration.maximumInFlightBatches,
-                index: laneIndex,
-                count: laneCount
-            )
-            let pending = Self.portion(
-                total: configuration.maximumPendingRequests,
                 index: laneIndex,
                 count: laneCount
             )
@@ -53,9 +51,13 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                     maximumDelay: configuration.maximumDelay,
                     adaptiveDelayPolicy: adaptivePolicy,
                     maximumInFlightBatches: inFlight,
-                    maximumPendingRequests: pending
+                    // The shared capacity below owns the process-wide bound.
+                    // Retain the same value here for configuration invariants
+                    // and diagnostics; a lane no longer gets a hard slice.
+                    maximumPendingRequests: configuration.maximumPendingRequests
                 ),
-                databaseWorkAdmission: databaseWorkAdmission
+                databaseWorkAdmission: databaseWorkAdmission,
+                sharedPendingCapacity: sharedPendingCapacity
             )
         }
     }

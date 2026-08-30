@@ -1,5 +1,45 @@
 import Foundation
 import IMV2Core
+import Synchronization
+
+/// One memory bound shared by room-keyed admission lanes.
+///
+/// Per-lane FIFO actors still own ordering and batch selection. Sharing only
+/// the retained-request count prevents an uneven but valid room hash
+/// distribution from rejecting work while sibling lanes leave most of the
+/// configured process budget unused.
+final class V2SharedSendMessagePendingCapacity: Sendable {
+    private let maximum: Int
+    /// This counter is only a capacity token; it does not publish or protect
+    /// request memory. Relaxed operations are therefore sufficient. A CAS
+    /// loop preserves the hard upper bound without putting every lane through
+    /// a contended sleeping mutex on both enqueue and dequeue.
+    private let reserved = Atomic<Int>(0)
+
+    init(maximum: Int) {
+        precondition(maximum > 0)
+        self.maximum = maximum
+    }
+
+    func tryReserve() -> Bool {
+        var current = reserved.load(ordering: .relaxed)
+        while current < maximum {
+            let result = reserved.compareExchange(
+                expected: current,
+                desired: current + 1,
+                ordering: .relaxed
+            )
+            if result.exchanged { return true }
+            current = result.original
+        }
+        return false
+    }
+
+    func release() {
+        let result = reserved.wrappingSubtract(1, ordering: .relaxed)
+        precondition(result.oldValue > 0, "shared pending capacity released twice")
+    }
+}
 
 /// Bounded, FIFO batching boundary for command acceptance.
 ///
@@ -199,6 +239,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     private let store: any V2AtomicRoomWriteBatchStore
     private let configuration: Configuration
+    private let sharedPendingCapacity: V2SharedSendMessagePendingCapacity?
     /// Intrusive FIFO storage keeps enqueue and cancellation O(1). Batch
     /// selection still walks the staged requests in arrival order, but it no
     /// longer copies the whole queue once or twice for every transaction.
@@ -256,6 +297,23 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         self.store = store
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
+        sharedPendingCapacity = nil
+        managesForegroundWriteAdmission = databaseWorkAdmission != nil
+    }
+
+    /// Internal construction path for a room-keyed router. Keeping the
+    /// shared limiter out of the public API makes it impossible for callers
+    /// to accidentally couple otherwise independent batchers.
+    init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: Configuration,
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
+        sharedPendingCapacity: V2SharedSendMessagePendingCapacity
+    ) {
+        self.store = store
+        self.configuration = configuration
+        self.databaseWorkAdmission = databaseWorkAdmission
+        self.sharedPendingCapacity = sharedPendingCapacity
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
     }
 
@@ -298,7 +356,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         let pendingID = nextPendingID
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                guard pendingCount < configuration.maximumPendingRequests else {
+                let reserved = if let sharedPendingCapacity {
+                    sharedPendingCapacity.tryReserve()
+                } else {
+                    pendingCount < configuration.maximumPendingRequests
+                }
+                guard reserved else {
                     stagingQueueFullRejections &+= 1
                     continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
                     return
@@ -504,6 +567,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             pendingTailID = item.previousID
         }
         pendingCount -= 1
+        sharedPendingCapacity?.release()
         var detached = item
         detached.previousID = nil
         detached.nextID = nil

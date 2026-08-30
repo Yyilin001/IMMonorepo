@@ -53,6 +53,10 @@ public enum V2RichMessageContent {
     public static let maxEntities = 100
 
     public static func validate(text: String, entities: [V2MessageEntity]) throws {
+        // Plain text is the overwhelmingly common case. No entity can point
+        // outside the string when there is no entity, so constructing a Set
+        // and traversing UTF-16 would prove nothing further.
+        guard !entities.isEmpty else { return }
         guard entities.count <= maxEntities, Set(entities).count == entities.count else {
             throw V2RichMessageContentError.invalidEntity
         }

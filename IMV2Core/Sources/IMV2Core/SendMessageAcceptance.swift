@@ -44,9 +44,9 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         guard byteCount <= limits.maxUTF8Bytes,
               (byteCount > 0 || !media.isEmpty),
               media.count <= V2MessageCommandLimits.maxMediaAttachments,
-              Set(media).count == media.count,
+              (media.count < 2 || Set(media).count == media.count),
               mentions.count <= V2MessageCommandLimits.maxMentions,
-              Set(mentions).count == mentions.count
+              (mentions.count < 2 || Set(mentions).count == mentions.count)
         else {
             throw V2SendMessageValidationError.invalidTextLength
         }

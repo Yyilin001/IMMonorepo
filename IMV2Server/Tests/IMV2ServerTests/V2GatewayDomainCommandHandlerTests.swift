@@ -430,6 +430,51 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 10)])
     }
 
+    @Test("an accepted direct event excludes only the originating connection")
+    func acceptedDirectEventCarriesOriginExclusion() async throws {
+        let fixture = try GatewayDomainFixture()
+        let recipientID = try UserID("00000000-0000-0000-0000-000000000042")
+        let accepted = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000043"),
+            roomID: fixture.roomID,
+            roomSequence: 11,
+            senderUserID: fixture.userID,
+            clientMessageID: fixture.clientMessageID,
+            text: "private-live",
+            mediaPresentations: [],
+            usesRoomEventLog: true,
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000044"),
+            acceptedMembershipRevision: 3,
+            directRecipientUserID: recipientID,
+            createdAt: fixture.now
+        )
+        let hints = GatewayForegroundHintRecorder()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(
+                store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))
+            ),
+            foregroundGroupEventHints: hints,
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope()
+        request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init()
+        request.sendMessage.content.text = "private-live"
+        let connectionID = UUID()
+
+        let response = try await handler.handle(
+            envelope: request,
+            identity: fixture.identity,
+            originatingConnectionID: connectionID
+        )
+
+        #expect(response.messageAccepted.roomSequence == 11)
+        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 11)])
+        #expect(hints.directExclusions() == [connectionID])
+    }
+
     @Test("invalid sync state is returned as a stable protocol error")
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()
@@ -889,12 +934,33 @@ private final class GatewayForegroundHintRecorder:
     Sendable
 {
     private let hints = Mutex<[V2GroupEventWake]>([])
+    private let exclusions = Mutex<[UUID?]>([])
 
     func submitForegroundHint(_ hint: V2GroupEventWake) {
         hints.withLock { $0.append(hint) }
     }
 
     func submitForegroundDirectMessage(_ message: V2AcceptedMessage) {
+        exclusions.withLock { $0.append(nil) }
+        submitForegroundHint(.init(
+            roomID: message.roomID,
+            highWatermark: message.roomSequence
+        ))
+    }
+
+    func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
+        exclusions.withLock { $0.append(event.excludedConnectionID) }
+        submitForegroundHint(.init(
+            roomID: event.roomID,
+            highWatermark: event.highWatermark
+        ))
+    }
+
+    func submitForegroundDirectMessage(
+        _ message: V2AcceptedMessage,
+        excludingConnectionID: UUID?
+    ) {
+        exclusions.withLock { $0.append(excludingConnectionID) }
         submitForegroundHint(.init(
             roomID: message.roomID,
             highWatermark: message.roomSequence
@@ -902,6 +968,7 @@ private final class GatewayForegroundHintRecorder:
     }
 
     func values() -> [V2GroupEventWake] { hints.withLock { $0 } }
+    func directExclusions() -> [UUID?] { exclusions.withLock { $0 } }
 }
 
 private actor GatewayMembershipStore: V2RoomMembershipStore {

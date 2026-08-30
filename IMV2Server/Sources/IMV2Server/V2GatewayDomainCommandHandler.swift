@@ -139,10 +139,12 @@ protocol V2GatewayGroupEventLogHandling: Sendable {
     func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage
     func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription
     func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage)
+    func recordCommittedDirectRoomLogEvent(_ event: V2DirectRoomLiveEvent)
 }
 
 extension V2GatewayGroupEventLogHandling {
     func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) {}
+    func recordCommittedDirectRoomLogEvent(_: V2DirectRoomLiveEvent) {}
 }
 
 protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
@@ -299,6 +301,18 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     }
 
     public func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        try await handle(
+            envelope: envelope,
+            identity: identity,
+            originatingConnectionID: nil
+        )
+    }
+
+    public func handle(
+        envelope: IMV2Envelope,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?
+    ) async throws -> IMV2Envelope {
         let traceID = V2SecureProcessUUIDGenerator.shared.makeOne()
         let command = v2TelemetryCommand(for: envelope)
         let startedAt = now()
@@ -323,14 +337,22 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
                     throw CancellationError()
                 }
                 do {
-                    response = try await handleWithoutTelemetry(envelope: envelope, identity: identity)
+                    response = try await handleWithoutTelemetry(
+                        envelope: envelope,
+                        identity: identity,
+                        originatingConnectionID: originatingConnectionID
+                    )
                     await databaseWorkAdmission.release(workClass)
                 } catch {
                     await databaseWorkAdmission.release(workClass)
                     throw error
                 }
             } else {
-                response = try await handleWithoutTelemetry(envelope: envelope, identity: identity)
+                response = try await handleWithoutTelemetry(
+                    envelope: envelope,
+                    identity: identity,
+                    originatingConnectionID: originatingConnectionID
+                )
             }
             return await recordAndReturn(
                 response, traceID: traceID, command: command, startedAt: startedAt
@@ -415,10 +437,19 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         return true
     }
 
-    private func handleWithoutTelemetry(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+    private func handleWithoutTelemetry(
+        envelope: IMV2Envelope,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?
+    ) async throws -> IMV2Envelope {
         do {
             switch envelope.body {
-            case .sendMessage(let request): return try await handleSend(request, identity: identity)
+            case .sendMessage(let request):
+                return try await handleSend(
+                    request,
+                    identity: identity,
+                    originatingConnectionID: originatingConnectionID
+                )
             case .changeRoomMembership(let request): return try await handleMembership(request, identity: identity)
             case .withdrawMessage(let request): return try await handleWithdrawal(request, identity: identity)
             case .changeMessageReaction(let request): return try await handleReaction(request, identity: identity)
@@ -620,10 +651,14 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         }
     }
 
-    private func handleSend(_ request: IMV2SendMessage, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+    private func handleSend(
+        _ request: IMV2SendMessage,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?
+    ) async throws -> IMV2Envelope {
         guard request.hasContent,
-              UUID(uuidString: request.roomID) != nil,
-              UUID(uuidString: request.clientMessageID) != nil
+              let roomUUID = UUID(uuidString: request.roomID),
+              let clientMessageUUID = UUID(uuidString: request.clientMessageID)
         else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
         let text: String
         switch request.content.body {
@@ -634,23 +669,35 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         var mentions = try request.content.mentionedUserIds.map { try V2MentionTarget.user(.init($0)) }
         if request.content.mentionEveryone { mentions.append(.everyone) }
         let entities = try request.content.entities.map(v2MessageEntity)
-        try V2RichMessageContent.validate(text: text, entities: entities)
         let replyTo = try request.content.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(request.content.replyToMessageID))
         let outcome: V2SendMessageOutcome
         do {
-            outcome = try await sendMessage.send(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, clientMessageID: try .init(request.clientMessageID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo))
+            outcome = try await sendMessage.send(.init(
+                roomID: .init(uuid: roomUUID),
+                actorUserID: identity.userID,
+                clientMessageID: .init(uuid: clientMessageUUID),
+                text: text,
+                media: media,
+                mentions: mentions,
+                entities: entities,
+                replyTo: replyTo
+            ))
         } catch V2SendMessageAdmissionBatcherError.serverBusy {
             return errorEnvelope(code: "SERVER_BUSY", retryable: true)
         }
         switch outcome {
         case .accepted(let message):
-            groupEventLog.recordCommittedDirectRoomLogMessage(message)
-            if V2DirectRoomLiveEventDraft(message) != nil {
+            if let directEvent = V2DirectRoomLiveEventDraft(
+                message,
+                excludingConnectionID: originatingConnectionID
+            )?.materialized() {
+                groupEventLog.recordCommittedDirectRoomLogEvent(directEvent)
                 // Best effort and post-commit only. The dispatcher validates
-                // and queues immutable acceptance data, then serializes the
-                // optional payload off this accepted-send hot path.
-                foregroundGroupEventHints.submitForegroundDirectMessage(message)
+                // and queues one immutable payload shared with the local
+                // room-log acceleration cache.
+                foregroundGroupEventHints.submitForegroundDirectEvent(directEvent)
             } else if message.groupDeliveryMode != nil || message.usesRoomEventLog {
+                groupEventLog.recordCommittedDirectRoomLogMessage(message)
                 foregroundGroupEventHints.submitForegroundHint(.init(
                     roomID: message.roomID,
                     highWatermark: message.roomSequence

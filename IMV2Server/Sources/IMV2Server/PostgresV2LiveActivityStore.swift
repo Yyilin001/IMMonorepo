@@ -88,63 +88,49 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
-                throw PostgresV2LiveActivityAdmissionInvariantError.transactionIsNotSQL
+                throw V2LiveActivityStoreError.corruptPersistenceState
             }
             let user = try liveActivityUUID(identity.userID)
             let device = try liveActivityUUID(identity.deviceID)
+            // All contenders for one user take the same first lock; the
+            // device lock then serializes the narrower limit without a
+            // user/device lock-order cycle.
+            try await lockConnectionIdentity(user: user, device: device, sql: sql)
+            // `auth_devices.device_id` is globally unique and the lease has a
+            // composite owner foreign key, so this device can only occur under
+            // `user`. Keeping the predicate user-only lets PostgreSQL use the
+            // existing `(user_id, expires_at)` index.
+            try await sql.raw("""
+                DELETE FROM im_v2.user_live_presence_leases
+                WHERE expires_at <= \(bind: now)
+                  AND user_id = \(bind: user)
+                """).run()
+            guard let counts = try await sql.raw("""
+                SELECT COUNT(*) FILTER (WHERE device_id = \(bind: device))::integer AS device_count,
+                       COUNT(*) FILTER (WHERE user_id = \(bind: user))::integer AS user_count
+                FROM im_v2.user_live_presence_leases
+                WHERE user_id = \(bind: user)
+                  AND expires_at > \(bind: now)
+                  AND connection_id <> \(bind: connectionID)
+                """).first(decoding: LiveActivityConnectionCountRow.self)
+            else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            guard counts.deviceCount < policy.maximumConnectionsPerDevice,
+                  counts.userCount < policy.maximumConnectionsPerUser
+            else { return .rejected }
             let expiry = now.addingTimeInterval(onlineLease)
-            // One statement owns the complete admission decision. This keeps
-            // the user->device lock order, expiry cleanup, limit observation
-            // and lease insert on one PostgreSQL snapshot while avoiding five
-            // client/server round trips during a reconnect surge.
-            guard let outcome = try await sql.raw("""
-                WITH locked AS MATERIALIZED (
-                    SELECT pg_advisory_xact_lock(
-                               hashtextextended(\(bind: "v2-live-user:" + user.uuidString.lowercased()), 0)
-                           ) AS user_lock,
-                           pg_advisory_xact_lock(
-                               hashtextextended(\(bind: "v2-live-device:" + device.uuidString.lowercased()), 0)
-                           ) AS device_lock
-                ), expired AS (
-                    DELETE FROM im_v2.user_live_presence_leases AS lease
-                    USING locked
-                    WHERE lease.expires_at <= \(bind: now)
-                      AND lease.user_id = \(bind: user)
-                      AND lease.connection_id <> \(bind: connectionID)
-                    RETURNING lease.connection_id
-                ), counts AS MATERIALIZED (
-                    SELECT COUNT(*) FILTER (WHERE lease.device_id = \(bind: device))::integer AS device_count,
-                           COUNT(lease.connection_id)::integer AS user_count
-                    FROM locked
-                    LEFT JOIN im_v2.user_live_presence_leases AS lease
-                      ON lease.user_id = \(bind: user)
-                     AND lease.expires_at > \(bind: now)
-                     AND lease.connection_id <> \(bind: connectionID)
-                ), inserted AS (
-                    INSERT INTO im_v2.user_live_presence_leases
-                        (user_id, device_id, connection_id, expires_at, updated_at)
-                    SELECT \(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now)
-                    FROM counts
-                    WHERE counts.device_count < \(bind: policy.maximumConnectionsPerDevice)
-                      AND counts.user_count < \(bind: policy.maximumConnectionsPerUser)
-                    ON CONFLICT (connection_id) DO UPDATE
-                    SET expires_at = EXCLUDED.expires_at,
-                        updated_at = EXCLUDED.updated_at
-                    WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
-                      AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
-                    RETURNING connection_id
-                )
-                SELECT counts.device_count < \(bind: policy.maximumConnectionsPerDevice)
-                       AND counts.user_count < \(bind: policy.maximumConnectionsPerUser) AS admitted,
-                       inserted.connection_id
-                FROM counts
-                LEFT JOIN inserted ON TRUE
-                """).first(decoding: LiveActivityAdmissionRow.self)
-            else { throw PostgresV2LiveActivityAdmissionInvariantError.missingOutcomeRow }
-            guard outcome.admitted else { return .rejected }
-            guard outcome.connectionID == connectionID else {
-                throw PostgresV2LiveActivityAdmissionInvariantError.missingInsertedConnection
-            }
+            guard try await sql.raw("""
+                INSERT INTO im_v2.user_live_presence_leases
+                    (user_id, device_id, connection_id, expires_at, updated_at)
+                VALUES
+                    (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now))
+                ON CONFLICT (connection_id) DO UPDATE
+                SET expires_at = EXCLUDED.expires_at,
+                    updated_at = EXCLUDED.updated_at
+                WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
+                  AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
+                RETURNING connection_id
+                """).first(decoding: LiveActivityConnectionIDRow.self) != nil
+            else { throw V2LiveActivityStoreError.corruptPersistenceState }
             return .accepted(expiresAt: expiry)
         }
     }
@@ -190,21 +176,32 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             }
         }
         let rows = try unique.values.map { request in
-            (
+            LiveActivityLeaseRenewalInput(
                 connectionID: request.connectionID,
                 userID: try liveActivityUUID(request.identity.userID),
                 deviceID: try liveActivityUUID(request.identity.deviceID),
-                expiresAt: request.now.addingTimeInterval(onlineLease),
-                updatedAt: request.now
+                expiresAtUnixSeconds: request.now.addingTimeInterval(onlineLease).timeIntervalSince1970,
+                updatedAtUnixSeconds: request.now.timeIntervalSince1970
             )
         }
-        var query: SQLQueryString = """
-            WITH requested(connection_id, user_id, device_id, expires_at, updated_at) AS (VALUES
-            """
-        query += rows.map { row in
-            "(\(bind: row.connectionID), \(bind: row.userID), \(bind: row.deviceID), \(bind: row.expiresAt), \(bind: row.updatedAt))"
-        }.joined(separator: ",")
-        query += """
+        let encodedRows = try JSONEncoder().encode(rows)
+        guard let encodedRowsJSON = String(data: encodedRows, encoding: .utf8) else {
+            throw V2LiveActivityStoreError.corruptPersistenceState
+        }
+        let query: SQLQueryString = """
+            WITH requested AS MATERIALIZED (
+                SELECT input.connection_id,
+                       input.user_id,
+                       input.device_id,
+                       to_timestamp(input.expires_at_unix_seconds) AS expires_at,
+                       to_timestamp(input.updated_at_unix_seconds) AS updated_at
+                FROM jsonb_to_recordset(\(bind: encodedRowsJSON)::jsonb) AS input(
+                    connection_id uuid,
+                    user_id uuid,
+                    device_id uuid,
+                    expires_at_unix_seconds double precision,
+                    updated_at_unix_seconds double precision
+                )
             ), renewed AS (
                 UPDATE im_v2.user_live_presence_leases AS lease
                 SET expires_at = requested.expires_at,
@@ -306,6 +303,20 @@ private struct LiveActivityLeaseRefreshRow: Decodable {
         case allowsOnlinePresence = "allows_online_presence"
     }
 }
+private struct LiveActivityLeaseRenewalInput: Encodable {
+    let connectionID: UUID
+    let userID: UUID
+    let deviceID: UUID
+    let expiresAtUnixSeconds: TimeInterval
+    let updatedAtUnixSeconds: TimeInterval
+    enum CodingKeys: String, CodingKey {
+        case connectionID = "connection_id"
+        case userID = "user_id"
+        case deviceID = "device_id"
+        case expiresAtUnixSeconds = "expires_at_unix_seconds"
+        case updatedAtUnixSeconds = "updated_at_unix_seconds"
+    }
+}
 private struct LiveActivityOnlinePreferenceRow: Decodable { let allowsOnlinePresence: Bool; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence" } }
 private struct LiveActivityTypingPreferenceRow: Decodable { let allowsTypingIndicators: Bool; enum CodingKeys: String, CodingKey { case allowsTypingIndicators = "allows_typing_indicators" } }
 private struct LiveActivityUserRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }
@@ -313,18 +324,13 @@ private struct LiveActivityExpiryRow: Decodable { let expiresAt: Date?; enum Cod
 private struct LiveActivityMembershipRevisionRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
 private struct LiveActivityExistsRow: Decodable { let exists: Int }
 private struct LiveActivityBooleanRow: Decodable { let exists: Bool }
-private struct LiveActivityAdmissionRow: Decodable {
-    let admitted: Bool
-    let connectionID: UUID?
+private struct LiveActivityConnectionCountRow: Decodable {
+    let deviceCount: Int
+    let userCount: Int
     enum CodingKeys: String, CodingKey {
-        case admitted
-        case connectionID = "connection_id"
+        case deviceCount = "device_count"
+        case userCount = "user_count"
     }
-}
-private enum PostgresV2LiveActivityAdmissionInvariantError: Error {
-    case transactionIsNotSQL
-    case missingOutcomeRow
-    case missingInsertedConnection
 }
 private struct LiveActivityConnectionIDRow: Decodable {
     let connectionID: UUID

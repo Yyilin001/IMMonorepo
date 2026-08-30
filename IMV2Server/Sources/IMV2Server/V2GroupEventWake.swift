@@ -51,13 +51,50 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async
 }
 
+/// Optional process-local acceleration for publishers that can complete a
+/// foreground direct-event publication without suspension.  A conformer must
+/// perform only bounded in-memory routing and enqueue work; broker I/O and
+/// actor hops remain on ``V2ForegroundGroupEventHintPublishing``.
+///
+/// Returning `false` asks the dispatcher to retain its ordinary asynchronous
+/// publication path.  This keeps multi-gateway/NATS deployments and test
+/// embeddings semantically identical while a local SwiftNIO gateway avoids a
+/// short-lived child task for every accepted private message.
+protocol V2ImmediateForegroundDirectEventPublishing: Sendable {
+    func publishForegroundDirectEventImmediately(_ event: V2DirectRoomLiveEvent) -> Bool
+}
+
 /// Non-suspending post-commit boundary used by the Gateway acceptance path.
 /// Implementations must only perform bounded process-local enqueue work. Any
 /// broker, socket, serialization, or retry work belongs to a runtime-owned
 /// consumer behind this boundary.
 public protocol V2ForegroundGroupEventHintSubmitting: Sendable {
     func submitForegroundHint(_ hint: V2GroupEventWake)
+    func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent)
     func submitForegroundDirectMessage(_ message: V2AcceptedMessage)
+    func submitForegroundDirectMessage(
+        _ message: V2AcceptedMessage,
+        excludingConnectionID: UUID?
+    )
+}
+
+extension V2ForegroundGroupEventHintSubmitting {
+    public func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
+        // Compatibility publishers retain the safe metadata-only wake. The
+        // concrete Gateway dispatcher overrides this method to preserve the
+        // already-authorized live payload and exact socket exclusion.
+        submitForegroundHint(.init(
+            roomID: event.roomID,
+            highWatermark: event.highWatermark
+        ))
+    }
+
+    public func submitForegroundDirectMessage(
+        _ message: V2AcceptedMessage,
+        excludingConnectionID _: UUID?
+    ) {
+        submitForegroundDirectMessage(message)
+    }
 }
 
 extension V2ForegroundGroupEventHintPublishing {
@@ -84,6 +121,7 @@ public final class V2ForegroundGroupEventHintDispatcher:
     Sendable
 {
     private let publisher: any V2ForegroundGroupEventHintPublishing
+    private let immediateDirectEventPublisher: (any V2ImmediateForegroundDirectEventPublishing)?
     private let maximumPendingRooms: Int
     /// Live foreground sends are lossy accelerators, but a single serial
     /// publisher must not become the throughput ceiling for unrelated rooms.
@@ -94,7 +132,12 @@ public final class V2ForegroundGroupEventHintDispatcher:
     private let signalContinuation: AsyncStream<Void>.Continuation
     private struct Pending: Sendable {
         let wake: V2GroupEventWake
-        let directMessage: V2DirectRoomLiveEventDraft?
+        let directEvent: V2DirectRoomLiveEvent?
+    }
+
+    private struct Publication: Sendable {
+        let wake: V2GroupEventWake
+        let directEvent: V2DirectRoomLiveEvent?
     }
 
     private struct State: Sendable {
@@ -110,6 +153,7 @@ public final class V2ForegroundGroupEventHintDispatcher:
     ) {
         precondition(maximumPendingRooms > 0 && maximumConcurrentPublications > 0)
         self.publisher = publisher
+        immediateDirectEventPublisher = publisher as? any V2ImmediateForegroundDirectEventPublishing
         self.maximumPendingRooms = maximumPendingRooms
         self.maximumConcurrentPublications = maximumConcurrentPublications
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -139,31 +183,52 @@ public final class V2ForegroundGroupEventHintDispatcher:
                 // the recovery path. Keep the newest bounded room set.
                 state.pending.removeValue(forKey: bufferedRoom)
             }
-            state.pending[hint.roomID] = .init(wake: hint, directMessage: nil)
+            state.pending[hint.roomID] = .init(wake: hint, directEvent: nil)
             return true
         }
         if accepted { signalContinuation.yield() }
     }
 
     public func submitForegroundDirectMessage(_ message: V2AcceptedMessage) {
-        guard let draft = V2DirectRoomLiveEventDraft(message) else { return }
+        submitForegroundDirectMessage(message, excludingConnectionID: nil)
+    }
+
+    public func submitForegroundDirectMessage(
+        _ message: V2AcceptedMessage,
+        excludingConnectionID: UUID?
+    ) {
+        guard let event = V2DirectRoomLiveEventDraft(
+            message,
+            excludingConnectionID: excludingConnectionID
+        )?.materialized() else { return }
+        submitForegroundDirectEvent(event)
+    }
+
+    public func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
+        // The production single-Gateway publisher performs only immutable
+        // frame preparation and bounded per-connection mailbox appends. Do it
+        // before touching the shared fallback mailbox, avoiding one global
+        // lock, AsyncStream signal and executor hop for every accepted DM.
+        if immediateDirectEventPublisher?.publishForegroundDirectEventImmediately(event) == true {
+            return
+        }
         let accepted = state.withLock { state in
             guard !state.finished else { return false }
-            if let existing = state.pending[draft.message.roomID],
-               existing.wake.highWatermark >= draft.message.roomSequence {
+            if let existing = state.pending[event.roomID],
+               existing.wake.highWatermark >= event.roomSequence {
                 return false
             }
-            if state.pending[draft.message.roomID] == nil,
+            if state.pending[event.roomID] == nil,
                state.pending.count >= maximumPendingRooms,
                let bufferedRoom = state.pending.keys.first {
                 state.pending.removeValue(forKey: bufferedRoom)
             }
-            state.pending[draft.message.roomID] = .init(
+            state.pending[event.roomID] = .init(
                 wake: .init(
-                    roomID: draft.message.roomID,
-                    highWatermark: draft.message.roomSequence
+                    roomID: event.roomID,
+                    highWatermark: event.roomSequence
                 ),
-                directMessage: draft
+                directEvent: event
             )
             return true
         }
@@ -183,23 +248,40 @@ public final class V2ForegroundGroupEventHintDispatcher:
             }
 
             // A later room event is only placed in a subsequent drain after
-            // this one has completed.  Within a drain, rooms are independent:
+            // this one has completed. Within a drain, rooms are independent:
             // clients still require exact cursor continuity and fall back to
             // the durable log for a duplicate, a gap, or a dropped hint.
             var lowerBound = 0
             while lowerBound < batch.count {
                 if Task.isCancelled { return }
-                let upperBound = min(lowerBound + maximumConcurrentPublications, batch.count)
+                let upperBound = min(
+                    lowerBound + maximumConcurrentPublications, batch.count
+                )
                 let slice = batch[lowerBound..<upperBound]
                 let publicationSink = publisher
+                let immediateSink = immediateDirectEventPublisher
+                var fallbacks: [Publication] = []
+                fallbacks.reserveCapacity(slice.count)
+                for item in slice {
+                    let event = item.directEvent
+                    if let event,
+                       immediateSink?.publishForegroundDirectEventImmediately(event) == true {
+                        continue
+                    }
+                    fallbacks.append(.init(wake: item.wake, directEvent: event))
+                }
+                guard !fallbacks.isEmpty else {
+                    lowerBound = upperBound
+                    continue
+                }
                 await withTaskGroup(of: Void.self) { group in
-                    for item in slice {
+                    for publication in fallbacks {
                         group.addTask {
                             guard !Task.isCancelled else { return }
-                            if let event = item.directMessage?.materialized() {
+                            if let event = publication.directEvent {
                                 await publicationSink.publishForegroundDirectEvent(event)
                             } else {
-                                await publicationSink.publishForegroundHint(item.wake)
+                                await publicationSink.publishForegroundHint(publication.wake)
                             }
                         }
                     }
@@ -286,7 +368,11 @@ public struct V2GroupEventWakeRelay: Sendable {
 /// A single-node development deployment can route directly to its local
 /// registry. Multi-gateway deployments replace this publisher with the NATS
 /// adapter; both preserve the same metadata-only wake contract.
-public struct V2LocalGroupEventWakePublisher: V2GroupEventWakePublishing, V2ForegroundGroupEventHintPublishing {
+public struct V2LocalGroupEventWakePublisher:
+    V2GroupEventWakePublishing,
+    V2ForegroundGroupEventHintPublishing,
+    V2ImmediateForegroundDirectEventPublishing
+{
     private let registry: V2DeviceConnectionRegistry
 
     public init(registry: V2DeviceConnectionRegistry) { self.registry = registry }
@@ -301,6 +387,10 @@ public struct V2LocalGroupEventWakePublisher: V2GroupEventWakePublishing, V2Fore
 
     public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
         await registry.notifyForegroundDirectEvent(event)
+    }
+
+    func publishForegroundDirectEventImmediately(_ event: V2DirectRoomLiveEvent) -> Bool {
+        registry.submitForegroundDirectEvent(event)
     }
 
     public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {

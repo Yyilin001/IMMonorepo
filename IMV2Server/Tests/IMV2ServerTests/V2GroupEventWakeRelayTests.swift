@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Synchronization
 @testable import IMV2Server
 import Testing
 
@@ -65,6 +66,33 @@ struct V2GroupEventWakeRelayTests {
 
         #expect(dispatcher.pendingRoomCount() == 2)
         dispatcher.finish()
+    }
+
+    @Test("foreground dispatcher uses a bounded immediate local direct-event publication")
+    func foregroundDispatcherUsesImmediateDirectEventPublisher() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(publisher: publisher)
+        let message = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000d10"),
+            roomID: try .init("00000000-0000-0000-0000-000000000d11"),
+            roomSequence: 12,
+            senderUserID: try .init("00000000-0000-0000-0000-000000000d12"),
+            clientMessageID: try .init("00000000-0000-0000-0000-000000000d13"),
+            text: "hello",
+            mediaPresentations: [],
+            usesRoomEventLog: true,
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000d14"),
+            acceptedMembershipRevision: 1,
+            directRecipientUserID: try .init("00000000-0000-0000-0000-000000000d15"),
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+        dispatcher.submitForegroundDirectMessage(message)
+        #expect(publisher.immediateCount == 1)
+        #expect(dispatcher.pendingRoomCount() == 0)
+        let task = Task { await dispatcher.run() }
+        #expect(publisher.asynchronousCount == 0)
+        dispatcher.finish()
+        await task.value
     }
 }
 
@@ -142,6 +170,31 @@ private actor ForegroundHintPublisherFake: V2ForegroundGroupEventHintPublishing 
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
+    }
+}
+
+private final class ImmediateForegroundHintPublisherFake:
+    V2ForegroundGroupEventHintPublishing,
+    V2ImmediateForegroundDirectEventPublishing,
+    Sendable
+{
+    private struct State: Sendable {
+        var immediateCount = 0
+        var asynchronousCount = 0
+    }
+
+    private let state = Mutex(State())
+
+    var immediateCount: Int { state.withLock(\.immediateCount) }
+    var asynchronousCount: Int { state.withLock(\.asynchronousCount) }
+
+    func publishForegroundHint(_: V2GroupEventWake) async {
+        state.withLock { $0.asynchronousCount += 1 }
+    }
+
+    func publishForegroundDirectEventImmediately(_: V2DirectRoomLiveEvent) -> Bool {
+        state.withLock { $0.immediateCount += 1 }
+        return true
     }
 }
 

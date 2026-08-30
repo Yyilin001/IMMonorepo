@@ -92,15 +92,30 @@ inactive room, then may use spare capacity for later commands from those same
 hot rooms without allowing them to overtake an in-flight transaction. The
 strict conditional fast-append statement accepts distinct rooms; a same-room
 combination uses the complete ordered batch path or safely falls back. It
-requires `room_log` and a nonzero shard-credit batch size. The batch staging queue is bounded by
-`IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED`; it must never be made
-unbounded to increase apparent throughput. For the measured 8-vCPU,
+requires `room_log` and a nonzero shard-credit batch size. The batch staging
+queue is always bounded. For compatibility it defaults to
+`IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED`, but deployments with
+measured burst traffic should size the request queue independently with
+`IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS`. A database-work queue
+counts operations while this queue counts messages; one atomic operation may
+contain many messages, so treating those counts as interchangeable can shed a
+bounded burst long before PostgreSQL is saturated. The explicit value must be
+at least the append batch size and no more than 1,048,576. It must never be
+made unbounded to increase apparent throughput. For the measured 8-vCPU,
 single-Gateway high-activity profile, use:
 
 ```
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE=32
 IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS=2
 ```
+
+Choose the pending bound from evidence: multiply the accepted message rate by
+the longest transient execution stall the latency SLO is prepared to absorb,
+then validate both memory and `append_batch_queue_wait_milliseconds_max`. For
+example, 10,000 messages/s and a measured 277 ms stall require about 2,770
+request slots; 4,096 is a bounded starting point, not a general default. A
+larger value does not add steady-state throughput and must not be retained if
+queue depth grows continuously or tail latency exceeds the SLO.
 
 `IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT` is optional. It defaults
 to the historic `min(8, IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT)` limit.
@@ -136,7 +151,7 @@ IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS=1000
 
 The three `HIGH_ACTIVITY` values are all-or-nothing. The high delay must be
 strictly greater than the base delay, the request threshold is at least two
-and no larger than the bounded foreground staging queue, and the observation
+and no larger than the bounded append staging queue, and the observation
 window is 1...1,000 ms. Arrival measurement uses a process-local monotonic
 clock and retains no more than the threshold number of samples. It controls
 only a newly scheduled underfilled batch: it cannot reorder a room, extend a

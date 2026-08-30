@@ -861,6 +861,121 @@ struct V2SendMessageServiceTests {
         #expect(snapshot.atomicBatchCommitted == 2)
         #expect(snapshot.atomicBatchCommittedRequests == 4)
     }
+
+    @Test("sharded lanes share one bounded pending budget and cancellation returns capacity")
+    func shardedAdmissionSharesPendingCapacityWithoutLeakingIt() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore()
+        let batcher = V2ShardedSendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 4,
+                maximumDelay: .seconds(30),
+                maximumInFlightBatches: 2,
+                maximumPendingRequests: 3
+            ),
+            laneCount: 2
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        var roomByLane: [RoomID?] = [nil, nil]
+        var candidate = 1
+        while roomByLane.contains(where: { $0 == nil }) {
+            let roomID = try RoomID(String(format:
+                "30000000-0000-0000-0000-%012d", candidate
+            ))
+            let lane = V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: roomID, laneCount: 2
+            )
+            roomByLane[lane] = roomByLane[lane] ?? roomID
+            candidate += 1
+        }
+        let hotRoomID = try #require(roomByLane[0])
+        let otherRoomID = try #require(roomByLane[1])
+        let senderID = try UserID("30000000-0000-0000-0000-000000000100")
+
+        func stagedSend(
+            roomID: RoomID,
+            clientMessageSuffix: Int
+        ) -> Task<V2SendMessageOutcome, any Error> {
+            Task {
+                try await service.send(.init(
+                    roomID: roomID,
+                    actorUserID: senderID,
+                    clientMessageID: try ClientMessageID(String(format:
+                        "40000000-0000-0000-0000-%012d", clientMessageSuffix
+                    )),
+                    text: "message-\(clientMessageSuffix)"
+                ))
+            }
+        }
+
+        let first = stagedSend(roomID: hotRoomID, clientMessageSuffix: 1)
+        while await batcher.snapshot().pendingRequests != 1 { await Task.yield() }
+        let second = stagedSend(roomID: hotRoomID, clientMessageSuffix: 2)
+        while await batcher.snapshot().pendingRequests != 2 { await Task.yield() }
+        let third = stagedSend(roomID: hotRoomID, clientMessageSuffix: 3)
+        while await batcher.snapshot().pendingRequests != 3 { await Task.yield() }
+
+        // All three requests may borrow the process-wide budget even though
+        // they hash to one lane. A fourth request must still be rejected.
+        await #expect(throws: V2SendMessageAdmissionBatcherError.serverBusy) {
+            try await service.send(.init(
+                roomID: otherRoomID,
+                actorUserID: senderID,
+                clientMessageID: try ClientMessageID(
+                    "40000000-0000-0000-0000-000000000004"
+                ),
+                text: "over-capacity"
+            ))
+        }
+        #expect(await batcher.snapshot().stagingQueueFullRejections == 1)
+
+        third.cancel()
+        await #expect(throws: CancellationError.self) { try await third.value }
+        while await batcher.snapshot().pendingRequests != 2 { await Task.yield() }
+
+        // Cancellation must return the shared reservation so another lane
+        // can consume it; otherwise production traffic would slowly lose all
+        // queue capacity after client disconnects and timeouts.
+        let replacement = stagedSend(roomID: otherRoomID, clientMessageSuffix: 5)
+        while await batcher.snapshot().pendingRequests != 3 { await Task.yield() }
+
+        first.cancel()
+        second.cancel()
+        replacement.cancel()
+        await #expect(throws: CancellationError.self) { try await first.value }
+        await #expect(throws: CancellationError.self) { try await second.value }
+        await #expect(throws: CancellationError.self) { try await replacement.value }
+        while await batcher.snapshot().pendingRequests != 0 { await Task.yield() }
+
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.cancelledPendingRequests == 4)
+        #expect(snapshot.stagingQueueFullRejections == 1)
+    }
+
+    @Test("shared pending capacity remains exact under concurrent reservations")
+    func sharedPendingCapacityIsAtomicallyBounded() async {
+        let capacity = V2SharedSendMessagePendingCapacity(maximum: 17)
+        let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0 ..< 256 {
+                group.addTask { capacity.tryReserve() }
+            }
+            var accepted = 0
+            for await reserved in group where reserved { accepted += 1 }
+            return accepted
+        }
+        #expect(accepted == 17)
+
+        for _ in 0 ..< accepted { capacity.release() }
+        for _ in 0 ..< 17 { #expect(capacity.tryReserve()) }
+        #expect(!capacity.tryReserve())
+        for _ in 0 ..< 17 { capacity.release() }
+    }
 }
 
 private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {

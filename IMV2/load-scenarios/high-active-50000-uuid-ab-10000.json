@@ -1,0 +1,21 @@
+{
+  "name": "online-50000-uuid-index-ab-10000-v1",
+  "seed": 20260828,
+  "roomWarmupTimeoutSeconds": 900,
+  "completionDrainSeconds": 30,
+  "postDrainHoldSeconds": 10,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 50,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 4,
+  "personas": [
+    { "name": "reader", "share": 0.45, "sendWeight": 0.1, "roomLogReadWeight": 1.0, "syncPullWeight": 1.0 },
+    { "name": "regular_sender", "share": 0.35, "sendWeight": 1.0, "roomLogReadWeight": 1.0, "syncPullWeight": 0.5 },
+    { "name": "high_frequency_sender", "share": 0.15, "sendWeight": 4.0, "roomLogReadWeight": 0.5, "syncPullWeight": 0.25 },
+    { "name": "heavy_sender", "share": 0.05, "sendWeight": 10.0, "roomLogReadWeight": 0.25, "syncPullWeight": 0.1 }
+  ],
+  "phases": [
+    { "name": "checkpoint-barrier", "durationSeconds": 180, "messagesPerSecond": 0, "roomLogReadsPerSecond": 0, "syncPullsPerSecond": 0, "reconnectPercentPerMinute": 0 },
+    { "name": "rate-10000", "durationSeconds": 90, "messagesPerSecond": 10000, "roomLogReadsPerSecond": 0, "syncPullsPerSecond": 100, "reconnectPercentPerMinute": 0.05 }
+  ]
+}

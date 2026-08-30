@@ -266,10 +266,10 @@ public struct V2AcceptanceIDFactory: Sendable {
         let generator = V2SecureProcessUUIDGenerator.shared
         makeIdentifiers = { acceptedAt in
             let identifiers = generator.makeOrderedTriple(at: acceptedAt)
-            return try V2AcceptanceIdentifiers(
-                messageID: MessageID(identifiers.0.uuidString),
-                eventID: EventID(identifiers.1.uuidString),
-                planID: FanoutPlanID(identifiers.2.uuidString)
+            return V2AcceptanceIdentifiers(
+                messageID: MessageID(uuid: identifiers.0),
+                eventID: EventID(uuid: identifiers.1),
+                planID: FanoutPlanID(uuid: identifiers.2)
             )
         }
     }
@@ -302,23 +302,65 @@ public struct V2AcceptanceIDFactory: Sendable {
 final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
     static let shared = V2SecureProcessUUIDGenerator()
 
-    private let key = SymmetricKey(size: .bits256)
-    private let counter = Atomic<UInt64>(0)
-    private let lastOrderedUnixMilliseconds = Mutex<UInt64>(0)
+    /// HMAC's keyed inner/outer hash states are invariant for the process.
+    /// Copying this value before appending the unique counter preserves the
+    /// exact HMAC(key, counter) construction while avoiding key-pad arrays and
+    /// two complete SHA-512 block updates for every accepted message.
+    private let authenticationTemplate: HMAC<SHA512>
+    private let authenticationCounter = Atomic<UInt64>(0)
+    /// Trace and connection IDs never cross an authorization boundary. A
+    /// process-random 56-bit namespace plus an injective 64-bit counter gives
+    /// them process/restart uniqueness without paying for an HMAC on every
+    /// heartbeat, pull and command. Public durable IDs still use the HMAC
+    /// expansion below and retain their pseudorandom UUIDv7 contract.
+    private let localIdentifierPrefix: (
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+    )
+    private let localIdentifierCounter = Atomic<UInt64>(0)
+    private let lastOrderedUnixMilliseconds = Atomic<UInt64>(0)
+
+    init() {
+        let key = SymmetricKey(size: .bits256)
+        authenticationTemplate = HMAC(key: key)
+        localIdentifierPrefix = key.withUnsafeBytes { bytes in
+            (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6])
+        }
+    }
 
     func makeOne() -> UUID {
-        let authenticationCode = nextAuthenticationCode()
-        return v2UUIDv4(authenticationCode, offset: 0)
+        let increment = localIdentifierCounter.wrappingAdd(1, ordering: .relaxed)
+        precondition(increment.newValue != 0, "process-local identifier space exhausted")
+        let value = increment.newValue
+        return UUID(uuid: (
+            localIdentifierPrefix.0,
+            localIdentifierPrefix.1,
+            localIdentifierPrefix.2,
+            localIdentifierPrefix.3,
+            localIdentifierPrefix.4,
+            localIdentifierPrefix.5,
+            0x40 | UInt8(truncatingIfNeeded: value >> 60),
+            UInt8(truncatingIfNeeded: value >> 52),
+            0x80 | UInt8(truncatingIfNeeded: value >> 46) & 0x3f,
+            UInt8(truncatingIfNeeded: value >> 38),
+            UInt8(truncatingIfNeeded: value >> 30),
+            UInt8(truncatingIfNeeded: value >> 22),
+            UInt8(truncatingIfNeeded: value >> 14),
+            UInt8(truncatingIfNeeded: value >> 6),
+            UInt8(truncatingIfNeeded: value) & 0x3f,
+            localIdentifierPrefix.6
+        ))
     }
 
     func makeOrderedTriple(at date: Date) -> (UUID, UUID, UUID) {
         let unixMilliseconds = orderedUnixMilliseconds(for: date)
         let authenticationCode = nextAuthenticationCode()
-        return (
-            v2UUIDv7(authenticationCode, offset: 0, unixMilliseconds: unixMilliseconds),
-            v2UUIDv7(authenticationCode, offset: 16, unixMilliseconds: unixMilliseconds),
-            v2UUIDv7(authenticationCode, offset: 32, unixMilliseconds: unixMilliseconds)
-        )
+        return authenticationCode.withUnsafeBytes { bytes in
+            (
+                v2UUIDv7(bytes, offset: 0, unixMilliseconds: unixMilliseconds),
+                v2UUIDv7(bytes, offset: 16, unixMilliseconds: unixMilliseconds),
+                v2UUIDv7(bytes, offset: 32, unixMilliseconds: unixMilliseconds)
+            )
+        }
     }
 
     /// A backwards wall-clock adjustment must not send new B-tree keys back
@@ -329,18 +371,27 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
         precondition(milliseconds.isFinite && milliseconds >= 0)
         let candidate = UInt64(milliseconds.rounded(.down))
         precondition(candidate <= 0x0000_ffff_ffff_ffff, "UUIDv7 timestamp exhausted")
-        return lastOrderedUnixMilliseconds.withLock { previous in
-            previous = max(previous, candidate)
-            return previous
+        var observed = lastOrderedUnixMilliseconds.load(ordering: .relaxed)
+        while observed < candidate {
+            let exchanged = lastOrderedUnixMilliseconds.compareExchange(
+                expected: observed,
+                desired: candidate,
+                ordering: .relaxed
+            )
+            if exchanged.exchanged { return candidate }
+            observed = exchanged.original
         }
+        return observed
     }
 
-    private func nextAuthenticationCode() -> [UInt8] {
-        let increment = counter.wrappingAdd(1, ordering: .relaxed)
+    private func nextAuthenticationCode() -> HMAC<SHA512>.MAC {
+        let increment = authenticationCounter.wrappingAdd(1, ordering: .relaxed)
         precondition(increment.newValue != 0, "acceptance identifier space exhausted")
         var input = increment.newValue.bigEndian
         return withUnsafeBytes(of: &input) { bytes in
-            Array(HMAC<SHA512>.authenticationCode(for: Data(bytes), using: key))
+            var authenticator = authenticationTemplate
+            authenticator.update(data: Data(bytes))
+            return authenticator.finalize()
         }
     }
 }

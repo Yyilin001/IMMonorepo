@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import Logging
 @preconcurrency import NIOCore
+import Synchronization
 
 /// A single TLS-decoded NIO channel. Work is serialized before it enters the
 /// actor-backed byte stream, so async authentication/database work cannot
@@ -16,6 +17,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let authenticationTimeoutMilliseconds: Int
     private let idleTimeoutMilliseconds: Int
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
+    private let foregroundWriteScheduler: V2NIOForegroundWriteScheduler
     private let logger = Logger(label: "imv2.gateway.transport")
     private var pending: V2GatewayInboundQueue
     private var processing = false
@@ -24,8 +26,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     /// queued input, so database/pool acquisition does not continue for a
     /// client that no longer exists.
     private var processingTask: Task<Void, Never>?
+    /// Best-effort foreground pushes have no request promise and may be
+    /// coalesced. Keep their EventLoop handoff separate from ordered command
+    /// responses so a live-event burst never creates one Swift task and actor
+    /// continuation per recipient.
+    private var foregroundWriter: V2NIOGatewayForegroundWriter?
     private struct PendingResponseWrite {
-        let bytes: Data
+        let frame: V2Frame
         let promise: EventLoopPromise<Void>
     }
     private var pendingResponseWrite: PendingResponseWrite?
@@ -42,13 +49,33 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private var authenticationDeadline: Scheduled<Void>?
     private var closeReason: V2GatewayConnectionClosure?
 
-    public init(
+    public convenience init(
         stream: V2GatewayByteStream,
         maximumQueuedInboundBytes: Int,
         maximumQueuedInboundChunks: Int,
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
         transportMetrics: any V2GatewayTransportMetricsRecorder
+    ) {
+        self.init(
+            stream: stream,
+            maximumQueuedInboundBytes: maximumQueuedInboundBytes,
+            maximumQueuedInboundChunks: maximumQueuedInboundChunks,
+            authenticationTimeoutMilliseconds: authenticationTimeoutMilliseconds,
+            idleTimeoutMilliseconds: idleTimeoutMilliseconds,
+            transportMetrics: transportMetrics,
+            foregroundWriteScheduler: .init()
+        )
+    }
+
+    init(
+        stream: V2GatewayByteStream,
+        maximumQueuedInboundBytes: Int,
+        maximumQueuedInboundChunks: Int,
+        authenticationTimeoutMilliseconds: Int,
+        idleTimeoutMilliseconds: Int,
+        transportMetrics: any V2GatewayTransportMetricsRecorder,
+        foregroundWriteScheduler: V2NIOForegroundWriteScheduler
     ) {
         precondition(
             maximumQueuedInboundBytes > 0 &&
@@ -64,6 +91,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         self.authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
         self.idleTimeoutMilliseconds = idleTimeoutMilliseconds
         self.transportMetrics = transportMetrics
+        self.foregroundWriteScheduler = foregroundWriteScheduler
     }
 
     public func handlerAdded(context: ChannelHandlerContext) {
@@ -75,6 +103,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let eventLoop = context.eventLoop
         let stream = stream
+        let foregroundWriter = V2NIOGatewayForegroundWriter(
+            channel: context.channel,
+            scheduler: foregroundWriteScheduler
+        )
+        self.foregroundWriter = foregroundWriter
         Task {
             let attached = await stream.attachTransport(deviceRevocationHandler: {
                 await withCheckedContinuation { continuation in
@@ -110,6 +143,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
                     }
                 }
+            }, foregroundWriter: { bytes in
+                foregroundWriter.submit(bytes)
             })
             eventLoop.execute {
                 let handler = boundHandler.value
@@ -134,6 +169,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     public func channelInactive(context: ChannelHandlerContext) {
         closed = true
+        foregroundWriter?.finish()
+        foregroundWriter = nil
         idleCheck?.cancel()
         idleCheck = nil
         authenticationDeadline?.cancel()
@@ -184,10 +221,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
-                let needsFrameDrain = try await stream.receive(inbound) { response in
+                let needsFrameDrain = try await stream.receiveFrames(inbound) { response in
                     try Task.checkCancellation()
                     try await eventLoop.flatSubmit {
-                        boundHandler.value.writeWhenWritable(
+                        boundHandler.value.writeFrameWhenWritable(
                             response,
                             context: boundContext.value
                         )
@@ -251,6 +288,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         }
         closed = true
         closeReason = reason
+        foregroundWriter?.finish()
+        foregroundWriter = nil
         idleCheck?.cancel()
         idleCheck = nil
         authenticationDeadline?.cancel()
@@ -267,8 +306,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         context.close(promise: closePromise)
     }
 
-    private func writeWhenWritable(
-        _ bytes: Data,
+    private func writeFrameWhenWritable(
+        _ frame: V2Frame,
         context: ChannelHandlerContext
     ) -> EventLoopFuture<Void> {
         let promise = context.eventLoop.makePromise(of: Void.self)
@@ -277,11 +316,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             return promise.futureResult
         }
         if context.channel.isWritable {
-            write(bytes, promise: promise, context: context)
+            write(frame, promise: promise, context: context)
         } else if pendingResponseWrite == nil {
             // The stream awaits this promise before dispatching another frame,
             // so a stalled channel retains at most one complete response.
-            pendingResponseWrite = .init(bytes: bytes, promise: promise)
+            pendingResponseWrite = .init(frame: frame, promise: promise)
         } else {
             promise.fail(V2GatewayTransportWriteError.responseAlreadyPending)
         }
@@ -292,19 +331,21 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         guard context.channel.isWritable, let pendingResponseWrite else { return }
         self.pendingResponseWrite = nil
         write(
-            pendingResponseWrite.bytes,
+            pendingResponseWrite.frame,
             promise: pendingResponseWrite.promise,
             context: context
         )
     }
 
     private func write(
-        _ bytes: Data,
+        _ frame: V2Frame,
         promise: EventLoopPromise<Void>,
         context: ChannelHandlerContext
     ) {
-        var buffer = context.channel.allocator.buffer(capacity: bytes.count)
-        buffer.writeBytes(bytes)
+        let buffer = v2GatewayWireBuffer(
+            frame,
+            allocator: context.channel.allocator
+        )
         context.writeAndFlush(wrapOutboundOut(buffer), promise: promise)
     }
 
@@ -344,6 +385,171 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             scheduleIdleCheck(context: context)
         }
     }
+}
+
+/// Process-wide foreground write combiner. One lane belongs to each child
+/// EventLoop: the first ready connection schedules a drain and later ready
+/// connections join the same bounded turn instead of each allocating an
+/// `EventLoop.execute` closure. Turns are capped so heartbeats, command
+/// responses and TLS work retain fair access to the loop under a live-event
+/// burst.
+final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
+    private final class Lane: @unchecked Sendable {
+        private struct State {
+            var writers = CircularBuffer<V2NIOGatewayForegroundWriter>(initialCapacity: 64)
+            var drainScheduled = false
+        }
+
+        private let eventLoop: any EventLoop
+        private let maximumWritesPerTurn: Int
+        private let state = Mutex(State())
+
+        init(eventLoop: any EventLoop, maximumWritesPerTurn: Int) {
+            self.eventLoop = eventLoop
+            self.maximumWritesPerTurn = maximumWritesPerTurn
+        }
+
+        func enqueue(_ writer: V2NIOGatewayForegroundWriter) {
+            let shouldSchedule = state.withLock { state in
+                state.writers.append(writer)
+                guard !state.drainScheduled else { return false }
+                state.drainScheduled = true
+                return true
+            }
+            if shouldSchedule { scheduleDrain() }
+        }
+
+        private func scheduleDrain() {
+            eventLoop.execute { [self] in drain() }
+        }
+
+        private func drain() {
+            eventLoop.preconditionInEventLoop()
+            var batch: [V2NIOGatewayForegroundWriter] = []
+            batch.reserveCapacity(maximumWritesPerTurn)
+            state.withLock { state in
+                while batch.count < maximumWritesPerTurn,
+                      let writer = state.writers.popFirst() {
+                    batch.append(writer)
+                }
+            }
+            for writer in batch { writer.drainOnEventLoop() }
+            let needsAnotherTurn = state.withLock { state in
+                guard state.writers.isEmpty else { return true }
+                state.drainScheduled = false
+                return false
+            }
+            if needsAnotherTurn { scheduleDrain() }
+        }
+    }
+
+    private struct State: Sendable {
+        var lanes: [ObjectIdentifier: Lane] = [:]
+    }
+
+    private let maximumWritesPerTurn: Int
+    private let state = Mutex(State())
+
+    init(maximumWritesPerTurn: Int = 512) {
+        precondition(maximumWritesPerTurn > 0)
+        self.maximumWritesPerTurn = maximumWritesPerTurn
+    }
+
+    func enqueue(_ writer: V2NIOGatewayForegroundWriter, on eventLoop: any EventLoop) {
+        let identity = ObjectIdentifier(eventLoop)
+        let lane = state.withLock { state in
+            if let existing = state.lanes[identity] { return existing }
+            let created = Lane(
+                eventLoop: eventLoop,
+                maximumWritesPerTurn: maximumWritesPerTurn
+            )
+            state.lanes[identity] = created
+            return created
+        }
+        lane.enqueue(writer)
+    }
+}
+
+/// Bounded, non-suspending bridge from an authenticated foreground route to
+/// one NIO channel. A connection can watch only one foreground room, so
+/// replacing a pending frame with the newest waterline is cursor-safe. The
+/// stream's transport fence rejects stale subscriptions before this bridge;
+/// `finish()` provides an immediate channel-lifecycle fence while actor
+/// teardown is still scheduled.
+final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
+    private struct State: Sendable {
+        var pending: Data?
+        var enqueued = false
+        var finished = false
+    }
+
+    private let state = Mutex(State())
+    /// A production NIO channel and its EventLoop are thread-safe entry
+    /// points. All mutable channel-handler state remains confined to that
+    /// EventLoop; this reference is never used to run application work inline.
+    private let channel: any Channel
+    private let scheduler: V2NIOForegroundWriteScheduler
+
+    init(channel: any Channel, scheduler: V2NIOForegroundWriteScheduler) {
+        self.channel = channel
+        self.scheduler = scheduler
+    }
+
+    func submit(_ bytes: Data) {
+        let shouldEnqueue = state.withLock { state in
+            guard !state.finished else { return false }
+            state.pending = bytes
+            guard !state.enqueued else { return false }
+            state.enqueued = true
+            return true
+        }
+        guard shouldEnqueue else { return }
+        scheduler.enqueue(self, on: channel.eventLoop)
+    }
+
+    func finish() {
+        state.withLock {
+            $0.finished = true
+            $0.pending = nil
+            $0.enqueued = false
+        }
+    }
+
+    fileprivate func drainOnEventLoop() {
+        channel.eventLoop.preconditionInEventLoop()
+        let bytes = state.withLock { state -> Data? in
+            state.enqueued = false
+            guard !state.finished else {
+                state.pending = nil
+                return nil
+            }
+            defer { state.pending = nil }
+            return state.pending
+        }
+        guard let bytes, channel.isActive, channel.isWritable else { return }
+        var buffer = channel.allocator.buffer(capacity: bytes.count)
+        buffer.writeBytes(bytes)
+        channel.writeAndFlush(buffer, promise: nil)
+    }
+}
+
+/// Encodes the stable 18-byte gateway header and protobuf payload directly
+/// into NIO-owned storage. The byte order intentionally mirrors
+/// `V2FrameCodec.encode`; validation remains in `V2GatewayByteStream` before
+/// the frame crosses onto the event loop.
+func v2GatewayWireBuffer(
+    _ frame: V2Frame,
+    allocator: ByteBufferAllocator
+) -> ByteBuffer {
+    var buffer = allocator.buffer(capacity: V2Frame.headerLength + frame.payload.count)
+    buffer.writeInteger(V2Frame.magic, endianness: .big)
+    buffer.writeInteger(frame.version)
+    buffer.writeInteger(frame.flags.rawValue)
+    buffer.writeInteger(frame.command.rawValue, endianness: .big)
+    buffer.writeInteger(frame.requestID, endianness: .big)
+    buffer.writeInteger(UInt32(frame.payload.count), endianness: .big)
+    buffer.writeBytes(frame.payload)
+    return buffer
 }
 
 /// Event-loop-confined, two-dimensional admission queue. `CircularBuffer`

@@ -214,11 +214,22 @@ public final class V2DirectRoomLogEventCache: Sendable {
     /// response waits only for one bounded shard-mailbox append; JSON creation,
     /// ordering and LRU mutation run in the runtime-owned writer task.
     public func enqueueCommittedPlainDirectMessage(_ message: V2AcceptedMessage) {
-        guard Self.isEligible(message) else {
+        guard let prepared = Self.prepare(message) else {
             lane(for: message.roomID).mailbox.recordBypass()
             return
         }
-        lane(for: message.roomID).mailbox.enqueue(message)
+        lane(for: prepared.roomID).mailbox.enqueue(prepared)
+    }
+
+    /// Preferred production entry point. The foreground live event and this
+    /// cache share one immutable encoded payload, so post-commit acceleration
+    /// no longer performs two JSON encodes or retains two full message values.
+    func enqueueCommittedPlainDirectEvent(_ event: V2DirectRoomLiveEvent) {
+        guard let prepared = Self.prepare(event) else {
+            lane(for: event.roomID).mailbox.recordBypass()
+            return
+        }
+        lane(for: prepared.roomID).mailbox.enqueue(prepared)
     }
 
     /// Own this loop with one runtime task. Each lane is drained by one child,
@@ -320,14 +331,10 @@ public final class V2DirectRoomLogEventCache: Sendable {
     private static func run(lane: Lane) async {
         for await _ in lane.mailbox.signals {
             if Task.isCancelled { return }
-            let messages = lane.mailbox.drain()
-            for message in messages {
+            let events = lane.mailbox.drain()
+            for event in events {
                 if Task.isCancelled { return }
-                guard let prepared = prepare(message) else {
-                    await lane.cache.recordBypass()
-                    continue
-                }
-                await lane.cache.record(prepared)
+                await lane.cache.record(event)
             }
         }
     }
@@ -361,6 +368,23 @@ public final class V2DirectRoomLogEventCache: Sendable {
         )
     }
 
+    private static func prepare(_ event: V2DirectRoomLiveEvent) -> PreparedEvent? {
+        guard event.projectionKind == "message",
+              let membershipRevision = event.acceptedMembershipRevision
+        else { return nil }
+        return .init(
+            roomID: event.roomID,
+            entry: .init(
+                sourceEventID: event.sourceEventID,
+                roomSequence: event.roomSequence,
+                projectionKind: event.projectionKind,
+                payload: event.payload
+            ),
+            membershipRevision: membershipRevision,
+            byteCost: event.payload.count + 128
+        )
+    }
+
     private static func partition(_ total: Int, among count: Int, index: Int) -> Int {
         total / count + (index < total % count ? 1 : 0)
     }
@@ -377,7 +401,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
 
 private final class V2DirectRoomLogEventCacheMailbox: Sendable {
     private struct State: Sendable {
-        var pending: [V2AcceptedMessage]
+        var pending: [V2DirectRoomLogEventCache.PreparedEvent]
         var dropped: UInt64 = 0
         var bypassed: UInt64 = 0
         var finished = false
@@ -391,7 +415,7 @@ private final class V2DirectRoomLogEventCacheMailbox: Sendable {
     init(maximumPending: Int) {
         precondition(maximumPending > 0)
         self.maximumPending = maximumPending
-        var pending: [V2AcceptedMessage] = []
+        var pending: [V2DirectRoomLogEventCache.PreparedEvent] = []
         pending.reserveCapacity(maximumPending)
         state = Mutex(.init(pending: pending))
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -399,14 +423,14 @@ private final class V2DirectRoomLogEventCacheMailbox: Sendable {
         continuation = stream.continuation
     }
 
-    func enqueue(_ message: V2AcceptedMessage) {
+    func enqueue(_ event: V2DirectRoomLogEventCache.PreparedEvent) {
         let accepted = state.withLock { state in
             guard !state.finished else { return false }
             guard state.pending.count < maximumPending else {
                 state.dropped &+= 1
                 return false
             }
-            state.pending.append(message)
+            state.pending.append(event)
             return true
         }
         if accepted { continuation.yield() }
@@ -416,7 +440,7 @@ private final class V2DirectRoomLogEventCacheMailbox: Sendable {
         state.withLock { $0.bypassed &+= 1 }
     }
 
-    func drain() -> [V2AcceptedMessage] {
+    func drain() -> [V2DirectRoomLogEventCache.PreparedEvent] {
         state.withLock { state in
             guard !state.pending.isEmpty else { return [] }
             let batch = state.pending

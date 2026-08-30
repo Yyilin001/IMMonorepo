@@ -62,11 +62,16 @@ public actor V2ShardAdmissionCommandCreditPool {
     let validUntil: Date
   }
 
+  private struct PendingReservation: Sendable {
+    let id: UInt64
+    let task: Task<Reservation?, Error>
+  }
+
   private let database: any Database
   private let batchSize: Int
   private var credits: [Key: Credits] = [:]
   private var tokenKeys: [UInt64: Key] = [:]
-  private var pendingReservations: [Key: Task<Reservation?, Error>] = [:]
+  private var pendingReservations: [Key: PendingReservation] = [:]
   private var nextInternalID: UInt64 = 0
   private var batchReservations = 0
   private var databaseCreditsReserved = 0
@@ -241,29 +246,54 @@ public actor V2ShardAdmissionCommandCreditPool {
     for key: Key,
     now: Date
   ) async throws -> Reservation? {
-    if let pending = pendingReservations[key] {
-      return try await pending.value
+    let pending: PendingReservation
+    if let existing = pendingReservations[key] {
+      pending = existing
+    } else {
+      let reservationID = makeInternalID()
+      pending = .init(
+        id: reservationID,
+        task: Task { [database, batchSize] in
+          guard
+            let grant = try await Self.reserveBatch(
+              database: database,
+              key: key,
+              batchSize: batchSize,
+              now: now
+            )
+          else { return nil }
+          return Reservation(id: reservationID, grant: grant)
+        }
+      )
+      pendingReservations[key] = pending
     }
-    let reservationID = makeInternalID()
-    let task: Task<Reservation?, Error> = Task { [database, batchSize] in
-      guard
-        let grant = try await Self.reserveBatch(
-          database: database,
-          key: key,
-          batchSize: batchSize,
-          now: now
-        )
-      else { return nil }
-      return Reservation(id: reservationID, grant: grant)
+    do {
+      let grant = try await pending.task.value
+      finishPendingReservation(pending, for: key, grant: grant)
+      return grant
+    } catch {
+      finishPendingReservation(pending, for: key, grant: nil)
+      throw error
     }
-    pendingReservations[key] = task
-    defer { pendingReservations.removeValue(forKey: key) }
-    let grant = try await task.value
+  }
+
+  /// Whichever waiter resumes first retires the completed shared task before
+  /// returning its grant. Without this hand-off, another waiter can consume
+  /// the last credit, re-enter `reserveBatchIfNeeded`, observe the same
+  /// already-completed task and spin synchronously on its old reservation ID.
+  /// That spin monopolizes this actor and prevents the original creator's
+  /// `defer` from ever removing the task — a sustained-load livelock.
+  private func finishPendingReservation(
+    _ pending: PendingReservation,
+    for key: Key,
+    grant: Reservation?
+  ) {
+    guard pendingReservations[key]?.id == pending.id else { return }
+    pendingReservations.removeValue(forKey: key)
     if let grant {
       batchReservations += 1
       databaseCreditsReserved += grant.grant.count
     }
-    return grant
   }
 
   /// Ensures at least one process-local credit exists for `key`. The common

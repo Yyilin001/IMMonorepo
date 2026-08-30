@@ -5,7 +5,7 @@ credentials_path="${1:-}"
 duration_seconds="${2:-}"
 expected_messages="${3:-}"
 database_url="${IM_V2_PROFILE_DATABASE_URL:-}"
-capacity_profile_id="${IM_V2_LOAD_CAPACITY_PROFILE_ID:-loadtest-v17}"
+capacity_profile_id="${IM_V2_LOAD_CAPACITY_PROFILE_ID:-}"
 expiry_margin_seconds="${IM_V2_LOAD_TOKEN_EXPIRY_MARGIN_SECONDS:-120}"
 lease_margin_seconds="${IM_V2_LOAD_LEASE_MARGIN_SECONDS:-1800}"
 credit_headroom_percent="${IM_V2_LOAD_CREDIT_HEADROOM_PERCENT:-10}"
@@ -21,6 +21,8 @@ fail() {
 }
 
 [[ -n "${database_url}" ]] || fail 'IM_V2_PROFILE_DATABASE_URL is required'
+[[ "${capacity_profile_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+  || fail 'IM_V2_LOAD_CAPACITY_PROFILE_ID is required and must be valid'
 [[ -f "${credentials_path}" ]] || { usage; fail 'credentials JSONL does not exist'; }
 [[ "${duration_seconds}" =~ ^[1-9][0-9]*$ ]] || { usage; fail 'duration must be a positive integer'; }
 [[ "${expected_messages}" =~ ^[0-9]+$ ]] || { usage; fail 'expected messages must be a non-negative integer'; }

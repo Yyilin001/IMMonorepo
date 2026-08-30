@@ -16,6 +16,15 @@ public struct V2DirectRoomLiveEvent: Equatable, Sendable {
     public let projectionKind: String
     public let payload: Data
     public let recipientUserIDs: Set<UserID>
+    /// Durable membership fence captured by the accepting transaction. It is
+    /// not needed for socket routing, but lets the room-log acceleration cache
+    /// reuse this already-encoded payload without copying and encoding the
+    /// complete accepted message a second time.
+    let acceptedMembershipRevision: UInt64?
+    /// Process-local transport identity of the request origin. It removes only
+    /// the redundant echo to that one socket; it is never an audience grant
+    /// and is harmless on another Gateway where no connection can match it.
+    let excludedConnectionID: UUID?
 
     init(
         roomID: RoomID,
@@ -24,7 +33,9 @@ public struct V2DirectRoomLiveEvent: Equatable, Sendable {
         roomSequence: UInt64,
         projectionKind: String,
         payload: Data,
-        recipientUserIDs: Set<UserID>
+        recipientUserIDs: Set<UserID>,
+        acceptedMembershipRevision: UInt64? = nil,
+        excludedConnectionID: UUID? = nil
     ) {
         self.roomID = roomID
         self.highWatermark = highWatermark
@@ -33,6 +44,8 @@ public struct V2DirectRoomLiveEvent: Equatable, Sendable {
         self.projectionKind = projectionKind
         self.payload = payload
         self.recipientUserIDs = recipientUserIDs
+        self.acceptedMembershipRevision = acceptedMembershipRevision
+        self.excludedConnectionID = excludedConnectionID
     }
 
     public init?(_ message: V2AcceptedMessage) {
@@ -55,8 +68,12 @@ struct V2DirectRoomLiveEventDraft: Equatable, Sendable {
     let message: V2AcceptedMessage
     let sourceEventID: EventID
     let recipientUserIDs: Set<UserID>
+    let excludedConnectionID: UUID?
 
-    init?(_ message: V2AcceptedMessage) {
+    init?(
+        _ message: V2AcceptedMessage,
+        excludingConnectionID: UUID? = nil
+    ) {
         guard message.usesRoomEventLog,
               message.groupDeliveryMode == nil,
               message.media.isEmpty,
@@ -70,6 +87,7 @@ struct V2DirectRoomLiveEventDraft: Equatable, Sendable {
         self.message = message
         self.sourceEventID = sourceEventID
         recipientUserIDs = [message.senderUserID, directRecipientUserID]
+        self.excludedConnectionID = excludingConnectionID
     }
 
     func materialized() -> V2DirectRoomLiveEvent? {
@@ -81,7 +99,9 @@ struct V2DirectRoomLiveEventDraft: Equatable, Sendable {
             roomSequence: message.roomSequence,
             projectionKind: "message",
             payload: payload,
-            recipientUserIDs: recipientUserIDs
+            recipientUserIDs: recipientUserIDs,
+            acceptedMembershipRevision: message.acceptedMembershipRevision,
+            excludedConnectionID: excludedConnectionID
         )
     }
 }

@@ -5,6 +5,12 @@ import IMV2Core
 /// Admission and removal remain immediate because they enforce connection
 /// ownership; only renewal, whose rows are already owned, is batched.
 public actor V2LivePresenceRenewalBatcher {
+    /// These generations only identify actor-local continuations and delayed
+    /// flushes. They are neither public identifiers nor authorization tokens,
+    /// so a monotonic counter provides the required uniqueness without
+    /// opening the platform random source for every heartbeat.
+    private typealias Generation = UInt64
+
     public struct Configuration: Equatable, Sendable {
         public let maximumBatchSize: Int
         public let maximumDelay: Duration
@@ -44,15 +50,16 @@ public actor V2LivePresenceRenewalBatcher {
 
     private struct PendingRenewal {
         var request: V2LivePresenceLeaseRenewalRequest
-        var continuations: [UUID: CheckedContinuation<V2LivePresenceLeaseRefresh, any Error>]
+        var continuations: [Generation: CheckedContinuation<V2LivePresenceLeaseRefresh, any Error>]
     }
 
     private let leases: any V2LivePresenceLeaseManaging
     private let configuration: Configuration
     private var pending: [UUID: PendingRenewal] = [:]
-    private var scheduledFlushID: UUID?
+    private var scheduledFlushID: Generation?
     private var scheduledFlush: Task<Void, Never>?
     private var scheduledFlushIsImmediate = false
+    private var nextGeneration: Generation = 0
     private var submittedRequests: UInt64 = 0
     private var executedBatches: UInt64 = 0
     private var failedBatches: UInt64 = 0
@@ -72,7 +79,7 @@ public actor V2LivePresenceRenewalBatcher {
         now: Date
     ) async throws -> V2LivePresenceLeaseRefresh {
         try Task.checkCancellation()
-        let continuationID = UUID()
+        let continuationID = makeGeneration()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 submittedRequests &+= 1
@@ -124,7 +131,7 @@ public actor V2LivePresenceRenewalBatcher {
 
     private func scheduleFlush(after delay: Duration) {
         scheduledFlush?.cancel()
-        let flushID = UUID()
+        let flushID = makeGeneration()
         scheduledFlushID = flushID
         scheduledFlushIsImmediate = delay == .zero
         scheduledFlush = Task {
@@ -134,7 +141,7 @@ public actor V2LivePresenceRenewalBatcher {
         }
     }
 
-    private func flush(scheduledID: UUID) async {
+    private func flush(scheduledID: Generation) async {
         guard scheduledFlushID == scheduledID else { return }
         scheduledFlushID = nil
         scheduledFlush = nil
@@ -174,7 +181,7 @@ public actor V2LivePresenceRenewalBatcher {
         }
     }
 
-    private func cancelPending(connectionID: UUID, continuationID: UUID) {
+    private func cancelPending(connectionID: UUID, continuationID: Generation) {
         guard var item = pending[connectionID],
               let continuation = item.continuations.removeValue(forKey: continuationID)
         else { return }
@@ -184,5 +191,11 @@ public actor V2LivePresenceRenewalBatcher {
             pending[connectionID] = item
         }
         continuation.resume(throwing: CancellationError())
+    }
+
+    private func makeGeneration() -> Generation {
+        nextGeneration &+= 1
+        precondition(nextGeneration != 0, "live presence renewal generation exhausted")
+        return nextGeneration
     }
 }

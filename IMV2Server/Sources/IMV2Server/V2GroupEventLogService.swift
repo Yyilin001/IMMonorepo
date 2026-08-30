@@ -93,4 +93,10 @@ public struct V2GroupEventLogService: Sendable {
     public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) {
         directRoomLogEventCache?.enqueueCommittedPlainDirectMessage(message)
     }
+
+    /// Reuses the payload already materialized for foreground delivery. The
+    /// cache remains best effort and never becomes an authorization source.
+    func recordCommittedDirectRoomLogEvent(_ event: V2DirectRoomLiveEvent) {
+        directRoomLogEventCache?.enqueueCommittedPlainDirectEvent(event)
+    }
 }

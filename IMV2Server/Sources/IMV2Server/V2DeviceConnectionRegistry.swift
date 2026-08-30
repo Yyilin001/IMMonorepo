@@ -22,23 +22,28 @@ public actor V2DeviceConnectionRegistry {
     /// Every registration gets a fresh token. Actor methods revalidate it
     /// after external awaits so an older continuation cannot resurrect state
     /// after unregister or a later registration of the same connection ID.
-    private var lifecycleByConnection: [UUID: UUID] = [:]
+    private typealias Generation = UInt64
+    private var lifecycleByConnection: [UUID: Generation] = [:]
     /// Foreground group viewers are intentionally process-local soft state.
     /// The durable room event log and normal per-user sync remain recovery
     /// sources after a process or connection failure.
     private var streamsByForegroundGroup: [RoomID: [UUID: V2GatewayByteStream]] = [:]
     private var foregroundGroupByConnection: [UUID: RoomID] = [:]
-    private var foregroundMutationByConnection: [UUID: UUID] = [:]
+    private var foregroundMutationByConnection: [UUID: Generation] = [:]
     private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
     private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
     private var livePresenceRenewals: V2LivePresenceRenewalBatcher?
     private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
     private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
-    private var presenceMutationByConnection: [UUID: UUID] = [:]
+    private var presenceMutationByConnection: [UUID: Generation] = [:]
     private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var typingRoomByConnection: [UUID: RoomID] = [:]
-    private var typingMutationByConnection: [UUID: UUID] = [:]
+    private var typingMutationByConnection: [UUID: Generation] = [:]
+    /// These values are actor-local reentrancy fences, not public identities
+    /// or security capabilities. A monotonic generation is sufficient and
+    /// avoids opening the platform random source during connection churn.
+    private var nextGeneration: Generation = 0
     private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
     public init(
@@ -63,7 +68,7 @@ public actor V2DeviceConnectionRegistry {
         guard (streamsByDevice[identity.deviceID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerDevice,
               (streamsByUser[identity.userID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerUser
         else { return false }
-        let lifecycle = UUID()
+        let lifecycle = makeGeneration()
         lifecycleByConnection[connectionID] = lifecycle
         identityByConnection[connectionID] = identity
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
@@ -123,7 +128,7 @@ public actor V2DeviceConnectionRegistry {
         streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
         if streamsByUser[identity.userID]?.isEmpty == true { streamsByUser.removeValue(forKey: identity.userID) }
         do {
-            let mutation = UUID()
+            let mutation = makeGeneration()
             foregroundMutationByConnection[connectionID] = mutation
             defer {
                 if foregroundMutationByConnection[connectionID] == mutation {
@@ -134,7 +139,7 @@ public actor V2DeviceConnectionRegistry {
         }
         guard lifecycleByConnection[connectionID] == nil else { return }
         do {
-            let mutation = UUID()
+            let mutation = makeGeneration()
             presenceMutationByConnection[connectionID] = mutation
             defer {
                 if presenceMutationByConnection[connectionID] == mutation {
@@ -145,7 +150,7 @@ public actor V2DeviceConnectionRegistry {
         }
         guard lifecycleByConnection[connectionID] == nil else { return }
         do {
-            let mutation = UUID()
+            let mutation = makeGeneration()
             typingMutationByConnection[connectionID] = mutation
             defer {
                 if typingMutationByConnection[connectionID] == mutation {
@@ -205,7 +210,7 @@ public actor V2DeviceConnectionRegistry {
         guard let identity = identityByConnection[connectionID],
               let lifecycle = lifecycleByConnection[connectionID]
         else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         foregroundMutationByConnection[connectionID] = mutation
         defer {
             if foregroundMutationByConnection[connectionID] == mutation {
@@ -245,7 +250,7 @@ public actor V2DeviceConnectionRegistry {
 
     public func unsubscribeForegroundGroup(connectionID: UUID, roomID: RoomID) async {
         guard foregroundGroupByConnection[connectionID] == roomID else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         foregroundMutationByConnection[connectionID] = mutation
         defer {
             if foregroundMutationByConnection[connectionID] == mutation {
@@ -286,7 +291,8 @@ public actor V2DeviceConnectionRegistry {
     ) async {
         let streams = foregroundRoutes.streams(
             roomID: event.roomID,
-            recipientUserIDs: event.recipientUserIDs
+            recipientUserIDs: event.recipientUserIDs,
+            excludingConnectionID: event.excludedConnectionID
         )
         let prepared = foregroundFrameLimits.flatMap {
             V2PreparedGatewayGroupEventAvailable(
@@ -303,6 +309,41 @@ public actor V2DeviceConnectionRegistry {
             directEvent: event,
             prepared: prepared
         )
+    }
+
+    /// Completes the production local-only direct-event route without
+    /// creating a Swift child task or crossing this registry actor.  The
+    /// immutable frame is encoded once, every audience member is still
+    /// selected from the authenticated routing snapshot, and each stream's
+    /// transport fence validates authentication/lifecycle again.
+    ///
+    /// `false` is returned before publication when this registry was created
+    /// without a process-wide frame contract.  Once publication begins, a
+    /// partial transport-lifecycle miss also returns `false`; the dispatcher
+    /// then runs the compatibility path.  A duplicate on an already-enqueued
+    /// stream is explicitly safe because foreground events are idempotent
+    /// accelerators and the room-log cursor remains authoritative.
+    nonisolated func submitForegroundDirectEvent(
+        _ event: V2DirectRoomLiveEvent
+    ) -> Bool {
+        guard let foregroundFrameLimits,
+              let prepared = V2PreparedGatewayGroupEventAvailable(
+                  roomID: event.roomID,
+                  highWatermark: event.highWatermark,
+                  directEvent: event,
+                  frameLimits: foregroundFrameLimits
+              )
+        else { return false }
+        let streams = foregroundRoutes.streams(
+            roomID: event.roomID,
+            recipientUserIDs: event.recipientUserIDs,
+            excludingConnectionID: event.excludedConnectionID
+        )
+        var completed = true
+        for stream in streams where !stream.submitGroupEventAvailable(prepared) {
+            completed = false
+        }
+        return completed
     }
 
     public func connectionCount(for deviceID: DeviceID) -> Int { streamsByDevice[deviceID]?.count ?? 0 }
@@ -407,7 +448,7 @@ public actor V2DeviceConnectionRegistry {
         guard identityByConnection[connectionID] != nil,
               let lifecycle = lifecycleByConnection[connectionID]
         else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         presenceMutationByConnection[connectionID] = mutation
         defer {
             if presenceMutationByConnection[connectionID] == mutation {
@@ -430,7 +471,7 @@ public actor V2DeviceConnectionRegistry {
 
     public func unsubscribePresence(connectionID: UUID, roomID: RoomID) async {
         guard presenceByConnection[connectionID]?.roomID == roomID else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         presenceMutationByConnection[connectionID] = mutation
         defer {
             if presenceMutationByConnection[connectionID] == mutation {
@@ -444,7 +485,7 @@ public actor V2DeviceConnectionRegistry {
         guard identityByConnection[connectionID] != nil,
               let lifecycle = lifecycleByConnection[connectionID]
         else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         typingMutationByConnection[connectionID] = mutation
         defer {
             if typingMutationByConnection[connectionID] == mutation {
@@ -467,7 +508,7 @@ public actor V2DeviceConnectionRegistry {
 
     public func unsubscribeTyping(connectionID: UUID, roomID: RoomID) async {
         guard typingRoomByConnection[connectionID] == roomID else { return }
-        let mutation = UUID()
+        let mutation = makeGeneration()
         typingMutationByConnection[connectionID] = mutation
         defer {
             if typingMutationByConnection[connectionID] == mutation {
@@ -678,7 +719,9 @@ public actor V2DeviceConnectionRegistry {
         if streams.count <= sequentialWriteLimit {
             for stream in streams {
                 if Task.isCancelled { return }
-                if let prepared {
+                if let prepared, stream.submitGroupEventAvailable(prepared) {
+                    continue
+                } else if let prepared {
                     await stream.sendGroupEventAvailable(prepared)
                 } else {
                     await stream.sendGroupEventAvailable(
@@ -700,7 +743,9 @@ public actor V2DeviceConnectionRegistry {
                 for stream in streams[lowerBound..<upperBound] {
                     group.addTask {
                         guard !Task.isCancelled else { return }
-                        if let prepared {
+                        if let prepared, stream.submitGroupEventAvailable(prepared) {
+                            return
+                        } else if let prepared {
                             await stream.sendGroupEventAvailable(prepared)
                         } else {
                             await stream.sendGroupEventAvailable(
@@ -719,7 +764,7 @@ public actor V2DeviceConnectionRegistry {
     private func rollbackRegistration(
         connectionID: UUID,
         identity: V2AuthenticatedConnection,
-        lifecycle: UUID
+        lifecycle: Generation
     ) {
         guard lifecycleByConnection[connectionID] == lifecycle,
               identityByConnection[connectionID] == identity
@@ -743,6 +788,12 @@ public actor V2DeviceConnectionRegistry {
         foregroundMutationByConnection.count
             + presenceMutationByConnection.count
             + typingMutationByConnection.count
+    }
+
+    private func makeGeneration() -> Generation {
+        nextGeneration &+= 1
+        precondition(nextGeneration != 0, "connection registry generation exhausted")
+        return nextGeneration
     }
 
 }
@@ -803,12 +854,16 @@ private final class V2ForegroundConnectionRoutes: Sendable {
 
     func streams(
         roomID: RoomID,
-        recipientUserIDs: Set<UserID>
+        recipientUserIDs: Set<UserID>,
+        excludingConnectionID: UUID? = nil
     ) -> [V2GatewayByteStream] {
         shard(for: roomID).state.withLock { state in
             guard let entries = state.entriesByRoom[roomID] else { return [] }
-            return entries.values.compactMap {
-                recipientUserIDs.contains($0.userID) ? $0.stream : nil
+            return entries.compactMap { connectionID, entry in
+                guard connectionID != excludingConnectionID,
+                      recipientUserIDs.contains(entry.userID)
+                else { return nil }
+                return entry.stream
             }
         }
     }

@@ -15,6 +15,11 @@ public protocol V2IdentifierTag: Sendable {}
 /// every boundary having to reinterpret or escape a raw value.
 public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, Comparable, CustomStringConvertible {
     public let rawValue: String
+    /// The already-validated UUID representation when this identifier came
+    /// from a UUID-shaped boundary. Persistence adapters can bind these 16
+    /// bytes directly instead of reparsing `rawValue` for every operation.
+    /// Opaque, non-UUID identifiers deliberately keep this value nil.
+    public let uuidValue: UUID?
 
     public static var maximumUTF8Bytes: Int { 128 }
 
@@ -33,7 +38,23 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
         // server's room-event payloads, so every layer shares one lexical key.
         // Non-UUID opaque identifiers deliberately retain their exact
         // URL-safe spelling.
-        self.rawValue = UUID(uuidString: rawValue)?.uuidString ?? rawValue
+        if let uuid = UUID(uuidString: rawValue) {
+            self.rawValue = uuid.uuidString
+            self.uuidValue = uuid
+        } else {
+            self.rawValue = rawValue
+            self.uuidValue = nil
+        }
+    }
+
+    /// Constructs a canonical identifier from a value that is already a
+    /// strongly typed UUID. Unlike the string boundary above, this path does
+    /// not need to rescan URL safety or parse the same UUID a second time.
+    /// The resulting spelling is still exactly Foundation's canonical UUID
+    /// representation, so persistence and wire equality remain unchanged.
+    public init(uuid: UUID) {
+        self.rawValue = uuid.uuidString
+        self.uuidValue = uuid
     }
 
     public var description: String { rawValue }
@@ -54,6 +75,25 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
+    }
+
+    /// Identity semantics remain the canonical opaque spelling. The cached
+    /// UUID is an implementation representation, not another equality axis.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rawValue == rhs.rawValue
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        if let uuidValue {
+            // UUID-backed identifiers dominate server routing dictionaries.
+            // Hash their already-parsed 16 bytes instead of rescanning the
+            // canonical 36-byte spelling on every lookup. Equality remains
+            // the canonical opaque string above, so public identity semantics
+            // and Codable output are unchanged.
+            hasher.combine(uuidValue)
+        } else {
+            hasher.combine(rawValue)
+        }
     }
 
     private static func isUnreservedASCII(_ byte: UInt8) -> Bool {

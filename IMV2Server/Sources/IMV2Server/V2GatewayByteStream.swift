@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Synchronization
 
 /// One immutable server-push frame shared by every authorized local recipient
 /// that negotiated the same protocol version. The bytes carry no
@@ -40,17 +41,70 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
     }
 }
 
+/// Process-local authorization and lifecycle fence for the high-frequency
+/// foreground push path. The registry still selects an audience from an
+/// authenticated subscription; this second fence prevents a stale routing
+/// snapshot from writing after unregister, revocation, or transport close.
+/// The synchronous writer only enqueues bounded best-effort work on the
+/// channel's own EventLoop. Durable room-log cursor pull remains the recovery
+/// path for every drop.
+private final class V2GatewayForegroundTransport: Sendable {
+    private struct State: Sendable {
+        var protocolVersion: UInt8?
+        var writer: (@Sendable (Data) -> Void)?
+    }
+
+    private let state = Mutex(State())
+
+    func attach(writer: (@Sendable (Data) -> Void)?) {
+        state.withLock { $0.writer = writer }
+    }
+
+    func activate(protocolVersion: UInt8) {
+        state.withLock { $0.protocolVersion = protocolVersion }
+    }
+
+    func deactivate() {
+        state.withLock { $0.protocolVersion = nil }
+    }
+
+    func detach() {
+        state.withLock {
+            $0.protocolVersion = nil
+            $0.writer = nil
+        }
+    }
+
+    func submit(_ prepared: V2PreparedGatewayGroupEventAvailable) -> Bool {
+        let writer = state.withLock { state -> (@Sendable (Data) -> Void)? in
+            guard state.protocolVersion == prepared.protocolVersion else { return nil }
+            return state.writer
+        }
+        guard let writer else { return false }
+        writer(prepared.bytes)
+        return true
+    }
+}
+
 /// The transport-neutral half of a gateway connection. TLS is deliberately
 /// terminated outside this actor; callers feed only decrypted bytes and write
 /// the returned bytes back to the same connection. This keeps framing,
 /// lifecycle fencing, and domain dispatch testable without a socket.
 public actor V2GatewayByteStream {
+    /// Process-unique connection identity backed by the same CSPRNG expansion
+    /// and atomic counter used for accepted-message identifiers. This avoids
+    /// relying on the platform UUID implementation during reconnect bursts.
+    public nonisolated static func makeConnectionID() -> UUID {
+        V2SecureProcessUUIDGenerator.shared.makeOne()
+    }
+
     private var decoder: V2FrameDecoder
     private let frameLimits: V2FrameLimits
     private let session: V2GatewaySession
     private let handler: any V2GatewayCommandHandler
     private let connectionID: UUID
     private let registry: V2DeviceConnectionRegistry
+    private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
     private var registeredIdentity: V2AuthenticatedConnection?
     // A revocation worker must not advance its durable cursor until the
     // transport confirms the local channel has closed. The handler therefore
@@ -67,7 +121,7 @@ public actor V2GatewayByteStream {
         frameLimits: V2FrameLimits,
         session: V2GatewaySession,
         handler: any V2GatewayCommandHandler,
-        connectionID: UUID = UUID(),
+        connectionID: UUID = V2GatewayByteStream.makeConnectionID(),
         registry: V2DeviceConnectionRegistry
     ) {
         self.decoder = .init(limits: frameLimits)
@@ -102,16 +156,33 @@ public actor V2GatewayByteStream {
         _ bytes: Data,
         respond: (Data) async throws -> Void
     ) async throws -> Bool {
+        try await receiveFrames(bytes) { frame in
+            try await respond(try V2FrameCodec.encode(frame, limits: frameLimits))
+        }
+    }
+
+    /// Production NIO transports use the validated frame form so they can
+    /// write header and protobuf payload directly into their outbound
+    /// `ByteBuffer`. Transport-neutral callers retain the `Data` API above.
+    func receiveFrames(
+        _ bytes: Data,
+        respond: (V2Frame) async throws -> Void
+    ) async throws -> Bool {
         do {
             let inbound = try decoder.append(bytes)
             for frame in inbound {
-                let exchange = try await session.receive(frame, handler: handler)
+                let exchange = try await session.receive(
+                    frame,
+                    handler: handler,
+                    originatingConnectionID: connectionID
+                )
                 try await registerAuthenticatedDeviceIfNeeded()
                 try await updateHybridGroupSubscription(
                     inbound: exchange.request,
                     response: exchange.responseEnvelope
                 )
-                try await respond(try V2FrameCodec.encode(exchange.response, limits: frameLimits))
+                try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
+                try await respond(exchange.response)
             }
             // A full decode quantum can leave a valid complete frame behind.
             // The NIO owner schedules one continuation before it consumes a
@@ -171,11 +242,13 @@ public actor V2GatewayByteStream {
     /// second one was installed, retaining a closed NIO pipeline forever.
     public func attachTransport(
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
-        outboundWriter: @escaping @Sendable (Data) async -> Void
+        outboundWriter: @escaping @Sendable (Data) async -> Void,
+        foregroundWriter: (@Sendable (Data) -> Void)? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
+        foregroundTransport.attach(writer: foregroundWriter)
         return true
     }
 
@@ -240,6 +313,16 @@ public actor V2GatewayByteStream {
         await outboundWriter(prepared.bytes)
     }
 
+    /// Production foreground notifications use this nonisolated fast path.
+    /// A false result means the connection is unauthenticated, detached, uses
+    /// another protocol version, or has no NIO fast writer; callers retain the
+    /// actor-backed compatibility path for those cases.
+    nonisolated func submitGroupEventAvailable(
+        _ prepared: V2PreparedGatewayGroupEventAvailable
+    ) -> Bool {
+        foregroundTransport.submit(prepared)
+    }
+
     public func sendPresenceState(_ state: V2PresenceState) async {
         guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
         var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.presenceChanged = .init()
@@ -266,6 +349,7 @@ public actor V2GatewayByteStream {
         transportClosed = true
         deviceRevocationHandler = nil
         outboundWriter = nil
+        foregroundTransport.detach()
     }
 
     private func registerAuthenticatedDeviceIfNeeded() async throws {
@@ -274,14 +358,23 @@ public actor V2GatewayByteStream {
         let accepted = try await registry.register(self, connectionID: connectionID, identity: identity)
         guard accepted, registeredIdentity == identity, !transportClosed else {
             if registeredIdentity == identity { registeredIdentity = nil }
+            foregroundTransport.deactivate()
             await registry.unregister(connectionID: connectionID)
             throw V2GatewaySessionError.authenticatedConnectionLimit
         }
+        guard let version = await session.authenticatedProtocolVersion() else {
+            registeredIdentity = nil
+            foregroundTransport.deactivate()
+            await registry.unregister(connectionID: connectionID)
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        foregroundTransport.activate(protocolVersion: version)
     }
 
     private func unregisterAuthenticatedDevice() async {
         guard registeredIdentity != nil else { return }
         registeredIdentity = nil
+        foregroundTransport.deactivate()
         await registry.unregister(connectionID: connectionID)
     }
 

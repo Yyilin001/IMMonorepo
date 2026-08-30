@@ -1,9 +1,30 @@
 import Foundation
 import IMV2Core
+import NIOCore
+import Synchronization
 @testable import IMV2Server
 import Testing
 
 struct V2GatewayByteStreamTests {
+    @Test("NIO response encoding is byte-identical to the transport-neutral codec")
+    func nioWireEncodingMatchesCoreCodec() throws {
+        let limits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let frame = V2Frame(
+            version: protocolVersion,
+            command: .messageAccepted,
+            requestID: 0x0102_0304_0506_0708,
+            payload: Data([0, 1, 2, 0xfe, 0xff])
+        )
+        try V2FrameCodec.validateForEncoding(frame, limits: limits)
+        let expected = try V2FrameCodec.encode(frame, limits: limits)
+        let actual = v2GatewayWireBuffer(frame, allocator: .init())
+
+        #expect(Data(actual.readableBytesView) == expected)
+    }
+
     @Test("transport callbacks cannot be reinstalled after the stream finishes")
     func finishPermanentlyDetachesTransportCallbacks() async throws {
         let stream = V2GatewayByteStream(
@@ -26,6 +47,89 @@ struct V2GatewayByteStreamTests {
         #expect(await !stream.attachTransport(
             deviceRevocationHandler: {}, outboundWriter: { _ in }
         ))
+    }
+
+    @Test("foreground fast writer is protocol and transport lifecycle fenced")
+    func foregroundFastWriterIsLifecycleFenced() async throws {
+        let limits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: limits)
+        let connectionID = UUID()
+        let stream = V2GatewayByteStream(
+            frameLimits: limits,
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
+            ),
+            handler: ByteStreamCommandFake(),
+            connectionID: connectionID,
+            registry: registry
+        )
+        let fastRecorder = SynchronousFrameRecorder()
+        let fallbackRecorder = OutboundFrameRecorder()
+        #expect(await stream.attachTransport(
+            deviceRevocationHandler: {},
+            outboundWriter: { bytes in await fallbackRecorder.append(bytes) },
+            foregroundWriter: { bytes in fastRecorder.append(bytes) }
+        ))
+
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000cf1")
+        let preAuthentication = try #require(V2PreparedGatewayGroupEventAvailable(
+            roomID: roomID,
+            highWatermark: 1,
+            directEvent: nil,
+            frameLimits: limits,
+            protocolVersion: protocolVersion
+        ))
+        #expect(!stream.submitGroupEventAvailable(preAuthentication))
+        #expect(fastRecorder.count == 0)
+
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+        await registry.subscribeForegroundGroup(
+            stream,
+            connectionID: connectionID,
+            roomID: roomID
+        )
+
+        await registry.notifyForegroundGroupAvailable(roomID: roomID, highWatermark: 42)
+        let fastFrame = try #require(fastRecorder.first)
+        #expect(try decode(fastFrame).groupEventAvailable.highWatermark == 42)
+        #expect(await fallbackRecorder.count() == 0)
+
+        let direct = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 43,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000cf2"),
+            roomSequence: 43,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-a")]
+        )
+        let localPublisher = V2LocalGroupEventWakePublisher(registry: registry)
+        #expect(localPublisher.publishForegroundDirectEventImmediately(direct))
+        let directFrame = try #require(fastRecorder.element(at: 1))
+        #expect(try decode(directFrame).groupEventAvailable.eventPayload == direct.payload)
+        #expect(await fallbackRecorder.count() == 0)
+
+        try await stream.finish()
+        #expect(!stream.submitGroupEventAvailable(preAuthentication))
+        #expect(fastRecorder.count == 2)
     }
 
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
@@ -77,6 +181,50 @@ struct V2GatewayByteStreamTests {
         let response = try decode(try #require(pullResponses.first))
         #expect(response.requestID == 4)
         #expect(response.error.code == "UNAVAILABLE")
+    }
+
+    @Test("authenticated commands carry the exact transport origin")
+    func authenticatedCommandsCarryTransportOrigin() async throws {
+        let connectionID = UUID()
+        let handler = OriginRecordingCommandFake()
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(
+                maximumPayloadBytes: 4_096,
+                acceptedVersions: [0, protocolVersion]
+            ),
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
+            ),
+            handler: handler,
+            connectionID: connectionID,
+            registry: V2DeviceConnectionRegistry()
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+
+        var command = IMV2Envelope()
+        command.requestID = 3
+        command.protocolVersion = UInt32(protocolVersion)
+        command.groupEventUnsubscribe = .init()
+        command.groupEventUnsubscribe.roomID = "00000000-0000-0000-0000-000000000cf8"
+        _ = try await stream.receive(encoded(command, version: protocolVersion))
+
+        #expect(await handler.origins() == [connectionID])
     }
 
     @Test("malformed framing closes the connection")
@@ -371,6 +519,70 @@ struct V2GatewayByteStreamTests {
         #expect(encodedFrames[0] == encodedFrames[1])
     }
 
+    @Test("a direct live payload excludes only its originating connection")
+    func directLivePayloadExcludesOnlyOriginatingConnection() async throws {
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: frameLimits)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c04")
+        let connectionIDs = [UUID(), UUID()]
+        let recorders = [OutboundFrameRecorder(), OutboundFrameRecorder()]
+
+        for index in recorders.indices {
+            let stream = V2GatewayByteStream(
+                frameLimits: frameLimits,
+                session: .init(
+                    limits: try .init(maximumInFlightRequests: 1),
+                    authenticator: ByteStreamAuthFake(),
+                    capabilityProfile: "base",
+                    commandAdmission: V2AllowingGatewayCommandAdmission()
+                ),
+                handler: ByteStreamCommandFake(),
+                connectionID: connectionIDs[index],
+                registry: registry
+            )
+            let recorder = recorders[index]
+            await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
+            var hello = IMV2Envelope()
+            hello.requestID = 1
+            hello.clientHello = .init()
+            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.supportedCapabilityProfiles = ["base"]
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var authenticate = IMV2Envelope()
+            authenticate.requestID = 2
+            authenticate.protocolVersion = UInt32(protocolVersion)
+            authenticate.authenticate = .init()
+            authenticate.authenticate.accessToken = "opaque"
+            authenticate.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+            await registry.subscribeForegroundGroup(
+                stream,
+                connectionID: connectionIDs[index],
+                roomID: roomID
+            )
+        }
+
+        let direct = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 45,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e04"),
+            roomSequence: 45,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-a")],
+            excludedConnectionID: connectionIDs[0]
+        )
+        await registry.notifyForegroundDirectEvent(direct)
+
+        #expect(await recorders[0].count() == 0)
+        let peerFrame = try #require(await recorders[1].waitForFirst())
+        #expect(try decode(peerFrame).groupEventAvailable.roomSequence == 45)
+        #expect(await recorders[1].count() == 1)
+    }
+
     private func encoded(_ envelope: IMV2Envelope, version: UInt8) throws -> Data {
         try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
     }
@@ -395,6 +607,17 @@ private actor OutboundFrameRecorder {
 
     func count() -> Int { frames.count }
     func all() -> [Data] { frames }
+}
+
+private final class SynchronousFrameRecorder: Sendable {
+    private let frames = Mutex<[Data]>([])
+
+    func append(_ bytes: Data) { frames.withLock { $0.append(bytes) } }
+    var count: Int { frames.withLock(\.count) }
+    var first: Data? { frames.withLock(\.first) }
+    func element(at index: Int) -> Data? {
+        frames.withLock { $0.indices.contains(index) ? $0[index] : nil }
+    }
 }
 
 private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
@@ -437,6 +660,36 @@ private struct ByteStreamAuthFake: V2GatewayAuthenticator {
 
 private struct ByteStreamCommandFake: V2GatewayCommandHandler {
     func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        var response = IMV2Envelope()
+        response.error = .init()
+        response.error.code = "UNAVAILABLE"
+        response.error.retryable = true
+        return response
+    }
+}
+
+private actor OriginRecordingCommandFake: V2GatewayCommandHandler {
+    private var values: [UUID?] = []
+
+    func handle(
+        envelope _: IMV2Envelope,
+        identity _: V2AuthenticatedConnection
+    ) async throws -> IMV2Envelope {
+        response()
+    }
+
+    func handle(
+        envelope _: IMV2Envelope,
+        identity _: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?
+    ) async throws -> IMV2Envelope {
+        values.append(originatingConnectionID)
+        return response()
+    }
+
+    func origins() -> [UUID?] { values }
+
+    private func response() -> IMV2Envelope {
         var response = IMV2Envelope()
         response.error = .init()
         response.error.code = "UNAVAILABLE"

@@ -21,7 +21,7 @@ enum IMV2GatewayLoadGenerator {
             if arguments.count == 2, arguments[0] == "--validate-scenario" {
                 let scenario = try LoadScenario.load(path: arguments[1])
                 let totalSeconds = scenario.phases.reduce(0) { $0 + $1.durationSeconds }
-                print("scenario valid name=\(scenario.name) personas=\(scenario.personas.count) phases=\(scenario.phases.count) duration_seconds=\(totalSeconds)")
+                print("scenario valid name=\(scenario.name) personas=\(scenario.personas.count) phases=\(scenario.phases.count) duration_seconds=\(totalSeconds) scheduler_hz=\(scenario.schedulerTicksPerSecond ?? 10)")
                 return
             }
             let configuration = try LoadConfiguration(arguments: arguments)
@@ -282,6 +282,11 @@ private struct LoadScenario: Decodable, Sendable {
     /// its last protocol responses. This hold never retries or schedules
     /// messages and therefore cannot hide an unsustainable offered rate.
     let postDrainHoldSeconds: Int?
+    /// Number of monotonic scheduler ticks used to distribute each second's
+    /// offered work. Older scenarios default to 10 Hz for report
+    /// reproducibility. Real-user capacity scenarios opt into 100 Hz so five
+    /// partition workers do not manufacture synchronized 100 ms bursts.
+    let schedulerTicksPerSecond: Int?
     let sendDispatch: ScenarioSendDispatch?
     let maximumQueuedMessagesPerConnection: Int?
     let personas: [Persona]
@@ -295,6 +300,8 @@ private struct LoadScenario: Decodable, Sendable {
               (scenario.completionDrainSeconds ?? 10) <= 60,
               (scenario.postDrainHoldSeconds ?? 0) >= 0,
               (scenario.postDrainHoldSeconds ?? 0) <= 60,
+              (scenario.schedulerTicksPerSecond ?? 10) >= 10,
+              (scenario.schedulerTicksPerSecond ?? 10) <= 1_000,
               (scenario.maximumSteadyStateQueuedMessages ?? 0) >= 0,
               (scenario.maximumSteadyStateQueuedMessages ?? 0) <= (scenario.maximumQueuedMessagesPerConnection ?? 0) * 5_000,
               !scenario.personas.isEmpty,
@@ -401,6 +408,9 @@ private final class LoadStatistics: @unchecked Sendable {
         var roomEventRecordsReceived = 0
         var roomEventAvailabilityHintsReceived = 0
         var roomEventLivePayloadsApplied = 0
+        var roomEventLocalEchoesApplied = 0
+        var roomEventLocalEchoGapsDetected = 0
+        var roomEventStalePagesReceived = 0
         var authenticationLatency = LatencyHistogram()
         var heartbeatLatency = LatencyHistogram()
         var messageLatency = LatencyHistogram()
@@ -504,6 +514,15 @@ private final class LoadStatistics: @unchecked Sendable {
     func recordRoomEventLivePayloadApplied() {
         lock.withLock { state.roomEventLivePayloadsApplied += 1 }
     }
+    func recordRoomEventLocalEchoApplied() {
+        lock.withLock { state.roomEventLocalEchoesApplied += 1 }
+    }
+    func recordRoomEventLocalEchoGapDetected() {
+        lock.withLock { state.roomEventLocalEchoGapsDetected += 1 }
+    }
+    func recordRoomEventStalePageReceived() {
+        lock.withLock { state.roomEventStalePagesReceived += 1 }
+    }
     func recordRoomEventPage(milliseconds: Double, records: Int) {
         lock.withLock {
             state.roomEventPagesReceived += 1
@@ -537,6 +556,7 @@ private struct LoadRun {
         let eventLoopLagMetrics = V2EventLoopLagMetrics()
         eventLoopLagMetrics.start(on: group)
         let statistics = LoadStatistics()
+        let scenarioPhaseReports = ScenarioPhaseReportCollector()
         let startedAt = Date()
         var slots: [LoadConnectionSlot] = []
         var terminalError: Error?
@@ -598,13 +618,15 @@ private struct LoadRun {
             }
             if let scenario = configuration.scenario {
                 try await waitForRoomWarmup(scenario: scenario, statistics: statistics)
-                scenarioPhases = try await runScenario(
+                try await runScenario(
                     scenario,
                     slots: slots,
                     group: group,
                     sslContext: sslContext,
-                    statistics: statistics
+                    statistics: statistics,
+                    reports: scenarioPhaseReports
                 )
+                scenarioPhases = scenarioPhaseReports.snapshot()
                 scenarioDrain = await drainScenarioMessages(
                     channels: slots.compactMap(\.channel),
                     maximumSeconds: scenario.completionDrainSeconds ?? 10
@@ -650,6 +672,7 @@ private struct LoadRun {
             terminalError = error
         }
 
+        scenarioPhases = scenarioPhaseReports.snapshot()
         await close(channels: slots.compactMap(\.channel))
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
@@ -763,17 +786,21 @@ private struct LoadRun {
         slots: [LoadConnectionSlot],
         group: MultiThreadedEventLoopGroup,
         sslContext: NIOSSLContext,
-        statistics: LoadStatistics
-    ) async throws -> [ScenarioPhaseReport] {
+        statistics: LoadStatistics,
+        reports: ScenarioPhaseReportCollector
+    ) async throws {
         let assignments = ScenarioAssignments(
             scenario: scenario,
             slots: slots,
             totalConnections: configuration.connections
         )
         var random = ScenarioRandom(seed: scenario.seed)
-        var reports: [ScenarioPhaseReport] = []
+        let ticksPerSecond = scenario.schedulerTicksPerSecond ?? 10
+        let tickNanoseconds = Int64(1_000_000_000 / ticksPerSecond)
         for phase in scenario.phases {
             let started = statistics.snapshot()
+            let phaseStarted = NIODeadline.now()
+            var completedTicks = 0
             var messageCarry = 0.0
             var roomLogCarry = 0.0
             var syncCarry = 0.0
@@ -781,38 +808,68 @@ private struct LoadRun {
             let messageRate = phase.messagesPerSecond * configuration.scenarioRateScale
             let roomLogRate = phase.roomLogReadsPerSecond * configuration.scenarioRateScale
             let syncRate = phase.syncPullsPerSecond * configuration.scenarioRateScale
-            print("scenario phase=\(phase.name) seconds=\(phase.durationSeconds) messages_per_second=\(messageRate) room_log_reads_per_second=\(roomLogRate) sync_pulls_per_second=\(syncRate)")
-            for tick in 0..<(phase.durationSeconds * 10) {
-                messageCarry += messageRate / 10
-                roomLogCarry += roomLogRate / 10
-                syncCarry += syncRate / 10
-                reconnectCarry += phase.reconnectPercentPerMinute / 100 * Double(slots.count) / 600
-                let messageCount = Int(messageCarry.rounded(.down))
-                let roomLogCount = Int(roomLogCarry.rounded(.down))
-                let syncCount = Int(syncCarry.rounded(.down))
-                let reconnectCount = Int(reconnectCarry.rounded(.down))
-                messageCarry -= Double(messageCount)
-                roomLogCarry -= Double(roomLogCount)
-                syncCarry -= Double(syncCount)
-                reconnectCarry -= Double(reconnectCount)
-                for _ in 0..<messageCount { assignments.pick(kind: .send, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent()) }
-                for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
-                for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
-                for _ in 0..<reconnectCount {
-                    if let slot = assignments.pickSlot(random: &random) {
-                        try await reconnect(slot: slot, group: group, sslContext: sslContext, statistics: statistics)
+            print("scenario phase=\(phase.name) seconds=\(phase.durationSeconds) scheduler_hz=\(ticksPerSecond) messages_per_second=\(messageRate) room_log_reads_per_second=\(roomLogRate) sync_pulls_per_second=\(syncRate)")
+            do {
+                for tick in 0..<(phase.durationSeconds * ticksPerSecond) {
+                    messageCarry += messageRate / Double(ticksPerSecond)
+                    roomLogCarry += roomLogRate / Double(ticksPerSecond)
+                    syncCarry += syncRate / Double(ticksPerSecond)
+                    reconnectCarry += phase.reconnectPercentPerMinute / 100
+                        * Double(slots.count) / Double(60 * ticksPerSecond)
+                    let messageCount = Int(messageCarry.rounded(.down))
+                    let roomLogCount = Int(roomLogCarry.rounded(.down))
+                    let syncCount = Int(syncCarry.rounded(.down))
+                    let reconnectCount = Int(reconnectCarry.rounded(.down))
+                    messageCarry -= Double(messageCount)
+                    roomLogCarry -= Double(roomLogCount)
+                    syncCarry -= Double(syncCount)
+                    reconnectCarry -= Double(reconnectCount)
+                    for _ in 0..<messageCount { assignments.pick(kind: .send, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent()) }
+                    for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
+                    for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
+                    for _ in 0..<reconnectCount {
+                        if let slot = assignments.pickSlot(random: &random) {
+                            try await reconnect(slot: slot, group: group, sslContext: sslContext, statistics: statistics)
+                        }
+                    }
+                    let nextTick = phaseStarted + .nanoseconds(
+                        Int64(tick + 1) * tickNanoseconds
+                    )
+                    let remaining = nextTick - .now()
+                    if remaining.nanoseconds > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(remaining.nanoseconds))
+                    }
+                    completedTicks = tick + 1
+                    if completedTicks.isMultiple(of: ticksPerSecond * 10) {
+                        try enforceGuards(statistics: statistics)
+                        printScenarioProgress(
+                            phase: phase.name,
+                            second: completedTicks / ticksPerSecond,
+                            statistics: statistics
+                        )
                     }
                 }
-                try await Task.sleep(nanoseconds: 100_000_000)
-                if tick.isMultiple(of: 100) {
-                    try enforceGuards(statistics: statistics)
-                    printScenarioProgress(phase: phase.name, second: tick / 10, statistics: statistics)
-                }
+                try enforceGuards(statistics: statistics)
+            } catch {
+                reports.append(.init(
+                    phase: phase,
+                    rateScale: configuration.scenarioRateScale,
+                    observedDurationSeconds: Double(completedTicks) / Double(ticksPerSecond),
+                    completed: false,
+                    started: started,
+                    ended: statistics.snapshot()
+                ))
+                throw error
             }
-            try enforceGuards(statistics: statistics)
-            reports.append(.init(phase: phase, rateScale: configuration.scenarioRateScale, started: started, ended: statistics.snapshot()))
+            reports.append(.init(
+                phase: phase,
+                rateScale: configuration.scenarioRateScale,
+                observedDurationSeconds: Double(phase.durationSeconds),
+                completed: true,
+                started: started,
+                ended: statistics.snapshot()
+            ))
         }
-        return reports
     }
 
     /// Polls the per-channel simulator state on its owning event loop before
@@ -909,7 +966,7 @@ private struct LoadRun {
 
     private func printScenarioProgress(phase: String, second: Int, statistics: LoadStatistics) {
         let snapshot = statistics.snapshot()
-        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_records=\(snapshot.roomEventRecordsReceived) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
+        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_local_echoes=\(snapshot.roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(snapshot.roomEventLocalEchoGapsDetected) room_event_pulls=\(snapshot.roomEventPullsSent) room_event_records=\(snapshot.roomEventRecordsReceived) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
     }
 
     private func startWorkloads(channels: [Channel]) async throws {
@@ -1121,7 +1178,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         )
         case message(sent: NIODeadline, roomID: String)
         case syncPull(sent: NIODeadline)
-        case roomEventPull(sent: NIODeadline, roomID: String)
+        case roomEventPull(sent: NIODeadline, roomID: String, afterRoomSequence: UInt64)
         case roomEventSubscribe(roomID: String)
         case syncAck(hasMore: Bool)
     }
@@ -1389,8 +1446,17 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     throw LoadError.unexpectedResponse
                 }
                 statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
-                if roomLogReads, roomLogReadTrigger == .messageAcknowledgement {
-                    try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
+                if roomLogReads {
+                    switch roomLogReadTrigger {
+                    case .availabilityHint:
+                        try applyAcceptedLocalEchoIfContiguous(
+                            roomID: roomID,
+                            roomSequence: response.roomSequence,
+                            context: context
+                        )
+                    case .messageAcknowledgement:
+                        try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
+                    }
                 }
                 try drainQueuedScenarioMessages(context: context)
 
@@ -1428,22 +1494,28 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     context: context
                 )
 
-            case .roomEventPull(let sent, let roomID):
+            case .roomEventPull(let sent, let roomID, let requestedAfterRoomSequence):
                 roomEventPullRooms.remove(roomID)
                 guard case .groupEventPage(let page)? = envelope.body,
                       page.roomID == roomID,
-                      page.nextRoomSequence >= roomEventCursors[roomID, default: 0],
+                      page.nextRoomSequence >= requestedAfterRoomSequence,
                       page.events.count <= 100,
+                      page.events.first.map({ $0.roomSequence > requestedAfterRoomSequence }) ?? true,
                       zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
-                      (page.events.last?.roomSequence ?? roomEventCursors[roomID, default: 0]) == page.nextRoomSequence
+                      (page.events.last?.roomSequence ?? requestedAfterRoomSequence) == page.nextRoomSequence
                 else { throw LoadError.unexpectedResponse }
-                roomEventCursors[roomID] = page.nextRoomSequence
+                let currentCursor = roomEventCursors[roomID, default: 0]
+                if page.nextRoomSequence <= currentCursor {
+                    statistics.recordRoomEventStalePageReceived()
+                } else {
+                    roomEventCursors[roomID] = page.nextRoomSequence
+                }
                 statistics.recordRoomEventPage(
                     milliseconds: (NIODeadline.now() - sent).millisecondsDouble,
                     records: page.events.count
                 )
                 let announcedHighWatermark = roomEventAnnouncedHighWatermarks[roomID, default: 0]
-                if page.hasMore_p || page.nextRoomSequence < announcedHighWatermark {
+                if page.hasMore_p || roomEventCursors[roomID, default: 0] < announcedHighWatermark {
                     try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
                 }
 
@@ -1850,17 +1922,50 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     /// page, while later messages schedule the next bounded pull.
     private func sendRoomEventPullIfNeeded(roomID: String, context: ChannelHandlerContext) throws {
         guard roomEventPullRooms.insert(roomID).inserted else { return }
+        let afterRoomSequence = roomEventCursors[roomID, default: 0]
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
         request.protocolVersion = IMV2ProtocolVersion.current
         request.groupEventPull = .init()
         request.groupEventPull.roomID = roomID
-        request.groupEventPull.afterRoomSequence = roomEventCursors[roomID, default: 0]
+        request.groupEventPull.afterRoomSequence = afterRoomSequence
         request.groupEventPull.pageSize = 100
-        pendingRequests[requestID] = .roomEventPull(sent: .now(), roomID: roomID)
+        pendingRequests[requestID] = .roomEventPull(
+            sent: .now(),
+            roomID: roomID,
+            afterRoomSequence: afterRoomSequence
+        )
         statistics.recordRoomEventPullSent()
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    }
+
+    /// A successful send acknowledgement is also the originating client's
+    /// durable local echo. Advancing only a contiguous cursor preserves the
+    /// room-log gap invariant: an acknowledgement may never hide messages
+    /// committed immediately before it. If another writer created a gap, the
+    /// normal bounded pull path fills it before this sequence is considered
+    /// contiguous.
+    private func applyAcceptedLocalEchoIfContiguous(
+        roomID: String,
+        roomSequence: UInt64,
+        context: ChannelHandlerContext
+    ) throws {
+        guard activeRoomLogRoomID == roomID else { return }
+        let cursor = roomEventCursors[roomID, default: 0]
+        roomEventAnnouncedHighWatermarks[roomID] = max(
+            roomEventAnnouncedHighWatermarks[roomID, default: 0],
+            roomSequence
+        )
+        if cursor < UInt64.max, roomSequence == cursor + 1 {
+            roomEventCursors[roomID] = roomSequence
+            statistics.recordRoomEventLocalEchoApplied()
+        } else if cursor < UInt64.max, roomSequence > cursor + 1 {
+            statistics.recordRoomEventLocalEchoGapDetected()
+        }
+        if roomEventAnnouncedHighWatermarks[roomID, default: 0] > roomEventCursors[roomID, default: 0] {
+            try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
+        }
     }
 
     private func sendSyncAck(
@@ -1900,7 +2005,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .syncPull, .syncAck:
             syncInFlight = false
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
-        case .roomEventPull(_, let roomID):
+        case .roomEventPull(_, let roomID, _):
             roomEventPullRooms.remove(roomID)
             statistics.recordWorkloadFailure(kind: "room_event", code: code, retryable: retryable)
         case .roomEventSubscribe(let roomID):
@@ -2016,6 +2121,9 @@ private struct LoadReport: Encodable {
     let roomEventRecordsReceived: Int
     let roomEventAvailabilityHintsReceived: Int
     let roomEventLivePayloadsApplied: Int
+    let roomEventLocalEchoesApplied: Int
+    let roomEventLocalEchoGapsDetected: Int
+    let roomEventStalePagesReceived: Int
     let maximumRSSMegabytes: Double
     let authenticationLatency: Percentiles
     let heartbeatLatency: Percentiles
@@ -2025,6 +2133,7 @@ private struct LoadReport: Encodable {
     let eventLoopLag: LoadEventLoopLagReport
     let scenarioName: String?
     let scenarioRateScale: Double?
+    let scenarioSchedulerTicksPerSecond: Int?
     let scenarioSendDispatch: String?
     let maximumQueuedScenarioMessagesPerConnection: Int?
     let scenarioPhases: [ScenarioPhaseReport]
@@ -2086,6 +2195,9 @@ private struct LoadReport: Encodable {
         roomEventRecordsReceived = state.roomEventRecordsReceived
         roomEventAvailabilityHintsReceived = state.roomEventAvailabilityHintsReceived
         roomEventLivePayloadsApplied = state.roomEventLivePayloadsApplied
+        roomEventLocalEchoesApplied = state.roomEventLocalEchoesApplied
+        roomEventLocalEchoGapsDetected = state.roomEventLocalEchoGapsDetected
+        roomEventStalePagesReceived = state.roomEventStalePagesReceived
         maximumRSSMegabytes = Double(state.maximumRSSBytes) / 1_048_576
         authenticationLatency = state.authenticationLatency.percentiles
         heartbeatLatency = state.heartbeatLatency.percentiles
@@ -2095,6 +2207,9 @@ private struct LoadReport: Encodable {
         self.eventLoopLag = .init(snapshot: eventLoopLag)
         scenarioName = configuration.scenario?.name
         scenarioRateScale = configuration.scenario.map { _ in configuration.scenarioRateScale }
+        scenarioSchedulerTicksPerSecond = configuration.scenario.map {
+            $0.schedulerTicksPerSecond ?? 10
+        }
         scenarioSendDispatch = configuration.scenario.map { _ in configuration.scenarioSendDispatch.rawValue }
         maximumQueuedScenarioMessagesPerConnection = configuration.scenario.map {
             _ in configuration.maximumQueuedScenarioMessagesPerConnection
@@ -2106,7 +2221,7 @@ private struct LoadReport: Encodable {
     }
 
     var summary: String {
-        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) messages_skipped=\(messagesSkipped) scenario_queue_max=\(maximumQueuedScenarioMessages) room_event_hints=\(roomEventAvailabilityHintsReceived) room_event_live_payloads=\(roomEventLivePayloadsApplied) room_event_pulls=\(roomEventPullsSent) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) event_loop_lag_max_ms=\(eventLoopLag.maximumMilliseconds) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
+        "load complete requested=\(requestedConnections) authenticated=\(authenticated) failed=\(failed) peak_active=\(peakActive) messages_ack=\(messagesAcknowledged) messages_skipped=\(messagesSkipped) scenario_queue_max=\(maximumQueuedScenarioMessages) room_event_hints=\(roomEventAvailabilityHintsReceived) room_event_live_payloads=\(roomEventLivePayloadsApplied) room_event_local_echoes=\(roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(roomEventLocalEchoGapsDetected) room_event_stale_pages=\(roomEventStalePagesReceived) room_event_pulls=\(roomEventPullsSent) sync_records=\(syncRecordsReceived) room_event_records=\(roomEventRecordsReceived) workload_failed=\(workloadFailed) auth_p95_ms=\(authenticationLatency.p95) heartbeat_p95_ms=\(heartbeatLatency.p95) message_p95_ms=\(messageLatency.p95) sync_p95_ms=\(syncPullLatency.p95) room_event_p95_ms=\(roomEventPullLatency.p95) event_loop_lag_max_ms=\(eventLoopLag.maximumMilliseconds) max_rss_mb=\(String(format: "%.1f", maximumRSSMegabytes))"
     }
 }
 
@@ -2131,6 +2246,8 @@ private struct LoadEventLoopLagReport: Encodable {
 private struct ScenarioPhaseReport: Encodable {
     let name: String
     let durationSeconds: Int
+    let observedDurationSeconds: Double
+    let completed: Bool
     let requestedMessagesPerSecond: Double
     let requestedRoomLogReadsPerSecond: Double
     let requestedSyncPullsPerSecond: Double
@@ -2143,17 +2260,33 @@ private struct ScenarioPhaseReport: Encodable {
     let queuedScenarioMessagesAtEnd: Int
     let roomEventPullsSent: Int
     let roomEventRecordsReceived: Int
+    let roomEventLocalEchoesApplied: Int
+    let roomEventLocalEchoGapsDetected: Int
+    let roomEventStalePagesReceived: Int
     let syncPullsSent: Int
     let syncRecordsReceived: Int
     let workloadFailed: Int
+    let heartbeatLatency: Percentiles
+    let messageLatency: Percentiles
+    let syncPullLatency: Percentiles
+    let roomEventPullLatency: Percentiles
 
     func isSteadyStateDrained(maximumQueuedMessages: Int) -> Bool {
         scenarioMessageQueueOverflowed == 0 && queuedScenarioMessagesAtEnd <= maximumQueuedMessages
     }
 
-    init(phase: LoadScenario.Phase, rateScale: Double, started: LoadStatistics.State, ended: LoadStatistics.State) {
+    init(
+        phase: LoadScenario.Phase,
+        rateScale: Double,
+        observedDurationSeconds: Double,
+        completed: Bool,
+        started: LoadStatistics.State,
+        ended: LoadStatistics.State
+    ) {
         name = phase.name
         durationSeconds = phase.durationSeconds
+        self.observedDurationSeconds = observedDurationSeconds
+        self.completed = completed
         requestedMessagesPerSecond = phase.messagesPerSecond * rateScale
         requestedRoomLogReadsPerSecond = phase.roomLogReadsPerSecond * rateScale
         requestedSyncPullsPerSecond = phase.syncPullsPerSecond * rateScale
@@ -2166,9 +2299,37 @@ private struct ScenarioPhaseReport: Encodable {
         queuedScenarioMessagesAtEnd = ended.queuedScenarioMessages
         roomEventPullsSent = ended.roomEventPullsSent - started.roomEventPullsSent
         roomEventRecordsReceived = ended.roomEventRecordsReceived - started.roomEventRecordsReceived
+        roomEventLocalEchoesApplied = ended.roomEventLocalEchoesApplied - started.roomEventLocalEchoesApplied
+        roomEventLocalEchoGapsDetected = ended.roomEventLocalEchoGapsDetected - started.roomEventLocalEchoGapsDetected
+        roomEventStalePagesReceived = ended.roomEventStalePagesReceived - started.roomEventStalePagesReceived
         syncPullsSent = ended.syncPullsSent - started.syncPullsSent
         syncRecordsReceived = ended.syncRecordsReceived - started.syncRecordsReceived
         workloadFailed = ended.workloadFailed - started.workloadFailed
+        heartbeatLatency = ended.heartbeatLatency
+            .subtracting(started.heartbeatLatency)
+            .percentiles
+        messageLatency = ended.messageLatency
+            .subtracting(started.messageLatency)
+            .percentiles
+        syncPullLatency = ended.syncPullLatency
+            .subtracting(started.syncPullLatency)
+            .percentiles
+        roomEventPullLatency = ended.roomEventPullLatency
+            .subtracting(started.roomEventPullLatency)
+            .percentiles
+    }
+}
+
+private final class ScenarioPhaseReportCollector: @unchecked Sendable {
+    private let lock = NIOLock()
+    private var reports: [ScenarioPhaseReport] = []
+
+    func append(_ report: ScenarioPhaseReport) {
+        lock.withLock { reports.append(report) }
+    }
+
+    func snapshot() -> [ScenarioPhaseReport] {
+        lock.withLock { reports }
     }
 }
 
@@ -2193,6 +2354,31 @@ private struct LatencyHistogram: Sendable {
         buckets[bucket] += 1
         count += 1
         maximum = max(maximum, milliseconds)
+    }
+
+    /// Returns only samples recorded after `baseline` was captured. Load
+    /// statistics are cumulative, so subtracting bucket counts gives exact
+    /// per-phase percentiles without another lock or histogram update on the
+    /// load generator's per-message hot path. Values above the bounded
+    /// histogram range retain the best available maximum: the exact ending
+    /// maximum when it was introduced by this interval, otherwise the
+    /// overflow bucket boundary.
+    func subtracting(_ baseline: Self) -> Self {
+        var result = Self()
+        var highestNonemptyBucket: Int?
+        for index in buckets.indices {
+            let samples = max(0, buckets[index] - baseline.buckets[index])
+            result.buckets[index] = samples
+            result.count += samples
+            if samples > 0 { highestNonemptyBucket = index }
+        }
+        guard let highestNonemptyBucket else { return result }
+        if maximum > baseline.maximum {
+            result.maximum = maximum
+        } else {
+            result.maximum = Double(highestNonemptyBucket)
+        }
+        return result
     }
 
     var percentiles: Percentiles {

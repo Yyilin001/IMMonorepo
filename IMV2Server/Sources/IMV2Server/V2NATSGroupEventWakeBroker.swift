@@ -91,6 +91,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         let projectionKind: String
         let payload: Data
         let recipientUserIDs: [String]
+        let excludedConnectionID: UUID?
 
         enum CodingKeys: String, CodingKey {
             case sourceEventID = "source_event_id"
@@ -98,6 +99,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             case projectionKind = "projection_kind"
             case payload
             case recipientUserIDs = "recipient_user_ids"
+            case excludedConnectionID = "excluded_connection_id"
         }
 
         init(_ event: V2DirectRoomLiveEvent) {
@@ -106,6 +108,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             projectionKind = event.projectionKind
             payload = event.payload
             recipientUserIDs = event.recipientUserIDs.map(\.rawValue).sorted()
+            excludedConnectionID = event.excludedConnectionID
         }
     }
 
@@ -404,7 +407,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                 roomSequence: direct.roomSequence,
                 projectionKind: direct.projectionKind,
                 payload: direct.payload,
-                recipientUserIDs: recipients
+                recipientUserIDs: recipients,
+                excludedConnectionID: direct.excludedConnectionID
             )))
         })
         let channel = try await ClientBootstrap(group: group)

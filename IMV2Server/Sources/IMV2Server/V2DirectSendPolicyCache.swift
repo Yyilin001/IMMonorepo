@@ -117,6 +117,34 @@ public actor V2DirectSendPolicyCache {
                 recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
             )
         }
+
+        /// Applies the opposite participant's first committed send to this
+        /// direction's cache entry. The caller supplies and verifies the
+        /// previous durable pair revision before using this transformation;
+        /// the marker itself is monotonic in PostgreSQL.
+        func markingRecipientHasReplied() -> Self {
+            .init(
+                recipientID: recipientID,
+                directPairRevision: directPairRevision + 1,
+                senderPolicyRevision: senderPolicyRevision,
+                recipientPolicyRevision: recipientPolicyRevision,
+                senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+                senderCanSend: senderCanSend,
+                senderIsActive: senderIsActive,
+                recipientIsActive: recipientIsActive,
+                blocked: blocked,
+                isFriend: isFriend,
+                senderHasReplied: senderHasReplied,
+                recipientHasReplied: true,
+                allowsStrangers: allowsStrangers,
+                senderAccountKind: senderAccountKind,
+                senderAccountStatus: senderAccountStatus,
+                senderAllowsServiceMessages: senderAllowsServiceMessages,
+                recipientAccountKind: recipientAccountKind,
+                recipientAccountStatus: recipientAccountStatus,
+                recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
+            )
+        }
     }
 
     public struct Snapshot: Equatable, Sendable {
@@ -216,6 +244,29 @@ public actor V2DirectSendPolicyCache {
     func insert(_ updates: [Update]) {
         for update in updates {
             insert(update.entry, for: update.key)
+        }
+    }
+
+    struct RecipientReplyUpdate: Sendable {
+        let key: Key
+        let expectedDirectPairRevision: Int64
+    }
+
+    /// Advances only a cache entry proven to describe the pair revision that
+    /// immediately preceded the opposite participant's committed first send.
+    /// Missing or newer entries are left untouched and will be refreshed by
+    /// the normal revision-fenced database path.
+    func markRecipientsHaveReplied(_ updates: [RecipientReplyUpdate]) {
+        let now = clock.now
+        for update in updates {
+            guard let node = entries[update.key],
+                  node.expiresAt > now,
+                  node.value.directPairRevision == update.expectedDirectPairRevision,
+                  !node.value.recipientHasReplied
+            else { continue }
+            node.value = node.value.markingRecipientHasReplied()
+            node.expiresAt = now + lifetime
+            moveToMostRecent(node)
         }
     }
 

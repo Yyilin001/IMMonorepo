@@ -58,12 +58,44 @@ struct V2DirectRoomLogFastAppendCacheTests {
         #expect(await cache.snapshot().entries == 0)
     }
 
-    private func makeEntry(sequence: Int64) throws -> V2DirectRoomLogFastAppendCache.Entry {
+    @Test("reciprocal reply promotion preserves the cached room and shard snapshot")
+    func reciprocalReplyPromotionIsRevisionFenced() async throws {
+        let cache = V2DirectRoomLogFastAppendCache(capacity: 2)
+        let key = V2DirectRoomLogFastAppendCache.Key(roomID: UUID(), senderID: UUID())
+        let entry = try makeEntry(
+            sequence: 21,
+            directPairRevision: 7,
+            recipientHasReplied: false
+        )
+        await cache.insert(entry, for: key)
+
+        await cache.markRecipientsHaveReplied([.init(
+            key: key,
+            expectedDirectPairRevision: 7
+        )])
+        let promoted = try #require(await cache.value(for: key))
+        #expect(promoted.policy.recipientHasReplied)
+        #expect(promoted.policy.directPairRevision == 8)
+        #expect(promoted.roomShardID == entry.roomShardID)
+        #expect(promoted.membershipRevision == entry.membershipRevision)
+
+        await cache.markRecipientsHaveReplied([.init(
+            key: key,
+            expectedDirectPairRevision: 7
+        )])
+        #expect(await cache.value(for: key)?.policy.directPairRevision == 8)
+    }
+
+    private func makeEntry(
+        sequence: Int64,
+        directPairRevision: Int64 = 1,
+        recipientHasReplied: Bool = true
+    ) throws -> V2DirectRoomLogFastAppendCache.Entry {
         let recipientID = UUID()
         return try .init(
             policy: .init(
                 recipientID: recipientID,
-                directPairRevision: 1,
+                directPairRevision: directPairRevision,
                 senderPolicyRevision: 1,
                 recipientPolicyRevision: 1,
                 senderProfileVisibleToRecipient: true,
@@ -73,7 +105,7 @@ struct V2DirectRoomLogFastAppendCacheTests {
                 blocked: false,
                 isFriend: true,
                 senderHasReplied: true,
-                recipientHasReplied: true,
+                recipientHasReplied: recipientHasReplied,
                 allowsStrangers: true,
                 senderAccountKind: nil,
                 senderAccountStatus: nil,

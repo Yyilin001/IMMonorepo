@@ -504,7 +504,7 @@ enum IMV2ServerApp {
                         maximumInFlightBatches:
                             configuration.directRoomLogAppendBatchMaximumInFlightBatches,
                         maximumPendingRequests:
-                            configuration.foregroundWriteDatabaseWorkMaximumQueued
+                            configuration.directRoomLogAppendMaximumPendingRequests
                 )
                 let appendDatabaseWorkAdmission = configuration.databaseWorkAdmissionEnabled
                     ? databaseWorkAdmission

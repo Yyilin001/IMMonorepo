@@ -168,6 +168,7 @@ public final class V2TLSGatewayServer {
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
     private let eventLoopLagMetrics: V2EventLoopLagMetrics?
     private let childChannels = V2GatewayChildChannelRegistry()
+    private let foregroundWriteScheduler = V2NIOForegroundWriteScheduler()
     /// Keep accept work off the child channel group so a coordinated reconnect
     /// cannot consume one of the event loops serving established TLS streams.
     private let acceptorGroup: MultiThreadedEventLoopGroup
@@ -234,6 +235,7 @@ public final class V2TLSGatewayServer {
         let idleTimeoutMilliseconds = idleTimeoutMilliseconds
         let transportMetrics = transportMetrics
         let childChannels = childChannels
+        let foregroundWriteScheduler = foregroundWriteScheduler
         let channel = try await ServerBootstrap(group: acceptorGroup, childGroup: group)
             .serverChannelOption(ChannelOptions.backlog, value: listenBacklog)
             .serverChannelOption(ChannelOptions.maxMessagesPerRead, value: acceptBatchSize)
@@ -270,7 +272,8 @@ public final class V2TLSGatewayServer {
                             maximumQueuedInboundChunks: inboundChunkLimit,
                             authenticationTimeoutMilliseconds: authenticationTimeoutMilliseconds,
                             idleTimeoutMilliseconds: idleTimeoutMilliseconds,
-                            transportMetrics: transportMetrics
+                            transportMetrics: transportMetrics,
+                            foregroundWriteScheduler: foregroundWriteScheduler
                         )
                     )
                 }.flatMapError { error in

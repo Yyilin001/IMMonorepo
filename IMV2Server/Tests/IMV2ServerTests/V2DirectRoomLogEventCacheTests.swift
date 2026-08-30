@@ -5,6 +5,47 @@ import Testing
 
 @Suite("Direct room-log event cache")
 struct V2DirectRoomLogEventCacheTests {
+    @Test("plain payload fast encoder preserves the canonical JSON contract")
+    func plainPayloadFastEncoderPreservesJSONContract() throws {
+        let message = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000101"),
+            roomID: try .init("00000000-0000-0000-0000-000000000102"),
+            roomSequence: 17,
+            timelineSequence: 23,
+            senderUserID: try .init("00000000-0000-0000-0000-000000000103"),
+            clientMessageID: try .init("00000000-0000-0000-0000-000000000104"),
+            text: "quote \" slash \\ controls \u{8}\u{c}\n\r\t\u{1f} 中文🙂",
+            mediaPresentations: [],
+            usesRoomEventLog: true,
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000105"),
+            acceptedMembershipRevision: 9,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000.125)
+        )
+
+        let encoded = try #require(V2DirectRoomLogPayloadCodec.encode(message))
+        let object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+
+        #expect(object["event_type"] as? String == "message.accepted")
+        #expect(object["message_id"] as? String == message.messageID.rawValue)
+        #expect(object["room_id"] as? String == message.roomID.rawValue)
+        #expect((object["room_sequence"] as? NSNumber)?.uint64Value == 17)
+        #expect((object["timeline_sequence"] as? NSNumber)?.uint64Value == 23)
+        #expect(object["sender_user_id"] as? String == message.senderUserID.rawValue)
+        #expect(object["text"] as? String == message.text)
+        #expect((object["server_created_at_ms"] as? NSNumber)?.int64Value == 1_700_000_000_125)
+        #expect((object["entities"] as? [Any])?.isEmpty == true)
+        #expect((object["media_ids"] as? [Any])?.isEmpty == true)
+        #expect((object["media_presentations"] as? [Any])?.isEmpty == true)
+        #expect((object["mention_user_ids"] as? [Any])?.isEmpty == true)
+        #expect(object["mentions_everyone"] as? Bool == false)
+        #expect(object["message_revision"] as? Int == 1)
+        #expect(object["reply_to_message_id"] is NSNull)
+        #expect(object["forwarded_from_message_id"] is NSNull)
+        #expect(object["forwarded_from_user_id"] is NSNull)
+    }
+
     @Test("returns only a fresh-fence contiguous direct-event page")
     func returnsContiguousAuthorizedPage() async throws {
         let roomID = try RoomID(UUID().uuidString)
@@ -213,6 +254,54 @@ struct V2DirectRoomLogEventCacheTests {
         #expect(snapshot.pendingWrites == 0)
         #expect(snapshot.cachedEvents == 1)
         #expect(snapshot.droppedWrites == 1)
+        await cache.finish()
+        await runner.value
+    }
+
+    @Test("one prepared direct payload retains its durable membership fence")
+    func recordsPreparedDirectPayloadWithoutReencoding() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let payload = Data("already-encoded-payload".utf8)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1,
+            maximumPendingWrites: 1
+        ))
+        let event = V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 1,
+            sourceEventID: try .init(UUID().uuidString),
+            roomSequence: 1,
+            projectionKind: "message",
+            payload: payload,
+            recipientUserIDs: [try .init(UUID().uuidString)],
+            acceptedMembershipRevision: 7
+        )
+        cache.enqueueCommittedPlainDirectEvent(event)
+        let runner = Task { await cache.run() }
+        for _ in 0..<20 where (await cache.snapshot()).cachedEvents == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 8,
+            actorLeftRevision: nil,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1
+        ) == nil)
+        let authorized = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 7,
+            actorLeftRevision: nil,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1
+        ))
+        #expect(authorized.events.first?.payload == payload)
         await cache.finish()
         await runner.value
     }

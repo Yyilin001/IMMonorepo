@@ -192,6 +192,34 @@ public actor V2DirectRoomLogFastAppendCache {
         }
     }
 
+    struct RecipientReplyUpdate: Sendable {
+        let key: Key
+        let expectedDirectPairRevision: Int64
+    }
+
+    /// Promotes the opposite direction after a first send commits. Revision
+    /// equality prevents an out-of-order post-commit callback from rewriting
+    /// a newer authorization snapshot.
+    func markRecipientsHaveReplied(_ updates: [RecipientReplyUpdate]) {
+        let now = clock.now
+        for update in updates {
+            guard let node = entries[update.key],
+                  node.expiresAt > now,
+                  node.entry.policy.directPairRevision == update.expectedDirectPairRevision,
+                  !node.entry.policy.recipientHasReplied
+            else { continue }
+            node.entry = .init(
+                policy: node.entry.policy.markingRecipientHasReplied(),
+                roomShardID: node.entry.roomShardID,
+                capacityProfileID: node.entry.capacityProfileID,
+                membershipRevision: node.entry.membershipRevision,
+                shardState: node.entry.shardState
+            )
+            node.expiresAt = now + lifetime
+            moveToMostRecent(node)
+        }
+    }
+
     /// A miss may mean a concurrent send, permission change, membership
     /// change, lease replacement or an idempotent replay. Remove only this
     /// direction; the full path will repopulate it after its transaction

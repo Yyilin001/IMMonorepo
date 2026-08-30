@@ -1,6 +1,7 @@
 import Fluent
 import Foundation
 import IMV2Core
+import PostgresNIO
 import SQLKit
 
 /// PostgreSQL implementation of the V2 acceptance boundary.
@@ -327,7 +328,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             // twice from the same preflight snapshot.
             throw V2AtomicRoomWriteBatchError(reason: .duplicateRoom)
         }
-        ordered.sort { $0.roomID.uuidString < $1.roomID.uuidString }
+        ordered.sort { $0.roomID < $1.roomID }
         let orderedRequests = ordered.enumerated().map { ordinal, item in
             OrderedRoomWriteRequest(
                 originalIndex: item.originalIndex,
@@ -534,10 +535,11 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         )
     }
 
-    /// The fast path has deliberately narrow semantics. Any mutable direct
-    /// policy effect (first reply, stranger quota, special account state or
-    /// profile/capability projection) remains on the complete path, where it
-    /// is already covered by dedicated transaction tests.
+    /// The fast path has deliberately narrow semantics. First-reply markers,
+    /// special accounts and profile/capability projections remain on the
+    /// complete path. An already-established stranger sender may use the
+    /// conditional statement because that same transaction also consumes its
+    /// exact durable stranger quota before advancing the room cursor.
     private func fastPlainDirectRoomLogCommitsIfEligible(
         requests: [V2RoomWriteRequest],
         knownIDs: [(roomID: UUID, senderID: UUID, cacheKey: V2DirectSendPolicyCache.Key)]
@@ -611,6 +613,9 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: identity.senderID,
                 cacheKey: identity.cacheKey,
                 snapshot: snapshot,
+                requiresStrangerQuota: fastPlainDirectPolicyRequiresStrangerQuota(
+                    snapshot.policy
+                ),
                 usesRoomAdmissionCredits: usesRoomAdmissionCredits
             ))
         }
@@ -719,15 +724,14 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: candidate.senderID,
                 cacheKey: candidate.cacheKey,
                 snapshot: candidate.snapshot,
+                requiresStrangerQuota: candidate.requiresStrangerQuota,
                 usesRoomAdmissionCredits: candidate.usesRoomAdmissionCredits,
                 roomCreditToken: roomCreditToken,
                 shardCreditToken: shardCreditToken
             ))
         }
 
-        let ordered = prepared.sorted {
-            $0.roomID.uuidString < $1.roomID.uuidString
-        }
+        let ordered = prepared.sorted { $0.roomID < $1.roomID }
         let lockRequests = ordered.enumerated().map { ordinal, append in
             OrderedRoomWriteRequest(
                 originalIndex: append.originalIndex,
@@ -852,13 +856,30 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     private func fastPlainDirectPolicyIsEligible(
         _ policy: V2DirectSendPolicyCache.Entry
     ) -> Bool {
+        fastPlainDirectPolicyIsCacheCandidate(policy)
+            && policy.senderHasReplied
+            && (policy.isFriend || policy.recipientHasReplied || policy.allowsStrangers)
+    }
+
+    private func fastPlainDirectPolicyRequiresStrangerQuota(
+        _ policy: V2DirectSendPolicyCache.Entry
+    ) -> Bool {
+        !policy.isFriend && !policy.recipientHasReplied
+    }
+
+    /// A first accepted send may still be waiting for the opposite endpoint's
+    /// monotonic reply marker. Retaining that otherwise-stable snapshot lets
+    /// the post-commit reciprocal update promote it without another complete
+    /// authorization decode; the actual fast append still requires the full
+    /// predicate above and verifies every revision in PostgreSQL.
+    private func fastPlainDirectPolicyIsCacheCandidate(
+        _ policy: V2DirectSendPolicyCache.Entry
+    ) -> Bool {
         policy.senderIsActive
             && policy.senderProfileVisibleToRecipient
             && policy.senderCanSend == true
             && policy.recipientIsActive
             && !policy.blocked
-            && (policy.isFriend || policy.recipientHasReplied)
-            && policy.senderHasReplied
             && policy.senderAccountKind == nil
             && policy.recipientAccountKind == nil
     }
@@ -997,7 +1018,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             .shardReservation,
             duration: reservationStartedAt.duration(to: .now)
         )
-        return try zip(prepared, projectionChanges).map { append, changes in
+        return zip(prepared, projectionChanges).map { append, changes in
+            let reciprocalReplyCacheUpdate = append.advancesReplyMarker
+                ? DirectReplyCacheUpdate(
+                    key: .init(
+                        roomID: append.roomID,
+                        senderID: append.directContext.recipientID
+                    ),
+                    expectedDirectPairRevision: append.policyCacheEntry.directPairRevision
+                )
+                : nil
             var cacheEntry = append.policyCacheEntry
             if append.advancesReplyMarker {
                 cacheEntry = cacheEntry.markingSenderHasReplied()
@@ -1009,20 +1039,20 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             var shadows: [DirectProjectionShadowRequest] = []
             if changes.recipientProfileInserted {
                 shadows.append(.init(
-                    userID: try .init(append.directContext.recipientID.uuidString),
-                    sourceEventID: try .init(append.input.eventID.uuidString),
+                    userID: .init(uuid: append.directContext.recipientID),
+                    sourceEventID: .init(uuid: append.input.eventID),
                     projectionKinds: ["direct_room_profile"]
                 ))
             }
             if changes.senderCapabilityInserted {
                 shadows.append(.init(
                     userID: append.request.command.senderUserID,
-                    sourceEventID: try .init(append.input.eventID.uuidString),
+                    sourceEventID: .init(uuid: append.input.eventID),
                     projectionKinds: ["direct_sending_capability"]
                 ))
             }
             let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
-            if fastPlainDirectPolicyIsEligible(cacheEntry),
+            if fastPlainDirectPolicyIsCacheCandidate(cacheEntry),
                let shardState = append.fastAppendShardState {
                 fastAppendCacheUpdate = .init(
                     policy: cacheEntry,
@@ -1042,6 +1072,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     acceptedDirectProjectionShadows: shadows,
                     directPolicyCacheUpdate: cacheEntry,
                     directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
+                    reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
                     shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit,
                     roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit,
                     roomAdmissionHeatObservation: append.commit.roomAdmissionHeatObservation
@@ -1328,7 +1359,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 usesRoomEventLog: true,
                 sourceEventID: writeSet.eventID,
                 acceptedMembershipRevision: try unsigned(room.membershipRevision),
-                directRecipientUserID: try .init(directContext.recipientID.uuidString)
+                directRecipientUserID: .init(uuid: directContext.recipientID)
             )
             let input = try plainRoomLogMessageInput(
                 acceptedMessage: timelineMessage,
@@ -1573,7 +1604,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     """).all(decoding: MessageMediaPresentationRow.self)
                 let priorMentions = try await sql.raw("SELECT mention_kind, mentioned_user_id FROM im_v2.message_mentions WHERE message_id = \(bind: existing.messageID) ORDER BY ordinal").all(decoding: MentionRow.self)
                 let accepted = try existing.acceptedMessage(
-                    media: try priorMedia.map { try .init(mediaID: .init($0.mediaID.uuidString)) },
+                    media: priorMedia.map { .init(mediaID: .init(uuid: $0.mediaID)) },
                     mediaPresentations: try priorMedia.map { try $0.presentation },
                     mentions: try priorMentions.map { try $0.target },
                     groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
@@ -1754,7 +1785,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     sql: sql
                 )
             }
-            var updatedDirectPolicyCacheEntry = loadedContext.directPolicyCacheEntry()
+            let loadedDirectPolicyCacheEntry = loadedContext.directPolicyCacheEntry()
+            var updatedDirectPolicyCacheEntry = loadedDirectPolicyCacheEntry
             // The reply marker is monotonic. Once a sender has an accepted
             // message we no longer issue a no-op UPDATE for every later send.
             // The actual value comes from the transaction snapshot, never
@@ -1825,7 +1857,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     )
                 if projectionChanges.recipientProfileInserted {
                     acceptedDirectProjectionShadows.append(.init(
-                        userID: try .init(recipientID.uuidString),
+                        userID: .init(uuid: recipientID),
                         sourceEventID: timelineWriteSet.eventID,
                         projectionKinds: ["direct_room_profile"]
                     ))
@@ -1870,7 +1902,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                )),
                command.targetRule == .eligibleMemberCount,
                let cacheEntry = updatedDirectPolicyCacheEntry,
-               fastPlainDirectPolicyIsEligible(cacheEntry) {
+               fastPlainDirectPolicyIsCacheCandidate(cacheEntry) {
                 fastAppendCacheUpdate = .init(
                     policy: cacheEntry,
                     roomShardID: room.roomShardID,
@@ -1881,11 +1913,26 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             } else {
                 fastAppendCacheUpdate = nil
             }
+            let reciprocalReplyCacheUpdate: DirectReplyCacheUpdate?
+            if replyMarkerAdvanced,
+               let directContext,
+               let loadedDirectPolicyCacheEntry {
+                reciprocalReplyCacheUpdate = .init(
+                    key: .init(
+                        roomID: roomID,
+                        senderID: directContext.recipientID
+                    ),
+                    expectedDirectPairRevision: loadedDirectPolicyCacheEntry.directPairRevision
+                )
+            } else {
+                reciprocalReplyCacheUpdate = nil
+            }
             return .init(
                 outcome: .accepted(acceptedMessage),
                 acceptedDirectProjectionShadows: acceptedDirectProjectionShadows,
                 directPolicyCacheUpdate: updatedDirectPolicyCacheEntry,
                 directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
+                reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
                 shardAdmissionCommandCredit: nil,
                 roomAdmissionHeatObservation: usesDirectRoomLog
                     && directRoomLogAdmissionMode == .room
@@ -1920,6 +1967,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             await directRoomLogFastAppendCache.insert(entry, for: .init(
                 roomID: cacheKey.roomID, senderID: cacheKey.senderID
             ))
+        }
+        if let update = commit.reciprocalDirectReplyCacheUpdate {
+            await directSendPolicyCache.markRecipientsHaveReplied([.init(
+                key: update.key,
+                expectedDirectPairRevision: update.expectedDirectPairRevision
+            )])
+            await directRoomLogFastAppendCache.markRecipientsHaveReplied([.init(
+                key: .init(roomID: update.key.roomID, senderID: update.key.senderID),
+                expectedDirectPairRevision: update.expectedDirectPairRevision
+            )])
         }
         if let shardCreditToken = commit.shardAdmissionCommandCredit,
            let shardAdmissionCommandCreditPool {
@@ -1966,11 +2023,15 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
 
         var policyUpdates: [V2DirectSendPolicyCache.Update] = []
         var fastAppendUpdates: [V2DirectRoomLogFastAppendCache.Update] = []
+        var reciprocalPolicyUpdates: [V2DirectSendPolicyCache.RecipientReplyUpdate] = []
+        var reciprocalFastAppendUpdates: [V2DirectRoomLogFastAppendCache.RecipientReplyUpdate] = []
         var shardTokens: [V2ShardAdmissionCommandCreditPool.Token] = []
         var roomTokens: [V2RoomAdmissionCommandCreditPool.Token] = []
         var heatObservations: [(UUID, Date)] = []
         policyUpdates.reserveCapacity(committed.count)
         fastAppendUpdates.reserveCapacity(committed.count)
+        reciprocalPolicyUpdates.reserveCapacity(committed.count)
+        reciprocalFastAppendUpdates.reserveCapacity(committed.count)
         shardTokens.reserveCapacity(committed.count)
         roomTokens.reserveCapacity(committed.count)
         heatObservations.reserveCapacity(committed.count)
@@ -1993,6 +2054,16 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     key: .init(roomID: item.cacheKey.roomID, senderID: item.cacheKey.senderID)
                 ))
             }
+            if let update = item.commit.reciprocalDirectReplyCacheUpdate {
+                reciprocalPolicyUpdates.append(.init(
+                    key: update.key,
+                    expectedDirectPairRevision: update.expectedDirectPairRevision
+                ))
+                reciprocalFastAppendUpdates.append(.init(
+                    key: .init(roomID: update.key.roomID, senderID: update.key.senderID),
+                    expectedDirectPairRevision: update.expectedDirectPairRevision
+                ))
+            }
             if let token = item.commit.shardAdmissionCommandCredit {
                 shardTokens.append(token)
             }
@@ -2009,6 +2080,10 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         // creating four child tasks for every PostgreSQL micro-batch.
         await directSendPolicyCache.insert(policyUpdates)
         await directRoomLogFastAppendCache.insert(fastAppendUpdates)
+        await directSendPolicyCache.markRecipientsHaveReplied(reciprocalPolicyUpdates)
+        await directRoomLogFastAppendCache.markRecipientsHaveReplied(
+            reciprocalFastAppendUpdates
+        )
         if let shardAdmissionCommandCreditPool {
             await shardAdmissionCommandCreditPool.commit(shardTokens)
         }
@@ -2181,22 +2256,36 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     outstanding_plan_delta bigint,
                     now_unix_seconds double precision
                 )
-            ), applied AS (
-                UPDATE im_v2.shard_admission_pools AS pool
-                SET command_window_used = pool.command_window_used + input.command_delta,
-                    fanout_window_used = pool.fanout_window_used + input.fanout_delta,
-                    outstanding_fanout_units = pool.outstanding_fanout_units + input.outstanding_unit_delta,
-                    outstanding_plans = pool.outstanding_plans + input.outstanding_plan_delta
+            ), locked AS MATERIALIZED (
+                SELECT pool.room_shard_id, pool.capacity_profile_id,
+                       input.command_delta, input.fanout_delta,
+                       input.outstanding_unit_delta, input.outstanding_plan_delta
                 FROM input
-                WHERE pool.room_shard_id = input.room_shard_id
-                  AND pool.capacity_profile_id = input.capacity_profile_id
-                  AND pool.lease_id = input.lease_id
+                JOIN im_v2.shard_admission_pools AS pool
+                  ON pool.room_shard_id = input.room_shard_id
+                 AND pool.capacity_profile_id = input.capacity_profile_id
+                WHERE pool.lease_id = input.lease_id
                   AND pool.generation = input.generation
                   AND pool.valid_until > input.observed_at
                   AND pool.command_window_used <= pool.command_window_limit - input.command_delta
                   AND pool.fanout_window_used <= pool.fanout_window_limit - input.fanout_delta
                   AND pool.outstanding_fanout_units <= pool.max_outstanding_fanout_units - input.outstanding_unit_delta
                   AND pool.outstanding_plans <= pool.max_outstanding_plans - input.outstanding_plan_delta
+                -- PostgreSQL does not promise UPDATE ... FROM will visit rows
+                -- in JSON/input order. Lock every shared shard row explicitly
+                -- in one global order before applying any counter mutation so
+                -- overlapping batches cannot build a cyclic wait graph.
+                ORDER BY pool.room_shard_id, pool.capacity_profile_id
+                FOR UPDATE OF pool
+            ), applied AS (
+                UPDATE im_v2.shard_admission_pools AS pool
+                SET command_window_used = pool.command_window_used + locked.command_delta,
+                    fanout_window_used = pool.fanout_window_used + locked.fanout_delta,
+                    outstanding_fanout_units = pool.outstanding_fanout_units + locked.outstanding_unit_delta,
+                    outstanding_plans = pool.outstanding_plans + locked.outstanding_plan_delta
+                FROM locked
+                WHERE pool.room_shard_id = locked.room_shard_id
+                  AND pool.capacity_profile_id = locked.capacity_profile_id
                 RETURNING pool.room_shard_id, pool.capacity_profile_id
             )
             SELECT (SELECT count(*) FROM input)::bigint AS expected_count,
@@ -2311,8 +2400,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         // unnecessary direct-pair lookup on the high-volume group path.
         guard message.groupDeliveryMode == nil else { return }
         guard let sql = database as? any SQLDatabase,
-              let roomID = UUID(uuidString: message.roomID.rawValue),
-              let senderID = UUID(uuidString: message.senderUserID.rawValue),
+              let roomID = message.roomID.uuidValue,
+              let senderID = message.senderUserID.uuidValue,
               let pair = try await sql.raw("SELECT lower_user_id, higher_user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID)").first(decoding: DirectRoomPairRow.self),
               let event = try await sql.raw("""
                   SELECT COALESCE(event.event_id, message.accepted_event_id) AS event_id
@@ -2330,13 +2419,13 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else if pair.higherUserID == senderID { recipientID = pair.lowerUserID }
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         _ = try await shadowForwarder.shadowIfForwarding(
-            userID: try .init(recipientID.uuidString),
-            sourceEventID: try .init(event.eventID.uuidString),
+            userID: .init(uuid: recipientID),
+            sourceEventID: .init(uuid: event.eventID),
             projectionKinds: ["direct_room_profile"]
         )
         _ = try await shadowForwarder.shadowIfForwarding(
             userID: command.senderUserID,
-            sourceEventID: try .init(event.eventID.uuidString),
+            sourceEventID: .init(uuid: event.eventID),
             projectionKinds: ["direct_sending_capability"]
         )
     }
@@ -2373,6 +2462,33 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 senderID: item.senderID,
                 clientMessageID: try uuid(item.request.command.clientMessageID)
             )
+        }
+        // Production PostgreSQL receives typed arrays through a named
+        // statement. This removes JSON serialization/parsing and lets every
+        // physical foreground connection reuse the invariant recursive lock
+        // plan without changing the transaction or ordered-lock contract.
+        if let postgres = sql as? any PostgresDatabase {
+            let statement = MessageOperationLockBatchStatement(inputs: inputs)
+            let acquiredCount = try await postgres.withConnection { connection in
+                connection.eventLoop.makeFutureWithTask {
+                    let rows = try await connection.execute(
+                        statement,
+                        logger: connection.logger
+                    )
+                    var result: Int64?
+                    for try await row in rows {
+                        guard result == nil else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                        result = row
+                    }
+                    return result
+                }
+            }.get()
+            guard acquiredCount == Int64(inputs.count) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return
         }
         let inputsJSON = try roomWriteJSON(inputs)
         let expectedCount = Int64(inputs.count)
@@ -2798,9 +2914,17 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                            message.accepted_membership_revision,
                            event.committed_membership_revision
                        ) AS prior_accepted_membership_revision,
+                       CASE WHEN locked_room.room_kind = 'direct'
+                            THEN CASE WHEN pair.lower_user_id = message.sender_user_id
+                                      THEN pair.higher_user_id
+                                      ELSE pair.lower_user_id END
+                            ELSE NULL::uuid
+                       END AS prior_direct_recipient_user_id,
                        NULL::text AS prior_denial_reason
                 FROM locked_room
                 JOIN im_v2.messages AS message ON TRUE
+                LEFT JOIN im_v2.direct_room_pairs AS pair
+                  ON pair.room_id = message.room_id
                 LEFT JOIN im_v2.room_events AS event
                   ON event.room_id = message.room_id
                  AND event.room_sequence = message.room_sequence
@@ -2812,7 +2936,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        denial.timeline_sequence, denial.sender_user_id,
                        denial.client_message_id, NULL::text, NULL::text,
                        NULL::uuid, denial.created_at, denial.source_event_id,
-                       NULL::bigint, denial.reason
+                       NULL::bigint, NULL::uuid, denial.reason
                 FROM locked_room
                 JOIN im_v2.direct_message_denials AS denial ON TRUE
                 WHERE denial.sender_user_id = \(bind: senderID)
@@ -2996,6 +3120,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                    prior.prior_rich_entities, prior.prior_reply_to_message_id,
                    prior.prior_created_at, prior.prior_source_event_id,
                    prior.prior_accepted_membership_revision,
+                   prior.prior_direct_recipient_user_id,
                    prior.prior_denial_reason,
                    admission.*, actor.actor_role, actor.sender_is_active, actor.muted,
                    policy.recipient_user_id, policy.sender_profile_visible_to_recipient,
@@ -3147,7 +3272,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             createdAt: createdAt,
             sql: sql
         )
-        return try .init(roomID: roomID, sourceEventID: .init(sourceEventID.uuidString), timelineSequence: nextTimelineSequence, createdAt: createdAt, reason: reason)
+        return .init(roomID: roomID, sourceEventID: .init(uuid: sourceEventID), timelineSequence: nextTimelineSequence, createdAt: createdAt, reason: reason)
     }
 
     /// The public denial reason deliberately hides whether a block, stranger
@@ -4667,14 +4792,48 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
               Set(appends.map(\.roomID)).count == appends.count else {
             throw V2AtomicRoomWriteBatchError(reason: .duplicateRoom)
         }
-        let inputs = try appends.enumerated().map { ordinal, append in
-            try FastPlainDirectRoomLogAppendInput(ordinal: ordinal, append: append)
+        let inputs = try appends.map { append in
+            try FastPlainDirectRoomLogAppendInput(append: append)
         }
-        let inputJSON = try roomWriteJSON(inputs)
         let expectedCount = Int64(inputs.count)
+        // SQLKit's raw-query path uses an unnamed extended-protocol
+        // statement. PostgreSQL therefore planned this large, invariant CTE
+        // once per micro-batch; at 6k msg/s measured planning time was 2.57ms
+        // against 5.81ms execution time. A named PostgresNIO statement keeps
+        // the exact transaction and bind contract while allowing every pool
+        // connection to reuse its plan. Retain the SQLKit branch for database
+        // test doubles, but production PostgreSQL must take this branch.
+        if let postgres = sql as? any PostgresDatabase {
+            let statement = FastPlainDirectRoomLogAppendStatement(
+                inputs: inputs,
+                strangerWindowSeconds: strangerMessagePolicy.window,
+                maximumStrangerMessages: strangerMessagePolicy.maximumMessagesPerWindow
+            )
+            let result = try await postgres.withConnection { connection in
+                connection.eventLoop.makeFutureWithTask {
+                    let rows = try await connection.execute(
+                        statement,
+                        logger: connection.logger
+                    )
+                    var decoded: [FastPlainDirectRoomLogAllocationRow] = []
+                    decoded.reserveCapacity(inputs.count)
+                    for try await row in rows {
+                        decoded.append(row)
+                    }
+                    return decoded
+                }
+            }.get()
+            guard result.count == Int(expectedCount),
+                  result.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
+            else {
+                throw V2AtomicRoomWriteBatchError(reason: .conditionalWriteMismatch)
+            }
+            return result
+        }
         let result = try await sql.raw("""
             WITH input AS MATERIALIZED (
-                SELECT input.ordinal, input.room_id, input.sender_id,
+                SELECT (input.ordinality - 1)::integer AS ordinal,
+                       input.room_id, input.sender_id,
                        input.recipient_id, input.message_id, input.event_id,
                        input.client_message_id,
                        input.expected_membership_revision,
@@ -4684,30 +4843,40 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                        input.room_shard_id, input.capacity_profile_id,
                        input.expected_shard_lease_id,
                        input.expected_shard_generation,
+                       input.requires_stranger_quota,
                        input.uses_room_admission_credits,
-                       input.text_body, input.rich_entities,
+                       input.text_body, input.rich_entities_json::jsonb AS rich_entities,
                        input.created_at_unix_seconds,
                        to_timestamp(input.created_at_unix_seconds) AS created_at
-                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
-                    ordinal integer,
-                    room_id uuid,
-                    sender_id uuid,
-                    recipient_id uuid,
-                    message_id uuid,
-                    event_id uuid,
-                    client_message_id uuid,
-                    expected_membership_revision bigint,
-                    expected_direct_pair_revision bigint,
-                    expected_sender_policy_revision bigint,
-                    expected_recipient_policy_revision bigint,
-                    room_shard_id text,
-                    capacity_profile_id text,
-                    expected_shard_lease_id uuid,
-                    expected_shard_generation bigint,
-                    uses_room_admission_credits boolean,
-                    text_body text,
-                    rich_entities jsonb,
-                    created_at_unix_seconds double precision
+                FROM unnest(
+                    \(bind: inputs.map(\.roomID))::uuid[],
+                    \(bind: inputs.map(\.senderID))::uuid[],
+                    \(bind: inputs.map(\.recipientID))::uuid[],
+                    \(bind: inputs.map(\.messageID))::uuid[],
+                    \(bind: inputs.map(\.eventID))::uuid[],
+                    \(bind: inputs.map(\.clientMessageID))::uuid[],
+                    \(bind: inputs.map(\.expectedMembershipRevision))::bigint[],
+                    \(bind: inputs.map(\.expectedDirectPairRevision))::bigint[],
+                    \(bind: inputs.map(\.expectedSenderPolicyRevision))::bigint[],
+                    \(bind: inputs.map(\.expectedRecipientPolicyRevision))::bigint[],
+                    \(bind: inputs.map(\.roomShardID))::text[],
+                    \(bind: inputs.map(\.capacityProfileID))::text[],
+                    \(bind: inputs.map(\.expectedShardLeaseID))::uuid[],
+                    \(bind: inputs.map(\.expectedShardGeneration))::bigint[],
+                    \(bind: inputs.map(\.requiresStrangerQuota))::boolean[],
+                    \(bind: inputs.map(\.usesRoomAdmissionCredits))::boolean[],
+                    \(bind: inputs.map(\.text))::text[],
+                    \(bind: inputs.map(\.entitiesJSON))::text[],
+                    \(bind: inputs.map(\.createdAtUnixSeconds))::double precision[]
+                ) WITH ORDINALITY AS input(
+                    room_id, sender_id, recipient_id, message_id, event_id,
+                    client_message_id, expected_membership_revision,
+                    expected_direct_pair_revision, expected_sender_policy_revision,
+                    expected_recipient_policy_revision, room_shard_id,
+                    capacity_profile_id, expected_shard_lease_id,
+                    expected_shard_generation, requires_stranger_quota,
+                    uses_room_admission_credits, text_body, rich_entities_json,
+                    created_at_unix_seconds, ordinality
                 )
             ), locked_room AS MATERIALIZED (
                 SELECT input.*, room.room_sequence, room.timeline_sequence,
@@ -4812,7 +4981,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                 WHERE room.uses_room_admission_credits
                    OR admission.command_window_used < admission.command_window_limit
                 FOR UPDATE OF admission
-            ), locked_shard AS MATERIALIZED (
+            ), validated_shard AS MATERIALIZED (
                 SELECT room.ordinal
                 FROM fresh_room AS room
                 JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
@@ -4824,22 +4993,67 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                  AND shard.valid_until > room.created_at
                 WHERE admission.shard_lease_id = room.expected_shard_lease_id
                   AND admission.shard_lease_generation = room.expected_shard_generation
-                FOR KEY SHARE OF shard
+                -- Do not retain a KEY SHARE lock here. The final aggregate
+                -- reservation revalidates this lease and capacity with an
+                -- UPDATE in the same transaction. Retaining shared locks and
+                -- upgrading them there lets concurrent batches deadlock even
+                -- when that UPDATE acquires different shard rows in a stable
+                -- order. Any intervening lease change makes the reservation
+                -- fail and rolls back every provisional write below.
             ), eligible AS MATERIALIZED (
                 SELECT room.*
                 FROM fresh_room AS room
-                JOIN locked_shard AS shard ON shard.ordinal = room.ordinal
+                JOIN validated_shard AS shard ON shard.ordinal = room.ordinal
                 WHERE room.room_kind = 'direct'
                   AND room.frozen_at IS NULL
                   AND room.membership_revision = room.expected_membership_revision
                   AND room.actual_room_shard_id = room.room_shard_id
                   AND room.actual_capacity_profile_id = room.capacity_profile_id
+            ), stranger_quota AS (
+                INSERT INTO im_v2.stranger_message_windows
+                    (sender_user_id, recipient_user_id, window_started_at, message_count)
+                SELECT eligible.sender_id, eligible.recipient_id,
+                       eligible.created_at, 1
+                FROM eligible
+                WHERE eligible.requires_stranger_quota
+                ON CONFLICT (sender_user_id, recipient_user_id) DO UPDATE
+                SET window_started_at = CASE
+                        WHEN im_v2.stranger_message_windows.window_started_at
+                             <= EXCLUDED.window_started_at
+                                - (\(bind: strangerMessagePolicy.window) * interval '1 second')
+                        THEN EXCLUDED.window_started_at
+                        ELSE im_v2.stranger_message_windows.window_started_at
+                    END,
+                    message_count = CASE
+                        WHEN im_v2.stranger_message_windows.window_started_at
+                             <= EXCLUDED.window_started_at
+                                - (\(bind: strangerMessagePolicy.window) * interval '1 second')
+                        THEN 1
+                        ELSE im_v2.stranger_message_windows.message_count + 1
+                    END
+                WHERE im_v2.stranger_message_windows.window_started_at
+                          <= EXCLUDED.window_started_at
+                             - (\(bind: strangerMessagePolicy.window) * interval '1 second')
+                   OR im_v2.stranger_message_windows.message_count
+                          < \(bind: strangerMessagePolicy.maximumMessagesPerWindow)
+                RETURNING sender_user_id, recipient_user_id
+            ), quota_gate AS MATERIALIZED (
+                SELECT eligible.*
+                FROM eligible
+                WHERE NOT eligible.requires_stranger_quota
+                UNION ALL
+                SELECT eligible.*
+                FROM eligible
+                JOIN stranger_quota AS quota
+                  ON quota.sender_user_id = eligible.sender_id
+                 AND quota.recipient_user_id = eligible.recipient_id
+                WHERE eligible.requires_stranger_quota
             ), room_update AS (
                 UPDATE im_v2.rooms AS room
                 SET room_sequence = room.room_sequence + 1,
                     timeline_sequence = room.timeline_sequence + 1
-                FROM eligible
-                WHERE room.room_id = eligible.room_id
+                FROM quota_gate
+                WHERE room.room_id = quota_gate.room_id
                 RETURNING room.room_id, room.room_sequence,
                           room.timeline_sequence
             ), admission_update AS (
@@ -5332,6 +5546,7 @@ private struct MessageAcceptanceContextRow: Decodable {
     let priorCreatedAt: Date?
     let priorSourceEventID: UUID?
     let priorAcceptedMembershipRevision: Int64?
+    let priorDirectRecipientUserID: UUID?
     let priorDenialReason: String?
     let roomEligibleMemberCount: Int?
     let roomCommandWindowLimit: Int?
@@ -5400,6 +5615,7 @@ private struct MessageAcceptanceContextRow: Decodable {
         case priorCreatedAt = "prior_created_at"
         case priorSourceEventID = "prior_source_event_id"
         case priorAcceptedMembershipRevision = "prior_accepted_membership_revision"
+        case priorDirectRecipientUserID = "prior_direct_recipient_user_id"
         case priorDenialReason = "prior_denial_reason"
         case roomEligibleMemberCount = "room_eligible_member_count"
         case roomCommandWindowLimit = "room_command_window_limit"
@@ -5467,6 +5683,7 @@ private struct MessageAcceptanceContextRow: Decodable {
                   priorTextBody == nil, priorRichEntities == nil,
                   priorReplyToMessageID == nil, priorCreatedAt == nil,
                   priorSourceEventID == nil, priorAcceptedMembershipRevision == nil,
+                  priorDirectRecipientUserID == nil,
                   priorDenialReason == nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return nil
@@ -5488,6 +5705,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             createdAt: priorCreatedAt,
             sourceEventID: priorSourceEventID,
             acceptedMembershipRevision: priorAcceptedMembershipRevision,
+            directRecipientUserID: priorDirectRecipientUserID,
             denialReason: priorDenialReason
         ).operation()
     }
@@ -5717,7 +5935,7 @@ private struct ShardRow: Decodable {
         case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans"
     }
     func admissionState() throws -> ShardAdmissionState {
-        try .init(lease: .init(id: try ShardAdmissionLeaseID(leaseID.uuidString), generation: try unsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans)
+        try .init(lease: .init(id: ShardAdmissionLeaseID(uuid: leaseID), generation: try unsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans)
     }
 }
 
@@ -5989,6 +6207,55 @@ private struct MessageOperationLockBatchRow: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case acquiredCount = "acquired_count"
+    }
+}
+
+/// Named, typed-array form of the ordered idempotency-fence batch.
+///
+/// The recursive edge is intentionally identical to the SQLKit fallback: a
+/// later lock is not attempted until PostgreSQL has acquired the preceding
+/// ordinal. Bump `name` whenever the SQL or binding contract changes.
+private struct MessageOperationLockBatchStatement: PostgresPreparedStatement {
+    static let name = "im_v2_message_operation_lock_batch_v1"
+    static let sql = """
+        WITH RECURSIVE input AS MATERIALIZED (
+            SELECT (input.ordinality - 1)::integer AS ordinal,
+                   hashtextextended(
+                       'v2-message-operation:' || input.sender_id::text || ':' || input.client_message_id::text,
+                       0
+                   ) AS lock_key
+            FROM unnest($1::uuid[], $2::uuid[]) WITH ORDINALITY AS input(
+                sender_id, client_message_id, ordinality
+            )
+        ), locked(ordinal, lock_acquired) AS (
+            SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
+            FROM input
+            WHERE input.ordinal = 0
+
+            UNION ALL
+
+            SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
+            FROM locked AS previous
+            JOIN input
+              ON input.ordinal = previous.ordinal + 1
+        )
+        SELECT count(*)::bigint AS acquired_count
+        FROM locked
+        """
+
+    typealias Row = Int64
+
+    let inputs: [MessageOperationLockInput]
+
+    func makeBindings() throws -> PostgresBindings {
+        var bindings = PostgresBindings(capacity: 2)
+        bindings.append(inputs.map(\.senderID))
+        bindings.append(inputs.map(\.clientMessageID))
+        return bindings
+    }
+
+    func decodeRow(_ row: PostgresRow) throws -> Row {
+        try row.decode(Int64.self)
     }
 }
 
@@ -6310,6 +6577,7 @@ private struct FastPlainDirectRoomLogCandidate {
     let senderID: UUID
     let cacheKey: V2DirectSendPolicyCache.Key
     let snapshot: V2DirectRoomLogFastAppendCache.Entry
+    let requiresStrangerQuota: Bool
     let usesRoomAdmissionCredits: Bool
 }
 
@@ -6320,13 +6588,13 @@ private struct FastPlainDirectRoomLogAppend {
     let senderID: UUID
     let cacheKey: V2DirectSendPolicyCache.Key
     let snapshot: V2DirectRoomLogFastAppendCache.Entry
+    let requiresStrangerQuota: Bool
     let usesRoomAdmissionCredits: Bool
     let roomCreditToken: V2RoomAdmissionCommandCreditPool.Token?
     let shardCreditToken: V2ShardAdmissionCommandCreditPool.Token
 }
 
-private struct FastPlainDirectRoomLogAppendInput: Encodable {
-    let ordinal: Int
+private struct FastPlainDirectRoomLogAppendInput: Sendable {
     let roomID: UUID
     let senderID: UUID
     let recipientID: UUID
@@ -6341,17 +6609,17 @@ private struct FastPlainDirectRoomLogAppendInput: Encodable {
     let capacityProfileID: String
     let expectedShardLeaseID: UUID
     let expectedShardGeneration: Int64
+    let requiresStrangerQuota: Bool
     let usesRoomAdmissionCredits: Bool
     let text: String
-    let entities: [V2MessageEntity]
+    let entitiesJSON: String
     let createdAtUnixSeconds: Double
 
-    init(ordinal: Int, append: FastPlainDirectRoomLogAppend) throws {
+    init(append: FastPlainDirectRoomLogAppend) throws {
         guard let lease = append.snapshot.shardState.lease,
-              let leaseID = UUID(uuidString: lease.id.rawValue),
+              let leaseID = lease.id.uuidValue,
               let generation = Int64(exactly: lease.generation)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        self.ordinal = ordinal
         roomID = append.roomID
         senderID = append.senderID
         recipientID = append.snapshot.policy.recipientID
@@ -6366,32 +6634,316 @@ private struct FastPlainDirectRoomLogAppendInput: Encodable {
         capacityProfileID = append.snapshot.capacityProfileID
         expectedShardLeaseID = leaseID
         expectedShardGeneration = generation
+        requiresStrangerQuota = append.requiresStrangerQuota
         usesRoomAdmissionCredits = append.usesRoomAdmissionCredits
         text = append.request.command.text
-        entities = append.request.command.entities
+        entitiesJSON = append.request.command.entities.isEmpty
+            ? "[]"
+            : try roomWriteJSON(append.request.command.entities)
         createdAtUnixSeconds = append.request.now.timeIntervalSince1970
     }
+}
 
-    enum CodingKeys: String, CodingKey {
-        case ordinal
-        case roomID = "room_id"
-        case senderID = "sender_id"
-        case recipientID = "recipient_id"
-        case messageID = "message_id"
-        case eventID = "event_id"
-        case clientMessageID = "client_message_id"
-        case expectedMembershipRevision = "expected_membership_revision"
-        case expectedDirectPairRevision = "expected_direct_pair_revision"
-        case expectedSenderPolicyRevision = "expected_sender_policy_revision"
-        case expectedRecipientPolicyRevision = "expected_recipient_policy_revision"
-        case roomShardID = "room_shard_id"
-        case capacityProfileID = "capacity_profile_id"
-        case expectedShardLeaseID = "expected_shard_lease_id"
-        case expectedShardGeneration = "expected_shard_generation"
-        case usesRoomAdmissionCredits = "uses_room_admission_credits"
-        case text = "text_body"
-        case entities = "rich_entities"
-        case createdAtUnixSeconds = "created_at_unix_seconds"
+/// Named, connection-cached form of the invariant fast append statement.
+///
+/// Bump `name` whenever `sql` changes. PostgresNIO prepares this once per
+/// physical foreground connection and then executes it with new array binds;
+/// the statement does not own a connection or cross the enclosing Fluent
+/// transaction boundary.
+private struct FastPlainDirectRoomLogAppendStatement: PostgresPreparedStatement {
+    static let name = "im_v2_fast_plain_direct_room_log_append_v1"
+    static let sql = """
+        WITH input AS MATERIALIZED (
+            SELECT (input.ordinality - 1)::integer AS ordinal,
+                   input.room_id, input.sender_id,
+                   input.recipient_id, input.message_id, input.event_id,
+                   input.client_message_id,
+                   input.expected_membership_revision,
+                   input.expected_direct_pair_revision,
+                   input.expected_sender_policy_revision,
+                   input.expected_recipient_policy_revision,
+                   input.room_shard_id, input.capacity_profile_id,
+                   input.expected_shard_lease_id,
+                   input.expected_shard_generation,
+                   input.requires_stranger_quota,
+                   input.uses_room_admission_credits,
+                   input.text_body, input.rich_entities_json::jsonb AS rich_entities,
+                   input.created_at_unix_seconds,
+                   to_timestamp(input.created_at_unix_seconds) AS created_at
+            FROM unnest(
+                $1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[],
+                $5::uuid[], $6::uuid[], $7::bigint[], $8::bigint[],
+                $9::bigint[], $10::bigint[], $11::text[], $12::text[],
+                $13::uuid[], $14::bigint[], $15::boolean[], $16::boolean[],
+                $17::text[], $18::text[], $19::double precision[]
+            ) WITH ORDINALITY AS input(
+                room_id, sender_id, recipient_id, message_id, event_id,
+                client_message_id, expected_membership_revision,
+                expected_direct_pair_revision, expected_sender_policy_revision,
+                expected_recipient_policy_revision, room_shard_id,
+                capacity_profile_id, expected_shard_lease_id,
+                expected_shard_generation, requires_stranger_quota,
+                uses_room_admission_credits, text_body, rich_entities_json,
+                created_at_unix_seconds, ordinality
+            )
+        ), locked_room AS MATERIALIZED (
+            SELECT input.*, room.room_sequence, room.timeline_sequence,
+                   room.membership_revision, room.room_kind,
+                   room.room_shard_id AS actual_room_shard_id,
+                   room.capacity_profile_id AS actual_capacity_profile_id,
+                   room.frozen_at
+            FROM input
+            JOIN im_v2.rooms AS room ON room.room_id = input.room_id
+            ORDER BY room.room_id
+            FOR UPDATE OF room
+        ), fresh_room AS MATERIALIZED (
+            SELECT room.*
+            FROM locked_room AS room
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM im_v2.messages AS message
+                WHERE message.sender_user_id = room.sender_id
+                  AND message.client_message_id = room.client_message_id
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM im_v2.direct_message_denials AS denial
+                WHERE denial.sender_user_id = room.sender_id
+                  AND denial.client_message_id = room.client_message_id
+            )
+        ), locked_membership AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM fresh_room AS room
+            JOIN im_v2.room_memberships AS membership
+              ON membership.room_id = room.room_id
+             AND membership.user_id = room.sender_id
+             AND membership.joined_revision <= room.membership_revision
+             AND (membership.left_revision IS NULL
+                  OR membership.left_revision > room.membership_revision)
+            WHERE membership.role IN ('owner', 'admin', 'member')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM im_v2.room_member_mutes AS mute
+                WHERE mute.room_id = room.room_id
+                  AND mute.user_id = room.sender_id
+                  AND mute.mute_until > room.created_at
+              )
+            FOR UPDATE OF membership
+        ), locked_pair AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM fresh_room AS room
+            JOIN locked_membership AS membership ON membership.ordinal = room.ordinal
+            JOIN im_v2.direct_room_pairs AS pair
+              ON pair.room_id = room.room_id
+             AND ((pair.lower_user_id = room.sender_id
+                   AND pair.higher_user_id = room.recipient_id)
+                  OR (pair.higher_user_id = room.sender_id
+                      AND pair.lower_user_id = room.recipient_id))
+             AND pair.direct_policy_revision = room.expected_direct_pair_revision
+            FOR UPDATE OF pair
+        ), locked_policy_versions AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM fresh_room AS room
+            JOIN locked_pair AS pair ON pair.ordinal = room.ordinal
+            JOIN im_v2.user_direct_send_policy_versions AS sender_version
+              ON sender_version.user_id = room.sender_id
+             AND sender_version.revision = room.expected_sender_policy_revision
+            JOIN im_v2.user_direct_send_policy_versions AS recipient_version
+              ON recipient_version.user_id = room.recipient_id
+             AND recipient_version.revision = room.expected_recipient_policy_revision
+            FOR SHARE OF sender_version, recipient_version
+        ), locked_active_profiles AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM fresh_room AS room
+            JOIN locked_policy_versions AS policy ON policy.ordinal = room.ordinal
+            JOIN im_v2.public_user_profiles AS sender_profile
+              ON sender_profile.user_id = room.sender_id
+             AND sender_profile.state = 'active'
+            JOIN im_v2.public_user_profiles AS recipient_profile
+              ON recipient_profile.user_id = room.recipient_id
+             AND recipient_profile.state = 'active'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM im_v2.account_disables AS disabled
+                WHERE disabled.user_id = room.sender_id
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM im_v2.account_disables AS disabled
+                WHERE disabled.user_id = room.recipient_id
+            )
+            FOR SHARE OF sender_profile, recipient_profile
+        ), locked_admission AS MATERIALIZED (
+            SELECT room.ordinal,
+                   admission.command_window_used,
+                   admission.command_window_limit,
+                   admission.shard_lease_id,
+                   admission.shard_lease_generation
+            FROM fresh_room AS room
+            JOIN locked_active_profiles AS profile ON profile.ordinal = room.ordinal
+            JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
+            WHERE room.uses_room_admission_credits
+               OR admission.command_window_used < admission.command_window_limit
+            FOR UPDATE OF admission
+        ), validated_shard AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM fresh_room AS room
+            JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
+            JOIN im_v2.shard_admission_pools AS shard
+              ON shard.room_shard_id = room.room_shard_id
+             AND shard.capacity_profile_id = room.capacity_profile_id
+             AND shard.lease_id = room.expected_shard_lease_id
+             AND shard.generation = room.expected_shard_generation
+             AND shard.valid_until > room.created_at
+            WHERE admission.shard_lease_id = room.expected_shard_lease_id
+              AND admission.shard_lease_generation = room.expected_shard_generation
+        ), eligible AS MATERIALIZED (
+            SELECT room.*
+            FROM fresh_room AS room
+            JOIN validated_shard AS shard ON shard.ordinal = room.ordinal
+            WHERE room.room_kind = 'direct'
+              AND room.frozen_at IS NULL
+              AND room.membership_revision = room.expected_membership_revision
+              AND room.actual_room_shard_id = room.room_shard_id
+              AND room.actual_capacity_profile_id = room.capacity_profile_id
+        ), stranger_quota AS (
+            INSERT INTO im_v2.stranger_message_windows
+                (sender_user_id, recipient_user_id, window_started_at, message_count)
+            SELECT eligible.sender_id, eligible.recipient_id,
+                   eligible.created_at, 1
+            FROM eligible
+            WHERE eligible.requires_stranger_quota
+            ON CONFLICT (sender_user_id, recipient_user_id) DO UPDATE
+            SET window_started_at = CASE
+                    WHEN im_v2.stranger_message_windows.window_started_at
+                         <= EXCLUDED.window_started_at
+                            - ($20 * interval '1 second')
+                    THEN EXCLUDED.window_started_at
+                    ELSE im_v2.stranger_message_windows.window_started_at
+                END,
+                message_count = CASE
+                    WHEN im_v2.stranger_message_windows.window_started_at
+                         <= EXCLUDED.window_started_at
+                            - ($20 * interval '1 second')
+                    THEN 1
+                    ELSE im_v2.stranger_message_windows.message_count + 1
+                END
+            WHERE im_v2.stranger_message_windows.window_started_at
+                      <= EXCLUDED.window_started_at - ($20 * interval '1 second')
+               OR im_v2.stranger_message_windows.message_count < $21
+            RETURNING sender_user_id, recipient_user_id
+        ), quota_gate AS MATERIALIZED (
+            SELECT eligible.*
+            FROM eligible
+            WHERE NOT eligible.requires_stranger_quota
+            UNION ALL
+            SELECT eligible.*
+            FROM eligible
+            JOIN stranger_quota AS quota
+              ON quota.sender_user_id = eligible.sender_id
+             AND quota.recipient_user_id = eligible.recipient_id
+            WHERE eligible.requires_stranger_quota
+        ), room_update AS (
+            UPDATE im_v2.rooms AS room
+            SET room_sequence = room.room_sequence + 1,
+                timeline_sequence = room.timeline_sequence + 1
+            FROM quota_gate
+            WHERE room.room_id = quota_gate.room_id
+            RETURNING room.room_id, room.room_sequence,
+                      room.timeline_sequence
+        ), admission_update AS (
+            UPDATE im_v2.room_admission AS admission
+            SET command_window_used = admission.command_window_used + 1
+            FROM eligible
+            JOIN room_update ON room_update.room_id = eligible.room_id
+            WHERE admission.room_id = eligible.room_id
+              AND NOT eligible.uses_room_admission_credits
+            RETURNING admission.room_id
+        ), admission_gate AS (
+            SELECT room_update.room_id
+            FROM room_update
+            JOIN eligible ON eligible.room_id = room_update.room_id
+            WHERE eligible.uses_room_admission_credits
+            UNION ALL
+            SELECT room_id FROM admission_update
+        ), message_insert AS (
+            INSERT INTO im_v2.messages
+                (message_id, room_id, room_sequence, timeline_sequence,
+                 sender_user_id, client_message_id, text_body,
+                 rich_entities, reply_to_message_id,
+                 forwarded_from_message_id, forwarded_from_user_id,
+                 created_at, accepted_event_id, accepted_event_storage,
+                 accepted_membership_revision)
+            SELECT eligible.message_id, eligible.room_id,
+                   room_update.room_sequence,
+                   room_update.timeline_sequence,
+                   eligible.sender_id, eligible.client_message_id,
+                   eligible.text_body, eligible.rich_entities, NULL,
+                   NULL, NULL, eligible.created_at, eligible.event_id,
+                   'message_row', eligible.expected_membership_revision
+            FROM eligible
+            JOIN room_update ON room_update.room_id = eligible.room_id
+            JOIN admission_gate ON admission_gate.room_id = eligible.room_id
+            RETURNING message_id, room_id
+        )
+        SELECT input.ordinal, room_update.room_sequence,
+               room_update.timeline_sequence
+        FROM input
+        JOIN room_update ON room_update.room_id = input.room_id
+        JOIN admission_gate ON admission_gate.room_id = input.room_id
+        JOIN message_insert ON message_insert.message_id = input.message_id
+        ORDER BY input.ordinal
+        """
+
+    typealias Row = FastPlainDirectRoomLogAllocationRow
+
+    let inputs: [FastPlainDirectRoomLogAppendInput]
+    let strangerWindowSeconds: Double
+    let maximumStrangerMessages: Int64
+
+    init(
+        inputs: [FastPlainDirectRoomLogAppendInput],
+        strangerWindowSeconds: TimeInterval,
+        maximumStrangerMessages: Int
+    ) {
+        self.inputs = inputs
+        self.strangerWindowSeconds = strangerWindowSeconds
+        self.maximumStrangerMessages = Int64(maximumStrangerMessages)
+    }
+
+    func makeBindings() throws -> PostgresBindings {
+        var bindings = PostgresBindings(capacity: 21)
+        bindings.append(inputs.map(\.roomID))
+        bindings.append(inputs.map(\.senderID))
+        bindings.append(inputs.map(\.recipientID))
+        bindings.append(inputs.map(\.messageID))
+        bindings.append(inputs.map(\.eventID))
+        bindings.append(inputs.map(\.clientMessageID))
+        bindings.append(inputs.map(\.expectedMembershipRevision))
+        bindings.append(inputs.map(\.expectedDirectPairRevision))
+        bindings.append(inputs.map(\.expectedSenderPolicyRevision))
+        bindings.append(inputs.map(\.expectedRecipientPolicyRevision))
+        bindings.append(inputs.map(\.roomShardID))
+        bindings.append(inputs.map(\.capacityProfileID))
+        bindings.append(inputs.map(\.expectedShardLeaseID))
+        bindings.append(inputs.map(\.expectedShardGeneration))
+        bindings.append(inputs.map(\.requiresStrangerQuota))
+        bindings.append(inputs.map(\.usesRoomAdmissionCredits))
+        bindings.append(inputs.map(\.text))
+        bindings.append(inputs.map(\.entitiesJSON))
+        bindings.append(inputs.map(\.createdAtUnixSeconds))
+        bindings.append(strangerWindowSeconds)
+        bindings.append(maximumStrangerMessages)
+        return bindings
+    }
+
+    func decodeRow(_ row: PostgresRow) throws -> Row {
+        let (ordinal, roomSequence, timelineSequence) = try row.decode(
+            (Int32, Int64, Int64).self
+        )
+        return .init(
+            ordinal: Int(ordinal),
+            roomSequence: roomSequence,
+            timelineSequence: timelineSequence
+        )
     }
 }
 
@@ -6452,8 +7004,9 @@ private struct MessageRow: Decodable {
     let replyToMessageID: UUID?
     let acceptedEventID: UUID?
     let acceptedMembershipRevision: Int64?
+    let directRecipientUserID: UUID?
     let createdAt: Date
-    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", richEntities = "rich_entities", replyToMessageID = "reply_to_message_id", acceptedEventID = "accepted_event_id", acceptedMembershipRevision = "accepted_membership_revision", createdAt = "created_at" }
+    enum CodingKeys: String, CodingKey { case messageID = "message_id", roomID = "room_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", senderUserID = "sender_user_id", clientMessageID = "client_message_id", textBody = "text_body", richEntities = "rich_entities", replyToMessageID = "reply_to_message_id", acceptedEventID = "accepted_event_id", acceptedMembershipRevision = "accepted_membership_revision", directRecipientUserID = "direct_recipient_user_id", createdAt = "created_at" }
     func acceptedMessage(
         media: [V2MediaReference] = [],
         mediaPresentations: [V2MediaPresentation] = [],
@@ -6467,13 +7020,13 @@ private struct MessageRow: Decodable {
         try V2RichMessageContent.validate(text: textBody, entities: entities)
         let replyTo: V2MessageReplyReference?
         if let replyToMessageID {
-            replyTo = .init(messageID: try .init(replyToMessageID.uuidString))
+            replyTo = .init(messageID: .init(uuid: replyToMessageID))
         } else {
             replyTo = nil
         }
-        let sourceEventID = try acceptedEventID.map { try EventID($0.uuidString) }
+        let sourceEventID = acceptedEventID.map { EventID(uuid: $0) }
         let membershipRevision = try acceptedMembershipRevision.map(unsigned)
-        return try .init(messageID: .init(messageID.uuidString), roomID: .init(roomID.uuidString), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(senderUserID.uuidString), clientMessageID: .init(clientMessageID.uuidString), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, usesRoomEventLog: usesRoomEventLog, sourceEventID: sourceEventID, acceptedMembershipRevision: membershipRevision, createdAt: createdAt)
+        return try .init(messageID: .init(uuid: messageID), roomID: .init(uuid: roomID), roomSequence: unsigned(roomSequence), timelineSequence: unsigned(timelineSequence), senderUserID: .init(uuid: senderUserID), clientMessageID: .init(uuid: clientMessageID), text: textBody, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, groupDeliveryMode: groupDeliveryMode, usesRoomEventLog: usesRoomEventLog, sourceEventID: sourceEventID, acceptedMembershipRevision: membershipRevision, directRecipientUserID: directRecipientUserID.map { .init(uuid: $0) }, createdAt: createdAt)
     }
 }
 
@@ -6493,6 +7046,10 @@ private struct DirectMessageAcceptanceContext {
     let senderHasReplied: Bool
     let supportAccountID: UUID?
 }
+private struct DirectReplyCacheUpdate {
+    let key: V2DirectSendPolicyCache.Key
+    let expectedDirectPairRevision: Int64
+}
 private struct RoomWriteCommit {
     let outcome: V2SendMessageOutcome
     /// `nil` means an idempotent acceptance must recover shadowing from the
@@ -6501,6 +7058,11 @@ private struct RoomWriteCommit {
     let acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?
     let directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry?
     let directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
+    /// When this commit sets one side's monotonic first-send marker, the
+    /// opposite cached direction can advance from the immediately preceding
+    /// pair revision without another full policy read. PostgreSQL revision
+    /// predicates remain authoritative for every later fast append.
+    let reciprocalDirectReplyCacheUpdate: DirectReplyCacheUpdate?
     /// A command credit becomes committed only after this transaction returns
     /// successfully from Fluent. All non-success paths return it to the local
     /// pool from inside the retry closure.
@@ -6518,6 +7080,7 @@ private struct RoomWriteCommit {
         acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?,
         directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry? = nil,
         directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry? = nil,
+        reciprocalDirectReplyCacheUpdate: DirectReplyCacheUpdate? = nil,
         shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token? = nil,
         roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token? = nil,
         roomAdmissionHeatObservation: UUID? = nil
@@ -6526,6 +7089,7 @@ private struct RoomWriteCommit {
         self.acceptedDirectProjectionShadows = acceptedDirectProjectionShadows
         self.directPolicyCacheUpdate = directPolicyCacheUpdate
         self.directRoomLogFastAppendCacheUpdate = directRoomLogFastAppendCacheUpdate
+        self.reciprocalDirectReplyCacheUpdate = reciprocalDirectReplyCacheUpdate
         self.shardAdmissionCommandCredit = shardAdmissionCommandCredit
         self.roomAdmissionCommandCredit = roomAdmissionCommandCredit
         self.roomAdmissionHeatObservation = roomAdmissionHeatObservation
@@ -6723,6 +7287,7 @@ private struct MessageOperationReplayRow: Decodable {
     let createdAt: Date
     let sourceEventID: UUID?
     let acceptedMembershipRevision: Int64?
+    let directRecipientUserID: UUID?
     let denialReason: String?
 
     enum CodingKeys: String, CodingKey {
@@ -6739,6 +7304,7 @@ private struct MessageOperationReplayRow: Decodable {
         case createdAt = "created_at"
         case sourceEventID = "source_event_id"
         case acceptedMembershipRevision = "accepted_membership_revision"
+        case directRecipientUserID = "direct_recipient_user_id"
         case denialReason = "denial_reason"
     }
 
@@ -6760,18 +7326,20 @@ private struct MessageOperationReplayRow: Decodable {
                 replyToMessageID: replyToMessageID,
                 acceptedEventID: sourceEventID,
                 acceptedMembershipRevision: acceptedMembershipRevision,
+                directRecipientUserID: directRecipientUserID,
                 createdAt: createdAt
             ))
         case "denied":
             guard messageID == nil, roomSequence == nil, textBody == nil,
                   richEntities == nil, replyToMessageID == nil,
                   acceptedMembershipRevision == nil,
+                  directRecipientUserID == nil,
                   let sourceEventID, let denialReason,
                   let reason = V2DirectMessageDenied.Reason(rawValue: denialReason)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return .denied(try .init(
-                roomID: .init(roomID.uuidString),
-                sourceEventID: .init(sourceEventID.uuidString),
+                roomID: .init(uuid: roomID),
+                sourceEventID: .init(uuid: sourceEventID),
                 timelineSequence: unsigned(timelineSequence),
                 createdAt: createdAt,
                 reason: reason
@@ -6797,7 +7365,7 @@ private struct MessageMediaPresentationRow: Decodable {
     var presentation: V2MediaPresentation {
         get throws {
             try .init(
-                mediaID: .init(mediaID.uuidString),
+                mediaID: .init(uuid: mediaID),
                 kind: V2MediaPresentation.kind(forContentType: contentType),
                 contentType: contentType,
                 byteCount: byteCount
@@ -6821,7 +7389,7 @@ private struct OrderedMessageMediaPresentationRow: Decodable {
     var presentation: V2MediaPresentation {
         get throws {
             try .init(
-                mediaID: .init(mediaID.uuidString),
+                mediaID: .init(uuid: mediaID),
                 kind: V2MediaPresentation.kind(forContentType: contentType),
                 contentType: contentType,
                 byteCount: byteCount
@@ -6841,7 +7409,7 @@ private struct MentionRow: Decodable {
         get throws {
             switch kind {
             case "everyone": return .everyone
-            case "user": guard let userID else { throw V2RoomWriteStoreError.corruptPersistenceState }; return .user(try .init(userID.uuidString))
+            case "user": guard let userID else { throw V2RoomWriteStoreError.corruptPersistenceState }; return .user(.init(uuid: userID))
             default: throw V2RoomWriteStoreError.corruptPersistenceState
             }
         }
@@ -6849,7 +7417,7 @@ private struct MentionRow: Decodable {
 }
 
 private func uuid<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: value.rawValue) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
 }
 

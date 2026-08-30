@@ -42,6 +42,32 @@ struct V2AuthenticatedGatewayAdmissionTests {
         #expect(await limiter.trackedIdentityCount() == 4)
     }
 
+    @Test("first capacity eviction preserves the most recently used quota state")
+    func preservesRecentQuotaWhenLazyRecencyTrackingStarts() async throws {
+        let limiter = V2AuthenticatedGatewayCommandRateLimiter(policy: .init(
+            deviceCommandsPerSecond: 1,
+            deviceBurst: 1,
+            userCommandsPerSecond: 1,
+            userBurst: 1,
+            maximumTrackedIdentities: 4
+        ))
+        let start = Date(timeIntervalSince1970: 1_750_000_000)
+        let first = try identity(user: 1, device: 1)
+        let second = try identity(user: 2, device: 2)
+        let newcomer = try identity(user: 3, device: 3)
+
+        #expect(await limiter.admit(identity: first, now: start))
+        #expect(await limiter.admit(identity: second, now: start))
+        #expect(await limiter.admit(identity: first, now: start.addingTimeInterval(1)))
+
+        // Adding two newcomer identities forces the first eviction and the
+        // lazy LRU rebuild. The older second user/device pair must be evicted,
+        // while the first pair retains its just-consumed token buckets.
+        #expect(await limiter.admit(identity: newcomer, now: start.addingTimeInterval(1)))
+        #expect(await !limiter.admit(identity: first, now: start.addingTimeInterval(1)))
+        #expect(await limiter.trackedIdentityCount() == 4)
+    }
+
     @Test("registry enforces exact local device and user connection ceilings")
     func boundsAuthenticatedConnections() async throws {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(

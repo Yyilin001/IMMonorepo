@@ -365,8 +365,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// a positive override is an explicitly measured throughput experiment,
     /// never a client-controlled concurrency setting.
     public let directRoomLogAppendBatchMaximumInFlightBatches: Int
+    /// Maximum direct append requests retained before they are assigned to a
+    /// durable micro-batch. This is deliberately independent of the database
+    /// work queue: one queued database operation may represent many append
+    /// requests, so reusing that operation count as a request count rejects
+    /// otherwise bounded traffic bursts prematurely.
+    public let directRoomLogAppendMaximumPendingRequests: Int
     /// Stable room-keyed scheduling lanes. The total in-flight and pending
-    /// budgets are divided across lanes instead of multiplied by this value.
+    /// budgets are shared across lanes instead of multiplied by this value.
     public let directRoomLogAppendLaneCount: Int
     /// Maximum extra server-side queueing time for an append micro-batch.
     /// This has meaning only when `directRoomLogAppendBatchSize` is positive.
@@ -700,6 +706,31 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directRoomLogAppendBatchSize = parsedDirectRoomLogAppendBatchSize
+        let rawDirectRoomLogAppendMaximumPending = Self.optional(
+            "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS",
+            environment: environment
+        )
+        if let rawDirectRoomLogAppendMaximumPending {
+            guard parsedDirectRoomLogAppendBatchSize > 0,
+                  let parsedDirectRoomLogAppendMaximumPending = Int(
+                      rawDirectRoomLogAppendMaximumPending
+                  ),
+                  (parsedDirectRoomLogAppendBatchSize ... 1_048_576).contains(
+                      parsedDirectRoomLogAppendMaximumPending
+                  )
+            else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS"
+                )
+            }
+            directRoomLogAppendMaximumPendingRequests =
+                parsedDirectRoomLogAppendMaximumPending
+        } else {
+            // Retain the pre-existing bound unless a deployment explicitly
+            // sizes the message-request staging queue for measured bursts.
+            directRoomLogAppendMaximumPendingRequests =
+                foregroundWriteDatabaseWorkMaximumQueued
+        }
         let maximumAppendBatchConcurrency = databasePolicy.eventLoopThreads *
             foregroundWriteDatabaseWorkLimit
         let rawDirectRoomLogAppendBatchMaximumInFlight = Self.optional(
@@ -739,7 +770,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                       && parsedDirectRoomLogAppendLaneCount
                           <= directRoomLogAppendBatchMaximumInFlightBatches
                       && parsedDirectRoomLogAppendLaneCount
-                          <= foregroundWriteDatabaseWorkMaximumQueued
+                          <= directRoomLogAppendMaximumPendingRequests
               )
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
@@ -794,7 +825,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                   parsedHighActivityAppendDelay > parsedDirectRoomLogAppendBatchDelay,
                   parsedHighActivityAppendDelay <= 25,
                   parsedHighActivityAppendMinimumRequests >= 2,
-                  parsedHighActivityAppendMinimumRequests <= foregroundWriteDatabaseWorkMaximumQueued,
+                  parsedHighActivityAppendMinimumRequests
+                      <= directRoomLogAppendMaximumPendingRequests,
                   (1 ... 1_000).contains(parsedHighActivityAppendWindow)
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
@@ -846,7 +878,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES", environment: environment
         ) ?? "0"
         guard let parsedDirectRoomLogEventCacheEntries = Int(rawDirectRoomLogEventCacheEntries),
-              (0 ... 131_072).contains(parsedDirectRoomLogEventCacheEntries),
+              (0 ... 1_048_576).contains(parsedDirectRoomLogEventCacheEntries),
               parsedDirectRoomLogEventCacheEntries == 0
                 || parsedDirectFanoutMode == .roomLog
         else {

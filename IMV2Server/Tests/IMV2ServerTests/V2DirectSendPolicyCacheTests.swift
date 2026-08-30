@@ -90,9 +90,36 @@ struct V2DirectSendPolicyCacheTests {
         #expect(refined.recipientPolicyRevision == entry.recipientPolicyRevision)
     }
 
+    @Test("reciprocal reply promotion is revision fenced")
+    func reciprocalReplyPromotionRequiresExactPreviousRevision() async {
+        let cache = V2DirectSendPolicyCache(capacity: 2)
+        let key = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
+        let entry = makeEntry(
+            directPairRevision: 41,
+            recipientHasReplied: false
+        )
+        await cache.insert(entry, for: key)
+
+        await cache.markRecipientsHaveReplied([.init(
+            key: key,
+            expectedDirectPairRevision: 40
+        )])
+        #expect(await cache.value(for: key) == entry)
+
+        await cache.markRecipientsHaveReplied([.init(
+            key: key,
+            expectedDirectPairRevision: 41
+        )])
+        let promoted = await cache.value(for: key)
+        #expect(promoted?.recipientHasReplied == true)
+        #expect(promoted?.directPairRevision == 42)
+        #expect(promoted?.senderHasReplied == entry.senderHasReplied)
+    }
+
     private func makeEntry(
         directPairRevision: Int64 = 1,
-        senderHasReplied: Bool = true
+        senderHasReplied: Bool = true,
+        recipientHasReplied: Bool = true
     ) -> V2DirectSendPolicyCache.Entry {
         .init(
             recipientID: UUID(), directPairRevision: directPairRevision,
@@ -100,7 +127,9 @@ struct V2DirectSendPolicyCacheTests {
             senderProfileVisibleToRecipient: true, senderCanSend: true,
             senderIsActive: true,
             recipientIsActive: true, blocked: false, isFriend: true,
-            senderHasReplied: senderHasReplied, recipientHasReplied: true, allowsStrangers: true,
+            senderHasReplied: senderHasReplied,
+            recipientHasReplied: recipientHasReplied,
+            allowsStrangers: true,
             senderAccountKind: nil, senderAccountStatus: nil,
             senderAllowsServiceMessages: nil, recipientAccountKind: nil,
             recipientAccountStatus: nil, recipientAllowsCustomerMessages: nil

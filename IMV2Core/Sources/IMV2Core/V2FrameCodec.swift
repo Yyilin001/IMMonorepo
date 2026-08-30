@@ -234,13 +234,20 @@ public struct V2FrameDecoder: Sendable {
 }
 
 public enum V2FrameCodec {
-    public static func encode(_ frame: V2Frame, limits: V2FrameLimits) throws -> Data {
+    /// Shared validation for contiguous-Data and transport-native encoders.
+    /// Keeping this public boundary lets a NIO transport avoid an intermediate
+    /// full-frame `Data` copy without weakening the protocol limits.
+    public static func validateForEncoding(_ frame: V2Frame, limits: V2FrameLimits) throws {
         guard limits.acceptedVersions.contains(frame.version) else {
             throw V2FrameCodecError.unsupportedVersion(frame.version)
         }
         guard frame.payload.count <= limits.maximumPayloadBytes else {
             throw V2FrameCodecError.payloadTooLarge(frame.payload.count)
         }
+    }
+
+    public static func encode(_ frame: V2Frame, limits: V2FrameLimits) throws -> Data {
+        try validateForEncoding(frame, limits: limits)
         var encoded = Data()
         encoded.reserveCapacity(V2Frame.headerLength + frame.payload.count)
         encoded.appendUInt16(V2Frame.magic)
