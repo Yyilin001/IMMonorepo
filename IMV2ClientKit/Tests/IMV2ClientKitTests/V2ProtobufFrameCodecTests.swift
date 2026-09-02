@@ -41,11 +41,71 @@ struct V2ProtobufFrameCodecTests {
             requestID: plain.requestID,
             payload: plain.payload
         )
-        #expect(throws: V2ProtobufFrameCodecError.unsupportedFrameFlags) {
+        #expect(throws: V2ProtobufFrameCodecError.unsupportedCompression) {
             _ = try V2ProtobufFrameCodec.decode(compressed)
         }
         #expect(throws: V2ProtobufFrameCodecError.unsupportedFrameFlags) {
             _ = try V2ProtobufFrameCodec.encode(envelope, frameVersion: 1, flags: [.compressed])
+        }
+    }
+
+    @Test("client codec decodes a negotiated independently compressed frame")
+    func negotiatedCompressionRoundTrip() throws {
+        var envelope = IMV2Envelope()
+        envelope.requestID = 12
+        envelope.protocolVersion = IMV2ProtocolVersion.current
+        envelope.groupEventPage = .init()
+        envelope.groupEventPage.roomID = "group-compression-test"
+        var event = IMV2GroupEvent()
+        event.sourceEventID = "00000000-0000-0000-0000-000000000012"
+        event.roomSequence = 1
+        event.projectionKind = "message"
+        event.payload = Data(repeating: 0x62, count: 8_192)
+        envelope.groupEventPage.events = [event]
+
+        let frame = try V2ProtobufFrameCodec.encode(
+            envelope,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
+            compression: .zlib,
+            compressionThresholdBytes: 1,
+            maximumExpansionRatio: 1_024
+        )
+        #expect(frame.flags == [.compressed])
+        #expect(try V2ProtobufFrameCodec.decode(
+            frame,
+            compression: .zlib,
+            maximumExpansionRatio: 1_024
+        ) == envelope)
+        #expect(throws: V2ProtobufFrameCodecError.unsupportedCompression) {
+            _ = try V2ProtobufFrameCodec.decode(frame)
+        }
+    }
+
+    @Test("client restores v21 group-page request correlation from the frame header")
+    func headerBoundRequestIDRoundTrip() throws {
+        var envelope = IMV2Envelope()
+        envelope.requestID = 13
+        envelope.protocolVersion = 21
+        envelope.groupEventPage = .init()
+        envelope.groupEventPage.roomID = "group-header-bound-client-test"
+
+        let frame = try V2ProtobufFrameCodec.encode(
+            envelope,
+            frameVersion: 21,
+            bindRequestIDToHeader: true
+        )
+        #expect(frame.flags == [.headerBoundRequestID])
+        #expect(try V2ProtobufFrameCodec.decode(frame) == envelope)
+
+        let wrongCommand = V2Frame(
+            version: frame.version,
+            flags: frame.flags,
+            command: .syncBatch,
+            requestID: frame.requestID,
+            payload: frame.payload
+        )
+        #expect(throws: V2ProtobufFrameCodecError.unsupportedFrameFlags) {
+            _ = try V2ProtobufFrameCodec.decode(wrongCommand)
         }
     }
 

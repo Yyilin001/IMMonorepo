@@ -5,6 +5,46 @@ import Testing
 
 @Suite("Routed room write store")
 struct V2RoutedRoomWriteStoreTests {
+    @Test("distinct physical owners receive independent atomic append batches")
+    func distinctOwnersReceiveIndependentBatches() async throws {
+        let requests = try makeRequests(count: 4)
+        let routes = try Dictionary(uniqueKeysWithValues: requests.enumerated().map {
+            index, request in
+            (
+                request.command.roomID,
+                try V2RoomShardRoute(
+                    shardID: index.isMultiple(of: 2) ? "rooms-a" : "rooms-b",
+                    epoch: 0
+                )
+            )
+        })
+        let router = TestRoomRouter(routes: routes)
+        let firstStore = RecordingAtomicStore()
+        let secondStore = RecordingAtomicStore()
+        let routed = try V2RoutedRoomWriteStore(
+            router: router,
+            stores: ["rooms-a": firstStore, "rooms-b": secondStore],
+            physicalStoreKeyByShard: [
+                "rooms-a": "postgres-a",
+                "rooms-b": "postgres-b",
+            ]
+        )
+
+        let outcomes = try await routed.acceptAtomically(requests: requests)
+
+        #expect(outcomes.count == requests.count)
+        #expect(await router.batchRouteCallCount() == 1)
+        #expect(await router.singleRouteCallCount() == 0)
+        #expect(await firstStore.batches() == [[
+            requests[0].command.clientMessageID,
+            requests[2].command.clientMessageID,
+        ]])
+        #expect(await secondStore.batches() == [[
+            requests[1].command.clientMessageID,
+            requests[3].command.clientMessageID,
+        ]])
+    }
+
     @Test("co-located logical owners bypass route resolution and retain one atomic append batch")
     func coLocatedOwnersBypassRoutingAndRetainOneAtomicBatch() async throws {
         let requests = try makeRequests(count: 3)

@@ -7,7 +7,12 @@ import SQLKit
 /// membership, admission state, fan-out plan and operation ledger atomically.
 /// Staged audiences stay relational throughout this transaction, so a 100k
 /// group never becomes a Swift array or a giant PostgreSQL operation array.
-public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGroupMessagingStore {
+public struct PostgresV2GroupMessagingStore:
+    V2GroupMessagingStore,
+    V2ControlValidatedGroupMessagingStore,
+    V2ControlValidatedStagedGroupMessagingStore,
+    V2StagedGroupMessagingStore
+{
     private let database: any Database
 
     public init(database: any Database) {
@@ -43,11 +48,170 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
         )
         return try await createGroup(
             input: input,
+            identityValidation: .ownerDatabase,
             capacityProfile: capacityProfile,
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
             planID: planID,
+            now: now
+        )
+    }
+
+    public func createControlValidated(
+        command: V2CreateGroupRoomCommand,
+        validatedMemberUserIDs: [UserID],
+        capacityProfile: V2CapacityProfile,
+        roomShardID: String,
+        roomID: RoomID,
+        eventID: EventID,
+        planID: FanoutPlanID,
+        now: Date
+    ) async throws -> V2CreateGroupRoomOutcome {
+        let actorID = try groupUUID(command.actorUserID)
+        let requestedMembers = try command.initialMemberUserIDs.map(groupUUID)
+        let canonicalAudience = validatedMemberUserIDs.sorted()
+        guard canonicalAudience == command.allMemberUserIDs,
+              canonicalAudience.count <= capacityProfile.limits.maxEligibleMembers
+        else { throw V2GroupMessagingStoreError.corruptPersistenceState }
+        return try await createGroup(
+            input: .init(
+                actorUserID: command.actorUserID,
+                actorID: actorID,
+                operationID: try groupUUID(command.operationID),
+                title: command.title,
+                deliveryMode: command.deliveryMode,
+                memberCount: canonicalAudience.count,
+                audience: .inline(
+                    requestedMembers: requestedMembers,
+                    materializedMembers: canonicalAudience
+                )
+            ),
+            identityValidation: .controlDatabaseManifest,
+            capacityProfile: capacityProfile,
+            roomShardID: roomShardID,
+            roomID: roomID,
+            eventID: eventID,
+            planID: planID,
+            now: now
+        )
+    }
+
+    public func stageControlValidatedAudience(
+        intent: V2GroupRoomCreationIntent,
+        page: V2GroupRoomCreationManifestPage,
+        now: Date
+    ) async throws {
+        let values = try GroupOwnerIntentValues(intent)
+        let encodedMembers = try groupUUIDJSON(
+            page.memberUserIDs.map { userID in
+                guard let value = userID.uuidValue else {
+                    throw V2GroupMessagingStoreError.corruptPersistenceState
+                }
+                return value
+            }
+        )
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2GroupMessagingStoreError.corruptPersistenceState
+            }
+            let lockKey = values.actorUserID.uuidString
+                + ":" + values.operationID.uuidString
+            try await sql.raw("""
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended(\(bind: lockKey), 0)
+                )
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.group_room_creation_intents
+                    (actor_user_id, operation_id, room_id, event_id, plan_id,
+                     room_shard_id, route_epoch, request_fingerprint,
+                     audience_member_count, state, created_at, updated_at)
+                VALUES (
+                    \(bind: values.actorUserID), \(bind: values.operationID),
+                    \(bind: values.roomID), \(bind: values.eventID),
+                    \(bind: values.planID), \(bind: intent.roomShardID),
+                    \(bind: intent.routeEpoch),
+                    \(bind: intent.requestFingerprint),
+                    \(bind: intent.audienceMemberCount), 'prepared',
+                    \(bind: now), \(bind: now)
+                )
+                ON CONFLICT DO NOTHING
+                """).run()
+            guard let persisted = try await sql.raw("""
+                SELECT room_id, event_id, plan_id, room_shard_id, route_epoch,
+                       request_fingerprint, audience_member_count
+                FROM im_v2.group_room_creation_intents
+                WHERE actor_user_id = \(bind: values.actorUserID)
+                  AND operation_id = \(bind: values.operationID)
+                FOR UPDATE
+                """).first(decoding: GroupOwnerIntentRow.self),
+                  persisted.matches(intent)
+            else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
+
+            try await sql.raw("""
+                INSERT INTO im_v2.group_room_creation_intent_pages
+                    (actor_user_id, operation_id, page_number, member_count,
+                     page_digest, is_final, created_at)
+                VALUES (
+                    \(bind: values.actorUserID), \(bind: values.operationID),
+                    \(bind: page.pageNumber),
+                    \(bind: page.memberUserIDs.count), \(bind: page.digest),
+                    \(bind: page.isFinal), \(bind: now)
+                )
+                ON CONFLICT DO NOTHING
+                """).run()
+            guard let persistedPage = try await sql.raw("""
+                SELECT member_count, page_digest, is_final
+                FROM im_v2.group_room_creation_intent_pages
+                WHERE actor_user_id = \(bind: values.actorUserID)
+                  AND operation_id = \(bind: values.operationID)
+                  AND page_number = \(bind: page.pageNumber)
+                """).first(decoding: GroupOwnerIntentPageRow.self),
+                  persistedPage.memberCount == page.memberUserIDs.count,
+                  persistedPage.pageDigest == page.digest,
+                  persistedPage.isFinal == page.isFinal
+            else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
+            try await sql.raw("""
+                INSERT INTO im_v2.group_room_creation_intent_members
+                    (actor_user_id, operation_id, user_id, created_at)
+                SELECT \(bind: values.actorUserID),
+                       \(bind: values.operationID), value::uuid, \(bind: now)
+                FROM jsonb_array_elements_text(
+                    \(bind: encodedMembers)::jsonb
+                ) AS value
+                ON CONFLICT DO NOTHING
+                """).run()
+        }
+    }
+
+    public func createControlValidatedStaged(
+        command: V2StagedGroupRoomCommand,
+        intent: V2GroupRoomCreationIntent,
+        capacityProfile: V2CapacityProfile,
+        now: Date
+    ) async throws -> V2CreateGroupRoomOutcome {
+        guard command.actorUserID == intent.actorUserID,
+              command.operationID == intent.operationID,
+              command.allMemberCount == intent.audienceMemberCount,
+              command.allMemberCount <= capacityProfile.limits.maxEligibleMembers
+        else { throw V2GroupMessagingStoreError.corruptPersistenceState }
+        return try await createGroup(
+            input: .init(
+                actorUserID: command.actorUserID,
+                actorID: try groupUUID(command.actorUserID),
+                operationID: try groupUUID(command.operationID),
+                title: command.title,
+                deliveryMode: command.deliveryMode,
+                memberCount: command.allMemberCount,
+                audience: .stagedControlManifest
+            ),
+            identityValidation: .controlDatabaseManifest,
+            capacityProfile: capacityProfile,
+            roomShardID: intent.roomShardID,
+            roomID: intent.roomID,
+            eventID: intent.eventID,
+            planID: intent.planID,
             now: now
         )
     }
@@ -75,6 +239,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
         )
         return try await createGroup(
             input: input,
+            identityValidation: .ownerDatabase,
             capacityProfile: capacityProfile,
             roomShardID: roomShardID,
             roomID: roomID,
@@ -86,6 +251,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
 
     private func createGroup(
         input: GroupCreationInput,
+        identityValidation: GroupCreationIdentityValidation,
         capacityProfile: V2CapacityProfile,
         roomShardID: String,
         roomID: RoomID,
@@ -111,8 +277,16 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                 return .idempotent(try previous.group(ownerUserID: input.actorUserID))
             }
 
-            switch input.audience {
-            case .inline(let requestedMembers, _):
+            switch (input.audience, identityValidation) {
+            case (.inline, .controlDatabaseManifest):
+                // The routed coordinator can reach this capability only with
+                // the immutable audience returned by the durable control
+                // intent. Repeating identity lookups here would require a
+                // synchronously replicated global profile database and would
+                // reintroduce a cross-store race.
+                break
+
+            case (.inline(let requestedMembers, _), .ownerDatabase):
                 let allMembers = [input.actorID] + requestedMembers
                 let encoded = try groupUUIDJSON(allMembers)
                 let activeMemberCount = try await sql.raw("""
@@ -130,7 +304,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                     """).first(decoding: GroupCountRow.self)?.value ?? -1
                 guard activeMemberCount == Int64(input.memberCount) else { return .invalidMembers }
 
-            case .staged:
+            case (.staged, .ownerDatabase):
                 guard let draft = try await sql.raw("""
                     SELECT draft.title, draft.state,
                            (SELECT COUNT(*)::bigint
@@ -165,6 +339,40 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                     WHERE disabled.user_id IS NULL
                     """).first(decoding: GroupCountRow.self)?.value ?? -1
                 guard activeMemberCount == Int64(input.memberCount) else { return .invalidMembers }
+
+            case (.staged, .controlDatabaseManifest):
+                throw V2GroupMessagingStoreError.corruptPersistenceState
+
+            case (.stagedControlManifest, .ownerDatabase):
+                throw V2GroupMessagingStoreError.corruptPersistenceState
+
+            case (.stagedControlManifest, .controlDatabaseManifest):
+                guard let summary = try await sql.raw("""
+                    SELECT
+                        COUNT(*)::bigint AS page_count,
+                        COALESCE(MIN(page_number), -1)::bigint AS minimum_page,
+                        COALESCE(MAX(page_number), -1)::bigint AS maximum_page,
+                        COALESCE(SUM(member_count), 0)::bigint AS declared_members,
+                        COUNT(*) FILTER (WHERE is_final)::bigint AS final_count,
+                        COALESCE(MAX(page_number) FILTER (WHERE is_final), -1)::bigint
+                            AS final_page,
+                        (SELECT COUNT(*)::bigint
+                         FROM im_v2.group_room_creation_intent_members AS member
+                         WHERE member.actor_user_id = \(bind: input.actorID)
+                           AND member.operation_id = \(bind: input.operationID)
+                        ) AS materialized_members
+                    FROM im_v2.group_room_creation_intent_pages
+                    WHERE actor_user_id = \(bind: input.actorID)
+                      AND operation_id = \(bind: input.operationID)
+                    """).first(decoding: GroupOwnerManifestSummaryRow.self),
+                      summary.pageCount > 0,
+                      summary.minimumPage == 0,
+                      summary.maximumPage == summary.pageCount - 1,
+                      summary.finalCount == 1,
+                      summary.finalPage == summary.maximumPage,
+                      summary.declaredMembers == Int64(input.memberCount),
+                      summary.materializedMembers == Int64(input.memberCount)
+                else { return .unavailable }
             }
 
             let createdRoomID = try groupUUID(roomID)
@@ -203,6 +411,16 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                     FROM im_v2.group_room_creation_draft_members AS member
                     WHERE member.actor_user_id = \(bind: input.actorID)
                       AND member.operation_id = \(bind: input.operationID)
+                    """).run()
+            case .stagedControlManifest:
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_memberships
+                        (room_id, user_id, role, joined_revision)
+                    SELECT \(bind: createdRoomID), member.user_id, 'member', 1
+                    FROM im_v2.group_room_creation_intent_members AS member
+                    WHERE member.actor_user_id = \(bind: input.actorID)
+                      AND member.operation_id = \(bind: input.operationID)
+                      AND member.user_id <> \(bind: input.actorID)
                     """).run()
             }
 
@@ -244,6 +462,15 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                     UNION ALL
                     SELECT \(bind: createdEventID), member.user_id
                     FROM im_v2.group_room_creation_draft_members AS member
+                    WHERE member.actor_user_id = \(bind: input.actorID)
+                      AND member.operation_id = \(bind: input.operationID)
+                    """).run()
+            case .stagedControlManifest:
+                try await sql.raw("""
+                    INSERT INTO im_v2.fanout_plan_targets
+                        (source_event_id, target_user_id)
+                    SELECT \(bind: createdEventID), member.user_id
+                    FROM im_v2.group_room_creation_intent_members AS member
                     WHERE member.actor_user_id = \(bind: input.actorID)
                       AND member.operation_id = \(bind: input.operationID)
                     """).run()
@@ -344,7 +571,7 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                                   ORDER BY value::uuid),
                             \(bind: now))
                     """).run()
-            case .staged:
+            case .staged, .stagedControlManifest:
                 try await sql.raw("""
                     INSERT INTO im_v2.group_room_operations
                         (actor_user_id, operation_id, room_id, title, delivery_mode,
@@ -352,6 +579,14 @@ public struct PostgresV2GroupMessagingStore: V2GroupMessagingStore, V2StagedGrou
                     VALUES (\(bind: input.actorID), \(bind: input.operationID), \(bind: createdRoomID),
                             \(bind: input.title), \(bind: input.deliveryMode.rawValue), 'staged',
                             \(bind: input.memberCount), ARRAY[]::uuid[], \(bind: now))
+                    """).run()
+            }
+            if case .stagedControlManifest = input.audience {
+                try await sql.raw("""
+                    UPDATE im_v2.group_room_creation_intents
+                    SET state = 'committed', updated_at = \(bind: now)
+                    WHERE actor_user_id = \(bind: input.actorID)
+                      AND operation_id = \(bind: input.operationID)
                     """).run()
             }
             return .created(try input.group(roomID: roomID, createdAt: now))
@@ -366,13 +601,19 @@ public enum V2GroupMessagingStoreError: Error, Equatable, Sendable {
 private enum GroupCreationAudience: Sendable {
     case inline(requestedMembers: [UUID], materializedMembers: [UserID])
     case staged
+    case stagedControlManifest
 
     var kind: String {
         switch self {
         case .inline: "inline"
-        case .staged: "staged"
+        case .staged, .stagedControlManifest: "staged"
         }
     }
+}
+
+private enum GroupCreationIdentityValidation: Sendable {
+    case ownerDatabase
+    case controlDatabaseManifest
 }
 
 private struct GroupCreationInput: Sendable {
@@ -388,7 +629,8 @@ private struct GroupCreationInput: Sendable {
         let materializedMembers: [UserID]
         switch audience {
         case .inline(_, let members): materializedMembers = members
-        case .staged: materializedMembers = [actorUserID]
+        case .staged, .stagedControlManifest:
+            materializedMembers = [actorUserID]
         }
         return .init(
             roomID: roomID,
@@ -448,6 +690,88 @@ private struct GroupShardLeaseRow: Decodable {
 
 private struct GroupCountRow: Decodable { let value: Int64 }
 
+private struct GroupOwnerIntentValues {
+    let actorUserID: UUID
+    let operationID: UUID
+    let roomID: UUID
+    let eventID: UUID
+    let planID: UUID
+
+    init(_ intent: V2GroupRoomCreationIntent) throws {
+        guard let actorUserID = intent.actorUserID.uuidValue,
+              let operationID = intent.operationID.uuidValue,
+              let roomID = intent.roomID.uuidValue,
+              let eventID = intent.eventID.uuidValue,
+              let planID = intent.planID.uuidValue
+        else { throw V2GroupMessagingStoreError.corruptPersistenceState }
+        self.actorUserID = actorUserID
+        self.operationID = operationID
+        self.roomID = roomID
+        self.eventID = eventID
+        self.planID = planID
+    }
+}
+
+private struct GroupOwnerIntentRow: Decodable {
+    let roomID: UUID
+    let eventID: UUID
+    let planID: UUID
+    let roomShardID: String
+    let routeEpoch: Int64
+    let requestFingerprint: Data
+    let audienceMemberCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case eventID = "event_id"
+        case planID = "plan_id"
+        case roomShardID = "room_shard_id"
+        case routeEpoch = "route_epoch"
+        case requestFingerprint = "request_fingerprint"
+        case audienceMemberCount = "audience_member_count"
+    }
+
+    func matches(_ intent: V2GroupRoomCreationIntent) -> Bool {
+        roomID == intent.roomID.uuidValue
+            && eventID == intent.eventID.uuidValue
+            && planID == intent.planID.uuidValue
+            && roomShardID == intent.roomShardID
+            && routeEpoch == intent.routeEpoch
+            && requestFingerprint == intent.requestFingerprint
+            && audienceMemberCount == intent.audienceMemberCount
+    }
+}
+
+private struct GroupOwnerIntentPageRow: Decodable {
+    let memberCount: Int
+    let pageDigest: Data
+    let isFinal: Bool
+    enum CodingKeys: String, CodingKey {
+        case memberCount = "member_count"
+        case pageDigest = "page_digest"
+        case isFinal = "is_final"
+    }
+}
+
+private struct GroupOwnerManifestSummaryRow: Decodable {
+    let pageCount: Int64
+    let minimumPage: Int64
+    let maximumPage: Int64
+    let declaredMembers: Int64
+    let finalCount: Int64
+    let finalPage: Int64
+    let materializedMembers: Int64
+    enum CodingKeys: String, CodingKey {
+        case pageCount = "page_count"
+        case minimumPage = "minimum_page"
+        case maximumPage = "maximum_page"
+        case declaredMembers = "declared_members"
+        case finalCount = "final_count"
+        case finalPage = "final_page"
+        case materializedMembers = "materialized_members"
+    }
+}
+
 private struct GroupStagedDraftRow: Decodable {
     let title: String
     let state: String
@@ -486,7 +810,7 @@ private struct GroupOperationRow: Decodable {
         switch input.audience {
         case .inline(let requestedMembers, _):
             return initialMemberUserIDs == requestedMembers.sorted()
-        case .staged:
+        case .staged, .stagedControlManifest:
             return initialMemberUserIDs.isEmpty
         }
     }

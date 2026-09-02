@@ -4,8 +4,8 @@ import Foundation
 /// brokers. Callers own the execution boundary: this value must live inside a
 /// `NIOLoopBoundBox` and never cross to an actor or task directly.
 struct V2NATSInboundFrameParser {
-    private static let maximumBufferedBytes = 64 * 1_024
-    private static let maximumPayloadBytes = 16 * 1_024
+    static let defaultMaximumPayloadBytes = 16 * 1_024
+    static let absoluteMaximumPayloadBytes = 1_024 * 1_024
     private static let maximumOutputsPerRead = 256
     enum InvalidMessagePolicy: Sendable {
         /// A malformed `MSG` declaration indicates an invalid room-wake
@@ -29,14 +29,32 @@ struct V2NATSInboundFrameParser {
     private var pending = Data()
     private var remainingPayloadBytes: Int?
     private let invalidMessagePolicy: InvalidMessagePolicy
+    private let maximumPayloadBytes: Int
+    private let maximumBufferedBytes: Int
 
-    init(invalidMessagePolicy: InvalidMessagePolicy) {
+    init(
+        invalidMessagePolicy: InvalidMessagePolicy,
+        maximumPayloadBytes: Int = Self.defaultMaximumPayloadBytes
+    ) {
+        precondition(
+            maximumPayloadBytes > 0
+                && maximumPayloadBytes <= Self.absoluteMaximumPayloadBytes
+        )
         self.invalidMessagePolicy = invalidMessagePolicy
+        self.maximumPayloadBytes = maximumPayloadBytes
+        // A NIO read may coalesce several complete NATS messages. Bound the
+        // aggregate parser allocation while allowing four legal frames to be
+        // consumed without falsely treating their combined read as one
+        // oversized payload.
+        maximumBufferedBytes = max(
+            64 * 1_024,
+            maximumPayloadBytes * 4 + 1_024
+        )
     }
 
     mutating func consume(_ bytes: Data) -> [Output] {
         pending.append(bytes)
-        guard pending.count <= Self.maximumBufferedBytes else {
+        guard pending.count <= maximumBufferedBytes else {
             pending.removeAll(keepingCapacity: false)
             remainingPayloadBytes = nil
             return [.closeChannel]
@@ -101,7 +119,7 @@ struct V2NATSInboundFrameParser {
                 }
                 continue
             }
-            guard count <= Self.maximumPayloadBytes else {
+            guard count <= maximumPayloadBytes else {
                 pending.removeAll(keepingCapacity: false)
                 consumedBytes = 0
                 outputs.append(.closeChannel)
@@ -116,7 +134,11 @@ struct V2NATSInboundFrameParser {
 /// owns the async hop, preserving order without spawning one unstructured Task
 /// per payload. These hints are non-authoritative, so overload coalesces old
 /// payloads and durable sync remains the recovery source.
-final class V2NATSPayloadDispatcher: Sendable {
+protocol V2NATSPayloadSubmitting: Sendable {
+    func submit(_ payload: Data)
+}
+
+final class V2NATSPayloadDispatcher: V2NATSPayloadSubmitting, Sendable {
     private let continuation: AsyncStream<Data>.Continuation
     private let worker: Task<Void, Never>
 

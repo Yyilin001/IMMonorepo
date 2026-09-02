@@ -54,6 +54,11 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// identifiers, so an adaptive rollout can be verified without a SQL
     /// inference or high-cardinality labels.
     public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
+    /// Aggregate group read-cursor micro-batch facts. These counters contain
+    /// no room, user or operation identifiers and are sufficient to verify
+    /// that production traffic, rather than only a synthetic load shape, is
+    /// sharing transactions.
+    public let readReceiptBatching: V2ReadReceiptBatcher.Snapshot?
     /// Fixed-stage latency histograms for the authoritative shard-only direct
     /// append transaction. Stage names are an enum, never dynamic SQL or
     /// relation identifiers.
@@ -69,6 +74,10 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// Best-effort local direct-event cache facts. No room, user or event ID
     /// is exposed as a metric label.
     public let directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot?
+    /// Shared encoded group-page occupancy and lookup outcomes. The cache key
+    /// is deliberately not exposed, so room and event identifiers never
+    /// become metrics labels.
+    public let preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot?
     /// Aggregate heartbeat renewal batching facts. Connection and user IDs are
     /// intentionally absent to keep this operational metric low-cardinality.
     public let livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot?
@@ -80,11 +89,13 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot? = nil,
         directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot? = nil,
+        readReceiptBatching: V2ReadReceiptBatcher.Snapshot? = nil,
         directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot? = nil,
         gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot? = nil,
         directSendPolicy: V2DirectSendPolicyCache.Snapshot? = nil,
         directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil,
+        preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot? = nil,
         livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot? = nil
     ) {
         self.databaseWork = databaseWork
@@ -93,11 +104,13 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
+        self.readReceiptBatching = readReceiptBatching
         self.directRoomLogAppendStages = directRoomLogAppendStages
         self.gatewayEventLoopLag = gatewayEventLoopLag
         self.directSendPolicy = directSendPolicy
         self.directRoomLogFastAppend = directRoomLogFastAppend
         self.directRoomLogEventCache = directRoomLogEventCache
+        self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.livePresenceRenewals = livePresenceRenewals
     }
 }
@@ -113,11 +126,13 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
+    private let readReceiptBatcher: V2ReadReceiptBatcher?
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
     private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
     private let directSendPolicyCache: V2DirectSendPolicyCache?
     private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache?
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
+    private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let connectionRegistry: V2DeviceConnectionRegistry?
 
     public init(
@@ -127,11 +142,13 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
         directRoomLogAppendBatcher: (any V2SendMessageAdmission)? = nil,
+        readReceiptBatcher: V2ReadReceiptBatcher? = nil,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
         gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         directSendPolicyCache: V2DirectSendPolicyCache? = nil,
         directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
+        preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         connectionRegistry: V2DeviceConnectionRegistry? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
@@ -140,11 +157,13 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
         self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
+        self.readReceiptBatcher = readReceiptBatcher
         self.directRoomLogAppendStageMetrics = directRoomLogAppendStageMetrics
         self.gatewayEventLoopLagMetrics = gatewayEventLoopLagMetrics
         self.directSendPolicyCache = directSendPolicyCache
         self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
         self.directRoomLogEventCache = directRoomLogEventCache
+        self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.connectionRegistry = connectionRegistry
     }
 
@@ -154,11 +173,13 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         let credits = await shardAdmissionCommandCredits?.snapshot()
         let roomCredits = await roomAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
+        let receiptBatching = await readReceiptBatcher?.snapshot()
         let appendStages = directRoomLogAppendStageMetrics?.snapshot()
         let eventLoopLag = gatewayEventLoopLagMetrics?.snapshot()
         let directSendPolicy = await directSendPolicyCache?.snapshot()
         let fastAppend = await directRoomLogFastAppendCache?.snapshot()
         let eventCache = await directRoomLogEventCache?.snapshot()
+        let preparedPageCache = preparedGroupEventPageCache?.snapshot()
         let livePresenceRenewals = await connectionRegistry?.livePresenceRenewalMetrics()
         return await .init(
             databaseWork: databaseWork,
@@ -167,11 +188,13 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             shardAdmissionCommandCredits: credits,
             roomAdmissionCommandCredits: roomCredits,
             directRoomLogAppendBatching: appendBatching,
+            readReceiptBatching: receiptBatching,
             directRoomLogAppendStages: appendStages,
             gatewayEventLoopLag: eventLoopLag,
             directSendPolicy: directSendPolicy,
             directRoomLogFastAppend: fastAppend,
             directRoomLogEventCache: eventCache,
+            preparedGroupEventPageCache: preparedPageCache,
             livePresenceRenewals: livePresenceRenewals
         )
     }
@@ -405,6 +428,31 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_direct_room_log_append_batch_cancellations_total \(batching.cancelledPendingRequests)",
         ])
     }
+    if let batching = snapshot.readReceiptBatching {
+        lines.append(contentsOf: [
+            "# HELP im_v2_read_receipt_batch_pending_requests Read-receipt operations waiting for a durable batch.",
+            "# TYPE im_v2_read_receipt_batch_pending_requests gauge",
+            "im_v2_read_receipt_batch_pending_requests \(batching.pendingRequests)",
+            "# HELP im_v2_read_receipt_batch_in_flight Durable read-receipt batches currently executing.",
+            "# TYPE im_v2_read_receipt_batch_in_flight gauge",
+            "im_v2_read_receipt_batch_in_flight \(batching.inFlightBatches)",
+            "# HELP im_v2_read_receipt_batches_completed_total Durable read-receipt batches completed.",
+            "# TYPE im_v2_read_receipt_batches_completed_total counter",
+            "im_v2_read_receipt_batches_completed_total \(batching.completedBatches)",
+            "# HELP im_v2_read_receipt_requests_completed_total Read-receipt operations completed through the batch path.",
+            "# TYPE im_v2_read_receipt_requests_completed_total counter",
+            "im_v2_read_receipt_requests_completed_total \(batching.completedRequests)",
+            "# HELP im_v2_read_receipt_batch_maximum_observed_size Largest read-receipt transaction batch observed since process start.",
+            "# TYPE im_v2_read_receipt_batch_maximum_observed_size gauge",
+            "im_v2_read_receipt_batch_maximum_observed_size \(batching.maximumObservedBatchSize)",
+            "# HELP im_v2_read_receipt_batch_rejections_total Read-receipt operations rejected by the bounded staging queue.",
+            "# TYPE im_v2_read_receipt_batch_rejections_total counter",
+            "im_v2_read_receipt_batch_rejections_total{reason=\"queue_full\"} \(batching.queueFullRejections)",
+            "# HELP im_v2_read_receipt_batch_cancellations_total Pending read-receipt operations removed before durable dispatch.",
+            "# TYPE im_v2_read_receipt_batch_cancellations_total counter",
+            "im_v2_read_receipt_batch_cancellations_total \(batching.cancelledPendingRequests)",
+        ])
+    }
     if let stages = snapshot.directRoomLogAppendStages {
         lines.append(contentsOf: [
             "# HELP im_v2_direct_room_log_append_stage_milliseconds Fixed-stage latency inside the authoritative direct append path.",
@@ -513,6 +561,23 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# HELP im_v2_direct_room_log_event_cache_dropped_writes_total Cache accelerators dropped at the bounded post-commit mailbox.",
             "# TYPE im_v2_direct_room_log_event_cache_dropped_writes_total counter",
             "im_v2_direct_room_log_event_cache_dropped_writes_total \(eventCache.droppedWrites)",
+        ])
+    }
+    if let prepared = snapshot.preparedGroupEventPageCache {
+        lines.append(contentsOf: [
+            "# HELP im_v2_prepared_group_event_page_cache_entries Bounded shared encoded group-event page entries.",
+            "# TYPE im_v2_prepared_group_event_page_cache_entries gauge",
+            "im_v2_prepared_group_event_page_cache_entries \(prepared.entries)",
+            "# HELP im_v2_prepared_group_event_page_cache_bytes Encoded payload bytes retained by the shared group-event page cache.",
+            "# TYPE im_v2_prepared_group_event_page_cache_bytes gauge",
+            "im_v2_prepared_group_event_page_cache_bytes \(prepared.bytes)",
+            "# HELP im_v2_prepared_group_event_page_cache_lookups_total Shared encoded group-event page lookup outcomes.",
+            "# TYPE im_v2_prepared_group_event_page_cache_lookups_total counter",
+            "im_v2_prepared_group_event_page_cache_lookups_total{outcome=\"hit\"} \(prepared.hits)",
+            "im_v2_prepared_group_event_page_cache_lookups_total{outcome=\"miss\"} \(prepared.misses)",
+            "# HELP im_v2_prepared_group_event_page_cache_evictions_total Shared encoded group-event page removals caused by capacity bounds.",
+            "# TYPE im_v2_prepared_group_event_page_cache_evictions_total counter",
+            "im_v2_prepared_group_event_page_cache_evictions_total \(prepared.evictions)",
         ])
     }
     if let renewals = snapshot.livePresenceRenewals {

@@ -159,6 +159,37 @@ struct V2PrometheusTelemetrySinkTests {
         metrics.connectionOpened()
         metrics.observeQueuedInboundBytes(1_024)
         metrics.observeQueuedInboundBytes(-1)
+        metrics.foregroundFrameSubmitted(
+            bytes: 120,
+            recoveryQueued: false,
+            recoveryReplaced: false,
+            queuedBytes: 120
+        )
+        metrics.foregroundFrameSubmitted(
+            bytes: 140,
+            recoveryQueued: true,
+            recoveryReplaced: true,
+            queuedBytes: 260
+        )
+        metrics.foregroundWriteBatch(frames: 2, bytes: 260)
+        metrics.foregroundWriteDeferredForWritability()
+        metrics.foregroundGroupEventSubmitted(
+            duplicateSuppressed: false,
+            outOfOrder: true,
+            lateAfterPublication: false,
+            degradedToWake: false
+        )
+        metrics.foregroundGroupEventSubmitted(
+            duplicateSuppressed: true,
+            outOfOrder: false,
+            lateAfterPublication: true,
+            degradedToWake: true
+        )
+        metrics.foregroundGroupEventBatchPublished(eventCount: 7)
+        metrics.foregroundGroupInboundNotificationDropped()
+        metrics.foregroundGroupCoveredWakeSuppressed()
+        metrics.foregroundGroupWakeDeferred()
+        metrics.foregroundGroupDeferredWakeDelivered()
         metrics.connectionClosed(reason: .idleTimeout)
         metrics.connectionRejected(reason: .connectionLimit)
 
@@ -169,10 +200,45 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(snapshot.closureCount(for: .connectionLimit) == 1)
         #expect(snapshot.closureCount(for: .frameLimitViolation) == 0)
         #expect(snapshot.closureCount(for: .requestFailure) == 0)
+        #expect(snapshot.foregroundFramesSubmitted == 2)
+        #expect(snapshot.foregroundBytesSubmitted == 260)
+        #expect(snapshot.foregroundRecoveryFramesQueued == 1)
+        #expect(snapshot.foregroundRecoveryFramesReplaced == 1)
+        #expect(snapshot.foregroundFramesWritten == 2)
+        #expect(snapshot.foregroundBytesWritten == 260)
+        #expect(snapshot.foregroundWriteBatches == 1)
+        #expect(snapshot.foregroundNonWritableDeferrals == 1)
+        #expect(snapshot.peakQueuedForegroundBytes == 260)
+        #expect(snapshot.foregroundGroupEventsSubmitted == 2)
+        #expect(snapshot.foregroundGroupEventsPublished == 7)
+        #expect(snapshot.foregroundGroupEventBatchesPublished == 1)
+        #expect(snapshot.foregroundGroupEventDuplicatesSuppressed == 1)
+        #expect(snapshot.foregroundGroupEventOutOfOrderArrivals == 1)
+        #expect(snapshot.foregroundGroupEventLateArrivals == 1)
+        #expect(snapshot.foregroundGroupEventBatchDegradations == 1)
+        #expect(snapshot.foregroundGroupInboundNotificationsDropped == 1)
+        #expect(snapshot.foregroundGroupCoveredWakesSuppressed == 1)
+        #expect(snapshot.foregroundGroupWakesDeferred == 1)
+        #expect(snapshot.foregroundGroupDeferredWakesDelivered == 1)
 
         let rendered = v2RenderPrometheusGatewayTransportMetrics(snapshot)
         #expect(rendered.contains("im_v2_gateway_transport_active_connections 1"))
         #expect(rendered.contains("im_v2_gateway_inbound_queue_peak_bytes 1024"))
+        #expect(rendered.contains("im_v2_gateway_foreground_frames_submitted_total 2"))
+        #expect(rendered.contains("im_v2_gateway_foreground_recovery_frames_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_frames_written_total 2"))
+        #expect(rendered.contains("im_v2_gateway_foreground_write_batches_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_queue_peak_bytes 260"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_events_submitted_total 2"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_events_published_total 7"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_event_batches_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_event_out_of_order_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_event_late_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_event_degradations_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_inbound_notifications_dropped_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_covered_wakes_suppressed_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_wakes_deferred_total 1"))
+        #expect(rendered.contains("im_v2_gateway_foreground_group_deferred_wakes_delivered_total 1"))
         #expect(rendered.contains("im_v2_gateway_connection_closures_total{reason=\"idle_timeout\"} 1"))
         #expect(!rendered.contains("user_id"))
         #expect(!rendered.contains("device_id"))

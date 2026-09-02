@@ -26,6 +26,23 @@ public protocol V2GroupMessagingStore: Sendable {
     ) async throws -> V2CreateGroupRoomOutcome
 }
 
+/// Owner-side capability used only after the control database has atomically
+/// validated and persisted the exact initial audience. Keeping this separate
+/// from ordinary `create` prevents a routed coordinator from accidentally
+/// depending on stale or incomplete identity replicas in the owner database.
+public protocol V2ControlValidatedGroupMessagingStore: V2GroupMessagingStore {
+    func createControlValidated(
+        command: V2CreateGroupRoomCommand,
+        validatedMemberUserIDs: [UserID],
+        capacityProfile: V2CapacityProfile,
+        roomShardID: String,
+        roomID: RoomID,
+        eventID: EventID,
+        planID: FanoutPlanID,
+        now: Date
+    ) async throws -> V2CreateGroupRoomOutcome
+}
+
 /// Optional storage capability for audiences that have already been staged
 /// and frozen in PostgreSQL. The application process carries only the
 /// authoritative count; the store consumes the immutable member relation

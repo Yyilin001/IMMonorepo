@@ -110,9 +110,14 @@ protocol V2GatewayMessageEditHandling: Sendable {
 }
 
 protocol V2GatewayReadReceiptHandling: Sendable {
+    var managesForegroundWriteAdmission: Bool { get }
     func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome
     func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
+}
+
+extension V2GatewayReadReceiptHandling {
+    var managesForegroundWriteAdmission: Bool { false }
 }
 
 protocol V2GatewayLiveActivityHandling: Sendable {
@@ -137,14 +142,36 @@ protocol V2GatewayGroupAudienceImportHandling: Sendable {
 
 protocol V2GatewayGroupEventLogHandling: Sendable {
     func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage
+    func pullPrepared(
+        roomID: RoomID,
+        actorUserID: UserID,
+        afterRoomSequence: UInt64,
+        pageSize: Int,
+        context: V2PreparedGroupEventPageEncodingContext
+    ) async throws -> V2PreparedGroupEventPullResult
     func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription
-    func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage)
-    func recordCommittedDirectRoomLogEvent(_ event: V2DirectRoomLiveEvent)
+    func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async
+    func recordCommittedDirectRoomLogEvent(_ event: V2DirectRoomLiveEvent) async
 }
 
 extension V2GatewayGroupEventLogHandling {
-    func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) {}
-    func recordCommittedDirectRoomLogEvent(_: V2DirectRoomLiveEvent) {}
+    func pullPrepared(
+        roomID: RoomID,
+        actorUserID: UserID,
+        afterRoomSequence: UInt64,
+        pageSize: Int,
+        context _: V2PreparedGroupEventPageEncodingContext
+    ) async throws -> V2PreparedGroupEventPullResult {
+        .page(try await pull(
+            roomID: roomID,
+            actorUserID: actorUserID,
+            afterRoomSequence: afterRoomSequence,
+            pageSize: pageSize
+        ))
+    }
+
+    func recordCommittedDirectRoomLogMessage(_: V2AcceptedMessage) async {}
+    func recordCommittedDirectRoomLogEvent(_: V2DirectRoomLiveEvent) async {}
 }
 
 protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
@@ -193,7 +220,9 @@ extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
 extension V2ForwardMessagesService: V2GatewayForwardMessagesHandling {}
 
 /// Routes validated authenticated protobuf commands to the V2 domain services.
-public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
+public struct V2GatewayDomainCommandHandler:
+    V2GatewayCommandHandler,
+    V2PreparedGroupEventCommandHandling {
     private let sendMessage: V2SendMessageService
     private let membership: any V2GatewayRoomMembershipHandling
     private let withdrawal: any V2GatewayMessageWithdrawalHandling
@@ -320,7 +349,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             let response: IMV2Envelope
             if let databaseWorkAdmission,
                let workClass = databaseWorkClass(for: envelope),
-               !sendMessageManagesDatabaseAdmission(for: envelope) {
+               !commandManagesDatabaseAdmission(for: envelope) {
                 switch await databaseWorkAdmission.acquire(workClass) {
                 case .admitted:
                     break
@@ -367,6 +396,158 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             ))
             throw error
         }
+    }
+
+    func handlePreparedGroupEventPull(
+        _ request: IMV2GroupEventPull,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID _: UUID?,
+        context: V2PreparedGroupEventCommandContext
+    ) async throws -> V2PreparedGroupEventGatewayResponse {
+        let traceID = V2SecureProcessUUIDGenerator.shared.makeOne()
+        var telemetryEnvelope = IMV2Envelope()
+        telemetryEnvelope.groupEventPull = request
+        let command = v2TelemetryCommand(for: telemetryEnvelope)
+        let startedAt = now()
+        do {
+            let result: V2PreparedGroupEventPullResult
+            if let databaseWorkAdmission {
+                switch await databaseWorkAdmission.acquire(.interactiveRead) {
+                case .admitted:
+                    break
+                case .rejected:
+                    let response = errorEnvelope(code: "SERVER_BUSY", retryable: true)
+                    return .envelope(await recordAndReturn(
+                        response,
+                        traceID: traceID,
+                        command: command,
+                        startedAt: startedAt
+                    ))
+                case .cancelled:
+                    throw CancellationError()
+                }
+                guard !Task.isCancelled else {
+                    await databaseWorkAdmission.release(.interactiveRead)
+                    throw CancellationError()
+                }
+                do {
+                    result = try await pullPreparedGroupEventPage(
+                        request,
+                        identity: identity,
+                        context: context
+                    )
+                    await databaseWorkAdmission.release(.interactiveRead)
+                } catch {
+                    await databaseWorkAdmission.release(.interactiveRead)
+                    throw error
+                }
+            } else {
+                result = try await pullPreparedGroupEventPage(
+                    request,
+                    identity: identity,
+                    context: context
+                )
+            }
+
+            switch result {
+            case .prepared(let prepared):
+                await telemetry.record(.gatewayCommand(
+                    traceID: traceID,
+                    command: command,
+                    outcome: .accepted,
+                    rejection: nil,
+                    elapsedMilliseconds:
+                        v2ElapsedMilliseconds(since: startedAt, now: now())
+                ))
+                return .prepared(prepared)
+            case .page(let page):
+                return .envelope(await recordAndReturn(
+                    groupEventPageEnvelope(page),
+                    traceID: traceID,
+                    command: command,
+                    startedAt: startedAt
+                ))
+            case .eventTooLarge:
+                return .envelope(await recordAndReturn(
+                    errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false),
+                    traceID: traceID,
+                    command: command,
+                    startedAt: startedAt
+                ))
+            }
+        } catch V2CoreError.invalidIdentifier,
+                V2GroupEventLogError.invalidRequest {
+            return .envelope(await recordAndReturn(
+                errorEnvelope(code: "INVALID_ARGUMENT", retryable: false),
+                traceID: traceID,
+                command: command,
+                startedAt: startedAt
+            ))
+        } catch V2GroupEventLogError.actorNotMember {
+            return .envelope(await recordAndReturn(
+                errorEnvelope(code: "FORBIDDEN", retryable: false),
+                traceID: traceID,
+                command: command,
+                startedAt: startedAt
+            ))
+        } catch V2GroupEventLogError.roomNotFound {
+            return .envelope(await recordAndReturn(
+                errorEnvelope(code: "NOT_FOUND", retryable: false),
+                traceID: traceID,
+                command: command,
+                startedAt: startedAt
+            ))
+        } catch V2GroupEventLogError.corruptPersistenceState {
+            return .envelope(await recordAndReturn(
+                errorEnvelope(code: "UNAVAILABLE", retryable: true),
+                traceID: traceID,
+                command: command,
+                startedAt: startedAt
+            ))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error where v2PostgresFailureDisposition(error) != .other {
+            return .envelope(await recordAndReturn(
+                errorEnvelope(code: "UNAVAILABLE", retryable: true),
+                traceID: traceID,
+                command: command,
+                startedAt: startedAt
+            ))
+        } catch {
+            await telemetry.record(.gatewayCommand(
+                traceID: traceID,
+                command: command,
+                outcome: .failed,
+                rejection: nil,
+                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+            ))
+            throw error
+        }
+    }
+
+    private func pullPreparedGroupEventPage(
+        _ request: IMV2GroupEventPull,
+        identity: V2AuthenticatedConnection,
+        context: V2PreparedGroupEventCommandContext
+    ) async throws -> V2PreparedGroupEventPullResult {
+        try await groupEventLog.pullPrepared(
+            roomID: try .init(request.roomID),
+            actorUserID: identity.userID,
+            afterRoomSequence: request.afterRoomSequence,
+            pageSize: Int(request.pageSize),
+            context: .init(
+                requestID: context.requestID,
+                frameVersion: context.frameVersion,
+                compression: context.compression,
+                maximumUncompressedPayloadBytes:
+                    context.maximumUncompressedPayloadBytes,
+                compressionThresholdBytes: context.compressionThresholdBytes,
+                maximumExpansionRatio: context.maximumExpansionRatio,
+                maximumGroupEventPagePayloadBytes:
+                    maximumGroupEventPagePayloadBytes,
+                cache: context.cache
+            )
+        )
     }
 
     private func recordAndReturn(
@@ -431,10 +612,15 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         }
     }
 
-    private func sendMessageManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
-        guard sendMessage.managesForegroundWriteAdmission else { return false }
-        guard case .sendMessage = envelope.body else { return false }
-        return true
+    private func commandManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
+        switch envelope.body {
+        case .sendMessage:
+            return sendMessage.managesForegroundWriteAdmission
+        case .recordReadReceipt:
+            return readReceipt.managesForegroundWriteAdmission
+        default:
+            return false
+        }
     }
 
     private func handleWithoutTelemetry(
@@ -691,13 +877,25 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
                 message,
                 excludingConnectionID: originatingConnectionID
             )?.materialized() {
-                groupEventLog.recordCommittedDirectRoomLogEvent(directEvent)
+                await groupEventLog.recordCommittedDirectRoomLogEvent(directEvent)
                 // Best effort and post-commit only. The dispatcher validates
                 // and queues one immutable payload shared with the local
                 // room-log acceleration cache.
                 foregroundGroupEventHints.submitForegroundDirectEvent(directEvent)
+            } else if let groupEventDraft = V2GroupRoomLiveEventDraft(message) {
+                // The append batcher invokes its committed observer before
+                // resuming this request. In that configuration the observer
+                // has already materialized and submitted this exact Hybrid
+                // event. Keep the cheap eligibility draft so the richer-event
+                // fallback below remains unchanged, but do not JSON-encode a
+                // second payload merely to discard it here.
+                if !sendMessage.publishesCommittedGroupEvents,
+                   let groupEvent = groupEventDraft.materialized() {
+                    await groupEventLog.recordCommittedDirectRoomLogEvent(groupEvent)
+                    foregroundGroupEventHints.submitForegroundDirectEvent(groupEvent)
+                }
             } else if message.groupDeliveryMode != nil || message.usesRoomEventLog {
-                groupEventLog.recordCommittedDirectRoomLogMessage(message)
+                await groupEventLog.recordCommittedDirectRoomLogMessage(message)
                 foregroundGroupEventHints.submitForegroundHint(.init(
                     roomID: message.roomID,
                     highWatermark: message.roomSequence
@@ -1000,7 +1198,12 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
     }
 
     private func handleReadReceipt(_ request: IMV2RecordReadReceipt, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let outcome = try await readReceipt.record(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), readThroughRoomSequence: request.readThroughRoomSequence))
+        let outcome: V2ReadReceiptOutcome
+        do {
+            outcome = try await readReceipt.record(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), readThroughRoomSequence: request.readThroughRoomSequence))
+        } catch V2ReadReceiptBatcherError.serverBusy {
+            return errorEnvelope(code: "SERVER_BUSY", retryable: true)
+        }
         switch outcome {
         case .recorded(let result), .idempotent(let result):
             var response = IMV2Envelope(); response.readReceiptRecorded = .init()
@@ -1114,6 +1317,14 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             afterRoomSequence: request.afterRoomSequence,
             pageSize: Int(request.pageSize)
         )
+        return groupEventPageEnvelope(page)
+    }
+
+    /// Maps the durable fallback through the exact same payload-budget rules
+    /// as the ordinary group-event command. The prepared-page fast path calls
+    /// this only when local immutable coverage is unavailable or the fresh
+    /// membership fence cannot authorize the cached page.
+    private func groupEventPageEnvelope(_ page: V2GroupEventLogPage) -> IMV2Envelope {
         var response = IMV2Envelope()
         // Use the largest possible request ID to make this sizing an upper
         // bound. `V2GatewaySession` replaces it with the actual request ID
@@ -1123,6 +1334,10 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         response.groupEventPage = .init()
         response.groupEventPage.roomID = page.roomID.rawValue
         var eventFieldBytes = 0
+        var wireEvents: [IMV2GroupEvent] = []
+        wireEvents.reserveCapacity(page.events.count)
+        var nextRoomSequence = page.nextRoomSequence
+        var hasMore = page.hasMore
         for (index, entry) in page.events.enumerated() {
             let candidateEventFieldBytes = eventFieldBytes + v2GroupEventRepeatedFieldBytes(entry)
             let candidateHasMore = page.hasMore || index < page.events.endIndex - 1
@@ -1140,30 +1355,27 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
             event.roomSequence = entry.roomSequence
             event.projectionKind = entry.projectionKind
             event.payload = entry.payload
-            response.groupEventPage.events.append(event)
-            response.groupEventPage.nextRoomSequence = entry.roomSequence
-            response.groupEventPage.hasMore_p = candidateHasMore
+            wireEvents.append(event)
+            nextRoomSequence = entry.roomSequence
+            hasMore = candidateHasMore
             eventFieldBytes = candidateEventFieldBytes
         }
-        guard !response.groupEventPage.events.isEmpty || page.events.isEmpty else {
+        guard !wireEvents.isEmpty || page.events.isEmpty else {
             // A durable event must not be able to force a transport close. A
             // client cannot recover by repeating the same cursor, so make the
             // persisted incompatibility explicit and retain the connection.
             return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
         }
 
-        if page.events.isEmpty {
-            response.groupEventPage.nextRoomSequence = page.nextRoomSequence
-            response.groupEventPage.hasMore_p = page.hasMore
-        }
+        response.groupEventPage.events = wireEvents
+        response.groupEventPage.nextRoomSequence = nextRoomSequence
+        response.groupEventPage.hasMore_p = hasMore
 
-        // The estimator is exact for the current schema. Keep one final real
-        // encode here as a fail-closed compatibility fence if the proto evolves
-        // without its estimator being updated. Session encoding then only
-        // substitutes an actual request ID, which cannot exceed UInt64.max.
-        guard try response.serializedData().count <= maximumGroupEventPagePayloadBytes else {
-            return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
-        }
+        // The estimator is exact for the current schema and already uses the
+        // largest possible request ID. Do not serialize the whole page here:
+        // `V2GatewaySession` performs the authoritative protobuf encode once
+        // after substituting the real request ID. Payload-budget tests encode
+        // that final frame and protect this estimator when the proto evolves.
         return response
     }
 
@@ -1176,6 +1388,7 @@ public struct V2GatewayDomainCommandHandler: V2GatewayCommandHandler {
         response.groupEventSubscribed = .init()
         response.groupEventSubscribed.roomID = subscription.roomID.rawValue
         response.groupEventSubscribed.highWatermark = subscription.highWatermark
+        response.groupEventSubscribed.membershipRevision = subscription.membershipRevision
         return response
     }
 

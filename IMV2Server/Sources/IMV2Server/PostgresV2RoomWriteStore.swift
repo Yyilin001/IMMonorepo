@@ -23,6 +23,9 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let directSendPolicyCache: V2DirectSendPolicyCache
     private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
+    private let roomWriteBatchRouteCache: V2RoomWriteBatchRouteCache
+    private let hybridGroupShardCreditSnapshotCache:
+        V2HybridGroupShardCreditSnapshotCache
     private let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
     private let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
@@ -50,6 +53,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         self.payloadWriteMode = payloadWriteMode
         self.directSendPolicyCache = directSendPolicyCache
         self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
+        self.roomWriteBatchRouteCache = .init()
+        self.hybridGroupShardCreditSnapshotCache = .init()
         self.shardAdmissionCommandCreditPool = shardAdmissionCommandCreditPool
         self.roomAdmissionCommandCreditPool = roomAdmissionCommandCreditPool
         self.appendStageMetrics = appendStageMetrics
@@ -140,11 +145,26 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             return .init(roomID: roomID, senderID: senderID)
         }
         let presentKeys = keys.compactMap { $0 }
-        let snapshots = await directRoomLogFastAppendCache.values(for: presentKeys)
+        let roomIDs = presentKeys.map(\.roomID)
+        let routes = await resolvedRoomWriteBatchRoutes(roomIDs: roomIDs)
+        let snapshots: [V2DirectRoomLogFastAppendCache.Entry?]
+        if routes.contains(where: { $0 == .direct }) {
+            snapshots = await directRoomLogFastAppendCache.values(for: presentKeys)
+        } else {
+            snapshots = Array(repeating: nil, count: presentKeys.count)
+        }
         var snapshotIndex = 0
         var partitions: [V2AtomicRoomWriteBatchPartition?] = zip(requests, keys).map { request, key in
             guard key != nil else { return nil }
             defer { snapshotIndex += 1 }
+            let route = routes[snapshotIndex]
+            if route == .individual { return nil }
+            if route == .largeGroupHybrid {
+                return request.command.targetRule == .eligibleMemberCount
+                    ? .largeGroupHybrid
+                    : nil
+            }
+            guard route == .direct else { return nil }
             guard let snapshot = snapshots[snapshotIndex],
                   request.command.targetRule == .eligibleMemberCount,
                   snapshot.capacityProfileID == request.capacityProfile.id,
@@ -170,6 +190,67 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             }
         }
         return partitions
+    }
+
+    public func atomicBatchSupportsRepeatedRooms(
+        in partition: V2AtomicRoomWriteBatchPartition
+    ) async -> Bool {
+        partition == .largeGroupHybrid
+    }
+
+    private func resolvedRoomWriteBatchRoutes(
+        roomIDs: [UUID]
+    ) async -> [V2RoomWriteBatchRouteCache.Route?] {
+        var routes = await roomWriteBatchRouteCache.values(for: roomIDs)
+        let missingRoomIDs = Set(zip(roomIDs, routes).compactMap { roomID, route in
+            route == nil ? roomID : nil
+        }).sorted { $0.uuidString < $1.uuidString }
+        if !missingRoomIDs.isEmpty,
+           let loadedRoutes = try? await loadRoomWriteBatchRoutes(roomIDs: missingRoomIDs)
+        {
+            await roomWriteBatchRouteCache.insert(loadedRoutes)
+            let loadedByRoomID = Dictionary(
+                uniqueKeysWithValues: loadedRoutes.map { ($0.roomID, $0.route) }
+            )
+            for index in routes.indices where routes[index] == nil {
+                routes[index] = loadedByRoomID[roomIDs[index]]
+            }
+        }
+        return routes
+    }
+
+    /// Resolves only the immutable execution shape needed by the advisory
+    /// batch classifier. Authorization, membership, policy, room state and
+    /// capacity remain exclusively in the transactional write paths.
+    private func loadRoomWriteBatchRoutes(
+        roomIDs: [UUID]
+    ) async throws -> [(roomID: UUID, route: V2RoomWriteBatchRouteCache.Route)] {
+        guard let sql = database as? any SQLDatabase else { return [] }
+        let roomIDsJSON = try roomWriteJSON(roomIDs.map(\.uuidString))
+        let rows = try await sql.raw("""
+            WITH requested AS MATERIALIZED (
+                SELECT value::uuid AS room_id
+                FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb) AS value
+            )
+            SELECT room.room_id, room.room_kind, room.delivery_mode
+            FROM requested
+            JOIN im_v2.rooms AS room USING (room_id)
+            """).all(decoding: RoomWriteBatchRouteRow.self)
+        return rows.map { row in
+            let route: V2RoomWriteBatchRouteCache.Route
+            if row.roomKind == "direct" {
+                route = .direct
+            } else if row.roomKind == "group",
+                      row.deliveryMode == V2GroupDeliveryMode.largeGroupHybrid.rawValue {
+                route = .largeGroupHybrid
+            } else {
+                route = .individual
+            }
+            return (
+                roomID: row.roomID,
+                route: route
+            )
+        }
     }
 
     /// Owns the retry boundary for one logical command.  The transaction body
@@ -234,6 +315,15 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             throw V2AtomicRoomWriteBatchError(reason: .requestShape)
         }
 
+        let roomIDs = try requests.map { try uuid($0.command.roomID) }
+        let routes = await resolvedRoomWriteBatchRoutes(roomIDs: roomIDs)
+        if routes.allSatisfy({ $0 == .largeGroupHybrid }) {
+            return try await acceptPlainHybridGroupBatch(requests: requests)
+        }
+        guard routes.allSatisfy({ $0 == .direct }) else {
+            throw V2AtomicRoomWriteBatchError(reason: .roomKindMismatch)
+        }
+
         let fastPathStartedAt = ContinuousClock.now
         do {
             if let outcomes = try await acceptFastPlainDirectRoomLogBatchIfEligible(
@@ -256,6 +346,296 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             throw error
         }
         return try await acceptStandardPlainDirectRoomLogBatch(requests: requests)
+    }
+
+    /// Commits ordinary no-mention hybrid-group messages in one PostgreSQL
+    /// transaction. Rooms are locked in UUID order and repeated commands for
+    /// one hot room are reduced in their original arrival order. Persistence
+    /// updates that room once from the final reduced state while retaining
+    /// every message/event/audit row, so batching changes neither FIFO nor the
+    /// authorization, delivery, idempotency, and recovery contracts.
+    private func acceptPlainHybridGroupBatch(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome] {
+        guard requests.count >= 2,
+              requests.allSatisfy(Self.isPlainDirectRoomLogBatchShape),
+              requests.allSatisfy({ $0.command.targetRule == .eligibleMemberCount }),
+              let shardAdmissionCommandCreditPool,
+              let databaseSQL = database as? any SQLDatabase
+        else { throw V2AtomicRoomWriteBatchError(reason: .requestShape) }
+
+        var ordered = try requests.enumerated().map { originalIndex, request in
+            let roomID = try uuid(request.command.roomID)
+            let senderID = try uuid(request.command.senderUserID)
+            return OrderedRoomWriteRequest(
+                originalIndex: originalIndex,
+                request: request,
+                roomID: roomID,
+                senderID: senderID,
+                cacheKey: .init(roomID: roomID, senderID: senderID),
+                cachedDirectPolicy: nil,
+                usesRoomAdmissionCredits: false,
+                preflightOrdinal: -1
+            )
+        }
+        let operationKeys = try ordered.map {
+            "\($0.senderID.uuidString):\(try uuid($0.request.command.clientMessageID).uuidString)"
+        }
+        guard Set(operationKeys).count == ordered.count else {
+            throw V2AtomicRoomWriteBatchError(reason: .duplicateOperation)
+        }
+        ordered.sort {
+            if $0.roomID == $1.roomID {
+                return $0.originalIndex < $1.originalIndex
+            }
+            return $0.roomID < $1.roomID
+        }
+        ordered = ordered.enumerated().map { ordinal, item in
+            .init(
+                originalIndex: item.originalIndex,
+                request: item.request,
+                roomID: item.roomID,
+                senderID: item.senderID,
+                cacheKey: item.cacheKey,
+                cachedDirectPolicy: nil,
+                usesRoomAdmissionCredits: false,
+                preflightOrdinal: ordinal
+            )
+        }
+        let orderedRequests = ordered
+
+        // Charge command capacity before opening the message transaction.
+        // The actor durably reserves a bounded batch from PostgreSQL and then
+        // issues one token per message. The transaction below still rechecks
+        // the room assignment, lease generation and complete authorization
+        // graph under lock, so this snapshot is only a capacity hint.
+        let uniqueRoomIDs = Array(Set(orderedRequests.map(\.roomID))).sorted {
+            $0.uuidString < $1.uuidString
+        }
+        var cachedSnapshots = await hybridGroupShardCreditSnapshotCache.values(
+            for: uniqueRoomIDs
+        )
+        let missingRoomIDs = zip(uniqueRoomIDs, cachedSnapshots).compactMap {
+            roomID, snapshot in snapshot == nil ? roomID : nil
+        }
+        if !missingRoomIDs.isEmpty {
+            let loaded = try await loadPlainHybridGroupShardCreditSnapshots(
+                roomIDs: missingRoomIDs,
+                sql: databaseSQL
+            )
+            await hybridGroupShardCreditSnapshotCache.insert(loaded)
+            let loadedByRoomID = Dictionary(
+                uniqueKeysWithValues: loaded.map { ($0.roomID, $0.entry) }
+            )
+            for index in cachedSnapshots.indices where cachedSnapshots[index] == nil {
+                cachedSnapshots[index] = loadedByRoomID[uniqueRoomIDs[index]]
+            }
+        }
+        let snapshotsByRoomID = Dictionary(
+            uniqueKeysWithValues: zip(uniqueRoomIDs, cachedSnapshots).compactMap {
+                roomID, snapshot in snapshot.map { (roomID, $0) }
+            }
+        )
+        guard snapshotsByRoomID.count == uniqueRoomIDs.count else {
+            throw V2AtomicRoomWriteBatchError(reason: .admissionState)
+        }
+        let creditRequests = try orderedRequests.map { item in
+            guard let snapshot = snapshotsByRoomID[item.roomID],
+                  snapshot.kind == "group",
+                  snapshot.deliveryMode == .largeGroupHybrid,
+                  snapshot.capacityProfileID == item.request.capacityProfile.id,
+                  snapshot.frozenAt == nil,
+                  let snapshotLease = snapshot.shardState.lease,
+                  UUID(uuidString: snapshotLease.id.rawValue) == snapshot.roomShardLeaseID,
+                  Int64(exactly: snapshotLease.generation)
+                    == snapshot.roomShardLeaseGeneration
+            else { throw V2AtomicRoomWriteBatchError(reason: .admissionState) }
+            return V2ShardAdmissionCommandCreditPool.BatchRequest(
+                roomShardID: snapshot.roomShardID,
+                capacityProfileID: snapshot.capacityProfileID,
+                shardState: snapshot.shardState,
+                now: item.request.now
+            )
+        }
+        let acquisitions = try await shardAdmissionCommandCreditPool.acquire(creditRequests)
+        guard acquisitions.count == orderedRequests.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let grantedTokens: [V2ShardAdmissionCommandCreditPool.Token] =
+            acquisitions.compactMap { acquisition in
+            guard case .granted(let token, _) = acquisition else { return nil }
+            return token
+        }
+        let releaseNow = requests.map(\.now).max() ?? Date()
+        guard grantedTokens.count == orderedRequests.count else {
+            await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            await hybridGroupShardCreditSnapshotCache.invalidate(uniqueRoomIDs)
+            throw V2AtomicRoomWriteBatchError(reason: .admissionState)
+        }
+
+        let committed: [OrderedRoomWriteCommit]
+        do {
+            committed = try await v2WithPostgresTransactionRetry(database: database) { transaction in
+                let sql = try sqlDatabase(from: transaction)
+                // PostgreSQL can evaluate the complete ordinary-group
+                // contract and append the canonical rows in one conditional
+                // statement.  This is not a cache-authorized write: every
+                // membership, mute, account, role permission, room profile,
+                // lease and admission predicate is checked from locked
+                // durable rows. A stale or exceptional row produces zero
+                // writes and the batcher retries the immutable commands via
+                // the established complete path.
+                if sql is any PostgresDatabase {
+                    return try await persistConditionalPlainHybridGroupMessages(
+                        orderedRequests,
+                        acquisitions: acquisitions,
+                        snapshotsByRoomID: snapshotsByRoomID,
+                        sql: sql
+                    )
+                }
+                try await acquireMessageOperationLocks(orderedRequests, sql: sql)
+                let contexts = try await loadPlainHybridGroupBatchContexts(orderedRequests, sql: sql)
+                guard contexts.count == orderedRequests.count else {
+                    throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
+                }
+
+                var isolatedIndices: [Int] = []
+                var prepared: [PreparedPlainHybridGroupAppend] = []
+                var reducedRoomStates: [UUID: V2RoomCommandState] = [:]
+                var reducedTimelineSequences: [UUID: UInt64] = [:]
+                prepared.reserveCapacity(orderedRequests.count)
+                for ((item, context), acquisition) in zip(
+                    zip(orderedRequests, contexts), acquisitions
+                ) {
+                    guard context.ordinal == item.preflightOrdinal else {
+                        throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
+                    }
+                    guard case .granted(_, let effectiveShardState) = acquisition,
+                          let effectiveLease = effectiveShardState.lease,
+                          let snapshot = snapshotsByRoomID[item.roomID],
+                          !context.hasPriorOperation,
+                          context.room.kind == "group",
+                          context.room.deliveryMode == .largeGroupHybrid,
+                          context.room.roomShardID == snapshot.roomShardID,
+                          context.room.capacityProfileID == snapshot.capacityProfileID,
+                          context.room.capacityProfileID == item.request.capacityProfile.id,
+                          context.room.frozenAt == nil,
+                          context.senderIsActive == true,
+                          context.muted == false,
+                          context.allowsSendMessages == true,
+                          V2RoomMembershipRole(rawValue: context.actorRole ?? "") != nil,
+                          let admission = try? context.admissionSnapshot(),
+                          admission.room.shardLeaseID == admission.shard.leaseID,
+                          admission.room.shardLeaseGeneration == admission.shard.generation,
+                          UUID(uuidString: effectiveLease.id.rawValue)
+                            == admission.shard.leaseID,
+                          Int64(exactly: effectiveLease.generation)
+                            == admission.shard.generation
+                    else {
+                        isolatedIndices.append(item.originalIndex)
+                        continue
+                    }
+
+                    let roomState = try reducedRoomStates[item.roomID]
+                        ?? context.room.commandState(
+                            roomID: item.request.command.roomID,
+                            admission: admission.room
+                        )
+                    let result = try hybridReduction(
+                        command: item.request.command,
+                        roomState: roomState,
+                        shardState: effectiveShardState,
+                        profile: item.request.capacityProfile.limits,
+                        identifiers: item.request.identifiers,
+                        reliableTargetCount: 0,
+                        now: item.request.now
+                    )
+                    guard case .accepted(let initialWriteSet) = result else {
+                        isolatedIndices.append(item.originalIndex)
+                        continue
+                    }
+                    let previousTimelineSequence = try reducedTimelineSequences[item.roomID]
+                        ?? unsigned(context.room.timelineSequence)
+                    let (nextTimelineSequence, timelineOverflow) =
+                        previousTimelineSequence.addingReportingOverflow(1)
+                    guard !timelineOverflow else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    let writeSet = try withTimelineSequence(
+                        initialWriteSet,
+                        timelineSequence: nextTimelineSequence
+                    )
+                    reducedRoomStates[item.roomID] = writeSet.nextRoomState
+                    reducedTimelineSequences[item.roomID] = nextTimelineSequence
+                    let accepted = writeSet.acceptedMessage.materialized(
+                        mediaPresentations: [],
+                        groupDeliveryMode: .largeGroupHybrid,
+                        usesRoomEventLog: true,
+                        sourceEventID: writeSet.eventID,
+                        acceptedMembershipRevision: try unsigned(context.room.membershipRevision)
+                    )
+                    let reservation = try shardAdmissionReservation(
+                        from: effectiveShardState,
+                        to: writeSet.nextShardState
+                    )
+                    guard reservation.commandDelta == 1,
+                          reservation.fanoutDelta == 0,
+                          reservation.outstandingUnitDelta == 0,
+                          reservation.outstandingPlanDelta == 0
+                    else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    prepared.append(try .init(
+                        originalIndex: item.originalIndex,
+                        request: item.request,
+                        room: context.room,
+                        writeSet: writeSet,
+                        accepted: accepted,
+                        reservation: reservation
+                    ))
+                }
+                if !isolatedIndices.isEmpty {
+                    throw V2AtomicRoomWriteBatchError(
+                        reason: .authorizationState,
+                        isolatedRequestIndices: isolatedIndices.sorted()
+                    )
+                }
+                guard prepared.count == orderedRequests.count else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+
+                try await persistPlainHybridGroupMessages(prepared, sql: sql)
+                return prepared.map { append in
+                    OrderedRoomWriteCommit(
+                        originalIndex: append.originalIndex,
+                        cacheKey: append.cacheKey,
+                        commit: .init(
+                            outcome: .accepted(append.accepted),
+                            acceptedDirectProjectionShadows: []
+                        )
+                    )
+                }
+            }
+        } catch {
+            await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            if error is V2AtomicRoomWriteBatchError {
+                await hybridGroupShardCreditSnapshotCache.invalidate(uniqueRoomIDs)
+            }
+            throw error
+        }
+        await shardAdmissionCommandCreditPool.commit(grantedTokens)
+        var outcomes = Array<V2SendMessageOutcome?>(
+            repeating: nil,
+            count: requests.count
+        )
+        for item in committed {
+            guard outcomes.indices.contains(item.originalIndex) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            outcomes[item.originalIndex] = item.commit.outcome
+        }
+        guard outcomes.allSatisfy({ $0 != nil }) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return outcomes.compactMap { $0 }
     }
 
     /// Authoritative cold/cache-miss batch. It deliberately performs no actor
@@ -1588,6 +1968,8 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             let usesDirectRoomLog = room.kind == "direct" && directFanoutMode == .roomLog
             let usesDirectRoomLogShardAdmission = usesDirectRoomLog
                 && directRoomLogAdmissionMode == .shardOnly
+            let usesRoomEventLog = usesDirectRoomLog
+                || (room.kind == "group" && room.deliveryMode == .largeGroupHybrid)
 
             // A completed command must replay its canonical result even if a
             // later membership change removes the sender. Otherwise a lost
@@ -1608,7 +1990,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     mediaPresentations: try priorMedia.map { try $0.presentation },
                     mentions: try priorMentions.map { try $0.target },
                     groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
-                    usesRoomEventLog: usesDirectRoomLog
+                    usesRoomEventLog: usesRoomEventLog
                 )
                 let outcome: V2SendMessageOutcome = accepted.roomID == command.roomID && accepted.text == command.text && accepted.media == command.media && accepted.mentions == command.mentions
                     && accepted.entities == command.entities && accepted.replyTo == command.replyTo
@@ -1767,7 +2149,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
                     outcome: result.outcome(
                         mediaPresentations: mediaPresentations,
                         groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
-                        usesRoomEventLog: usesDirectRoomLog
+                        usesRoomEventLog: usesRoomEventLog
                     ),
                     acceptedDirectProjectionShadows: []
                 )
@@ -1807,7 +2189,7 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
             let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
                 mediaPresentations: mediaPresentations,
                 groupDeliveryMode: room.kind == "group" ? room.deliveryMode : nil,
-                usesRoomEventLog: usesDirectRoomLog,
+                usesRoomEventLog: usesRoomEventLog,
                 sourceEventID: timelineWriteSet.eventID,
                 acceptedMembershipRevision: try unsigned(room.membershipRevision)
             )
@@ -2207,6 +2589,19 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         guard transactional.count == prepared.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+
+        try await reserveTransactionalShardAdmissions(transactional, sql: sql)
+    }
+
+    /// Aggregates a shared-transaction reservation to one conditional update
+    /// per physical shard row. Callers have already performed their complete
+    /// room-local writes; a partial reservation aborts that enclosing
+    /// transaction, so no uncharged message can commit.
+    private func reserveTransactionalShardAdmissions(
+        _ transactional: [TransactionalShardAdmissionInput],
+        sql: any SQLDatabase
+    ) async throws {
+        guard !transactional.isEmpty else { return }
 
         var grouped: [TransactionalShardAdmissionKey: TransactionalShardAdmissionInput] = [:]
         for input in transactional {
@@ -2858,6 +3253,254 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
         }
+        return rows
+    }
+
+    /// Loads only the shard lease needed to reserve durable command credits
+    /// before the longer message transaction starts. This read is deliberately
+    /// not an authorization decision: `loadPlainHybridGroupBatchContexts`
+    /// repeats the assignment/lease checks and validates membership, mute and
+    /// role permissions while holding the established room-local locks.
+    private func loadPlainHybridGroupShardCreditSnapshots(
+        roomIDs: [UUID],
+        sql: any SQLDatabase
+    ) async throws -> [V2HybridGroupShardCreditSnapshotCache.Update] {
+        guard !roomIDs.isEmpty else { return [] }
+        let roomIDsJSON = try roomWriteJSON(roomIDs.map(\.uuidString))
+        let rows = try await sql.raw("""
+            WITH requested AS MATERIALIZED (
+                SELECT value::uuid AS room_id
+                FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb) AS value
+            )
+            SELECT room.room_id, room.room_kind, room.room_shard_id,
+                   room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                   admission.shard_lease_id AS room_shard_lease_id,
+                   admission.shard_lease_generation AS room_shard_lease_generation,
+                   shard.lease_id, shard.generation, shard.valid_until,
+                   shard.command_window_limit, shard.command_window_used,
+                   shard.fanout_window_limit, shard.fanout_window_used,
+                   shard.max_outstanding_fanout_units,
+                   shard.outstanding_fanout_units,
+                   shard.max_outstanding_plans, shard.outstanding_plans
+            FROM requested
+            JOIN im_v2.rooms AS room USING (room_id)
+            JOIN im_v2.room_admission AS admission USING (room_id)
+            JOIN im_v2.shard_admission_pools AS shard
+              ON shard.room_shard_id = room.room_shard_id
+             AND shard.capacity_profile_id = room.capacity_profile_id
+            ORDER BY room.room_id
+            """).all(decoding: PlainHybridGroupShardCreditSnapshotRow.self)
+        return try rows.map { row in
+            .init(
+                roomID: row.roomID,
+                entry: .init(
+                    roomShardID: row.roomShardID,
+                    capacityProfileID: row.capacityProfileID,
+                    kind: row.kind,
+                    deliveryMode: row.deliveryMode,
+                    frozenAt: row.frozenAt,
+                    roomShardLeaseID: row.roomShardLeaseID,
+                    roomShardLeaseGeneration: row.roomShardLeaseGeneration,
+                    shardState: try row.shard.admissionState()
+                )
+            )
+        }
+    }
+
+    /// Set-based authoritative preflight for ordinary hybrid-group sends.
+    /// The room/admission/membership lock order is identical to the scalar
+    /// path. Permission resolution is evaluated from the same durable policy
+    /// rows while the room lock fences concurrent policy mutations.
+    private func loadPlainHybridGroupBatchContexts(
+        _ ordered: [OrderedRoomWriteRequest],
+        sql: any SQLDatabase
+    ) async throws -> [PlainHybridGroupBatchPreflightRow] {
+        let input = try ordered.map { item in
+            PlainHybridGroupBatchPreflightInput(
+                ordinal: item.preflightOrdinal,
+                roomID: item.roomID,
+                senderID: item.senderID,
+                clientMessageID: try uuid(item.request.command.clientMessageID),
+                nowUnixSeconds: item.request.now.timeIntervalSince1970
+            )
+        }
+        // Production uses a named statement with typed column arrays. The
+        // authorization graph and lock order below are unchanged; this only
+        // removes per-batch JSON encoding/parsing and lets each physical
+        // foreground connection reuse PostgreSQL's prepared plan.
+        if let postgres = sql as? any PostgresDatabase {
+            let statement = try PlainHybridGroupBatchPreflightStatement(inputs: input)
+            let rows = try await postgres.withConnection { connection in
+                connection.eventLoop.makeFutureWithTask {
+                    let result = try await connection.execute(
+                        statement,
+                        logger: connection.logger
+                    )
+                    var decoded: [PlainHybridGroupBatchPreflightRow] = []
+                    decoded.reserveCapacity(input.count)
+                    for try await row in result {
+                        decoded.append(row)
+                    }
+                    return decoded
+                }
+            }.get()
+            guard rows.count == ordered.count,
+                  zip(rows, ordered).allSatisfy({
+                      $0.0.ordinal == $0.1.preflightOrdinal
+                  })
+            else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
+            return rows
+        }
+        let inputJSON = try roomWriteJSON(input)
+        let rows = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT input.ordinal, input.room_id, input.sender_id,
+                       input.client_message_id, input.now_unix_seconds
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                    ordinal integer,
+                    room_id uuid,
+                    sender_id uuid,
+                    client_message_id uuid,
+                    now_unix_seconds double precision
+                )
+            ), locked_room AS MATERIALIZED (
+                SELECT input.ordinal, input.sender_id, input.client_message_id,
+                       input.now_unix_seconds, room.room_kind,
+                       room.room_shard_id, room.room_sequence,
+                       room.timeline_sequence, room.membership_revision,
+                       room.capacity_profile_id, room.delivery_mode,
+                       room.frozen_at, room.room_id
+                FROM input
+                JOIN im_v2.rooms AS room ON room.room_id = input.room_id
+                ORDER BY room.room_id
+                FOR UPDATE OF room
+            ), prior_operation AS MATERIALIZED (
+                SELECT room.ordinal
+                FROM locked_room AS room
+                JOIN im_v2.messages AS message
+                  ON message.sender_user_id = room.sender_id
+                 AND message.client_message_id = room.client_message_id
+            ), fresh_room AS MATERIALIZED (
+                SELECT room.*
+                FROM locked_room AS room
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM prior_operation AS prior
+                    WHERE prior.ordinal = room.ordinal
+                )
+            ), locked_admission AS MATERIALIZED (
+                SELECT room.ordinal,
+                       admission.eligible_member_count AS room_eligible_member_count,
+                       admission.command_window_limit AS room_command_window_limit,
+                       admission.command_window_used AS room_command_window_used,
+                       admission.fanout_window_limit AS room_fanout_window_limit,
+                       admission.fanout_window_used AS room_fanout_window_used,
+                       admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
+                       admission.outstanding_fanout_units AS room_outstanding_fanout_units,
+                       admission.max_outstanding_plans AS room_max_outstanding_plans,
+                       admission.outstanding_plans AS room_outstanding_plans,
+                       admission.shard_lease_id AS room_shard_lease_id,
+                       admission.shard_lease_generation AS room_shard_lease_generation,
+                       shard.lease_id AS shard_lease_id,
+                       shard.generation AS shard_generation,
+                       shard.valid_until AS shard_valid_until,
+                       shard.command_window_limit AS shard_command_window_limit,
+                       shard.command_window_used AS shard_command_window_used,
+                       shard.fanout_window_limit AS shard_fanout_window_limit,
+                       shard.fanout_window_used AS shard_fanout_window_used,
+                       shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
+                       shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
+                       shard.max_outstanding_plans AS shard_max_outstanding_plans,
+                       shard.outstanding_plans AS shard_outstanding_plans
+                FROM fresh_room AS room
+                JOIN im_v2.room_admission AS admission
+                  ON admission.room_id = room.room_id
+                JOIN im_v2.shard_admission_pools AS shard
+                  ON shard.room_shard_id = room.room_shard_id
+                 AND shard.capacity_profile_id = room.capacity_profile_id
+                ORDER BY room.room_id
+                FOR UPDATE OF admission
+            ), locked_actor AS MATERIALIZED (
+                SELECT room.ordinal, membership.role AS actor_role,
+                       EXISTS (
+                           SELECT 1
+                           FROM im_v2.public_user_profiles AS profile
+                           WHERE profile.user_id = room.sender_id
+                             AND profile.state = 'active'
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM im_v2.account_disables AS disabled
+                                 WHERE disabled.user_id = profile.user_id
+                             )
+                       ) AS sender_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_member_mutes AS mute
+                           WHERE mute.room_id = room.room_id
+                             AND mute.user_id = room.sender_id
+                             AND mute.mute_until > to_timestamp(room.now_unix_seconds)
+                       ) AS muted,
+                       (
+                           membership.role = 'owner'
+                           OR EXISTS (
+                               SELECT 1 FROM im_v2.group_role_permissions AS permission
+                               WHERE permission.room_id = room.room_id
+                                 AND permission.role = membership.role
+                                 AND permission.permission = 'send_messages'
+                           )
+                           OR NOT EXISTS (
+                               SELECT 1 FROM im_v2.group_permission_operations AS operation
+                               WHERE operation.room_id = room.room_id
+                                 AND operation.role = membership.role
+                           )
+                       ) AS allows_send_messages
+                FROM fresh_room AS room
+                JOIN locked_admission AS admission USING (ordinal)
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.room_id = room.room_id
+                 AND membership.user_id = room.sender_id
+                 AND membership.joined_revision <= room.membership_revision
+                 AND (membership.left_revision IS NULL
+                      OR membership.left_revision > room.membership_revision)
+                ORDER BY room.room_id, membership.user_id
+                FOR UPDATE OF membership
+            )
+            SELECT room.ordinal, room.room_kind, room.room_shard_id,
+                   room.room_sequence, room.timeline_sequence,
+                   room.membership_revision, room.capacity_profile_id,
+                   room.delivery_mode, room.frozen_at,
+                   EXISTS (
+                       SELECT 1 FROM prior_operation AS prior
+                       WHERE prior.ordinal = room.ordinal
+                   ) AS has_prior_operation,
+                   admission.room_eligible_member_count,
+                   admission.room_command_window_limit,
+                   admission.room_command_window_used,
+                   admission.room_fanout_window_limit,
+                   admission.room_fanout_window_used,
+                   admission.room_max_outstanding_fanout_units,
+                   admission.room_outstanding_fanout_units,
+                   admission.room_max_outstanding_plans,
+                   admission.room_outstanding_plans,
+                   admission.room_shard_lease_id,
+                   admission.room_shard_lease_generation,
+                   admission.shard_lease_id, admission.shard_generation,
+                   admission.shard_valid_until,
+                   admission.shard_command_window_limit,
+                   admission.shard_command_window_used,
+                   admission.shard_fanout_window_limit,
+                   admission.shard_fanout_window_used,
+                   admission.shard_max_outstanding_fanout_units,
+                   admission.shard_outstanding_fanout_units,
+                   admission.shard_max_outstanding_plans,
+                   admission.shard_outstanding_plans,
+                   actor.actor_role, actor.sender_is_active, actor.muted,
+                   actor.allows_send_messages
+            FROM locked_room AS room
+            LEFT JOIN locked_admission AS admission USING (ordinal)
+            LEFT JOIN locked_actor AS actor USING (ordinal)
+            ORDER BY room.ordinal
+            """).all().map { try PlainHybridGroupBatchPreflightRow(row: $0) }
+        guard rows.count == ordered.count,
+              zip(rows, ordered).allSatisfy({ $0.0.ordinal == $0.1.preflightOrdinal })
+        else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
         return rows
     }
 
@@ -4660,6 +5303,139 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 
     /// Appends one or more already-authorized plain direct messages in one
+    /// Persists compact hybrid-group accepted events with one statement.
+    ///
+    /// The message row is both the canonical body and the immutable accepted
+    /// event identity. Room-log readers already merge that representation
+    /// with legacy `room_events`, and a statement trigger emits the same
+    /// coalesced durable wake. A zero-target terminal fan-out plan carries no
+    /// executable work, while revision-one projection state can be derived
+    /// losslessly and is materialized only if a later edit/withdraw requires
+    /// it. Repeated rooms retain every message while only their final input
+    /// advances mutable cursors and room admission.
+    private func persistPlainHybridGroupMessages(
+        _ prepared: [PreparedPlainHybridGroupAppend],
+        sql: any SQLDatabase
+    ) async throws {
+        guard !prepared.isEmpty else { return }
+        let inputs = prepared.map(\.input)
+        guard Set(inputs.map(\.messageID)).count == inputs.count,
+              Set(inputs.map(\.eventID)).count == inputs.count
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let expected = Int64(inputs.count)
+        let expectedRooms = Int64(Set(inputs.map(\.roomID)).count)
+        // The production PostgreSQL path binds typed arrays to a named
+        // statement. The former JSON recordset encoded the complete batch in
+        // Swift, parsed it again in PostgreSQL and replanned this invariant
+        // write graph for every transaction. Typed arrays retain the same
+        // one-statement atomicity and cardinality fences while avoiding that
+        // duplicate serialization work. Keep the JSON branch for SQL test
+        // doubles that do not expose PostgresNIO connections.
+        if let postgres = sql as? any PostgresDatabase {
+            let statement = try PlainHybridGroupAppendStatement(inputs: inputs)
+            let mutation = try await postgres.withConnection { connection in
+                connection.eventLoop.makeFutureWithTask {
+                    let rows = try await connection.execute(
+                        statement,
+                        logger: connection.logger
+                    )
+                    var result: PlainHybridGroupMutationRow?
+                    for try await row in rows {
+                        guard result == nil else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                        result = row
+                    }
+                    return result
+                }
+            }.get()
+            guard let mutation,
+                  mutation.roomCount == expectedRooms,
+                  mutation.admissionCount == expectedRooms,
+                  mutation.messageCount == expected
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return
+        }
+        let inputJSON = try roomWriteJSON(inputs)
+        guard let mutation = try await sql.raw("""
+            WITH input AS MATERIALIZED (
+                SELECT input.ordinal, input.room_id, input.message_id,
+                       input.event_id, input.sender_id,
+                       input.client_message_id, input.room_sequence,
+                       input.timeline_sequence, input.membership_revision,
+                       input.command_window_used, input.fanout_window_used,
+                       input.outstanding_fanout_units, input.outstanding_plans,
+                       input.shard_lease_id, input.shard_lease_generation,
+                       input.text_body, input.rich_entities,
+                       to_timestamp(input.created_at_unix_seconds) AS created_at
+                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS input(
+                    ordinal integer,
+                    room_id uuid,
+                    message_id uuid,
+                    event_id uuid,
+                    sender_id uuid,
+                    client_message_id uuid,
+                    room_sequence bigint,
+                    timeline_sequence bigint,
+                    membership_revision bigint,
+                    command_window_used bigint,
+                    fanout_window_used bigint,
+                    outstanding_fanout_units bigint,
+                    outstanding_plans bigint,
+                    shard_lease_id uuid,
+                    shard_lease_generation bigint,
+                    text_body text,
+                    rich_entities jsonb,
+                    created_at_unix_seconds double precision
+                )
+            ), final_room_input AS MATERIALIZED (
+                SELECT DISTINCT ON (room_id) *
+                FROM input
+                ORDER BY room_id, ordinal DESC
+            ), room_update AS (
+                UPDATE im_v2.rooms AS room
+                SET room_sequence = input.room_sequence,
+                    timeline_sequence = input.timeline_sequence
+                FROM final_room_input AS input
+                WHERE room.room_id = input.room_id
+                RETURNING room.room_id
+            ), admission_update AS (
+                UPDATE im_v2.room_admission AS admission
+                SET command_window_used = input.command_window_used,
+                    fanout_window_used = input.fanout_window_used,
+                    outstanding_fanout_units = input.outstanding_fanout_units,
+                    outstanding_plans = input.outstanding_plans,
+                    shard_lease_id = input.shard_lease_id,
+                    shard_lease_generation = input.shard_lease_generation
+                FROM final_room_input AS input
+                JOIN room_update ON room_update.room_id = input.room_id
+                WHERE admission.room_id = input.room_id
+                RETURNING admission.room_id
+            ), message_insert AS (
+                INSERT INTO im_v2.messages
+                    (message_id, room_id, room_sequence, timeline_sequence,
+                     sender_user_id, client_message_id, text_body,
+                     rich_entities, created_at, accepted_event_id,
+                     accepted_event_storage, accepted_membership_revision)
+                SELECT input.message_id, input.room_id, input.room_sequence,
+                       input.timeline_sequence, input.sender_id,
+                       input.client_message_id, input.text_body,
+                       input.rich_entities, input.created_at, input.event_id,
+                       'message_row', input.membership_revision
+                FROM input
+                JOIN admission_update ON admission_update.room_id = input.room_id
+                RETURNING message_id, room_id
+            )
+            SELECT (SELECT count(*) FROM room_update)::bigint AS room_count,
+                   (SELECT count(*) FROM admission_update)::bigint AS admission_count,
+                   (SELECT count(*) FROM message_insert)::bigint AS message_count
+            """).first(decoding: PlainHybridGroupMutationRow.self),
+              mutation.roomCount == expectedRooms,
+              mutation.admissionCount == expectedRooms,
+              mutation.messageCount == expected
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    }
+
     /// PostgreSQL statement. Inputs are already ordered by room and arrival
     /// sequence. A room may therefore occur more than once: the message rows
     /// retain every input while the room/admission state is updated exactly
@@ -4774,6 +5550,176 @@ public struct PostgresV2RoomWriteStore: V2AtomicRoomWriteBatchStore {
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+    }
+
+    /// Executes the steady ordinary hybrid-group contract as one conditional
+    /// PostgreSQL write graph. Shard command capacity has already been durably
+    /// charged by `V2ShardAdmissionCommandCreditPool`; the statement fences
+    /// that exact lease generation while retaining room-local admission,
+    /// authorization, idempotency and sequence allocation atomically.
+    private func persistConditionalPlainHybridGroupMessages(
+        _ ordered: [OrderedRoomWriteRequest],
+        acquisitions: [V2ShardAdmissionCommandCreditPool.Acquisition],
+        snapshotsByRoomID: [UUID: V2HybridGroupShardCreditSnapshotCache.Entry],
+        sql: any SQLDatabase
+    ) async throws -> [OrderedRoomWriteCommit] {
+        guard let postgres = sql as? any PostgresDatabase,
+              ordered.count == acquisitions.count,
+              !ordered.isEmpty
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+        let inputs = try zip(ordered, acquisitions).map { item, acquisition in
+            guard case .granted(_, let effectiveShardState) = acquisition,
+                  let lease = effectiveShardState.lease,
+                  let leaseID = UUID(uuidString: lease.id.rawValue),
+                  let generation = Int64(exactly: lease.generation),
+                  let snapshot = snapshotsByRoomID[item.roomID],
+                  snapshot.capacityProfileID == item.request.capacityProfile.id
+            else { throw V2AtomicRoomWriteBatchError(reason: .admissionState) }
+            return try PlainHybridGroupConditionalAppendInput(
+                item: item,
+                snapshot: snapshot,
+                expectedShardLeaseID: leaseID,
+                expectedShardGeneration: generation
+            )
+        }
+        let statement = try PlainHybridGroupConditionalAppendStatement(inputs: inputs)
+        let allocations = try await postgres.withConnection { connection in
+            connection.eventLoop.makeFutureWithTask {
+                let rows = try await connection.execute(
+                    statement,
+                    logger: connection.logger
+                )
+                var decoded: [PlainHybridGroupConditionalAllocationRow] = []
+                decoded.reserveCapacity(inputs.count)
+                for try await row in rows {
+                    decoded.append(row)
+                }
+                return decoded
+            }
+        }.get()
+        guard allocations.count == ordered.count,
+              zip(allocations, ordered).allSatisfy({ allocation, item in
+                  allocation.ordinal == item.preflightOrdinal
+                      && allocation.messageID
+                        == (try? uuid(item.request.identifiers.messageID))
+              })
+        else {
+            // The fast statement intentionally returns no per-user denial
+            // detail. On its exceptional zero-write path, run the established
+            // authoritative preflight while the operation/room locks are
+            // still held so the batcher can isolate exactly the stale or
+            // denied requests before scalar fallback. The steady accepted
+            // path still remains one statement.
+            let isolated = try await diagnoseConditionalPlainHybridGroupMismatch(
+                ordered,
+                acquisitions: acquisitions,
+                snapshotsByRoomID: snapshotsByRoomID,
+                sql: sql
+            )
+            guard isolated.isEmpty else {
+                throw V2AtomicRoomWriteBatchError(
+                    reason: .authorizationState,
+                    isolatedRequestIndices: isolated
+                )
+            }
+            throw V2AtomicRoomWriteBatchError(reason: .conditionalWriteMismatch)
+        }
+
+        return try zip(ordered, allocations).map { item, allocation in
+            let command = item.request.command
+            let accepted = V2AcceptedMessageDraft(
+                messageID: item.request.identifiers.messageID,
+                roomID: command.roomID,
+                roomSequence: try unsigned(allocation.roomSequence),
+                timelineSequence: try unsigned(allocation.timelineSequence),
+                senderUserID: command.senderUserID,
+                clientMessageID: command.clientMessageID,
+                text: command.text,
+                media: command.media,
+                mentions: command.mentions,
+                entities: command.entities,
+                replyTo: command.replyTo,
+                createdAt: item.request.now
+            ).materialized(
+                mediaPresentations: [],
+                groupDeliveryMode: .largeGroupHybrid,
+                usesRoomEventLog: true,
+                sourceEventID: item.request.identifiers.eventID,
+                acceptedMembershipRevision: try unsigned(allocation.membershipRevision)
+            )
+            return OrderedRoomWriteCommit(
+                originalIndex: item.originalIndex,
+                cacheKey: item.cacheKey,
+                commit: .init(
+                    outcome: .accepted(accepted),
+                    acceptedDirectProjectionShadows: []
+                )
+            )
+        }
+    }
+
+    private func diagnoseConditionalPlainHybridGroupMismatch(
+        _ ordered: [OrderedRoomWriteRequest],
+        acquisitions: [V2ShardAdmissionCommandCreditPool.Acquisition],
+        snapshotsByRoomID: [UUID: V2HybridGroupShardCreditSnapshotCache.Entry],
+        sql: any SQLDatabase
+    ) async throws -> [Int] {
+        let contexts = try await loadPlainHybridGroupBatchContexts(ordered, sql: sql)
+        guard contexts.count == ordered.count else {
+            throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
+        }
+        var isolated: [Int] = []
+        var reducedRoomStates: [UUID: V2RoomCommandState] = [:]
+        isolated.reserveCapacity(ordered.count)
+        for ((item, context), acquisition) in zip(zip(ordered, contexts), acquisitions) {
+            guard context.ordinal == item.preflightOrdinal,
+                  case .granted(_, let effectiveShardState) = acquisition,
+                  let effectiveLease = effectiveShardState.lease,
+                  let snapshot = snapshotsByRoomID[item.roomID],
+                  !context.hasPriorOperation,
+                  context.room.kind == "group",
+                  context.room.deliveryMode == .largeGroupHybrid,
+                  context.room.roomShardID == snapshot.roomShardID,
+                  context.room.capacityProfileID == snapshot.capacityProfileID,
+                  context.room.capacityProfileID == item.request.capacityProfile.id,
+                  context.room.frozenAt == nil,
+                  context.senderIsActive == true,
+                  context.muted == false,
+                  context.allowsSendMessages == true,
+                  V2RoomMembershipRole(rawValue: context.actorRole ?? "") != nil,
+                  let admission = try? context.admissionSnapshot(),
+                  admission.room.shardLeaseID == admission.shard.leaseID,
+                  admission.room.shardLeaseGeneration == admission.shard.generation,
+                  UUID(uuidString: effectiveLease.id.rawValue)
+                    == admission.shard.leaseID,
+                  Int64(exactly: effectiveLease.generation)
+                    == admission.shard.generation
+            else {
+                isolated.append(item.originalIndex)
+                continue
+            }
+            let roomState = try reducedRoomStates[item.roomID]
+                ?? context.room.commandState(
+                    roomID: item.request.command.roomID,
+                    admission: admission.room
+                )
+            let result = try hybridReduction(
+                command: item.request.command,
+                roomState: roomState,
+                shardState: effectiveShardState,
+                profile: item.request.capacityProfile.limits,
+                identifiers: item.request.identifiers,
+                reliableTargetCount: 0,
+                now: item.request.now
+            )
+            guard case .accepted(let writeSet) = result else {
+                isolated.append(item.originalIndex)
+                continue
+            }
+            reducedRoomStates[item.roomID] = writeSet.nextRoomState
+        }
+        return isolated.sorted()
     }
 
     /// One-statement append for a policy/cache hit. The policy booleans never
@@ -6057,6 +7003,979 @@ private struct RoomLogMessageMutationRow: Decodable {
     }
 }
 
+private struct PlainHybridGroupMutationRow: Decodable {
+    let roomCount: Int64
+    let admissionCount: Int64
+    let messageCount: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case roomCount = "room_count"
+        case admissionCount = "admission_count"
+        case messageCount = "message_count"
+    }
+}
+
+private struct PlainHybridGroupShardCreditSnapshotRow: Decodable {
+    let roomID: UUID
+    let kind: String
+    let roomShardID: String
+    let capacityProfileID: String
+    let deliveryMode: V2GroupDeliveryMode
+    let frozenAt: Date?
+    let roomShardLeaseID: UUID
+    let roomShardLeaseGeneration: Int64
+    let shard: ShardRow
+
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case kind = "room_kind"
+        case roomShardID = "room_shard_id"
+        case capacityProfileID = "capacity_profile_id"
+        case deliveryMode = "delivery_mode"
+        case frozenAt = "frozen_at"
+        case roomShardLeaseID = "room_shard_lease_id"
+        case roomShardLeaseGeneration = "room_shard_lease_generation"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        roomID = try container.decode(UUID.self, forKey: .roomID)
+        kind = try container.decode(String.self, forKey: .kind)
+        roomShardID = try container.decode(String.self, forKey: .roomShardID)
+        capacityProfileID = try container.decode(String.self, forKey: .capacityProfileID)
+        deliveryMode = try container.decode(V2GroupDeliveryMode.self, forKey: .deliveryMode)
+        frozenAt = try container.decodeIfPresent(Date.self, forKey: .frozenAt)
+        roomShardLeaseID = try container.decode(UUID.self, forKey: .roomShardLeaseID)
+        roomShardLeaseGeneration = try container.decode(
+            Int64.self,
+            forKey: .roomShardLeaseGeneration
+        )
+        shard = try ShardRow(from: decoder)
+    }
+}
+
+private struct PlainHybridGroupBatchPreflightInput: Encodable {
+    let ordinal: Int
+    let roomID: UUID
+    let senderID: UUID
+    let clientMessageID: UUID
+    let nowUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case roomID = "room_id"
+        case senderID = "sender_id"
+        case clientMessageID = "client_message_id"
+        case nowUnixSeconds = "now_unix_seconds"
+    }
+}
+
+private struct PlainHybridGroupConditionalAppendInput: Sendable {
+    let ordinal: Int
+    let roomID: UUID
+    let senderID: UUID
+    let clientMessageID: UUID
+    let messageID: UUID
+    let eventID: UUID
+    let roomShardID: String
+    let capacityProfileID: String
+    let expectedShardLeaseID: UUID
+    let expectedShardGeneration: Int64
+    let maximumEligibleMembers: Int64
+    let maximumCommandsPerWindow: Int64
+    let maximumFanoutUnitsPerWindow: Int64
+    let text: String
+    let richEntitiesJSON: String
+    let createdAtUnixSeconds: Double
+
+    init(
+        item: OrderedRoomWriteRequest,
+        snapshot: V2HybridGroupShardCreditSnapshotCache.Entry,
+        expectedShardLeaseID: UUID,
+        expectedShardGeneration: Int64
+    ) throws {
+        let limits = item.request.capacityProfile.limits
+        guard let maximumEligibleMembers = Int64(exactly: limits.maxEligibleMembers),
+              let maximumCommandsPerWindow = Int64(exactly: limits.maxCommandsPerWindow),
+              let maximumFanoutUnitsPerWindow = Int64(
+                  exactly: limits.maxFanoutUnitsPerWindow
+              )
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        ordinal = item.preflightOrdinal
+        roomID = item.roomID
+        senderID = item.senderID
+        clientMessageID = try uuid(item.request.command.clientMessageID)
+        messageID = try uuid(item.request.identifiers.messageID)
+        eventID = try uuid(item.request.identifiers.eventID)
+        roomShardID = snapshot.roomShardID
+        capacityProfileID = snapshot.capacityProfileID
+        self.expectedShardLeaseID = expectedShardLeaseID
+        self.expectedShardGeneration = expectedShardGeneration
+        self.maximumEligibleMembers = maximumEligibleMembers
+        self.maximumCommandsPerWindow = maximumCommandsPerWindow
+        self.maximumFanoutUnitsPerWindow = maximumFanoutUnitsPerWindow
+        text = item.request.command.text
+        richEntitiesJSON = item.request.command.entities.isEmpty
+            ? "[]"
+            : try roomWriteJSON(item.request.command.entities)
+        createdAtUnixSeconds = item.request.now.timeIntervalSince1970
+    }
+}
+
+private struct PlainHybridGroupConditionalAllocationRow: Sendable {
+    let ordinal: Int
+    let messageID: UUID
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let membershipRevision: Int64
+}
+
+/// One-statement authoritative ordinary hybrid-group append.
+///
+/// The process cache contributes only immutable routing and lease identifiers
+/// which are compared to locked durable rows. It never contributes a member,
+/// role, mute, account-state or permission decision. The final `batch_gate`
+/// makes the DML all-or-nothing: a stale lease, replay, non-member, mute,
+/// disabled account, denied role, frozen room or exhausted room window writes
+/// no room cursor, admission counter or message row.
+private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedStatement {
+    static let name = "im_v2_plain_hybrid_group_conditional_append_v3"
+    static let sql = """
+        WITH RECURSIVE input AS MATERIALIZED (
+            SELECT (source.ordinality - 1)::integer AS ordinal,
+                   source.room_id, source.sender_id,
+                   source.client_message_id, source.message_id,
+                   source.event_id, source.room_shard_id,
+                   source.capacity_profile_id,
+                   source.expected_shard_lease_id,
+                   source.expected_shard_generation,
+                   source.maximum_eligible_members,
+                   source.maximum_commands_per_window,
+                   source.maximum_fanout_units_per_window,
+                   source.text_body,
+                   source.rich_entities_json::jsonb AS rich_entities,
+                   to_timestamp(source.created_at_unix_seconds) AS created_at,
+                   hashtextextended(
+                       'v2-message-operation:' || source.sender_id::text
+                           || ':' || source.client_message_id::text,
+                       0
+                   ) AS operation_lock_key
+            FROM unnest(
+                $1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[],
+                $5::uuid[], $6::text[], $7::text[], $8::uuid[],
+                $9::bigint[], $10::bigint[], $11::bigint[], $12::bigint[],
+                $13::text[], $14::text[], $15::double precision[]
+            ) WITH ORDINALITY AS source(
+                room_id, sender_id, client_message_id, message_id, event_id,
+                room_shard_id, capacity_profile_id,
+                expected_shard_lease_id, expected_shard_generation,
+                maximum_eligible_members, maximum_commands_per_window,
+                maximum_fanout_units_per_window, text_body,
+                rich_entities_json, created_at_unix_seconds, ordinality
+            )
+        ), operation_lock_keys AS MATERIALIZED (
+            SELECT DISTINCT input.operation_lock_key
+            FROM input
+        ), ordered_operation_locks AS MATERIALIZED (
+            SELECT (row_number() OVER (ORDER BY operation_lock_key) - 1)::integer
+                       AS ordinal,
+                   operation_lock_key
+            FROM operation_lock_keys
+        ), operation_locks(ordinal, lock_acquired) AS MATERIALIZED (
+            SELECT ordered.ordinal,
+                   pg_advisory_xact_lock(ordered.operation_lock_key)
+            FROM ordered_operation_locks AS ordered
+            WHERE ordered.ordinal = 0
+
+            UNION ALL
+
+            SELECT ordered.ordinal,
+                   pg_advisory_xact_lock(ordered.operation_lock_key)
+            FROM operation_locks AS previous
+            JOIN ordered_operation_locks AS ordered
+              ON ordered.ordinal = previous.ordinal + 1
+        ), operation_fence AS MATERIALIZED (
+            SELECT count(*)::bigint AS acquired_count
+            FROM operation_locks
+        ), requested_rooms AS MATERIALIZED (
+            SELECT DISTINCT input.room_id
+            FROM input
+        ), locked_room AS MATERIALIZED (
+            SELECT room.room_id, room.room_kind, room.room_shard_id,
+                   room.capacity_profile_id, room.delivery_mode,
+                   room.frozen_at, room.room_sequence,
+                   room.timeline_sequence, room.membership_revision
+            FROM requested_rooms AS requested
+            JOIN im_v2.rooms AS room ON room.room_id = requested.room_id
+            CROSS JOIN operation_fence AS fence
+            WHERE fence.acquired_count
+                    = (SELECT count(*) FROM operation_lock_keys)
+            ORDER BY room.room_id
+            -- Appends only advance non-key sequence columns.  NO KEY UPDATE
+            -- still serializes competing appends to one room, while allowing
+            -- the KEY SHARE locks taken by receipt foreign-key checks.  Using
+            -- FOR UPDATE here needlessly made multi-room append and receipt
+            -- batches deadlock; a shared advisory room fence avoided that
+            -- deadlock only by serializing otherwise independent operations.
+            FOR NO KEY UPDATE OF room
+        ), fresh_input AS MATERIALIZED (
+            SELECT input.*, room.room_kind, room.delivery_mode,
+                   room.frozen_at, room.room_sequence,
+                   room.timeline_sequence, room.membership_revision,
+                   room.room_shard_id AS actual_room_shard_id,
+                   room.capacity_profile_id AS actual_capacity_profile_id
+            FROM input
+            JOIN locked_room AS room ON room.room_id = input.room_id
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM im_v2.messages AS message
+                WHERE message.sender_user_id = input.sender_id
+                  AND message.client_message_id = input.client_message_id
+            )
+        ), locked_admission AS MATERIALIZED (
+            SELECT room.room_id, admission.eligible_member_count,
+                   admission.command_window_limit,
+                   admission.command_window_used,
+                   admission.fanout_window_limit,
+                   admission.shard_lease_id,
+                   admission.shard_lease_generation
+            FROM locked_room AS room
+            JOIN im_v2.room_admission AS admission
+              ON admission.room_id = room.room_id
+            ORDER BY room.room_id
+            FOR UPDATE OF admission
+        ), locked_actor AS MATERIALIZED (
+            SELECT fresh.ordinal
+            FROM fresh_input AS fresh
+            JOIN locked_admission AS admission
+              ON admission.room_id = fresh.room_id
+            JOIN im_v2.room_memberships AS membership
+              ON membership.room_id = fresh.room_id
+             AND membership.user_id = fresh.sender_id
+             AND membership.joined_revision <= fresh.membership_revision
+             AND (membership.left_revision IS NULL
+                  OR membership.left_revision > fresh.membership_revision)
+            WHERE membership.role IN ('owner', 'admin', 'member')
+              AND EXISTS (
+                  SELECT 1
+                  FROM im_v2.public_user_profiles AS profile
+                  WHERE profile.user_id = fresh.sender_id
+                    AND profile.state = 'active'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM im_v2.account_disables AS disabled
+                        WHERE disabled.user_id = profile.user_id
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM im_v2.room_member_mutes AS mute
+                  WHERE mute.room_id = fresh.room_id
+                    AND mute.user_id = fresh.sender_id
+                    AND mute.mute_until > fresh.created_at
+              )
+              AND (
+                  membership.role = 'owner'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM im_v2.group_role_permissions AS permission
+                      WHERE permission.room_id = fresh.room_id
+                        AND permission.role = membership.role
+                        AND permission.permission = 'send_messages'
+                  )
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM im_v2.group_permission_operations AS operation
+                      WHERE operation.room_id = fresh.room_id
+                        AND operation.role = membership.role
+                  )
+              )
+            ORDER BY fresh.room_id, fresh.sender_id, fresh.ordinal
+            FOR UPDATE OF membership
+        ), eligible AS MATERIALIZED (
+            SELECT fresh.*, admission.eligible_member_count,
+                   admission.command_window_limit,
+                   admission.command_window_used,
+                   admission.fanout_window_limit
+            FROM fresh_input AS fresh
+            JOIN locked_actor AS actor ON actor.ordinal = fresh.ordinal
+            JOIN locked_admission AS admission
+              ON admission.room_id = fresh.room_id
+            JOIN im_v2.shard_admission_pools AS shard
+              ON shard.room_shard_id = fresh.room_shard_id
+             AND shard.capacity_profile_id = fresh.capacity_profile_id
+             AND shard.lease_id = fresh.expected_shard_lease_id
+             AND shard.generation = fresh.expected_shard_generation
+             AND shard.valid_until > fresh.created_at
+            WHERE fresh.room_kind = 'group'
+              AND fresh.delivery_mode = 'large_group_hybrid'
+              AND fresh.frozen_at IS NULL
+              AND fresh.actual_room_shard_id = fresh.room_shard_id
+              AND fresh.actual_capacity_profile_id = fresh.capacity_profile_id
+              AND admission.shard_lease_id = fresh.expected_shard_lease_id
+              AND admission.shard_lease_generation
+                    = fresh.expected_shard_generation
+              AND admission.eligible_member_count
+                    <= fresh.maximum_eligible_members
+              AND admission.command_window_limit
+                    = fresh.maximum_commands_per_window
+              AND admission.fanout_window_limit
+                    = fresh.maximum_fanout_units_per_window
+        ), room_delta AS MATERIALIZED (
+            SELECT eligible.room_id,
+                   count(*)::bigint AS message_count,
+                   min(eligible.room_sequence) AS room_sequence,
+                   min(eligible.timeline_sequence) AS timeline_sequence,
+                   min(eligible.command_window_used) AS command_window_used,
+                   min(eligible.command_window_limit) AS command_window_limit
+            FROM eligible
+            GROUP BY eligible.room_id
+        ), batch_gate AS MATERIALIZED (
+            SELECT count(*) = (SELECT count(*) FROM input)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM room_delta
+                   WHERE room_sequence > 9223372036854775807 - message_count
+                      OR timeline_sequence > 9223372036854775807 - message_count
+                      OR command_window_used > command_window_limit - message_count
+               ) AS allowed
+            FROM eligible
+        ), allocated AS MATERIALIZED (
+            SELECT eligible.*,
+                   eligible.room_sequence
+                       + row_number() OVER (
+                           PARTITION BY eligible.room_id
+                           ORDER BY eligible.ordinal
+                       ) AS allocated_room_sequence,
+                   eligible.timeline_sequence
+                       + row_number() OVER (
+                           PARTITION BY eligible.room_id
+                           ORDER BY eligible.ordinal
+                       ) AS allocated_timeline_sequence
+            FROM eligible
+            CROSS JOIN batch_gate
+            WHERE batch_gate.allowed
+        ), room_update AS (
+            UPDATE im_v2.rooms AS room
+            SET room_sequence = room.room_sequence + delta.message_count,
+                timeline_sequence = room.timeline_sequence + delta.message_count
+            FROM room_delta AS delta
+            CROSS JOIN batch_gate
+            WHERE batch_gate.allowed
+              AND room.room_id = delta.room_id
+            RETURNING room.room_id
+        ), admission_update AS (
+            UPDATE im_v2.room_admission AS admission
+            SET command_window_used
+                    = admission.command_window_used + delta.message_count
+            FROM room_delta AS delta
+            JOIN room_update ON room_update.room_id = delta.room_id
+            WHERE admission.room_id = delta.room_id
+            RETURNING admission.room_id
+        ), message_insert AS (
+            INSERT INTO im_v2.messages
+                (message_id, room_id, room_sequence, timeline_sequence,
+                 sender_user_id, client_message_id, text_body,
+                 rich_entities, created_at, accepted_event_id,
+                 accepted_event_storage, accepted_membership_revision)
+            SELECT allocated.message_id, allocated.room_id,
+                   allocated.allocated_room_sequence,
+                   allocated.allocated_timeline_sequence,
+                   allocated.sender_id, allocated.client_message_id,
+                   allocated.text_body, allocated.rich_entities,
+                   allocated.created_at, allocated.event_id,
+                   'message_row', allocated.membership_revision
+            FROM allocated
+            JOIN admission_update
+              ON admission_update.room_id = allocated.room_id
+            RETURNING message_id, room_id, room_sequence,
+                      timeline_sequence, accepted_membership_revision
+        )
+        SELECT allocated.ordinal, inserted.message_id,
+               inserted.room_sequence, inserted.timeline_sequence,
+               inserted.accepted_membership_revision
+        FROM allocated
+        JOIN message_insert AS inserted
+          ON inserted.message_id = allocated.message_id
+        ORDER BY allocated.ordinal
+        """
+
+    typealias Row = PlainHybridGroupConditionalAllocationRow
+
+    let inputs: [PlainHybridGroupConditionalAppendInput]
+
+    init(inputs: [PlainHybridGroupConditionalAppendInput]) throws {
+        guard !inputs.isEmpty,
+              inputs.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        self.inputs = inputs
+    }
+
+    func makeBindings() throws -> PostgresBindings {
+        var bindings = PostgresBindings(capacity: 15)
+        bindings.append(inputs.map(\.roomID))
+        bindings.append(inputs.map(\.senderID))
+        bindings.append(inputs.map(\.clientMessageID))
+        bindings.append(inputs.map(\.messageID))
+        bindings.append(inputs.map(\.eventID))
+        bindings.append(inputs.map(\.roomShardID))
+        bindings.append(inputs.map(\.capacityProfileID))
+        bindings.append(inputs.map(\.expectedShardLeaseID))
+        bindings.append(inputs.map(\.expectedShardGeneration))
+        bindings.append(inputs.map(\.maximumEligibleMembers))
+        bindings.append(inputs.map(\.maximumCommandsPerWindow))
+        bindings.append(inputs.map(\.maximumFanoutUnitsPerWindow))
+        bindings.append(inputs.map(\.text))
+        bindings.append(inputs.map(\.richEntitiesJSON))
+        bindings.append(inputs.map(\.createdAtUnixSeconds))
+        return bindings
+    }
+
+    func decodeRow(_ row: PostgresRow) throws -> Row {
+        let decoded = try row.decode((Int32, UUID, Int64, Int64, Int64).self)
+        return .init(
+            ordinal: Int(decoded.0),
+            messageID: decoded.1,
+            roomSequence: decoded.2,
+            timelineSequence: decoded.3,
+            membershipRevision: decoded.4
+        )
+    }
+}
+
+/// Named, typed-array form of the authoritative hybrid-group preflight.
+///
+/// This statement deliberately returns the same 36 durable fields as the
+/// SQLKit fallback. No cached permission boolean is accepted as authority:
+/// PostgreSQL still locks rooms, admission rows and sender memberships and
+/// evaluates active/mute/role permission state inside the transaction.
+private struct PlainHybridGroupBatchPreflightStatement: PostgresPreparedStatement {
+    static let name = "im_v2_plain_hybrid_group_batch_preflight_v1"
+    static let sql = """
+        WITH input AS MATERIALIZED (
+            SELECT (input.ordinality - 1)::integer AS ordinal,
+                   input.room_id, input.sender_id,
+                   input.client_message_id, input.now_unix_seconds
+            FROM unnest(
+                $1::uuid[], $2::uuid[], $3::uuid[], $4::double precision[]
+            ) WITH ORDINALITY AS input(
+                room_id, sender_id, client_message_id, now_unix_seconds,
+                ordinality
+            )
+        ), locked_room AS MATERIALIZED (
+            SELECT input.ordinal, input.sender_id, input.client_message_id,
+                   input.now_unix_seconds, room.room_kind,
+                   room.room_shard_id, room.room_sequence,
+                   room.timeline_sequence, room.membership_revision,
+                   room.capacity_profile_id, room.delivery_mode,
+                   room.frozen_at, room.room_id
+            FROM input
+            JOIN im_v2.rooms AS room ON room.room_id = input.room_id
+            ORDER BY room.room_id
+            FOR UPDATE OF room
+        ), prior_operation AS MATERIALIZED (
+            SELECT room.ordinal
+            FROM locked_room AS room
+            JOIN im_v2.messages AS message
+              ON message.sender_user_id = room.sender_id
+             AND message.client_message_id = room.client_message_id
+        ), fresh_room AS MATERIALIZED (
+            SELECT room.*
+            FROM locked_room AS room
+            WHERE NOT EXISTS (
+                SELECT 1 FROM prior_operation AS prior
+                WHERE prior.ordinal = room.ordinal
+            )
+        ), locked_admission AS MATERIALIZED (
+            SELECT room.ordinal,
+                   admission.eligible_member_count AS room_eligible_member_count,
+                   admission.command_window_limit AS room_command_window_limit,
+                   admission.command_window_used AS room_command_window_used,
+                   admission.fanout_window_limit AS room_fanout_window_limit,
+                   admission.fanout_window_used AS room_fanout_window_used,
+                   admission.max_outstanding_fanout_units AS room_max_outstanding_fanout_units,
+                   admission.outstanding_fanout_units AS room_outstanding_fanout_units,
+                   admission.max_outstanding_plans AS room_max_outstanding_plans,
+                   admission.outstanding_plans AS room_outstanding_plans,
+                   admission.shard_lease_id AS room_shard_lease_id,
+                   admission.shard_lease_generation AS room_shard_lease_generation,
+                   shard.lease_id AS shard_lease_id,
+                   shard.generation AS shard_generation,
+                   shard.valid_until AS shard_valid_until,
+                   shard.command_window_limit AS shard_command_window_limit,
+                   shard.command_window_used AS shard_command_window_used,
+                   shard.fanout_window_limit AS shard_fanout_window_limit,
+                   shard.fanout_window_used AS shard_fanout_window_used,
+                   shard.max_outstanding_fanout_units AS shard_max_outstanding_fanout_units,
+                   shard.outstanding_fanout_units AS shard_outstanding_fanout_units,
+                   shard.max_outstanding_plans AS shard_max_outstanding_plans,
+                   shard.outstanding_plans AS shard_outstanding_plans
+            FROM fresh_room AS room
+            JOIN im_v2.room_admission AS admission
+              ON admission.room_id = room.room_id
+            JOIN im_v2.shard_admission_pools AS shard
+              ON shard.room_shard_id = room.room_shard_id
+             AND shard.capacity_profile_id = room.capacity_profile_id
+            ORDER BY room.room_id
+            FOR UPDATE OF admission
+        ), locked_actor AS MATERIALIZED (
+            SELECT room.ordinal, membership.role AS actor_role,
+                   EXISTS (
+                       SELECT 1
+                       FROM im_v2.public_user_profiles AS profile
+                       WHERE profile.user_id = room.sender_id
+                         AND profile.state = 'active'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM im_v2.account_disables AS disabled
+                             WHERE disabled.user_id = profile.user_id
+                         )
+                   ) AS sender_is_active,
+                   EXISTS (
+                       SELECT 1 FROM im_v2.room_member_mutes AS mute
+                       WHERE mute.room_id = room.room_id
+                         AND mute.user_id = room.sender_id
+                         AND mute.mute_until > to_timestamp(room.now_unix_seconds)
+                   ) AS muted,
+                   (
+                       membership.role = 'owner'
+                       OR EXISTS (
+                           SELECT 1 FROM im_v2.group_role_permissions AS permission
+                           WHERE permission.room_id = room.room_id
+                             AND permission.role = membership.role
+                             AND permission.permission = 'send_messages'
+                       )
+                       OR NOT EXISTS (
+                           SELECT 1 FROM im_v2.group_permission_operations AS operation
+                           WHERE operation.room_id = room.room_id
+                             AND operation.role = membership.role
+                       )
+                   ) AS allows_send_messages
+            FROM fresh_room AS room
+            JOIN locked_admission AS admission USING (ordinal)
+            JOIN im_v2.room_memberships AS membership
+              ON membership.room_id = room.room_id
+             AND membership.user_id = room.sender_id
+             AND membership.joined_revision <= room.membership_revision
+             AND (membership.left_revision IS NULL
+                  OR membership.left_revision > room.membership_revision)
+            ORDER BY room.room_id, membership.user_id
+            FOR UPDATE OF membership
+        )
+        SELECT room.ordinal, room.room_kind, room.room_shard_id,
+               room.room_sequence, room.timeline_sequence,
+               room.membership_revision, room.capacity_profile_id,
+               room.delivery_mode, room.frozen_at,
+               EXISTS (
+                   SELECT 1 FROM prior_operation AS prior
+                   WHERE prior.ordinal = room.ordinal
+               ) AS has_prior_operation,
+               admission.room_eligible_member_count,
+               admission.room_command_window_limit,
+               admission.room_command_window_used,
+               admission.room_fanout_window_limit,
+               admission.room_fanout_window_used,
+               admission.room_max_outstanding_fanout_units,
+               admission.room_outstanding_fanout_units,
+               admission.room_max_outstanding_plans,
+               admission.room_outstanding_plans,
+               admission.room_shard_lease_id,
+               admission.room_shard_lease_generation,
+               admission.shard_lease_id, admission.shard_generation,
+               admission.shard_valid_until,
+               admission.shard_command_window_limit,
+               admission.shard_command_window_used,
+               admission.shard_fanout_window_limit,
+               admission.shard_fanout_window_used,
+               admission.shard_max_outstanding_fanout_units,
+               admission.shard_outstanding_fanout_units,
+               admission.shard_max_outstanding_plans,
+               admission.shard_outstanding_plans,
+               actor.actor_role, actor.sender_is_active, actor.muted,
+               actor.allows_send_messages
+        FROM locked_room AS room
+        LEFT JOIN locked_admission AS admission USING (ordinal)
+        LEFT JOIN locked_actor AS actor USING (ordinal)
+        ORDER BY room.ordinal
+        """
+
+    typealias Row = PlainHybridGroupBatchPreflightRow
+
+    let inputs: [PlainHybridGroupBatchPreflightInput]
+
+    init(inputs: [PlainHybridGroupBatchPreflightInput]) throws {
+        guard inputs.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        self.inputs = inputs
+    }
+
+    func makeBindings() throws -> PostgresBindings {
+        var bindings = PostgresBindings(capacity: 4)
+        bindings.append(inputs.map(\.roomID))
+        bindings.append(inputs.map(\.senderID))
+        bindings.append(inputs.map(\.clientMessageID))
+        bindings.append(inputs.map(\.nowUnixSeconds))
+        return bindings
+    }
+
+    func decodeRow(_ row: PostgresRow) throws -> Row {
+        try .init(postgresRow: row)
+    }
+}
+
+/// Sequential decoding is O(columns) without allocating a keyed Codable
+/// container or performing 36 string lookups for every returned row.
+private struct PlainHybridGroupPreparedRowCursor {
+    private var iterator: PostgresRow.Iterator
+
+    init(_ row: PostgresRow) {
+        iterator = row.makeIterator()
+    }
+
+    mutating func decode<T: PostgresDecodable>(_ type: T.Type = T.self) throws -> T {
+        guard let cell = iterator.next() else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return try cell.decode(type)
+    }
+
+    mutating func assertExhausted() throws {
+        guard iterator.next() == nil else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+    }
+}
+
+private struct PlainHybridGroupBatchPreflightRow: Decodable {
+    let ordinal: Int
+    let kind: String
+    let roomShardID: String
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let membershipRevision: Int64
+    let capacityProfileID: String
+    let deliveryMode: V2GroupDeliveryMode
+    let frozenAt: Date?
+    let hasPriorOperation: Bool
+    let roomEligibleMemberCount: Int?
+    let roomCommandWindowLimit: Int?
+    let roomCommandWindowUsed: Int?
+    let roomFanoutWindowLimit: Int?
+    let roomFanoutWindowUsed: Int?
+    let roomMaxOutstandingFanoutUnits: Int?
+    let roomOutstandingFanoutUnits: Int?
+    let roomMaxOutstandingPlans: Int?
+    let roomOutstandingPlans: Int?
+    let roomShardLeaseID: UUID?
+    let roomShardLeaseGeneration: Int64?
+    let shardLeaseID: UUID?
+    let shardGeneration: Int64?
+    let shardValidUntil: Date?
+    let shardCommandWindowLimit: Int?
+    let shardCommandWindowUsed: Int?
+    let shardFanoutWindowLimit: Int?
+    let shardFanoutWindowUsed: Int?
+    let shardMaxOutstandingFanoutUnits: Int?
+    let shardOutstandingFanoutUnits: Int?
+    let shardMaxOutstandingPlans: Int?
+    let shardOutstandingPlans: Int?
+    let actorRole: String?
+    let senderIsActive: Bool?
+    let muted: Bool?
+    let allowsSendMessages: Bool?
+
+    init(postgresRow: PostgresRow) throws {
+        var row = PlainHybridGroupPreparedRowCursor(postgresRow)
+        ordinal = try row.decode()
+        kind = try row.decode()
+        roomShardID = try row.decode()
+        roomSequence = try row.decode()
+        timelineSequence = try row.decode()
+        membershipRevision = try row.decode()
+        capacityProfileID = try row.decode()
+        let deliveryModeValue: String = try row.decode()
+        guard let deliveryMode = V2GroupDeliveryMode(rawValue: deliveryModeValue) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        self.deliveryMode = deliveryMode
+        frozenAt = try row.decode()
+        hasPriorOperation = try row.decode()
+        roomEligibleMemberCount = try row.decode()
+        roomCommandWindowLimit = try row.decode()
+        roomCommandWindowUsed = try row.decode()
+        roomFanoutWindowLimit = try row.decode()
+        roomFanoutWindowUsed = try row.decode()
+        roomMaxOutstandingFanoutUnits = try row.decode()
+        roomOutstandingFanoutUnits = try row.decode()
+        roomMaxOutstandingPlans = try row.decode()
+        roomOutstandingPlans = try row.decode()
+        roomShardLeaseID = try row.decode()
+        roomShardLeaseGeneration = try row.decode()
+        shardLeaseID = try row.decode()
+        shardGeneration = try row.decode()
+        shardValidUntil = try row.decode()
+        shardCommandWindowLimit = try row.decode()
+        shardCommandWindowUsed = try row.decode()
+        shardFanoutWindowLimit = try row.decode()
+        shardFanoutWindowUsed = try row.decode()
+        shardMaxOutstandingFanoutUnits = try row.decode()
+        shardOutstandingFanoutUnits = try row.decode()
+        shardMaxOutstandingPlans = try row.decode()
+        shardOutstandingPlans = try row.decode()
+        actorRole = try row.decode()
+        senderIsActive = try row.decode()
+        muted = try row.decode()
+        allowsSendMessages = try row.decode()
+        try row.assertExhausted()
+    }
+
+    /// This is the hottest row in hybrid-group admission. Decode columns
+    /// directly instead of constructing a generic keyed Codable container for
+    /// every message. PostgreSQL type validation and every authorization field
+    /// remain identical; only the Swift decoding mechanism changes.
+    init(row: any SQLRow) throws {
+        ordinal = try row.decode(column: "ordinal")
+        kind = try row.decode(column: "room_kind")
+        roomShardID = try row.decode(column: "room_shard_id")
+        roomSequence = try row.decode(column: "room_sequence")
+        timelineSequence = try row.decode(column: "timeline_sequence")
+        membershipRevision = try row.decode(column: "membership_revision")
+        capacityProfileID = try row.decode(column: "capacity_profile_id")
+        deliveryMode = try row.decode(column: "delivery_mode")
+        frozenAt = try row.decode(column: "frozen_at", as: Date?.self)
+        hasPriorOperation = try row.decode(column: "has_prior_operation")
+        roomEligibleMemberCount = try row.decode(
+            column: "room_eligible_member_count",
+            as: Int?.self
+        )
+        roomCommandWindowLimit = try row.decode(column: "room_command_window_limit", as: Int?.self)
+        roomCommandWindowUsed = try row.decode(column: "room_command_window_used", as: Int?.self)
+        roomFanoutWindowLimit = try row.decode(column: "room_fanout_window_limit", as: Int?.self)
+        roomFanoutWindowUsed = try row.decode(column: "room_fanout_window_used", as: Int?.self)
+        roomMaxOutstandingFanoutUnits = try row.decode(
+            column: "room_max_outstanding_fanout_units",
+            as: Int?.self
+        )
+        roomOutstandingFanoutUnits = try row.decode(
+            column: "room_outstanding_fanout_units",
+            as: Int?.self
+        )
+        roomMaxOutstandingPlans = try row.decode(column: "room_max_outstanding_plans", as: Int?.self)
+        roomOutstandingPlans = try row.decode(column: "room_outstanding_plans", as: Int?.self)
+        roomShardLeaseID = try row.decode(column: "room_shard_lease_id", as: UUID?.self)
+        roomShardLeaseGeneration = try row.decode(
+            column: "room_shard_lease_generation",
+            as: Int64?.self
+        )
+        shardLeaseID = try row.decode(column: "shard_lease_id", as: UUID?.self)
+        shardGeneration = try row.decode(column: "shard_generation", as: Int64?.self)
+        shardValidUntil = try row.decode(column: "shard_valid_until", as: Date?.self)
+        shardCommandWindowLimit = try row.decode(column: "shard_command_window_limit", as: Int?.self)
+        shardCommandWindowUsed = try row.decode(column: "shard_command_window_used", as: Int?.self)
+        shardFanoutWindowLimit = try row.decode(column: "shard_fanout_window_limit", as: Int?.self)
+        shardFanoutWindowUsed = try row.decode(column: "shard_fanout_window_used", as: Int?.self)
+        shardMaxOutstandingFanoutUnits = try row.decode(
+            column: "shard_max_outstanding_fanout_units",
+            as: Int?.self
+        )
+        shardOutstandingFanoutUnits = try row.decode(
+            column: "shard_outstanding_fanout_units",
+            as: Int?.self
+        )
+        shardMaxOutstandingPlans = try row.decode(
+            column: "shard_max_outstanding_plans",
+            as: Int?.self
+        )
+        shardOutstandingPlans = try row.decode(column: "shard_outstanding_plans", as: Int?.self)
+        actorRole = try row.decode(column: "actor_role", as: String?.self)
+        senderIsActive = try row.decode(column: "sender_is_active", as: Bool?.self)
+        muted = try row.decode(column: "muted", as: Bool?.self)
+        allowsSendMessages = try row.decode(column: "allows_send_messages", as: Bool?.self)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case kind = "room_kind"
+        case roomShardID = "room_shard_id"
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+        case membershipRevision = "membership_revision"
+        case capacityProfileID = "capacity_profile_id"
+        case deliveryMode = "delivery_mode"
+        case frozenAt = "frozen_at"
+        case hasPriorOperation = "has_prior_operation"
+        case roomEligibleMemberCount = "room_eligible_member_count"
+        case roomCommandWindowLimit = "room_command_window_limit"
+        case roomCommandWindowUsed = "room_command_window_used"
+        case roomFanoutWindowLimit = "room_fanout_window_limit"
+        case roomFanoutWindowUsed = "room_fanout_window_used"
+        case roomMaxOutstandingFanoutUnits = "room_max_outstanding_fanout_units"
+        case roomOutstandingFanoutUnits = "room_outstanding_fanout_units"
+        case roomMaxOutstandingPlans = "room_max_outstanding_plans"
+        case roomOutstandingPlans = "room_outstanding_plans"
+        case roomShardLeaseID = "room_shard_lease_id"
+        case roomShardLeaseGeneration = "room_shard_lease_generation"
+        case shardLeaseID = "shard_lease_id"
+        case shardGeneration = "shard_generation"
+        case shardValidUntil = "shard_valid_until"
+        case shardCommandWindowLimit = "shard_command_window_limit"
+        case shardCommandWindowUsed = "shard_command_window_used"
+        case shardFanoutWindowLimit = "shard_fanout_window_limit"
+        case shardFanoutWindowUsed = "shard_fanout_window_used"
+        case shardMaxOutstandingFanoutUnits = "shard_max_outstanding_fanout_units"
+        case shardOutstandingFanoutUnits = "shard_outstanding_fanout_units"
+        case shardMaxOutstandingPlans = "shard_max_outstanding_plans"
+        case shardOutstandingPlans = "shard_outstanding_plans"
+        case actorRole = "actor_role"
+        case senderIsActive = "sender_is_active"
+        case muted
+        case allowsSendMessages = "allows_send_messages"
+    }
+
+    var room: RoomRow {
+        .init(
+            kind: kind,
+            roomShardID: roomShardID,
+            roomSequence: roomSequence,
+            timelineSequence: timelineSequence,
+            membershipRevision: membershipRevision,
+            capacityProfileID: capacityProfileID,
+            deliveryMode: deliveryMode,
+            frozenAt: frozenAt
+        )
+    }
+
+    func admissionSnapshot() throws -> AdmissionSnapshotRow {
+        guard let roomEligibleMemberCount, let roomCommandWindowLimit,
+              let roomCommandWindowUsed, let roomFanoutWindowLimit,
+              let roomFanoutWindowUsed, let roomMaxOutstandingFanoutUnits,
+              let roomOutstandingFanoutUnits, let roomMaxOutstandingPlans,
+              let roomOutstandingPlans, let roomShardLeaseID,
+              let roomShardLeaseGeneration, let shardLeaseID,
+              let shardGeneration, let shardValidUntil,
+              let shardCommandWindowLimit, let shardCommandWindowUsed,
+              let shardFanoutWindowLimit, let shardFanoutWindowUsed,
+              let shardMaxOutstandingFanoutUnits,
+              let shardOutstandingFanoutUnits, let shardMaxOutstandingPlans,
+              let shardOutstandingPlans
+        else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
+        return .init(
+            roomEligibleMemberCount: roomEligibleMemberCount,
+            roomCommandWindowLimit: roomCommandWindowLimit,
+            roomCommandWindowUsed: roomCommandWindowUsed,
+            roomFanoutWindowLimit: roomFanoutWindowLimit,
+            roomFanoutWindowUsed: roomFanoutWindowUsed,
+            roomMaxOutstandingFanoutUnits: roomMaxOutstandingFanoutUnits,
+            roomOutstandingFanoutUnits: roomOutstandingFanoutUnits,
+            roomMaxOutstandingPlans: roomMaxOutstandingPlans,
+            roomOutstandingPlans: roomOutstandingPlans,
+            roomShardLeaseID: roomShardLeaseID,
+            roomShardLeaseGeneration: roomShardLeaseGeneration,
+            shardLeaseID: shardLeaseID,
+            shardGeneration: shardGeneration,
+            shardValidUntil: shardValidUntil,
+            shardCommandWindowLimit: shardCommandWindowLimit,
+            shardCommandWindowUsed: shardCommandWindowUsed,
+            shardFanoutWindowLimit: shardFanoutWindowLimit,
+            shardFanoutWindowUsed: shardFanoutWindowUsed,
+            shardMaxOutstandingFanoutUnits: shardMaxOutstandingFanoutUnits,
+            shardOutstandingFanoutUnits: shardOutstandingFanoutUnits,
+            shardMaxOutstandingPlans: shardMaxOutstandingPlans,
+            shardOutstandingPlans: shardOutstandingPlans,
+            actorRole: actorRole,
+            senderIsActive: senderIsActive,
+            muted: muted
+        )
+    }
+}
+
+private struct PlainHybridGroupAppendInput: Encodable {
+    let ordinal: Int
+    let roomID: UUID
+    let messageID: UUID
+    let eventID: UUID
+    let senderID: UUID
+    let clientMessageID: UUID
+    let roomSequence: Int64
+    let timelineSequence: Int64
+    let membershipRevision: Int64
+    let commandWindowUsed: Int
+    let fanoutWindowUsed: Int
+    let outstandingFanoutUnits: Int
+    let outstandingPlans: Int
+    let shardLeaseID: UUID
+    let shardLeaseGeneration: Int64
+    let text: String
+    let entities: [V2MessageEntity]
+    let createdAtUnixSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case ordinal
+        case roomID = "room_id"
+        case messageID = "message_id"
+        case eventID = "event_id"
+        case senderID = "sender_id"
+        case clientMessageID = "client_message_id"
+        case roomSequence = "room_sequence"
+        case timelineSequence = "timeline_sequence"
+        case membershipRevision = "membership_revision"
+        case commandWindowUsed = "command_window_used"
+        case fanoutWindowUsed = "fanout_window_used"
+        case outstandingFanoutUnits = "outstanding_fanout_units"
+        case outstandingPlans = "outstanding_plans"
+        case shardLeaseID = "shard_lease_id"
+        case shardLeaseGeneration = "shard_lease_generation"
+        case text = "text_body"
+        case entities = "rich_entities"
+        case createdAtUnixSeconds = "created_at_unix_seconds"
+    }
+}
+
+private struct PreparedPlainHybridGroupAppend {
+    let originalIndex: Int
+    let cacheKey: V2DirectSendPolicyCache.Key
+    let accepted: V2AcceptedMessage
+    let input: PlainHybridGroupAppendInput
+
+    init(
+        originalIndex: Int,
+        request: V2RoomWriteRequest,
+        room: RoomRow,
+        writeSet: V2MessageAcceptanceTransaction,
+        accepted: V2AcceptedMessage,
+        reservation: ShardAdmissionReservation
+    ) throws {
+        let roomID = try uuid(request.command.roomID)
+        let senderID = try uuid(request.command.senderUserID)
+        let roomAdmission = writeSet.nextRoomState.admission
+        guard writeSet.fanoutPlan.reservation.cost.targetCount == 0 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        self.originalIndex = originalIndex
+        cacheKey = .init(roomID: roomID, senderID: senderID)
+        self.accepted = accepted
+        input = .init(
+            ordinal: originalIndex,
+            roomID: roomID,
+            messageID: try uuid(writeSet.acceptedMessage.messageID),
+            eventID: try uuid(writeSet.eventID),
+            senderID: senderID,
+            clientMessageID: try uuid(request.command.clientMessageID),
+            roomSequence: try signed(writeSet.acceptedMessage.roomSequence),
+            timelineSequence: try signed(writeSet.acceptedMessage.timelineSequence),
+            membershipRevision: room.membershipRevision,
+            commandWindowUsed: roomAdmission.commandWindow.used,
+            fanoutWindowUsed: roomAdmission.fanoutWindow.used,
+            outstandingFanoutUnits: roomAdmission.outstandingFanoutUnits,
+            outstandingPlans: roomAdmission.outstandingPlans,
+            shardLeaseID: reservation.leaseID,
+            shardLeaseGeneration: reservation.generation,
+            text: request.command.text,
+            entities: request.command.entities,
+            createdAtUnixSeconds: request.now.timeIntervalSince1970
+        )
+    }
+}
+
 /// JSONB input for the set-based plain direct room-log append.  This is
 /// intentionally narrow: attachments, mentions and review jobs retain their
 /// dedicated path until their own batch write graph is designed and verified.
@@ -6641,6 +8560,154 @@ private struct FastPlainDirectRoomLogAppendInput: Sendable {
             ? "[]"
             : try roomWriteJSON(append.request.command.entities)
         createdAtUnixSeconds = append.request.now.timeIntervalSince1970
+    }
+}
+
+/// Named, connection-cached form of the hybrid-group canonical append.
+///
+/// Arrays are deliberately columnar: PostgresNIO can encode them directly in
+/// the extended protocol and PostgreSQL can expand them with one `unnest`.
+/// The JSON-valued entity column stays JSON text until the server-side cast,
+/// so arbitrary entities retain exactly the fallback path's representation.
+private struct PlainHybridGroupAppendStatement: PostgresPreparedStatement {
+    static let name = "im_v2_plain_hybrid_group_append_v2"
+    static let sql = """
+        WITH input AS MATERIALIZED (
+            SELECT input.ordinal, input.room_id, input.message_id,
+                   input.event_id, input.sender_id,
+                   input.client_message_id, input.room_sequence,
+                   input.timeline_sequence, input.membership_revision,
+                   input.command_window_used, input.fanout_window_used,
+                   input.outstanding_fanout_units, input.outstanding_plans,
+                   input.shard_lease_id, input.shard_lease_generation,
+                   input.text_body,
+                   input.rich_entities_json::jsonb AS rich_entities,
+                   to_timestamp(input.created_at_unix_seconds) AS created_at
+            FROM unnest(
+                $1::integer[], $2::uuid[], $3::uuid[], $4::uuid[],
+                $5::uuid[], $6::uuid[], $7::bigint[], $8::bigint[],
+                $9::bigint[], $10::bigint[], $11::bigint[], $12::bigint[],
+                $13::bigint[], $14::uuid[], $15::bigint[], $16::text[],
+                $17::text[], $18::double precision[]
+            ) AS input(
+                ordinal, room_id, message_id, event_id, sender_id,
+                client_message_id, room_sequence, timeline_sequence,
+                membership_revision, command_window_used, fanout_window_used,
+                outstanding_fanout_units, outstanding_plans, shard_lease_id,
+                shard_lease_generation, text_body, rich_entities_json,
+                created_at_unix_seconds
+            )
+        ), final_room_input AS MATERIALIZED (
+            SELECT DISTINCT ON (room_id) *
+            FROM input
+            ORDER BY room_id, ordinal DESC
+        ), room_update AS (
+            UPDATE im_v2.rooms AS room
+            SET room_sequence = input.room_sequence,
+                timeline_sequence = input.timeline_sequence
+            FROM final_room_input AS input
+            WHERE room.room_id = input.room_id
+            RETURNING room.room_id
+        ), admission_update AS (
+            UPDATE im_v2.room_admission AS admission
+            SET command_window_used = input.command_window_used,
+                fanout_window_used = input.fanout_window_used,
+                outstanding_fanout_units = input.outstanding_fanout_units,
+                outstanding_plans = input.outstanding_plans,
+                shard_lease_id = input.shard_lease_id,
+                shard_lease_generation = input.shard_lease_generation
+            FROM final_room_input AS input
+            JOIN room_update ON room_update.room_id = input.room_id
+            WHERE admission.room_id = input.room_id
+            RETURNING admission.room_id
+        ), message_insert AS (
+            INSERT INTO im_v2.messages
+                (message_id, room_id, room_sequence, timeline_sequence,
+                 sender_user_id, client_message_id, text_body,
+                 rich_entities, created_at, accepted_event_id,
+                 accepted_event_storage, accepted_membership_revision)
+            SELECT input.message_id, input.room_id, input.room_sequence,
+                   input.timeline_sequence, input.sender_id,
+                   input.client_message_id, input.text_body,
+                   input.rich_entities, input.created_at, input.event_id,
+                   'message_row', input.membership_revision
+            FROM input
+            JOIN admission_update ON admission_update.room_id = input.room_id
+            RETURNING message_id, room_id
+        )
+        SELECT (SELECT count(*) FROM room_update)::bigint AS room_count,
+               (SELECT count(*) FROM admission_update)::bigint
+                   AS admission_count,
+               (SELECT count(*) FROM message_insert)::bigint AS message_count
+        """
+
+    typealias Row = PlainHybridGroupMutationRow
+
+    let inputs: [PlainHybridGroupAppendInput]
+    let richEntitiesJSON: [String]
+
+    init(inputs: [PlainHybridGroupAppendInput]) throws {
+        self.inputs = inputs
+        richEntitiesJSON = try inputs.map { input in
+            input.entities.isEmpty ? "[]" : try roomWriteJSON(input.entities)
+        }
+    }
+
+    func makeBindings() throws -> PostgresBindings {
+        var bindings = PostgresBindings(capacity: 18)
+        bindings.append(try inputs.map { input in
+            guard let ordinal = Int32(exactly: input.ordinal) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return ordinal
+        })
+        bindings.append(inputs.map(\.roomID))
+        bindings.append(inputs.map(\.messageID))
+        bindings.append(inputs.map(\.eventID))
+        bindings.append(inputs.map(\.senderID))
+        bindings.append(inputs.map(\.clientMessageID))
+        bindings.append(inputs.map(\.roomSequence))
+        bindings.append(inputs.map(\.timelineSequence))
+        bindings.append(inputs.map(\.membershipRevision))
+        bindings.append(try inputs.map { input in
+            guard let value = Int64(exactly: input.commandWindowUsed) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return value
+        })
+        bindings.append(try inputs.map { input in
+            guard let value = Int64(exactly: input.fanoutWindowUsed) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return value
+        })
+        bindings.append(try inputs.map { input in
+            guard let value = Int64(exactly: input.outstandingFanoutUnits) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return value
+        })
+        bindings.append(try inputs.map { input in
+            guard let value = Int64(exactly: input.outstandingPlans) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return value
+        })
+        bindings.append(inputs.map(\.shardLeaseID))
+        bindings.append(inputs.map(\.shardLeaseGeneration))
+        bindings.append(inputs.map(\.text))
+        bindings.append(richEntitiesJSON)
+        bindings.append(inputs.map(\.createdAtUnixSeconds))
+        return bindings
+    }
+
+    func decodeRow(_ row: PostgresRow) throws -> Row {
+        let counts = try row.decode((Int64, Int64, Int64).self)
+        return .init(
+            roomCount: counts.0,
+            admissionCount: counts.1,
+            messageCount: counts.2
+        )
     }
 }
 
@@ -7268,6 +9335,17 @@ private struct DirectMessageSyncSequenceRow: Decodable {
 private struct DirectMessageEventRow: Decodable {
     let eventID: UUID
     enum CodingKeys: String, CodingKey { case eventID = "event_id" }
+}
+private struct RoomWriteBatchRouteRow: Decodable {
+    let roomID: UUID
+    let roomKind: String
+    let deliveryMode: String
+
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id"
+        case roomKind = "room_kind"
+        case deliveryMode = "delivery_mode"
+    }
 }
 private enum ExistingMessageOperation {
     case accepted(MessageRow)

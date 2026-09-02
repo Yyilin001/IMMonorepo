@@ -1,0 +1,31 @@
+{
+  "name": "pure-hybrid-group-v1-passive-500",
+  "seed": 20260901,
+  "roomWarmupTimeoutSeconds": 60,
+  "completionDrainSeconds": 15,
+  "postDrainHoldSeconds": 5,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 32,
+  "schedulerTicksPerSecond": 20,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 1,
+  "personas": [
+    {
+      "name": "hybrid_group_passive_viewer",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "pure_hybrid_group_passive_relay_observer",
+      "durationSeconds": 45,
+      "messagesPerSecond": 0,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0.0
+    }
+  ]
+}

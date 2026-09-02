@@ -105,11 +105,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let stream = stream
         let foregroundWriter = V2NIOGatewayForegroundWriter(
             channel: context.channel,
-            scheduler: foregroundWriteScheduler
+            scheduler: foregroundWriteScheduler,
+            metrics: transportMetrics
         )
         self.foregroundWriter = foregroundWriter
         Task {
-            let attached = await stream.attachTransport(deviceRevocationHandler: {
+            let attached = await stream.attachNIOTransport(deviceRevocationHandler: {
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
                         let handler = boundHandler.value
@@ -143,9 +144,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
                     }
                 }
-            }, foregroundWriter: { bytes in
-                foregroundWriter.submit(bytes)
-            })
+            }, foregroundWriter: foregroundWriter)
             eventLoop.execute {
                 let handler = boundHandler.value
                 guard attached, !handler.closed else { return }
@@ -189,6 +188,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     public func channelWritabilityChanged(context: ChannelHandlerContext) {
         if context.channel.isWritable {
+            foregroundWriter?.resumeAfterWritabilityChange()
             flushPendingResponse(context: context)
             processNext(context: context)
         }
@@ -394,7 +394,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 /// responses and TLS work retain fair access to the loop under a live-event
 /// burst.
 final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
-    private final class Lane: @unchecked Sendable {
+    final class Lane: @unchecked Sendable {
         private struct State {
             var writers = CircularBuffer<V2NIOGatewayForegroundWriter>(initialCapacity: 64)
             var drainScheduled = false
@@ -412,6 +412,22 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
         func enqueue(_ writer: V2NIOGatewayForegroundWriter) {
             let shouldSchedule = state.withLock { state in
                 state.writers.append(writer)
+                guard !state.drainScheduled else { return false }
+                state.drainScheduled = true
+                return true
+            }
+            if shouldSchedule { scheduleDrain() }
+        }
+
+        /// One group publication usually makes many writers on the same
+        /// EventLoop ready together. Appending that whole set under one lane
+        /// lock avoids repeating the cross-thread scheduler lock for every
+        /// recipient while retaining the exact same writer FIFO and fair,
+        /// bounded EventLoop drain turns.
+        func enqueue(_ writers: [V2NIOGatewayForegroundWriter]) {
+            guard !writers.isEmpty else { return }
+            let shouldSchedule = state.withLock { state in
+                for writer in writers { state.writers.append(writer) }
                 guard !state.drainScheduled else { return false }
                 state.drainScheduled = true
                 return true
@@ -455,9 +471,9 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
         self.maximumWritesPerTurn = maximumWritesPerTurn
     }
 
-    func enqueue(_ writer: V2NIOGatewayForegroundWriter, on eventLoop: any EventLoop) {
+    func lane(for eventLoop: any EventLoop) -> Lane {
         let identity = ObjectIdentifier(eventLoop)
-        let lane = state.withLock { state in
+        return state.withLock { state in
             if let existing = state.lanes[identity] { return existing }
             let created = Lane(
                 eventLoop: eventLoop,
@@ -466,70 +482,292 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
             state.lanes[identity] = created
             return created
         }
-        lane.enqueue(writer)
+    }
+}
+
+/// A lifecycle-fenced, already-encoded foreground frame awaiting admission to
+/// one connection writer. Creating this value does not enqueue work; the group
+/// publisher can collect many submissions and enter each EventLoop lane once.
+struct V2NIOGatewayForegroundWriteSubmission: Sendable {
+    let writer: V2NIOGatewayForegroundWriter
+    let bytes: ByteBuffer
+}
+
+/// FIFO used by one foreground connection writer. Normal operation preserves
+/// every ordered live batch. If the bounded prefix fills, one latest recovery
+/// frame is retained separately: after the prefix drains its higher waterline
+/// deliberately exposes a cursor gap and drives the durable pull path. This
+/// bounds memory without silently pretending a suffix is contiguous.
+struct V2GatewayForegroundWriteQueue: Sendable {
+    enum AppendOutcome: Equatable, Sendable {
+        case queued
+        case recoveryQueued
+        case recoveryReplaced
+    }
+
+    struct Drain: Equatable, Sendable {
+        let frames: [ByteBuffer]
+        let bytes: Int
+    }
+
+    private let maximumQueuedBytes: Int
+    private let maximumQueuedFrames: Int
+    private var frames: CircularBuffer<ByteBuffer>
+    private var frameBytes = 0
+    private var recoveryFrame: ByteBuffer?
+
+    init(maximumQueuedBytes: Int, maximumQueuedFrames: Int) {
+        precondition(maximumQueuedBytes > 0 && maximumQueuedFrames > 0)
+        self.maximumQueuedBytes = maximumQueuedBytes
+        self.maximumQueuedFrames = maximumQueuedFrames
+        frames = .init(initialCapacity: min(maximumQueuedFrames, 32))
+    }
+
+    var isEmpty: Bool { frames.isEmpty && recoveryFrame == nil }
+    var count: Int { frames.count + (recoveryFrame == nil ? 0 : 1) }
+    var queuedBytes: Int { frameBytes + (recoveryFrame?.readableBytes ?? 0) }
+
+    mutating func append(_ bytes: ByteBuffer) -> AppendOutcome {
+        if recoveryFrame != nil {
+            recoveryFrame = bytes
+            return .recoveryReplaced
+        }
+        if frames.count < maximumQueuedFrames,
+           bytes.readableBytes <= maximumQueuedBytes,
+           frameBytes <= maximumQueuedBytes - bytes.readableBytes {
+            frames.append(bytes)
+            frameBytes += bytes.readableBytes
+            return .queued
+        }
+        recoveryFrame = bytes
+        return .recoveryQueued
+    }
+
+    mutating func popBatch(
+        maximumFrames: Int,
+        maximumBytes: Int
+    ) -> Drain? {
+        precondition(maximumFrames > 0 && maximumBytes > 0)
+        guard !isEmpty else { return nil }
+        var drained: [ByteBuffer] = []
+        drained.reserveCapacity(min(maximumFrames, count))
+        var drainedBytes = 0
+        while drained.count < maximumFrames, let first = frames.first {
+            if !drained.isEmpty, drainedBytes + first.readableBytes > maximumBytes { break }
+            _ = frames.removeFirst()
+            frameBytes -= first.readableBytes
+            drained.append(first)
+            drainedBytes += first.readableBytes
+            if drainedBytes >= maximumBytes { break }
+        }
+        if frames.isEmpty,
+           drained.count < maximumFrames,
+           let recoveryFrame,
+           drained.isEmpty || drainedBytes + recoveryFrame.readableBytes <= maximumBytes {
+            self.recoveryFrame = nil
+            drained.append(recoveryFrame)
+            drainedBytes += recoveryFrame.readableBytes
+        }
+        guard !drained.isEmpty else { return nil }
+        return .init(frames: drained, bytes: drainedBytes)
+    }
+
+    mutating func removeAll() {
+        frames.removeAll(keepingCapacity: true)
+        frameBytes = 0
+        recoveryFrame = nil
     }
 }
 
 /// Bounded, non-suspending bridge from an authenticated foreground route to
-/// one NIO channel. A connection can watch only one foreground room, so
-/// replacing a pending frame with the newest waterline is cursor-safe. The
-/// stream's transport fence rejects stale subscriptions before this bridge;
-/// `finish()` provides an immediate channel-lifecycle fence while actor
-/// teardown is still scheduled.
+/// one NIO channel. Shared immutable frames remain COW while queued. A drain
+/// copies several complete protocol frames into one NIO buffer and performs a
+/// single flush, allowing the decoder to consume the coalesced frames while
+/// amortizing EventLoop, syscall, and TLS-record work.
 final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
-    private struct State: Sendable {
-        var pending: Data?
-        var enqueued = false
-        var finished = false
+    private struct LaneBatch {
+        let lane: V2NIOForegroundWriteScheduler.Lane
+        var writers: [V2NIOGatewayForegroundWriter]
     }
 
-    private let state = Mutex(State())
+    private struct State: Sendable {
+        var queue: V2GatewayForegroundWriteQueue
+        var scheduled = false
+        var waitingForWritability = false
+        var finished = false
+
+        init(maximumQueuedBytes: Int, maximumQueuedFrames: Int) {
+            queue = .init(
+                maximumQueuedBytes: maximumQueuedBytes,
+                maximumQueuedFrames: maximumQueuedFrames
+            )
+        }
+    }
+
+    private let state: Mutex<State>
     /// A production NIO channel and its EventLoop are thread-safe entry
     /// points. All mutable channel-handler state remains confined to that
     /// EventLoop; this reference is never used to run application work inline.
     private let channel: any Channel
-    private let scheduler: V2NIOForegroundWriteScheduler
+    private let schedulerLane: V2NIOForegroundWriteScheduler.Lane
+    private let metrics: (any V2GatewayTransportMetricsRecorder)?
+    private let maximumDrainFrames: Int
+    private let maximumDrainBytes: Int
 
-    init(channel: any Channel, scheduler: V2NIOForegroundWriteScheduler) {
+    init(
+        channel: any Channel,
+        scheduler: V2NIOForegroundWriteScheduler,
+        metrics: (any V2GatewayTransportMetricsRecorder)? = nil,
+        maximumQueuedBytes: Int = 256 * 1_024,
+        maximumQueuedFrames: Int = 32,
+        maximumDrainBytes: Int = 64 * 1_024,
+        maximumDrainFrames: Int = 32
+    ) {
+        precondition(
+            maximumQueuedBytes > 0 && maximumQueuedFrames > 0
+                && maximumDrainBytes > 0 && maximumDrainFrames > 0
+        )
         self.channel = channel
-        self.scheduler = scheduler
+        schedulerLane = scheduler.lane(for: channel.eventLoop)
+        self.metrics = metrics
+        self.maximumDrainFrames = maximumDrainFrames
+        self.maximumDrainBytes = maximumDrainBytes
+        state = .init(.init(
+            maximumQueuedBytes: maximumQueuedBytes,
+            maximumQueuedFrames: maximumQueuedFrames
+        ))
     }
 
+    /// Compatibility entry used by focused queue tests and non-prepared local
+    /// callers. Production group publication submits an already-prepared
+    /// `ByteBuffer` and avoids this one-time conversion per connection.
     func submit(_ bytes: Data) {
-        let shouldEnqueue = state.withLock { state in
-            guard !state.finished else { return false }
-            state.pending = bytes
-            guard !state.enqueued else { return false }
-            state.enqueued = true
-            return true
+        submit(ByteBuffer(bytes: bytes))
+    }
+
+    func submit(_ bytes: ByteBuffer) {
+        if append(bytes) { schedulerLane.enqueue(self) }
+    }
+
+    /// Admits one prepared frame without immediately entering the shared lane.
+    /// `submitBatch` uses this to pay one lane lock per EventLoop rather than
+    /// one per recipient. The per-connection mutex remains the lifecycle,
+    /// bounded-queue, and FIFO authority.
+    private func append(_ bytes: ByteBuffer) -> Bool {
+        let submission = state.withLock { state -> (
+            shouldEnqueue: Bool,
+            outcome: V2GatewayForegroundWriteQueue.AppendOutcome,
+            queuedBytes: Int
+        )? in
+            guard !state.finished else { return nil }
+            let outcome = state.queue.append(bytes)
+            guard !state.scheduled, !state.waitingForWritability else {
+                return (false, outcome, state.queue.queuedBytes)
+            }
+            state.scheduled = true
+            return (true, outcome, state.queue.queuedBytes)
         }
-        guard shouldEnqueue else { return }
-        scheduler.enqueue(self, on: channel.eventLoop)
+        guard let submission else { return false }
+        metrics?.foregroundFrameSubmitted(
+            bytes: bytes.readableBytes,
+            recoveryQueued: submission.outcome == .recoveryQueued,
+            recoveryReplaced: submission.outcome == .recoveryReplaced,
+            queuedBytes: submission.queuedBytes
+        )
+        return submission.shouldEnqueue
+    }
+
+    /// Bulk counterpart used by the real group-broadcast path. All queue
+    /// admissions happen before scheduling, so a concurrently scheduled writer
+    /// can safely drain an admitted frame even when this call does not add it to
+    /// a lane again. Object identity groups writers by their pre-registered
+    /// EventLoop lane without hashing or locking the process-wide scheduler.
+    static func submitBatch(_ submissions: [V2NIOGatewayForegroundWriteSubmission]) {
+        guard !submissions.isEmpty else { return }
+        var batches: [ObjectIdentifier: LaneBatch] = [:]
+        batches.reserveCapacity(min(submissions.count, 8))
+        for submission in submissions {
+            let writer = submission.writer
+            guard writer.append(submission.bytes) else { continue }
+            let identity = ObjectIdentifier(writer.schedulerLane)
+            if batches[identity] == nil {
+                batches[identity] = .init(lane: writer.schedulerLane, writers: [])
+            }
+            batches[identity]!.writers.append(writer)
+        }
+        for batch in batches.values { batch.lane.enqueue(batch.writers) }
     }
 
     func finish() {
         state.withLock {
             $0.finished = true
-            $0.pending = nil
-            $0.enqueued = false
+            $0.queue.removeAll()
+            $0.scheduled = false
+            $0.waitingForWritability = false
         }
+    }
+
+    func resumeAfterWritabilityChange() {
+        let shouldEnqueue = state.withLock { state in
+            guard !state.finished, !state.queue.isEmpty else {
+                state.waitingForWritability = false
+                return false
+            }
+            state.waitingForWritability = false
+            guard !state.scheduled else { return false }
+            state.scheduled = true
+            return true
+        }
+        if shouldEnqueue { schedulerLane.enqueue(self) }
     }
 
     fileprivate func drainOnEventLoop() {
         channel.eventLoop.preconditionInEventLoop()
-        let bytes = state.withLock { state -> Data? in
-            state.enqueued = false
-            guard !state.finished else {
-                state.pending = nil
-                return nil
-            }
-            defer { state.pending = nil }
-            return state.pending
+        guard channel.isActive else {
+            finish()
+            return
         }
-        guard let bytes, channel.isActive, channel.isWritable else { return }
-        var buffer = channel.allocator.buffer(capacity: bytes.count)
-        buffer.writeBytes(bytes)
+        guard channel.isWritable else {
+            state.withLock { state in
+                state.scheduled = false
+                if !state.finished, !state.queue.isEmpty {
+                    state.waitingForWritability = true
+                }
+            }
+            metrics?.foregroundWriteDeferredForWritability()
+            return
+        }
+        let result = state.withLock { state -> (
+            V2GatewayForegroundWriteQueue.Drain?, Bool
+        ) in
+            state.scheduled = false
+            guard !state.finished else {
+                state.queue.removeAll()
+                return (nil, false)
+            }
+            let batch = state.queue.popBatch(
+                maximumFrames: maximumDrainFrames,
+                maximumBytes: maximumDrainBytes
+            )
+            let reschedule = !state.queue.isEmpty
+            if reschedule { state.scheduled = true }
+            return (batch, reschedule)
+        }
+        guard let batch = result.0 else { return }
+        let buffer: ByteBuffer
+        if batch.frames.count == 1 {
+            // The common group-broadcast path writes the shared immutable COW
+            // storage directly. Reader-index changes are value-local; a true
+            // byte mutation in a downstream handler detaches automatically.
+            buffer = batch.frames[0]
+        } else {
+            var combined = channel.allocator.buffer(capacity: batch.bytes)
+            for frame in batch.frames { combined.writeImmutableBuffer(frame) }
+            buffer = combined
+        }
         channel.writeAndFlush(buffer, promise: nil)
+        metrics?.foregroundWriteBatch(frames: batch.frames.count, bytes: batch.bytes)
+        if result.1 { schedulerLane.enqueue(self) }
     }
 }
 

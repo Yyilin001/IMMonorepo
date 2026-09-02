@@ -73,6 +73,231 @@ struct V2DirectRoomLogEventCacheTests {
         #expect((await cache.snapshot()).hits == 1)
     }
 
+    @Test("returns a safe short page when the durable watermark advances after capture")
+    func returnsShortPageAcrossWatermarkRace() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8
+        ))
+        await cache.recordCommittedPlainDirectMessage(
+            try message(roomID: roomID, sequence: 1, membershipRevision: 4)
+        )
+
+        let page = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 1,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 100
+        ))
+        #expect(page.events.map(\.roomSequence) == [1])
+        #expect(page.nextRoomSequence == 1)
+        #expect(page.hasMore)
+        #expect((await cache.snapshot()).hits == 1)
+    }
+
+    @Test("hybrid-group messages share one cached payload behind the membership fence")
+    func cachesHybridGroupMessage() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8
+        ))
+        let accepted = try message(
+            roomID: roomID,
+            sequence: 1,
+            membershipRevision: 7,
+            groupDeliveryMode: .largeGroupHybrid
+        )
+        await cache.recordCommittedPlainDirectMessage(accepted)
+
+        #expect(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 8,
+            actorLeftRevision: nil,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1
+        ) == nil)
+        let page = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 7,
+            actorLeftRevision: nil,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1
+        ))
+        #expect(page.events.map(\.roomSequence) == [1])
+        #expect(page.events.first?.sourceEventID == accepted.sourceEventID)
+    }
+
+    @Test("authorized prepared pages reuse encoded bytes before event-array materialization")
+    func reusesPreparedPageBehindFreshMembershipFence() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1
+        ))
+        for sequence in 1 ... 2 {
+            await cache.recordCommittedPlainDirectMessage(try message(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                membershipRevision: 7,
+                groupDeliveryMode: .largeGroupHybrid
+            ))
+        }
+        let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
+            maximumEntries: 8,
+            maximumBytes: 1_048_576,
+            shardCount: 1
+        ))
+
+        func pull(requestID: UInt64) async throws -> V2Frame {
+            let result = try await cache.preparedPage(
+                roomID: roomID,
+                actorJoinedRevision: 7,
+                actorLeftRevision: nil,
+                currentHighWatermark: 2,
+                afterRoomSequence: 0,
+                pageSize: 100,
+                context: preparedContext(requestID: requestID, cache: preparedCache)
+            )
+            guard case .prepared(let response) = result else {
+                Issue.record("expected a prepared page")
+                throw V2GroupEventLogError.corruptPersistenceState
+            }
+            return response.frame
+        }
+
+        let first = try await pull(requestID: 101)
+        let second = try await pull(requestID: 202)
+        let decoded = try V2ServerProtobufFrameCodec.decode(second)
+
+        #expect(first.payload == second.payload)
+        #expect(decoded.requestID == 202)
+        #expect(decoded.groupEventPage.events.map(\.roomSequence) == [1, 2])
+        #expect(preparedCache.snapshot().misses == 1)
+        #expect(preparedCache.snapshot().hits == 1)
+        #expect((await cache.snapshot()).hits == 2)
+    }
+
+    @Test("prepared pages never cross join or leave membership revisions")
+    func preparedPagePreservesMembershipEpoch() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1
+        ))
+        await cache.recordCommittedPlainDirectMessage(try message(
+            roomID: roomID,
+            sequence: 1,
+            membershipRevision: 7,
+            groupDeliveryMode: .largeGroupHybrid
+        ))
+        let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
+            maximumEntries: 8,
+            maximumBytes: 1_048_576,
+            shardCount: 1
+        ))
+
+        let joinedAfterEvent = try await cache.preparedPage(
+            roomID: roomID,
+            actorJoinedRevision: 8,
+            actorLeftRevision: nil,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1,
+            context: preparedContext(requestID: 1, cache: preparedCache)
+        )
+        let leftAtEvent = try await cache.preparedPage(
+            roomID: roomID,
+            actorJoinedRevision: 1,
+            actorLeftRevision: 7,
+            currentHighWatermark: 1,
+            afterRoomSequence: 0,
+            pageSize: 1,
+            context: preparedContext(requestID: 2, cache: preparedCache)
+        )
+
+        guard case .miss = joinedAfterEvent else {
+            Issue.record("a post-event join must miss")
+            return
+        }
+        guard case .miss = leftAtEvent else {
+            Issue.record("an event at or after leave revision must miss")
+            return
+        }
+        #expect(preparedCache.snapshot().entries == 0)
+    }
+
+    @Test("prepared page budgeting keeps cursors resumable and reports oversized first events")
+    func preparedPagePreservesPayloadBudget() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1
+        ))
+        for sequence in 1 ... 2 {
+            await cache.recordCommittedPlainDirectMessage(try message(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                membershipRevision: 1,
+                groupDeliveryMode: .largeGroupHybrid
+            ))
+        }
+        let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
+            maximumEntries: 8,
+            maximumBytes: 1_048_576,
+            shardCount: 1
+        ))
+
+        let tooSmall = try await cache.preparedPage(
+            roomID: roomID,
+            actorJoinedRevision: 1,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 2,
+            context: preparedContext(
+                requestID: 1,
+                cache: preparedCache,
+                maximumGroupEventPagePayloadBytes: 64
+            )
+        )
+        guard case .eventTooLarge = tooSmall else {
+            Issue.record("the first event must not be silently skipped")
+            return
+        }
+
+        let oneEventBudget = try await cache.preparedPage(
+            roomID: roomID,
+            actorJoinedRevision: 1,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 1,
+            context: preparedContext(requestID: 2, cache: preparedCache)
+        )
+        guard case .prepared(let response) = oneEventBudget else {
+            Issue.record("expected a bounded prepared page")
+            return
+        }
+        let decoded = try V2ServerProtobufFrameCodec.decode(response.frame)
+        #expect(decoded.groupEventPage.events.map(\.roomSequence) == [1])
+        #expect(decoded.groupEventPage.nextRoomSequence == 1)
+        #expect(decoded.groupEventPage.hasMore_p)
+    }
+
     @Test("never serves a stale membership epoch or an unknown sequence gap")
     func rejectsStaleMembershipAndGaps() async throws {
         let roomID = try RoomID(UUID().uuidString)
@@ -206,6 +431,51 @@ struct V2DirectRoomLogEventCacheTests {
         #expect(snapshot.cachedRooms <= snapshot.cachedEvents)
     }
 
+    @Test("a saturated hot room advances its retained window without losing continuity")
+    func advancesSaturatedRoomWindow() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 1_024,
+            maximumBytes: 16 * 1_024 * 1_024,
+            maximumEventsPerRoom: 1_024,
+            shardCount: 1
+        ))
+        for sequence in 1...4_096 {
+            await cache.recordCommittedPlainDirectMessage(try message(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                membershipRevision: 1,
+                groupDeliveryMode: .largeGroupHybrid
+            ))
+        }
+
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.cachedEvents == 1_024)
+        #expect(snapshot.cachedRooms == 1)
+        let page = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 1,
+            actorLeftRevision: nil,
+            currentHighWatermark: 4_096,
+            afterRoomSequence: 3_072,
+            pageSize: 500
+        ))
+        #expect(page.events.first?.roomSequence == 3_073)
+        #expect(page.events.last?.roomSequence == 3_572)
+        #expect(page.events.count == 500)
+        #expect(page.hasMore)
+
+        // A delayed duplicate outside the retained window is irrelevant to
+        // future cursors and must not disturb the contiguous hot tail.
+        await cache.recordCommittedPlainDirectMessage(try message(
+            roomID: roomID,
+            sequence: 1,
+            membershipRevision: 1,
+            groupDeliveryMode: .largeGroupHybrid
+        ))
+        #expect((await cache.snapshot()).cachedEvents == 1_024)
+    }
+
     @Test("a definite coverage miss is observable before durable authorization")
     func identifiesDefiniteCoverageMiss() async throws {
         let cache = V2DirectRoomLogEventCache(configuration: .init(
@@ -258,6 +528,36 @@ struct V2DirectRoomLogEventCacheTests {
         await runner.value
     }
 
+    @Test("a foreground candidate materializes committed mailbox writes before missing")
+    func candidateMaterializesCommittedMailboxWrites() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1,
+            maximumPendingWrites: 8
+        ))
+        cache.enqueueCommittedPlainDirectMessage(try message(
+            roomID: roomID,
+            sequence: 1,
+            membershipRevision: 1,
+            groupDeliveryMode: .largeGroupHybrid
+        ))
+        #expect((await cache.snapshot()).pendingWrites == 1)
+
+        let candidate = try #require(await cache.candidate(
+            roomID: roomID,
+            afterRoomSequence: 0,
+            pageSize: 1
+        ))
+        #expect(candidate.events.map(\.entry.roomSequence) == [1])
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.pendingWrites == 0)
+        #expect(snapshot.cachedEvents == 1)
+        #expect(snapshot.misses == 0)
+    }
+
     @Test("one prepared direct payload retains its durable membership fence")
     func recordsPreparedDirectPayloadWithoutReencoding() async throws {
         let roomID = try RoomID(UUID().uuidString)
@@ -306,11 +606,106 @@ struct V2DirectRoomLogEventCacheTests {
         await runner.value
     }
 
+    @Test("a relayed group batch seeds recovery without becoming an authorization source")
+    func relayedGroupBatchSeedsAuthorizedRecovery() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1,
+            maximumPendingWrites: 8
+        ))
+        let service = V2GroupEventLogService(
+            store: RejectingGroupEventLogStore(),
+            directRoomLogEventCache: cache
+        )
+        let events = try (1 ... 2).map { sequence in
+            try #require(V2GroupRoomLiveEventDraft(message(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                membershipRevision: 7,
+                groupDeliveryMode: .largeGroupHybrid
+            ))?.materialized())
+        }
+
+        service.recordRelayedForegroundEvents(events)
+        // The publishing Gateway receives its own Core NATS message too.
+        // Replaying the exact batch must remain an idempotent cache operation.
+        service.recordRelayedForegroundEvents(events)
+
+        #expect(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 8,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 2
+        ) == nil)
+        let authorized = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 7,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 2
+        ))
+        #expect(authorized.events.map(\.roomSequence) == [1, 2])
+        #expect(authorized.events.map(\.sourceEventID) == events.map(\.sourceEventID))
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.cachedEvents == 2)
+        #expect(snapshot.cachedRooms == 1)
+    }
+
+    @Test("a relayed group batch preserves bounded mailbox accounting")
+    func relayedGroupBatchPreservesMailboxBounds() async throws {
+        let roomID = try RoomID(UUID().uuidString)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8,
+            maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 8,
+            shardCount: 1,
+            maximumPendingWrites: 2
+        ))
+        let service = V2GroupEventLogService(
+            store: RejectingGroupEventLogStore(),
+            directRoomLogEventCache: cache
+        )
+        let events = try (1 ... 3).map { sequence in
+            try #require(V2GroupRoomLiveEventDraft(message(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                membershipRevision: 7,
+                groupDeliveryMode: .largeGroupHybrid
+            ))?.materialized())
+        }
+
+        service.recordRelayedForegroundEvents(events)
+        var snapshot = await cache.snapshot()
+        #expect(snapshot.pendingWrites == 2)
+        #expect(snapshot.droppedWrites == 1)
+
+        let page = try #require(await cache.page(
+            roomID: roomID,
+            actorJoinedRevision: 7,
+            actorLeftRevision: nil,
+            currentHighWatermark: 2,
+            afterRoomSequence: 0,
+            pageSize: 2
+        ))
+        #expect(page.events.map(\.roomSequence) == [1, 2])
+        snapshot = await cache.snapshot()
+        #expect(snapshot.pendingWrites == 0)
+        #expect(snapshot.cachedEvents == 2)
+        #expect(snapshot.droppedWrites == 1)
+    }
+
     private func message(
         roomID: RoomID,
         sequence: UInt64,
         membershipRevision: UInt64,
-        sourceEventID: EventID? = try? EventID(UUID().uuidString)
+        sourceEventID: EventID? = try? EventID(UUID().uuidString),
+        groupDeliveryMode: V2GroupDeliveryMode? = nil
     ) throws -> V2AcceptedMessage {
         try .init(
             messageID: .init(UUID().uuidString),
@@ -321,10 +716,46 @@ struct V2DirectRoomLogEventCacheTests {
             clientMessageID: .init(UUID().uuidString),
             text: "cache-message-\(sequence)",
             mediaPresentations: [],
+            groupDeliveryMode: groupDeliveryMode,
             usesRoomEventLog: true,
             sourceEventID: sourceEventID,
             acceptedMembershipRevision: membershipRevision,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
+    }
+
+    private func preparedContext(
+        requestID: UInt64,
+        cache: V2PreparedGroupEventPageCache,
+        maximumGroupEventPagePayloadBytes: Int = 48 * 1_024
+    ) -> V2PreparedGroupEventPageEncodingContext {
+        .init(
+            requestID: requestID,
+            frameVersion: 21,
+            compression: nil,
+            maximumUncompressedPayloadBytes: 65_536,
+            compressionThresholdBytes: 1_024,
+            maximumExpansionRatio: 64,
+            maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
+            cache: cache
+        )
+    }
+}
+
+private struct RejectingGroupEventLogStore: V2GroupEventLogStore {
+    func pull(
+        roomID _: RoomID,
+        actorUserID _: UserID,
+        afterRoomSequence _: UInt64,
+        pageSize _: Int
+    ) async throws -> V2GroupEventLogPage {
+        throw V2GroupEventLogError.corruptPersistenceState
+    }
+
+    func subscribe(
+        roomID _: RoomID,
+        actorUserID _: UserID
+    ) async throws -> V2GroupEventSubscription {
+        throw V2GroupEventLogError.corruptPersistenceState
     }
 }

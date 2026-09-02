@@ -8,12 +8,52 @@ import SQLKit
 /// transaction freezes its exact audience before it changes membership, so
 /// add and remove events do not depend on whichever membership rows happen to
 /// exist when a worker runs.
-public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
+public struct PostgresV2RoomMembershipStore:
+    V2ControlValidatedRoomMembershipStore {
     private let database: any Database
 
     public init(database: any Database) { self.database = database }
 
     public func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2RoomMembershipChangeOutcome {
+        try await change(
+            command: command,
+            identitySnapshot: nil,
+            capacityProfile: capacityProfile,
+            eventID: eventID,
+            planID: planID,
+            now: now
+        )
+    }
+
+    public func changeControlValidated(
+        command: V2ChangeRoomMembershipCommand,
+        identitySnapshot: V2MembershipIdentitySnapshot,
+        capacityProfile: V2CapacityProfile,
+        eventID: EventID,
+        planID: FanoutPlanID,
+        now: Date
+    ) async throws -> V2RoomMembershipChangeOutcome {
+        guard identitySnapshot.actorUserID == command.actorUserID,
+              identitySnapshot.targetUserID == command.targetUserID
+        else { throw V2RoomMembershipStoreError.corruptPersistenceState }
+        return try await change(
+            command: command,
+            identitySnapshot: identitySnapshot,
+            capacityProfile: capacityProfile,
+            eventID: eventID,
+            planID: planID,
+            now: now
+        )
+    }
+
+    private func change(
+        command: V2ChangeRoomMembershipCommand,
+        identitySnapshot: V2MembershipIdentitySnapshot?,
+        capacityProfile: V2CapacityProfile,
+        eventID: EventID,
+        planID: FanoutPlanID,
+        now: Date
+    ) async throws -> V2RoomMembershipChangeOutcome {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipStoreError.corruptPersistenceState }
             let roomID = try membershipUUID(command.roomID)
@@ -35,7 +75,12 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
                 guard prior.matches(command: command, roomID: roomID, targetID: targetID) else { return .idempotencyConflict }
                 return .idempotent(try prior.change())
             }
-            guard try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: actorID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true else {
+            let actorIsActive = if let identitySnapshot {
+                identitySnapshot.actorIsActive
+            } else {
+                try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: actorID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true
+            }
+            guard actorIsActive else {
                 throw V2RoomMembershipStoreError.actorNotOwner
             }
 
@@ -97,7 +142,12 @@ public struct PostgresV2RoomMembershipStore: V2RoomMembershipStore {
             let deliveryTargetCount: Int
             switch command.action {
             case .add:
-                guard try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: targetID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true else {
+                let targetIsActive = if let identitySnapshot {
+                    identitySnapshot.targetIsActive
+                } else {
+                    try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.public_user_profiles AS profile WHERE profile.user_id = \(bind: targetID) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)) AS value").first(decoding: MembershipBooleanRow.self)?.value == true
+                }
+                guard targetIsActive else {
                     throw V2RoomMembershipStoreError.targetUnavailable
                 }
                 guard currentTarget == nil else { return .targetAlreadyMember }

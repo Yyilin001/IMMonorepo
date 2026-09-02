@@ -82,7 +82,7 @@ public enum V2CapacityProfileError: Error, Equatable, Sendable { case invalidIde
 /// value, never just the message row.
 public protocol V2RoomWriteStore: Sendable {
     func accept(
-        command: V2SendMessageCommand,
+        command: consuming V2SendMessageCommand,
         capacityProfile: V2CapacityProfile,
         identifiers: V2AcceptanceIdentifiers,
         now: Date
@@ -142,6 +142,15 @@ public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
         requests: [V2RoomWriteRequest]
     ) async -> [V2AtomicRoomWriteBatchPartition?]
 
+    /// Whether one compatibility class can advance the same room more than
+    /// once inside a single ordered transaction. The default remains false:
+    /// stores must opt in only after their reducer and persistence statement
+    /// both collapse the final room state without dropping intermediate
+    /// messages.
+    func atomicBatchSupportsRepeatedRooms(
+        in partition: V2AtomicRoomWriteBatchPartition
+    ) async -> Bool
+
     func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome]
@@ -167,6 +176,12 @@ public extension V2AtomicRoomWriteBatchStore {
         }
         return eligibility.map { $0 ? .standard : nil }
     }
+
+    func atomicBatchSupportsRepeatedRooms(
+        in partition: V2AtomicRoomWriteBatchPartition
+    ) async -> Bool {
+        false
+    }
 }
 
 /// Opaque, store-defined compatibility class. It never represents an
@@ -174,6 +189,9 @@ public extension V2AtomicRoomWriteBatchStore {
 public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable {
     public static let standard = Self(rawValue: 0)
     public static let accelerated = Self(rawValue: 1)
+    /// Plain, no-mention messages in a large-group room-log room. This class
+    /// never shares a transaction with the direct-message policy graph.
+    public static let largeGroupHybrid = Self(rawValue: 2)
 
     public let rawValue: UInt8
 
@@ -244,12 +262,21 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
 /// weakening the per-room ordering contract.
 public protocol V2SendMessageAdmission: Sendable {
     var managesForegroundWriteAdmission: Bool { get }
+    /// `true` means the admission boundary submits accepted Hybrid group
+    /// events at its ordered post-commit point before request continuations
+    /// resume. Gateway handlers must then avoid publishing the same event a
+    /// second time. Durable room-log recovery never depends on this hint.
+    var publishesCommittedGroupEvents: Bool { get }
 
     func accept(
-        _ request: V2RoomWriteRequest
+        _ request: consuming V2RoomWriteRequest
     ) async throws -> V2SendMessageOutcome
 
     func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot
+}
+
+extension V2SendMessageAdmission {
+    public var publishesCommittedGroupEvents: Bool { false }
 }
 
 public struct V2AcceptanceIDFactory: Sendable {
@@ -292,10 +319,11 @@ public struct V2AcceptanceIDFactory: Sendable {
 
 /// A process-local CSPRNG expansion for the three public identifiers created
 /// by one accepted message. The 256-bit key is seeded by the platform secure
-/// random source once. HMAC-SHA512 then gives every counter value a fresh
-/// 512-bit pseudorandom block; separate 16-byte regions are formatted as
-/// standards-compliant UUIDv4 values. No key, counter or derived relationship
-/// is exposed, and a process restart receives a new key.
+/// random source once. HMAC-SHA256 then gives every counter value a fresh
+/// 256-bit pseudorandom block. Three disjoint 10-byte regions supply the 74
+/// random bits of each standards-compliant UUIDv7; the two remaining bytes are
+/// deliberately unused. No key, counter or derived relationship is exposed,
+/// and a process restart receives a new key.
 /// `SymmetricKey` in swift-crypto has immutable storage but its Linux module
 /// does not yet declare `Sendable`. Concurrent operations only read that key;
 /// the sole mutable field is the stdlib atomic counter.
@@ -304,9 +332,9 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
 
     /// HMAC's keyed inner/outer hash states are invariant for the process.
     /// Copying this value before appending the unique counter preserves the
-    /// exact HMAC(key, counter) construction while avoiding key-pad arrays and
-    /// two complete SHA-512 block updates for every accepted message.
-    private let authenticationTemplate: HMAC<SHA512>
+    /// exact HMAC(key, counter) construction while avoiding rebuilding the
+    /// keyed SHA-256 inner and outer state for every accepted message.
+    private let authenticationTemplate: HMAC<SHA256>
     private let authenticationCounter = Atomic<UInt64>(0)
     /// Trace and connection IDs never cross an authorization boundary. A
     /// process-random 56-bit namespace plus an injective 64-bit counter gives
@@ -357,8 +385,8 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
         return authenticationCode.withUnsafeBytes { bytes in
             (
                 v2UUIDv7(bytes, offset: 0, unixMilliseconds: unixMilliseconds),
-                v2UUIDv7(bytes, offset: 16, unixMilliseconds: unixMilliseconds),
-                v2UUIDv7(bytes, offset: 32, unixMilliseconds: unixMilliseconds)
+                v2UUIDv7(bytes, offset: 10, unixMilliseconds: unixMilliseconds),
+                v2UUIDv7(bytes, offset: 20, unixMilliseconds: unixMilliseconds)
             )
         }
     }
@@ -384,7 +412,7 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
         return observed
     }
 
-    private func nextAuthenticationCode() -> HMAC<SHA512>.MAC {
+    private func nextAuthenticationCode() -> HMAC<SHA256>.MAC {
         let increment = authenticationCounter.wrappingAdd(1, ordering: .relaxed)
         precondition(increment.newValue != 0, "acceptance identifier space exhausted")
         var input = increment.newValue.bigEndian
@@ -413,16 +441,16 @@ private func v2UUIDv4<Bytes: RandomAccessCollection>(
 
 /// RFC 9562 section 5.7 layout. Bytes 0...5 are the 48-bit Unix millisecond
 /// timestamp; all remaining non-version/non-variant bits come directly from
-/// the process-secret HMAC expansion.
+/// ten bytes of the process-secret HMAC expansion.
 private func v2UUIDv7<Bytes: RandomAccessCollection>(
     _ bytes: Bytes,
     offset: Int,
     unixMilliseconds: UInt64
 ) -> UUID where Bytes.Element == UInt8, Bytes.Index == Int {
-    precondition(offset >= 0 && bytes.count >= offset + 16)
+    precondition(offset >= 0 && bytes.count >= offset + 10)
     precondition(unixMilliseconds <= 0x0000_ffff_ffff_ffff)
-    let versionAndRandom = (bytes[offset + 6] & 0x0f) | 0x70
-    let variantAndRandom = (bytes[offset + 8] & 0x3f) | 0x80
+    let versionAndRandom = (bytes[offset] & 0x0f) | 0x70
+    let variantAndRandom = (bytes[offset + 2] & 0x3f) | 0x80
     return UUID(uuid: (
         UInt8(truncatingIfNeeded: unixMilliseconds >> 40),
         UInt8(truncatingIfNeeded: unixMilliseconds >> 32),
@@ -430,9 +458,9 @@ private func v2UUIDv7<Bytes: RandomAccessCollection>(
         UInt8(truncatingIfNeeded: unixMilliseconds >> 16),
         UInt8(truncatingIfNeeded: unixMilliseconds >> 8),
         UInt8(truncatingIfNeeded: unixMilliseconds),
-        versionAndRandom, bytes[offset + 7],
-        variantAndRandom, bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
-        bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
+        versionAndRandom, bytes[offset + 1],
+        variantAndRandom, bytes[offset + 3], bytes[offset + 4], bytes[offset + 5],
+        bytes[offset + 6], bytes[offset + 7], bytes[offset + 8], bytes[offset + 9]
     ))
 }
 
@@ -450,6 +478,10 @@ public struct V2SendMessageService: Sendable {
     /// consumes the whole foreground lane before a transaction starts.
     var managesForegroundWriteAdmission: Bool {
         batcher?.managesForegroundWriteAdmission ?? false
+    }
+
+    var publishesCommittedGroupEvents: Bool {
+        batcher?.publishesCommittedGroupEvents ?? false
     }
 
     public init(

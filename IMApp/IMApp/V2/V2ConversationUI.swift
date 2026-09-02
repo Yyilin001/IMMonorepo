@@ -293,20 +293,34 @@ enum V2ActiveHybridGroupSubscriptionOutcome: Equatable, Sendable {
 struct V2ActiveHybridGroupWake: Equatable, Sendable {
     let roomID: String
     let highWatermark: UInt64
-    let liveEvent: V2ClientGroupEvent?
+    let liveEvents: [V2ClientGroupEvent]
 
-    init(roomID: String, highWatermark: UInt64, liveEvent: V2ClientGroupEvent? = nil) {
+    var liveEvent: V2ClientGroupEvent? {
+        liveEvents.count == 1 ? liveEvents[0] : nil
+    }
+
+    init(
+        roomID: String,
+        highWatermark: UInt64,
+        liveEvents: [V2ClientGroupEvent] = []
+    ) {
         self.roomID = roomID
         self.highWatermark = highWatermark
-        self.liveEvent = liveEvent
+        self.liveEvents = liveEvents
+    }
+
+    init(roomID: String, highWatermark: UInt64, liveEvent: V2ClientGroupEvent?) {
+        self.roomID = roomID
+        self.highWatermark = highWatermark
+        liveEvents = liveEvent.map { [$0] } ?? []
     }
 }
 
 protocol V2ActiveHybridGroupSynchronizing: Sendable {
     func synchronizeOnePage(roomID: String) async throws -> V2ActiveHybridGroupSyncOutcome
     func subscribe(roomID: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome
-    /// Returns true only when the event was atomically projected at the next
-    /// durable cursor position. False means the caller must use normal pull.
+    /// Returns true only when the complete live batch was atomically projected
+    /// at the next durable cursor positions. False means normal cursor pull.
     func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) async throws -> Bool
     func nextWake() async throws -> V2ActiveHybridGroupWake
     func unsubscribe(roomID: String) async

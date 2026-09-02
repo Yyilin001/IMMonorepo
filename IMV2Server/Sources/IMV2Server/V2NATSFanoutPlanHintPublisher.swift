@@ -62,6 +62,12 @@ public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
         let verbose = false
         let pedantic = false
         let token: String?
+
+        enum CodingKeys: String, CodingKey {
+            case verbose
+            case pedantic
+            case token = "auth_token"
+        }
     }
 
     private struct Connection {

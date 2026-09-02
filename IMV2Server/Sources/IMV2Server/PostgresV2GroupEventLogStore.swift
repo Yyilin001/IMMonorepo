@@ -3,7 +3,7 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
+public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
     private let database: any Database
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
 
@@ -33,7 +33,7 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
                afterRoomSequence: afterRoomSequence,
                pageSize: pageSize
            ) {
-            if let access = try await authorizedDirectRoomCacheAccess(
+            if let access = try await authorizedRoomCacheAccess(
                 roomID: roomUUID,
                 actorUserID: actorUUID,
                 sql: sql
@@ -70,6 +70,11 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
                        NULL::uuid AS message_id, FALSE AS is_message_row
                 FROM im_v2.room_events AS event
                 WHERE event.room_id = \(bind: roomUUID)
+                  -- Keep the cursor predicate inside the indexed source.  It
+                  -- is logically identical to the visibility fence below,
+                  -- but prevents a recovery miss from materializing the
+                  -- room's complete legacy-event history before filtering.
+                  AND event.room_sequence > \(bind: Int64(afterRoomSequence))
 
                 UNION ALL
 
@@ -214,12 +219,82 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
         return V2GroupEventLogPage(roomID: roomID, events: entries, nextRoomSequence: next, hasMore: hasMore)
     }
 
+    func pullPrepared(
+        roomID: RoomID,
+        actorUserID: UserID,
+        afterRoomSequence: UInt64,
+        pageSize: Int,
+        context: V2PreparedGroupEventPageEncodingContext
+    ) async throws -> V2PreparedGroupEventPullResult {
+        guard let sql = database as? any SQLDatabase,
+              let roomUUID = UUID(uuidString: roomID.rawValue),
+              let actorUUID = UUID(uuidString: actorUserID.rawValue),
+              let directRoomLogEventCache,
+              await directRoomLogEventCache.hasPreparedPageCoverage(
+                  roomID: roomID,
+                  afterRoomSequence: afterRoomSequence,
+                  pageSize: pageSize
+              )
+        else {
+            return .page(try await pull(
+                roomID: roomID,
+                actorUserID: actorUserID,
+                afterRoomSequence: afterRoomSequence,
+                pageSize: pageSize
+            ))
+        }
+
+        guard let access = try await authorizedRoomCacheAccess(
+            roomID: roomUUID,
+            actorUserID: actorUUID,
+            sql: sql
+        ) else {
+            // Preserve the complete durable query's public missing-room and
+            // membership error mapping. No prepared payload is reachable
+            // without the fresh row above.
+            return .page(try await pull(
+                roomID: roomID,
+                actorUserID: actorUserID,
+                afterRoomSequence: afterRoomSequence,
+                pageSize: pageSize
+            ))
+        }
+
+        switch try await directRoomLogEventCache.preparedPage(
+            roomID: roomID,
+            actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
+            actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
+            currentHighWatermark: try groupEventUnsigned(access.roomSequence),
+            afterRoomSequence: afterRoomSequence,
+            pageSize: pageSize,
+            context: context
+        ) {
+        case .prepared(let response):
+            return .prepared(response)
+        case .eventTooLarge:
+            return .eventTooLarge
+        case .miss:
+            // A cache eviction, gap, or membership-epoch mismatch after the
+            // probe is a normal race. The durable query remains authoritative.
+            return .page(try await pull(
+                roomID: roomID,
+                actorUserID: actorUserID,
+                afterRoomSequence: afterRoomSequence,
+                pageSize: pageSize
+            ))
+        }
+    }
+
     public func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription {
         guard let sql = database as? any SQLDatabase else {
             throw V2GroupEventLogError.corruptPersistenceState
         }
         let room = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
-        return .init(roomID: roomID, highWatermark: try groupEventUnsigned(room.roomSequence))
+        return .init(
+            roomID: roomID,
+            highWatermark: try groupEventUnsigned(room.roomSequence),
+            membershipRevision: try groupEventUnsigned(room.membershipRevision)
+        )
     }
 
     /// Group rooms and direct rooms use the same cursor protocol. A direct
@@ -238,7 +313,7 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
               let actorUUID = UUID(uuidString: actorUserID.rawValue)
         else { throw V2GroupEventLogError.corruptPersistenceState }
         guard let room = try await sql.raw("""
-            SELECT room_sequence, room_kind,
+            SELECT room_sequence, membership_revision, room_kind,
                    EXISTS (
                        SELECT 1 FROM im_v2.room_memberships AS membership
                        WHERE membership.room_id = rooms.room_id
@@ -258,10 +333,10 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
     }
 
     /// Supplies the minimal, current membership fence needed by the local
-    /// direct-event cache. Returning `nil` is intentionally indistinguishable
+    /// room-event cache. Returning `nil` is intentionally indistinguishable
     /// from a cache miss; the durable pull retains the public error mapping
     /// for missing rooms and unauthorized actors.
-    private func authorizedDirectRoomCacheAccess(
+    private func authorizedRoomCacheAccess(
         roomID: UUID,
         actorUserID: UUID,
         sql: any SQLDatabase
@@ -277,17 +352,19 @@ public struct PostgresV2GroupEventLogStore: V2GroupEventLogStore {
              AND (membership.left_revision IS NULL
                   OR membership.left_revision > room.membership_revision)
             WHERE room.room_id = \(bind: roomID)
-              AND room.room_kind = 'direct'
+              AND room.room_kind IN ('direct', 'group')
             """).first(decoding: DirectRoomCacheAccessRow.self)
     }
 }
 
 private struct GroupEventLogRoomRow: Decodable {
     let roomSequence: Int64
+    let membershipRevision: Int64
     let roomKind: String
     let actorIsActiveMember: Bool
     enum CodingKeys: String, CodingKey {
         case roomSequence = "room_sequence"
+        case membershipRevision = "membership_revision"
         case roomKind = "room_kind"
         case actorIsActiveMember = "actor_is_active_member"
     }

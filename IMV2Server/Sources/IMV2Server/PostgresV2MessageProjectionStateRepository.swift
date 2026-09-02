@@ -249,16 +249,56 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             SELECT message.text_body,
                    message.rich_entities::text AS entities_json,
                    message.withdrawn_at,
-                   accepted.event_id AS origin_event_id,
-                   accepted.payload::text AS accepted_payload_json,
-                   accepted.created_at
+                   CASE
+                       WHEN message.accepted_event_storage = 'message_row'
+                       THEN message.accepted_event_id
+                       ELSE accepted.event_id
+                   END AS origin_event_id,
+                   CASE
+                       WHEN message.accepted_event_storage = 'message_row'
+                       THEN jsonb_build_object(
+                           'event_type', 'message.accepted',
+                           'message_id', message.message_id::text,
+                           'room_id', message.room_id::text,
+                           'room_sequence', message.room_sequence,
+                           'timeline_sequence', message.timeline_sequence,
+                           'sender_user_id', message.sender_user_id::text,
+                           'text', message.text_body,
+                           'media_ids', '[]'::jsonb,
+                           'media_presentations', '[]'::jsonb,
+                           'mention_user_ids', '[]'::jsonb,
+                           'mentions_everyone', FALSE,
+                           'entities', message.rich_entities,
+                           'reply_to_message_id',
+                               message.reply_to_message_id::text,
+                           'forwarded_from_message_id',
+                               message.forwarded_from_message_id::text,
+                           'forwarded_from_user_id',
+                               message.forwarded_from_user_id::text,
+                           'message_revision', 1,
+                           'server_created_at_ms',
+                               floor(extract(epoch FROM message.created_at)
+                                     * 1000)::bigint
+                       )
+                       ELSE accepted.payload
+                   END::text AS accepted_payload_json,
+                   message.created_at
             FROM \(unsafeRaw: table("messages")) AS message
-            JOIN \(unsafeRaw: table("room_events")) AS accepted
-              ON accepted.room_id = message.room_id
+            LEFT JOIN \(unsafeRaw: table("room_events")) AS accepted
+              ON message.accepted_event_storage = 'room_event'
+             AND accepted.room_id = message.room_id
              AND accepted.room_sequence = message.room_sequence
              AND accepted.event_type = 'message.accepted'
             WHERE message.message_id = \(bind: messageID)
               AND message.content_revision = \(bind: revision)
+              AND (
+                  (
+                      message.accepted_event_storage = 'message_row'
+                      AND message.accepted_event_id IS NOT NULL
+                      AND message.accepted_membership_revision IS NOT NULL
+                  )
+                  OR accepted.event_id IS NOT NULL
+              )
             """).first(decoding: MessageProjectionStateMaterializationRow.self),
               source.withdrawnAt == nil,
               let entityData = source.entitiesJSON.data(using: .utf8)

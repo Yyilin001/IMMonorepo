@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import Synchronization
 @testable import IMV2Server
 import Testing
 
@@ -53,6 +54,36 @@ struct V2SendMessageServiceTests {
             bytes.prefix(6).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
         }
         #expect(rollbackMilliseconds == 1_645_557_742_000)
+
+        // The production path expands one 256-bit HMAC result into three
+        // disjoint UUIDv7 random regions. Exercise that shared generator under
+        // contention so a future layout change cannot overlap regions or
+        // reuse a counter value unnoticed.
+        let triples = await withTaskGroup(
+            of: [(UUID, UUID, UUID)].self,
+            returning: [(UUID, UUID, UUID)].self
+        ) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    (0..<256).map { _ in
+                        generator.makeOrderedTriple(at: acceptedAt)
+                    }
+                }
+            }
+            var result: [(UUID, UUID, UUID)] = []
+            result.reserveCapacity(2_048)
+            for await batch in group { result.append(contentsOf: batch) }
+            return result
+        }
+        let flattened = triples.flatMap { [$0.0, $0.1, $0.2] }
+        #expect(Set(flattened).count == flattened.count)
+        for value in flattened {
+            var uuid = value.uuid
+            withUnsafeBytes(of: &uuid) { bytes in
+                #expect(bytes[6] >> 4 == 7)
+                #expect(bytes[8] & 0xc0 == 0x80)
+            }
+        }
     }
 
     @Test("authenticated actor is persisted as the message sender and retry is idempotent")
@@ -263,6 +294,53 @@ struct V2SendMessageServiceTests {
         #expect(snapshot.activeRooms == 0)
     }
 
+    @Test("an opt-in partition batches repeated hot rooms in arrival order")
+    func admissionBatchingUsesOneRepeatedRoomAtomicPartition() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore(repeatedRoomBatchingEnabled: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 4, maximumDelay: .seconds(5))
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let firstRoomID = try RoomID("00000000-0000-0000-0000-000000000216")
+        let secondRoomID = try RoomID("00000000-0000-0000-0000-000000000220")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000217")
+        let ids = try (1 ... 4).map {
+            try ClientMessageID(String(format: "00000000-0000-0000-0005-%012x", $0))
+        }
+        let rooms = [firstRoomID, firstRoomID, secondRoomID, secondRoomID]
+
+        var tasks: [Task<V2SendMessageOutcome, any Error>] = []
+        for index in ids.indices {
+            tasks.append(Task {
+                try await service.send(.init(
+                    roomID: rooms[index], actorUserID: senderID,
+                    clientMessageID: ids[index], text: "message \(index)"
+                ))
+            })
+            if index < ids.count - 1 {
+                while await batcher.snapshot().pendingRequests != index + 1 {
+                    await Task.yield()
+                }
+            }
+        }
+        for task in tasks { _ = try await task.value }
+
+        #expect(await store.normalAcceptCallCount() == 0)
+        // The fairness pass selects one request per room before filling with
+        // hot-room followers; order within each room remains FIFO.
+        #expect(await store.batches() == [[ids[0], ids[2], ids[1], ids[3]]])
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.atomicBatchCommitted == 1)
+        #expect(snapshot.atomicBatchCommittedRequests == 4)
+    }
+
     @Test("a cache transition retains same-room FIFO across unique-room waves")
     func admissionBatchingKeepsOneRoomFIFOAcrossPartitionChanges() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -364,6 +442,69 @@ struct V2SendMessageServiceTests {
         }
     }
 
+    @Test("an in-flight batch cannot bypass its successor aggregation timer")
+    func admissionBatchingRetainsSuccessorAggregationWindow() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AtomicBatchTestStore(
+            repeatedRoomBatchingEnabled: true,
+            atomicBatchDelay: .milliseconds(40)
+        )
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .milliseconds(80),
+                adaptiveDelayPolicy: .init(
+                    highActivityMaximumDelay: .milliseconds(500),
+                    minimumRequestsInWindow: 2,
+                    observationWindow: .seconds(1)
+                )
+            )
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000198")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000199")
+        let ids = try (1 ... 3).map {
+            try ClientMessageID(String(format: "00000000-0000-0000-0006-%012x", $0))
+        }
+
+        let first = Task { try await service.send(.init(
+            roomID: roomID, actorUserID: senderID,
+            clientMessageID: ids[0], text: "one"
+        )) }
+        while await batcher.snapshot().pendingRequests != 1 {
+            await Task.yield()
+        }
+        let second = Task { try await service.send(.init(
+            roomID: roomID, actorUserID: senderID,
+            clientMessageID: ids[1], text: "two"
+        )) }
+        while await store.batches().isEmpty {
+            await Task.yield()
+        }
+        let successor = Task { try await service.send(.init(
+            roomID: roomID, actorUserID: senderID,
+            clientMessageID: ids[2], text: "three"
+        )) }
+
+        _ = try await [first.value, second.value]
+        // The first transaction completed well before the successor's 500 ms
+        // high-activity deadline. It must retain the bounded 80 ms successor
+        // opportunity instead of becoming a singleton at DB completion.
+        #expect(await batcher.snapshot().pendingRequests == 1)
+        #expect(await store.normalAcceptCallCount() == 0)
+        #expect(await batcher.snapshot().highActivityDelayScheduled)
+
+        _ = try await successor.value
+        #expect(await store.normalAcceptCallCount() == 1)
+        #expect(await batcher.snapshot().highActivityDelayFlushes == 1)
+    }
+
     @Test("one atomic batch owns one foreground database admission")
     func admissionBatchingOwnsOneDatabasePermitPerAtomicBatch() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -463,9 +604,11 @@ struct V2SendMessageServiceTests {
     func admissionBatchingPropagatesAtomicFailure() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
         let store = AtomicBatchTestStore(shouldFail: true)
+        let observer = RecordingCommittedMessageObserver()
         let batcher = V2SendMessageAdmissionBatcher(
             store: store,
-            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            committedMessageObserver: observer
         )
         let service = V2SendMessageService(
             store: store,
@@ -500,15 +643,18 @@ struct V2SendMessageServiceTests {
         }
         #expect(await store.normalAcceptCallCount() == 0)
         #expect(await store.batches().count == 1)
+        #expect(observer.roomSequences().isEmpty)
     }
 
     @Test("an unsupported batch shape falls back without exposing an optimisation failure")
     func admissionBatchingFallsBackToOrdinaryAcceptance() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
         let store = AtomicBatchTestStore(shouldDeclineBatch: true)
+        let observer = RecordingCommittedMessageObserver()
         let batcher = V2SendMessageAdmissionBatcher(
             store: store,
-            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5))
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            committedMessageObserver: observer
         )
         let service = V2SendMessageService(
             store: store,
@@ -545,6 +691,7 @@ struct V2SendMessageServiceTests {
         #expect(snapshot.atomicBatchFallbacks == 1)
         #expect(snapshot.atomicBatchFallbackRequests == 2)
         #expect(snapshot.atomicBatchFallbackReasons[.requestShape] == 1)
+        #expect(observer.roomSequences().isEmpty)
     }
 
     @Test("fallback returns each independent command's own result")
@@ -976,6 +1123,126 @@ struct V2SendMessageServiceTests {
         #expect(!capacity.tryReserve())
         for _ in 0 ..< 17 { capacity.release() }
     }
+
+    @Test("accepted batches reach the post-commit observer before callers resume")
+    func committedObserverRunsBeforeAcceptanceReturns() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let store = AcceptedAtomicBatchTestStore()
+        let observer = RecordingCommittedMessageObserver()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            committedMessageObserver: observer
+        )
+        let service = V2SendMessageService(
+            store: store,
+            capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64),
+            batcher: batcher
+        )
+        let roomID = try RoomID("50000000-0000-0000-0000-000000000001")
+        let senderID = try UserID("50000000-0000-0000-0000-000000000002")
+
+        async let first = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID(
+                "50000000-0000-0000-0000-000000000003"
+            ),
+            text: "one"
+        ))
+        async let second = service.send(.init(
+            roomID: roomID,
+            actorUserID: senderID,
+            clientMessageID: try ClientMessageID(
+                "50000000-0000-0000-0000-000000000004"
+            ),
+            text: "two"
+        ))
+        _ = try await [first, second]
+
+        #expect(service.publishesCommittedGroupEvents)
+        #expect(observer.roomSequences() == [1, 2])
+    }
+}
+
+private final class RecordingCommittedMessageObserver:
+    V2CommittedMessageBatchObserving,
+    Sendable
+{
+    private let values = Mutex<[UInt64]>([])
+
+    func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome]) {
+        values.withLock { values in
+            values.append(contentsOf: outcomes.compactMap { outcome in
+                guard case .accepted(let message) = outcome else { return nil }
+                return message.roomSequence
+            })
+        }
+    }
+
+    func roomSequences() -> [UInt64] { values.withLock { $0 } }
+}
+
+private actor AcceptedAtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
+    func atomicBatchPartitions(
+        requests: [V2RoomWriteRequest]
+    ) -> [V2AtomicRoomWriteBatchPartition?] {
+        requests.map { _ in .largeGroupHybrid }
+    }
+
+    func atomicBatchSupportsRepeatedRooms(
+        in partition: V2AtomicRoomWriteBatchPartition
+    ) -> Bool { partition == .largeGroupHybrid }
+
+    func accept(
+        command: V2SendMessageCommand,
+        capacityProfile _: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) throws -> V2SendMessageOutcome {
+        .accepted(try acceptedMessage(
+            command: command,
+            identifiers: identifiers,
+            roomSequence: 1,
+            now: now
+        ))
+    }
+
+    func acceptAtomically(
+        requests: [V2RoomWriteRequest]
+    ) throws -> [V2SendMessageOutcome] {
+        try requests.enumerated().map { index, request in
+            .accepted(try acceptedMessage(
+                command: request.command,
+                identifiers: request.identifiers,
+                roomSequence: UInt64(index + 1),
+                now: request.now
+            ))
+        }
+    }
+
+    private func acceptedMessage(
+        command: V2SendMessageCommand,
+        identifiers: V2AcceptanceIdentifiers,
+        roomSequence: UInt64,
+        now: Date
+    ) throws -> V2AcceptedMessage {
+        .init(
+            messageID: identifiers.messageID,
+            roomID: command.roomID,
+            roomSequence: roomSequence,
+            senderUserID: command.senderUserID,
+            clientMessageID: command.clientMessageID,
+            text: command.text,
+            mediaPresentations: [],
+            groupDeliveryMode: .largeGroupHybrid,
+            usesRoomEventLog: true,
+            sourceEventID: identifiers.eventID,
+            acceptedMembershipRevision: 1,
+            createdAt: now
+        )
+    }
 }
 
 private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
@@ -985,6 +1252,8 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     private let preclassifiedClientMessageIDs: Set<ClientMessageID>
     private let acceleratedClientMessageIDs: Set<ClientMessageID>
     private let isolatedBatchClientMessageIDs: Set<ClientMessageID>
+    private let repeatedRoomBatchingEnabled: Bool
+    private let atomicBatchDelay: Duration?
     private var recordedBatches: [[ClientMessageID]] = []
     private var recordedNormalClientMessageIDs: [ClientMessageID] = []
     private var normalCalls = 0
@@ -995,7 +1264,9 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         failingNormalClientMessageIDs: Set<ClientMessageID> = [],
         preclassifiedClientMessageIDs: Set<ClientMessageID> = [],
         acceleratedClientMessageIDs: Set<ClientMessageID> = [],
-        isolatedBatchClientMessageIDs: Set<ClientMessageID> = []
+        isolatedBatchClientMessageIDs: Set<ClientMessageID> = [],
+        repeatedRoomBatchingEnabled: Bool = false,
+        atomicBatchDelay: Duration? = nil
     ) {
         self.shouldFail = shouldFail
         self.shouldDeclineBatch = shouldDeclineBatch
@@ -1003,6 +1274,8 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         self.preclassifiedClientMessageIDs = preclassifiedClientMessageIDs
         self.acceleratedClientMessageIDs = acceleratedClientMessageIDs
         self.isolatedBatchClientMessageIDs = isolatedBatchClientMessageIDs
+        self.repeatedRoomBatchingEnabled = repeatedRoomBatchingEnabled
+        self.atomicBatchDelay = atomicBatchDelay
     }
 
     func atomicBatchEligibility(requests: [V2RoomWriteRequest]) -> [Bool] {
@@ -1016,9 +1289,16 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         requests.map { request in
             guard !preclassifiedClientMessageIDs.contains(request.command.clientMessageID)
             else { return nil }
+            if repeatedRoomBatchingEnabled { return .largeGroupHybrid }
             return acceleratedClientMessageIDs.contains(request.command.clientMessageID)
                 ? .accelerated : .standard
         }
+    }
+
+    func atomicBatchSupportsRepeatedRooms(
+        in partition: V2AtomicRoomWriteBatchPartition
+    ) -> Bool {
+        repeatedRoomBatchingEnabled && partition == .largeGroupHybrid
     }
 
     func accept(
@@ -1035,8 +1315,13 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         return .unavailable(.missingShardLease)
     }
 
-    func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
+    func acceptAtomically(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome] {
         recordedBatches.append(requests.map(\.command.clientMessageID))
+        if let atomicBatchDelay {
+            try await Task.sleep(for: atomicBatchDelay)
+        }
         let isolatedIndices = requests.indices.filter {
             isolatedBatchClientMessageIDs.contains(
                 requests[$0].command.clientMessageID

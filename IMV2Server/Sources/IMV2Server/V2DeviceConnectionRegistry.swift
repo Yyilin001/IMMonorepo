@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
 import Synchronization
 
@@ -14,6 +15,10 @@ public actor V2DeviceConnectionRegistry {
     /// immutable bytes; tests and alternate embeddings may omit it and retain
     /// the per-stream compatibility path.
     private let foregroundFrameLimits: V2FrameLimits?
+    private let foregroundFrameCompression: V2NegotiatedFrameCompression?
+    private let foregroundMaximumUncompressedPayloadBytes: Int
+    private let foregroundCompressionThresholdBytes: Int
+    private let foregroundMaximumCompressionExpansionRatio: Int
     private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     private let livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
@@ -52,11 +57,29 @@ public actor V2DeviceConnectionRegistry {
             maximumConnectionsPerUser: 8
         ),
         livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init(),
-        foregroundFrameLimits: V2FrameLimits? = nil
+        foregroundFrameLimits: V2FrameLimits? = nil,
+        foregroundFrameCompression: V2NegotiatedFrameCompression? = nil,
+        foregroundMaximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec
+            .defaultMaximumUncompressedPayloadBytes,
+        foregroundCompressionThresholdBytes: Int = V2ServerProtobufFrameCodec
+            .defaultCompressionThresholdBytes,
+        foregroundMaximumCompressionExpansionRatio: Int = V2ZlibFrameCompression
+            .defaultMaximumExpansionRatio
     ) {
+        precondition(
+            foregroundMaximumUncompressedPayloadBytes > 0
+                && foregroundCompressionThresholdBytes >= 0
+                && foregroundMaximumCompressionExpansionRatio > 0
+        )
         self.connectionAdmissionPolicy = connectionAdmissionPolicy
         self.livePresenceRenewalConfiguration = livePresenceRenewalConfiguration
         self.foregroundFrameLimits = foregroundFrameLimits
+        self.foregroundFrameCompression = foregroundFrameCompression
+        self.foregroundMaximumUncompressedPayloadBytes =
+            foregroundMaximumUncompressedPayloadBytes
+        self.foregroundCompressionThresholdBytes = foregroundCompressionThresholdBytes
+        self.foregroundMaximumCompressionExpansionRatio =
+            foregroundMaximumCompressionExpansionRatio
     }
 
     @discardableResult
@@ -206,7 +229,12 @@ public actor V2DeviceConnectionRegistry {
         foregroundGroupInterestManager = nil
     }
 
-    public func subscribeForegroundGroup(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
+    public func subscribeForegroundGroup(
+        _ stream: V2GatewayByteStream,
+        connectionID: UUID,
+        roomID: RoomID,
+        membershipRevision: UInt64 = 0
+    ) async {
         guard let identity = identityByConnection[connectionID],
               let lifecycle = lifecycleByConnection[connectionID]
         else { return }
@@ -223,6 +251,7 @@ public actor V2DeviceConnectionRegistry {
                 connectionID: connectionID,
                 roomID: roomID,
                 userID: identity.userID,
+                membershipRevision: membershipRevision,
                 stream: stream
             )
             return
@@ -238,6 +267,7 @@ public actor V2DeviceConnectionRegistry {
             connectionID: connectionID,
             roomID: roomID,
             userID: identity.userID,
+            membershipRevision: membershipRevision,
             stream: stream
         )
         if wasInactive, let foregroundGroupInterestManager {
@@ -272,7 +302,12 @@ public actor V2DeviceConnectionRegistry {
                 roomID: roomID,
                 highWatermark: highWatermark,
                 directEvent: nil,
-                frameLimits: $0
+                frameLimits: $0,
+                compression: foregroundFrameCompression,
+                maximumUncompressedPayloadBytes:
+                    foregroundMaximumUncompressedPayloadBytes,
+                compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
             )
         }
         await Self.publishForeground(
@@ -289,17 +324,18 @@ public actor V2DeviceConnectionRegistry {
     public nonisolated func notifyForegroundDirectEvent(
         _ event: V2DirectRoomLiveEvent
     ) async {
-        let streams = foregroundRoutes.streams(
-            roomID: event.roomID,
-            recipientUserIDs: event.recipientUserIDs,
-            excludingConnectionID: event.excludedConnectionID
-        )
+        let streams = foregroundRoutes.streams(for: event)
         let prepared = foregroundFrameLimits.flatMap {
             V2PreparedGatewayGroupEventAvailable(
                 roomID: event.roomID,
                 highWatermark: event.highWatermark,
                 directEvent: event,
-                frameLimits: $0
+                frameLimits: $0,
+                compression: foregroundFrameCompression,
+                maximumUncompressedPayloadBytes:
+                    foregroundMaximumUncompressedPayloadBytes,
+                compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
             )
         }
         await Self.publishForeground(
@@ -331,19 +367,97 @@ public actor V2DeviceConnectionRegistry {
                   roomID: event.roomID,
                   highWatermark: event.highWatermark,
                   directEvent: event,
-                  frameLimits: foregroundFrameLimits
+                  frameLimits: foregroundFrameLimits,
+                  compression: foregroundFrameCompression,
+                  maximumUncompressedPayloadBytes:
+                      foregroundMaximumUncompressedPayloadBytes,
+                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
               )
         else { return false }
-        let streams = foregroundRoutes.streams(
-            roomID: event.roomID,
-            recipientUserIDs: event.recipientUserIDs,
-            excludingConnectionID: event.excludedConnectionID
-        )
+        let streams = foregroundRoutes.streams(for: event)
+        return Self.submitPreparedForeground(prepared, to: streams)
+    }
+
+    /// Ordered Hybrid-group microbatch counterpart of the direct-event fast
+    /// path. The first event's membership epoch selects the audience, every
+    /// entry is revalidated by the prepared-frame constructor, and all sockets
+    /// receive one shared immutable frame rather than one frame per event.
+    nonisolated func submitForegroundGroupEvents(
+        _ events: [V2DirectRoomLiveEvent]
+    ) -> Bool {
+        guard let first = events.first,
+              first.groupMembershipRevision != nil,
+              let foregroundFrameLimits,
+              let prepared = V2PreparedGatewayGroupEventAvailable(
+                  groupEvents: events,
+                  frameLimits: foregroundFrameLimits,
+                  compression: foregroundFrameCompression,
+                  maximumUncompressedPayloadBytes:
+                      foregroundMaximumUncompressedPayloadBytes,
+                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
+              )
+        else { return false }
+        let streams = foregroundRoutes.streams(for: first)
+        return Self.submitPreparedForeground(prepared, to: streams)
+    }
+
+    /// Keeps the per-stream authentication/lifecycle fence while reducing the
+    /// process-wide scheduler handoff from one lock per recipient to one batch
+    /// per EventLoop. Callback-based test and alternate transports retain their
+    /// established immediate submission path.
+    private nonisolated static func submitPreparedForeground(
+        _ prepared: V2PreparedGatewayGroupEventAvailable,
+        to streams: [V2GatewayByteStream]
+    ) -> Bool {
         var completed = true
-        for stream in streams where !stream.submitGroupEventAvailable(prepared) {
-            completed = false
+        var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
+        nioSubmissions.reserveCapacity(streams.count)
+        for stream in streams {
+            if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
+                nioSubmissions.append(submission)
+            } else if !stream.submitGroupEventAvailable(prepared) {
+                completed = false
+            }
         }
+        V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
         return completed
+    }
+
+    /// Actor-backed compatibility path used by tests, alternate transports,
+    /// and any stream that could not use the NIO synchronous writer.
+    public nonisolated func notifyForegroundGroupEvents(
+        _ events: [V2DirectRoomLiveEvent]
+    ) async {
+        guard let first = events.first,
+              first.groupMembershipRevision != nil,
+              let foregroundFrameLimits,
+              let prepared = V2PreparedGatewayGroupEventAvailable(
+                  groupEvents: events,
+                  frameLimits: foregroundFrameLimits,
+                  compression: foregroundFrameCompression,
+                  maximumUncompressedPayloadBytes:
+                      foregroundMaximumUncompressedPayloadBytes,
+                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
+              )
+        else { return }
+        let streams = foregroundRoutes.streams(for: first)
+        var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
+        nioSubmissions.reserveCapacity(streams.count)
+        var actorFallbacks: [V2GatewayByteStream] = []
+        for stream in streams {
+            if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
+                nioSubmissions.append(submission)
+            } else if !stream.submitGroupEventAvailable(prepared) {
+                actorFallbacks.append(stream)
+            }
+        }
+        V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
+        for stream in actorFallbacks {
+            await stream.sendGroupEventAvailable(prepared)
+        }
     }
 
     public func connectionCount(for deviceID: DeviceID) -> Int { streamsByDevice[deviceID]?.count ?? 0 }
@@ -805,11 +919,23 @@ public actor V2DeviceConnectionRegistry {
 private final class V2ForegroundConnectionRoutes: Sendable {
     private struct Entry: Sendable {
         let userID: UserID
+        let membershipRevision: UInt64
         let stream: V2GatewayByteStream
     }
 
     private struct State: Sendable {
         var entriesByRoom: [RoomID: [UUID: Entry]] = [:]
+        /// Group publication is much more frequent than subscription
+        /// mutation. Build revision-fenced immutable arrays on mutation so a
+        /// hot room does not allocate and retain every stream again for each
+        /// foreground batch. Copying one Array value on lookup retains only
+        /// its COW storage; a concurrent mutation publishes a new snapshot.
+        var groupStreamsByRoomRevision:
+            [RoomID: [UInt64: [V2GatewayByteStream]]] = [:]
+        /// A large reconnect wave may add many viewers before the first live
+        /// event. Rebuild lazily once after that wave instead of turning N
+        /// subscriptions into O(N²) snapshot copies.
+        var dirtyGroupStreamRooms: Set<RoomID> = []
     }
 
     private final class Shard: Sendable {
@@ -827,13 +953,16 @@ private final class V2ForegroundConnectionRoutes: Sendable {
         connectionID: UUID,
         roomID: RoomID,
         userID: UserID,
+        membershipRevision: UInt64,
         stream: V2GatewayByteStream
     ) {
-        shard(for: roomID).state.withLock {
-            $0.entriesByRoom[roomID, default: [:]][connectionID] = .init(
+        shard(for: roomID).state.withLock { state in
+            state.entriesByRoom[roomID, default: [:]][connectionID] = .init(
                 userID: userID,
+                membershipRevision: membershipRevision,
                 stream: stream
             )
+            state.dirtyGroupStreamRooms.insert(roomID)
         }
     }
 
@@ -842,6 +971,10 @@ private final class V2ForegroundConnectionRoutes: Sendable {
             state.entriesByRoom[roomID]?.removeValue(forKey: connectionID)
             if state.entriesByRoom[roomID]?.isEmpty == true {
                 state.entriesByRoom.removeValue(forKey: roomID)
+                state.groupStreamsByRoomRevision.removeValue(forKey: roomID)
+                state.dirtyGroupStreamRooms.remove(roomID)
+            } else {
+                state.dirtyGroupStreamRooms.insert(roomID)
             }
         }
     }
@@ -866,6 +999,53 @@ private final class V2ForegroundConnectionRoutes: Sendable {
                 return entry.stream
             }
         }
+    }
+
+    /// Selects an audience from immutable, authenticated subscription state.
+    /// A group event never trusts room interest alone: the subscription and
+    /// committing transaction must name the same durable membership epoch.
+    func streams(for event: V2DirectRoomLiveEvent) -> [V2GatewayByteStream] {
+        shard(for: event.roomID).state.withLock { state in
+            if let membershipRevision = event.groupMembershipRevision {
+                guard event.recipientUserIDs.isEmpty else { return [] }
+                if event.excludedConnectionID == nil {
+                    if state.dirtyGroupStreamRooms.remove(event.roomID) != nil {
+                        Self.rebuildGroupStreams(roomID: event.roomID, state: &state)
+                    }
+                    return (
+                        state.groupStreamsByRoomRevision[event.roomID]?[membershipRevision]
+                    ) ?? []
+                }
+                guard let entries = state.entriesByRoom[event.roomID] else { return [] }
+                return entries.compactMap { connectionID, entry in
+                    guard connectionID != event.excludedConnectionID,
+                          entry.membershipRevision == membershipRevision
+                    else { return nil }
+                    return entry.stream
+                }
+            }
+            guard let entries = state.entriesByRoom[event.roomID] else { return [] }
+            guard !event.recipientUserIDs.isEmpty else { return [] }
+            return entries.compactMap { connectionID, entry in
+                guard connectionID != event.excludedConnectionID,
+                      event.recipientUserIDs.contains(entry.userID)
+                else { return nil }
+                return entry.stream
+            }
+        }
+    }
+
+    private static func rebuildGroupStreams(roomID: RoomID, state: inout State) {
+        guard let entries = state.entriesByRoom[roomID], !entries.isEmpty else {
+            state.groupStreamsByRoomRevision.removeValue(forKey: roomID)
+            return
+        }
+        var streamsByRevision: [UInt64: [V2GatewayByteStream]] = [:]
+        streamsByRevision.reserveCapacity(min(entries.count, 4))
+        for entry in entries.values {
+            streamsByRevision[entry.membershipRevision, default: []].append(entry.stream)
+        }
+        state.groupStreamsByRoomRevision[roomID] = streamsByRevision
     }
 
     private func shard(for roomID: RoomID) -> Shard {

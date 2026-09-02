@@ -1,5 +1,7 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
+import NIOCore
 import Synchronization
 
 /// One immutable server-push frame shared by every authorized local recipient
@@ -8,14 +10,24 @@ import Synchronization
 /// checks remain outside this value.
 struct V2PreparedGatewayGroupEventAvailable: Sendable {
     let protocolVersion: UInt8
-    let bytes: Data
+    /// `ByteBuffer` is a COW, `Sendable` value. One prepared group frame can
+    /// therefore share its immutable storage across every authorized channel;
+    /// a channel pipeline that needs to mutate its copy detaches normally.
+    private let uncompressedBytes: ByteBuffer
+    private let compressedBytes: ByteBuffer?
 
     init?(
         roomID: RoomID,
         highWatermark: UInt64,
         directEvent: V2DirectRoomLiveEvent?,
         frameLimits: V2FrameLimits,
-        protocolVersion: UInt8 = UInt8(IMV2ProtocolVersion.current)
+        protocolVersion: UInt8 = UInt8(IMV2ProtocolVersion.current),
+        compression: V2NegotiatedFrameCompression? = nil,
+        maximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec
+            .defaultMaximumUncompressedPayloadBytes,
+        compressionThresholdBytes: Int = V2ServerProtobufFrameCodec
+            .defaultCompressionThresholdBytes,
+        maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio
     ) {
         var envelope = IMV2Envelope()
         envelope.requestID = 0
@@ -31,13 +43,119 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
             envelope.groupEventAvailable.projectionKind = directEvent.projectionKind
             envelope.groupEventAvailable.eventPayload = directEvent.payload
         }
+        guard let uncompressedBytes = Self.encodedBytes(
+            envelope,
+            frameLimits: frameLimits,
+            protocolVersion: protocolVersion,
+            compression: nil,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: compressionThresholdBytes,
+            maximumExpansionRatio: maximumExpansionRatio
+        ) else { return nil }
+        self.protocolVersion = protocolVersion
+        self.uncompressedBytes = uncompressedBytes
+        compressedBytes = compression.flatMap { compression in
+            Self.encodedBytes(
+                envelope,
+                frameLimits: frameLimits,
+                protocolVersion: protocolVersion,
+                compression: compression,
+                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+                compressionThresholdBytes: compressionThresholdBytes,
+                maximumExpansionRatio: maximumExpansionRatio
+            )
+        }
+    }
+
+    /// Encodes one room-local ordered group batch once. No connection-specific
+    /// field is present, so the exact same immutable bytes may be enqueued on
+    /// every authorized stream.
+    init?(
+        groupEvents: [V2DirectRoomLiveEvent],
+        frameLimits: V2FrameLimits,
+        protocolVersion: UInt8 = UInt8(IMV2ProtocolVersion.current),
+        compression: V2NegotiatedFrameCompression? = nil,
+        maximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec
+            .defaultMaximumUncompressedPayloadBytes,
+        compressionThresholdBytes: Int = V2ServerProtobufFrameCodec
+            .defaultCompressionThresholdBytes,
+        maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio
+    ) {
+        guard let first = groupEvents.first,
+              let membershipRevision = first.groupMembershipRevision,
+              first.recipientUserIDs.isEmpty,
+              first.excludedConnectionID == nil,
+              groupEvents.allSatisfy({ event in
+                  event.roomID == first.roomID
+                      && event.groupMembershipRevision == membershipRevision
+                      && event.recipientUserIDs.isEmpty
+                      && event.excludedConnectionID == nil
+              })
+        else { return nil }
+        let ordered = v2GroupEventsOrderedByRoomSequence(groupEvents)
+        var envelope = IMV2Envelope()
+        envelope.requestID = 0
+        envelope.protocolVersion = UInt32(protocolVersion)
+        envelope.groupEventAvailable = .init()
+        envelope.groupEventAvailable.roomID = first.roomID.rawValue
+        envelope.groupEventAvailable.highWatermark = ordered.last?.roomSequence ?? first.highWatermark
+        envelope.groupEventAvailable.liveEvents = ordered.map { event in
+            var wire = IMV2GroupEvent()
+            wire.sourceEventID = event.sourceEventID.rawValue
+            wire.roomSequence = event.roomSequence
+            wire.projectionKind = event.projectionKind
+            wire.payload = event.payload
+            return wire
+        }
+        guard let uncompressedBytes = Self.encodedBytes(
+            envelope,
+            frameLimits: frameLimits,
+            protocolVersion: protocolVersion,
+            compression: nil,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: compressionThresholdBytes,
+            maximumExpansionRatio: maximumExpansionRatio
+        ) else { return nil }
+        self.protocolVersion = protocolVersion
+        self.uncompressedBytes = uncompressedBytes
+        compressedBytes = compression.flatMap { compression in
+            Self.encodedBytes(
+                envelope,
+                frameLimits: frameLimits,
+                protocolVersion: protocolVersion,
+                compression: compression,
+                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+                compressionThresholdBytes: compressionThresholdBytes,
+                maximumExpansionRatio: maximumExpansionRatio
+            )
+        }
+    }
+
+    func bytes(for compression: V2NegotiatedFrameCompression?) -> ByteBuffer {
+        compression == .zlib ? (compressedBytes ?? uncompressedBytes) : uncompressedBytes
+    }
+
+    private static func encodedBytes(
+        _ envelope: IMV2Envelope,
+        frameLimits: V2FrameLimits,
+        protocolVersion: UInt8,
+        compression: V2NegotiatedFrameCompression?,
+        maximumUncompressedPayloadBytes: Int,
+        compressionThresholdBytes: Int,
+        maximumExpansionRatio: Int
+    ) -> ByteBuffer? {
         guard let frame = try? V2ServerProtobufFrameCodec.encode(
             envelope,
-            frameVersion: protocolVersion
-        ), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
-        else { return nil }
-        self.protocolVersion = protocolVersion
-        self.bytes = bytes
+            frameVersion: protocolVersion,
+            compression: compression,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: compressionThresholdBytes,
+            maximumExpansionRatio: maximumExpansionRatio
+        ) else { return nil }
+        guard let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else {
+            return nil
+        }
+        return ByteBuffer(bytes: bytes)
     }
 }
 
@@ -49,40 +167,86 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
 /// channel's own EventLoop. Durable room-log cursor pull remains the recovery
 /// path for every drop.
 private final class V2GatewayForegroundTransport: Sendable {
+    private enum Writer: Sendable {
+        case callback(@Sendable (ByteBuffer) -> Void)
+        case nio(V2NIOGatewayForegroundWriter)
+    }
+
     private struct State: Sendable {
         var protocolVersion: UInt8?
-        var writer: (@Sendable (Data) -> Void)?
+        var compression: V2NegotiatedFrameCompression?
+        var writer: Writer?
     }
 
     private let state = Mutex(State())
 
-    func attach(writer: (@Sendable (Data) -> Void)?) {
-        state.withLock { $0.writer = writer }
+    func attach(writer: (@Sendable (ByteBuffer) -> Void)?) {
+        state.withLock { $0.writer = writer.map(Writer.callback) }
     }
 
-    func activate(protocolVersion: UInt8) {
-        state.withLock { $0.protocolVersion = protocolVersion }
+    func attach(nioWriter: V2NIOGatewayForegroundWriter?) {
+        state.withLock { $0.writer = nioWriter.map(Writer.nio) }
+    }
+
+    func activate(
+        protocolVersion: UInt8,
+        compression: V2NegotiatedFrameCompression?
+    ) {
+        state.withLock {
+            $0.protocolVersion = protocolVersion
+            $0.compression = compression
+        }
     }
 
     func deactivate() {
-        state.withLock { $0.protocolVersion = nil }
+        state.withLock {
+            $0.protocolVersion = nil
+            $0.compression = nil
+        }
     }
 
     func detach() {
         state.withLock {
             $0.protocolVersion = nil
+            $0.compression = nil
             $0.writer = nil
         }
     }
 
     func submit(_ prepared: V2PreparedGatewayGroupEventAvailable) -> Bool {
-        let writer = state.withLock { state -> (@Sendable (Data) -> Void)? in
+        let submission = state.withLock { state -> (
+            writer: Writer,
+            bytes: ByteBuffer
+        )? in
             guard state.protocolVersion == prepared.protocolVersion else { return nil }
-            return state.writer
+            guard let writer = state.writer else { return nil }
+            return (writer, prepared.bytes(for: state.compression))
         }
-        guard let writer else { return false }
-        writer(prepared.bytes)
+        guard let submission else { return false }
+        switch submission.writer {
+        case .callback(let writer):
+            writer(submission.bytes)
+        case .nio(let writer):
+            writer.submit(submission.bytes)
+        }
         return true
+    }
+
+    /// Captures the same authentication and lifecycle fence as `submit`, but
+    /// leaves lane scheduling to the group publisher so many local recipients
+    /// can be admitted as one EventLoop batch.
+    func prepareNIOSubmission(
+        _ prepared: V2PreparedGatewayGroupEventAvailable
+    ) -> V2NIOGatewayForegroundWriteSubmission? {
+        state.withLock { state in
+            guard state.protocolVersion == prepared.protocolVersion,
+                  case .nio(let writer)? = state.writer
+            else { return nil }
+            return .init(
+                writer: writer,
+                bytes: prepared.bytes(for: state.compression)
+            )
+        }
     }
 }
 
@@ -248,7 +412,30 @@ public actor V2GatewayByteStream {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
-        foregroundTransport.attach(writer: foregroundWriter)
+        let adaptedForegroundWriter: (@Sendable (ByteBuffer) -> Void)?
+        if let foregroundWriter {
+            adaptedForegroundWriter = { buffer in
+                foregroundWriter(Data(buffer.readableBytesView))
+            }
+        } else {
+            adaptedForegroundWriter = nil
+        }
+        foregroundTransport.attach(writer: adaptedForegroundWriter)
+        return true
+    }
+
+    /// Production SwiftNIO attachment. The actor-backed `Data` callback stays
+    /// unchanged for transport-neutral compatibility, while foreground group
+    /// frames retain their prepared COW `ByteBuffer` all the way to the channel.
+    func attachNIOTransport(
+        deviceRevocationHandler: @escaping @Sendable () async -> Void,
+        outboundWriter: @escaping @Sendable (Data) async -> Void,
+        foregroundWriter: V2NIOGatewayForegroundWriter?
+    ) -> Bool {
+        guard !transportClosed else { return false }
+        self.deviceRevocationHandler = deviceRevocationHandler
+        self.outboundWriter = outboundWriter
+        foregroundTransport.attach(nioWriter: foregroundWriter)
         return true
     }
 
@@ -306,11 +493,12 @@ public actor V2GatewayByteStream {
     /// current transport callback; a stale or differently-versioned stream
     /// cannot consume shared bytes.
     func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async {
-        guard let version = await session.authenticatedProtocolVersion(),
-              version == prepared.protocolVersion,
+        guard let contract = await session.authenticatedFrameContract(),
+              contract.protocolVersion == prepared.protocolVersion,
               let outboundWriter
         else { return }
-        await outboundWriter(prepared.bytes)
+        let buffer = prepared.bytes(for: contract.compression)
+        await outboundWriter(Data(buffer.readableBytesView))
     }
 
     /// Production foreground notifications use this nonisolated fast path.
@@ -321,6 +509,15 @@ public actor V2GatewayByteStream {
         _ prepared: V2PreparedGatewayGroupEventAvailable
     ) -> Bool {
         foregroundTransport.submit(prepared)
+    }
+
+    /// Production group publication first collects these lifecycle-fenced NIO
+    /// submissions, then enters each EventLoop lane once. Alternate transports
+    /// return nil and continue through `submitGroupEventAvailable` unchanged.
+    nonisolated func prepareNIOGroupEventAvailable(
+        _ prepared: V2PreparedGatewayGroupEventAvailable
+    ) -> V2NIOGatewayForegroundWriteSubmission? {
+        foregroundTransport.prepareNIOSubmission(prepared)
     }
 
     public func sendPresenceState(_ state: V2PresenceState) async {
@@ -362,13 +559,16 @@ public actor V2GatewayByteStream {
             await registry.unregister(connectionID: connectionID)
             throw V2GatewaySessionError.authenticatedConnectionLimit
         }
-        guard let version = await session.authenticatedProtocolVersion() else {
+        guard let contract = await session.authenticatedFrameContract() else {
             registeredIdentity = nil
             foregroundTransport.deactivate()
             await registry.unregister(connectionID: connectionID)
             throw V2GatewaySessionError.unsupportedCommand
         }
-        foregroundTransport.activate(protocolVersion: version)
+        foregroundTransport.activate(
+            protocolVersion: contract.protocolVersion,
+            compression: contract.compression
+        )
     }
 
     private func unregisterAuthenticatedDevice() async {
@@ -391,7 +591,12 @@ public actor V2GatewayByteStream {
             guard case .groupEventSubscribed(let subscribed)? = response.body,
                   subscribed.roomID == request.roomID
             else { return }
-            await registry.subscribeForegroundGroup(self, connectionID: connectionID, roomID: try .init(request.roomID))
+            await registry.subscribeForegroundGroup(
+                self,
+                connectionID: connectionID,
+                roomID: try .init(request.roomID),
+                membershipRevision: subscribed.membershipRevision
+            )
         case .groupEventUnsubscribe(let request):
             await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
         case .subscribePresence(let request):

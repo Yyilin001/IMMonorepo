@@ -58,15 +58,81 @@ public enum V2GatewayConnectionClosure: String, CaseIterable, Equatable, Sendabl
 public struct V2GatewayTransportMetricsSnapshot: Equatable, Sendable {
     public let activeConnections: Int
     public let peakQueuedInboundBytes: Int
+    public let foregroundFramesSubmitted: UInt64
+    public let foregroundBytesSubmitted: UInt64
+    public let foregroundRecoveryFramesQueued: UInt64
+    public let foregroundRecoveryFramesReplaced: UInt64
+    public let foregroundFramesWritten: UInt64
+    public let foregroundBytesWritten: UInt64
+    public let foregroundWriteBatches: UInt64
+    public let foregroundNonWritableDeferrals: UInt64
+    public let peakQueuedForegroundBytes: Int
+    public let foregroundGroupEventsSubmitted: UInt64
+    public let foregroundGroupEventsPublished: UInt64
+    public let foregroundGroupEventBatchesPublished: UInt64
+    public let foregroundGroupEventDuplicatesSuppressed: UInt64
+    public let foregroundGroupEventOutOfOrderArrivals: UInt64
+    public let foregroundGroupEventLateArrivals: UInt64
+    public let foregroundGroupEventBatchDegradations: UInt64
+    public let foregroundGroupInboundNotificationsDropped: UInt64
+    public let foregroundGroupCoveredWakesSuppressed: UInt64
+    public let foregroundGroupWakesDeferred: UInt64
+    public let foregroundGroupDeferredWakesDelivered: UInt64
     private let closures: [V2GatewayConnectionClosure: UInt64]
 
     public init(
         activeConnections: Int,
         peakQueuedInboundBytes: Int,
+        foregroundFramesSubmitted: UInt64 = 0,
+        foregroundBytesSubmitted: UInt64 = 0,
+        foregroundRecoveryFramesQueued: UInt64 = 0,
+        foregroundRecoveryFramesReplaced: UInt64 = 0,
+        foregroundFramesWritten: UInt64 = 0,
+        foregroundBytesWritten: UInt64 = 0,
+        foregroundWriteBatches: UInt64 = 0,
+        foregroundNonWritableDeferrals: UInt64 = 0,
+        peakQueuedForegroundBytes: Int = 0,
+        foregroundGroupEventsSubmitted: UInt64 = 0,
+        foregroundGroupEventsPublished: UInt64 = 0,
+        foregroundGroupEventBatchesPublished: UInt64 = 0,
+        foregroundGroupEventDuplicatesSuppressed: UInt64 = 0,
+        foregroundGroupEventOutOfOrderArrivals: UInt64 = 0,
+        foregroundGroupEventLateArrivals: UInt64 = 0,
+        foregroundGroupEventBatchDegradations: UInt64 = 0,
+        foregroundGroupInboundNotificationsDropped: UInt64 = 0,
+        foregroundGroupCoveredWakesSuppressed: UInt64 = 0,
+        foregroundGroupWakesDeferred: UInt64 = 0,
+        foregroundGroupDeferredWakesDelivered: UInt64 = 0,
         closures: [V2GatewayConnectionClosure: UInt64] = [:]
     ) {
         self.activeConnections = max(0, activeConnections)
         self.peakQueuedInboundBytes = max(0, peakQueuedInboundBytes)
+        self.foregroundFramesSubmitted = foregroundFramesSubmitted
+        self.foregroundBytesSubmitted = foregroundBytesSubmitted
+        self.foregroundRecoveryFramesQueued = foregroundRecoveryFramesQueued
+        self.foregroundRecoveryFramesReplaced = foregroundRecoveryFramesReplaced
+        self.foregroundFramesWritten = foregroundFramesWritten
+        self.foregroundBytesWritten = foregroundBytesWritten
+        self.foregroundWriteBatches = foregroundWriteBatches
+        self.foregroundNonWritableDeferrals = foregroundNonWritableDeferrals
+        self.peakQueuedForegroundBytes = max(0, peakQueuedForegroundBytes)
+        self.foregroundGroupEventsSubmitted = foregroundGroupEventsSubmitted
+        self.foregroundGroupEventsPublished = foregroundGroupEventsPublished
+        self.foregroundGroupEventBatchesPublished = foregroundGroupEventBatchesPublished
+        self.foregroundGroupEventDuplicatesSuppressed =
+            foregroundGroupEventDuplicatesSuppressed
+        self.foregroundGroupEventOutOfOrderArrivals =
+            foregroundGroupEventOutOfOrderArrivals
+        self.foregroundGroupEventLateArrivals = foregroundGroupEventLateArrivals
+        self.foregroundGroupEventBatchDegradations =
+            foregroundGroupEventBatchDegradations
+        self.foregroundGroupInboundNotificationsDropped =
+            foregroundGroupInboundNotificationsDropped
+        self.foregroundGroupCoveredWakesSuppressed =
+            foregroundGroupCoveredWakesSuppressed
+        self.foregroundGroupWakesDeferred = foregroundGroupWakesDeferred
+        self.foregroundGroupDeferredWakesDelivered =
+            foregroundGroupDeferredWakesDelivered
         self.closures = closures
     }
 
@@ -89,6 +155,47 @@ public protocol V2GatewayTransportMetricsRecorder: V2GatewayTransportMetricsSour
     /// connection gauge slot.
     func connectionRejected(reason: V2GatewayConnectionClosure)
     func observeQueuedInboundBytes(_ bytes: Int)
+    func foregroundFrameSubmitted(
+        bytes: Int,
+        recoveryQueued: Bool,
+        recoveryReplaced: Bool,
+        queuedBytes: Int
+    )
+    func foregroundWriteBatch(frames: Int, bytes: Int)
+    func foregroundWriteDeferredForWritability()
+    func foregroundGroupEventSubmitted(
+        duplicateSuppressed: Bool,
+        outOfOrder: Bool,
+        lateAfterPublication: Bool,
+        degradedToWake: Bool
+    )
+    func foregroundGroupEventBatchPublished(eventCount: Int)
+    func foregroundGroupInboundNotificationDropped()
+    func foregroundGroupCoveredWakeSuppressed()
+    func foregroundGroupWakeDeferred()
+    func foregroundGroupDeferredWakeDelivered()
+}
+
+extension V2GatewayTransportMetricsRecorder {
+    public func foregroundFrameSubmitted(
+        bytes _: Int,
+        recoveryQueued _: Bool,
+        recoveryReplaced _: Bool,
+        queuedBytes _: Int
+    ) {}
+    public func foregroundWriteBatch(frames _: Int, bytes _: Int) {}
+    public func foregroundWriteDeferredForWritability() {}
+    public func foregroundGroupEventSubmitted(
+        duplicateSuppressed _: Bool,
+        outOfOrder _: Bool,
+        lateAfterPublication _: Bool,
+        degradedToWake _: Bool
+    ) {}
+    public func foregroundGroupEventBatchPublished(eventCount _: Int) {}
+    public func foregroundGroupInboundNotificationDropped() {}
+    public func foregroundGroupCoveredWakeSuppressed() {}
+    public func foregroundGroupWakeDeferred() {}
+    public func foregroundGroupDeferredWakeDelivered() {}
 }
 
 /// Process-local transport metrics. Gateway channels update it without using
@@ -105,6 +212,30 @@ public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder,
     }
 
     private let storage = Mutex(Storage())
+    // The foreground fanout path can submit hundreds of thousands of local
+    // recipient frames per second. Relaxed atomics keep metrics from becoming
+    // a global mutex on that path; these counters publish observations only
+    // and protect no application state.
+    private let foregroundFramesSubmitted = Atomic<UInt64>(0)
+    private let foregroundBytesSubmitted = Atomic<UInt64>(0)
+    private let foregroundRecoveryFramesQueued = Atomic<UInt64>(0)
+    private let foregroundRecoveryFramesReplaced = Atomic<UInt64>(0)
+    private let foregroundFramesWritten = Atomic<UInt64>(0)
+    private let foregroundBytesWritten = Atomic<UInt64>(0)
+    private let foregroundWriteBatches = Atomic<UInt64>(0)
+    private let foregroundNonWritableDeferrals = Atomic<UInt64>(0)
+    private let peakQueuedForegroundBytes = Atomic<Int>(0)
+    private let foregroundGroupEventsSubmitted = Atomic<UInt64>(0)
+    private let foregroundGroupEventsPublished = Atomic<UInt64>(0)
+    private let foregroundGroupEventBatchesPublished = Atomic<UInt64>(0)
+    private let foregroundGroupEventDuplicatesSuppressed = Atomic<UInt64>(0)
+    private let foregroundGroupEventOutOfOrderArrivals = Atomic<UInt64>(0)
+    private let foregroundGroupEventLateArrivals = Atomic<UInt64>(0)
+    private let foregroundGroupEventBatchDegradations = Atomic<UInt64>(0)
+    private let foregroundGroupInboundNotificationsDropped = Atomic<UInt64>(0)
+    private let foregroundGroupCoveredWakesSuppressed = Atomic<UInt64>(0)
+    private let foregroundGroupWakesDeferred = Atomic<UInt64>(0)
+    private let foregroundGroupDeferredWakesDelivered = Atomic<UInt64>(0)
 
     public init() {}
 
@@ -131,11 +262,153 @@ public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder,
         }
     }
 
+    public func foregroundFrameSubmitted(
+        bytes: Int,
+        recoveryQueued: Bool,
+        recoveryReplaced: Bool,
+        queuedBytes: Int
+    ) {
+        _ = foregroundFramesSubmitted.wrappingAdd(1, ordering: .relaxed)
+        _ = foregroundBytesSubmitted.wrappingAdd(
+            UInt64(max(0, bytes)), ordering: .relaxed
+        )
+        if recoveryQueued {
+            _ = foregroundRecoveryFramesQueued.wrappingAdd(1, ordering: .relaxed)
+        }
+        if recoveryReplaced {
+            _ = foregroundRecoveryFramesReplaced.wrappingAdd(1, ordering: .relaxed)
+        }
+        var peak = peakQueuedForegroundBytes.load(ordering: .relaxed)
+        let observed = max(0, queuedBytes)
+        while observed > peak {
+            let exchanged = peakQueuedForegroundBytes.compareExchange(
+                expected: peak,
+                desired: observed,
+                ordering: .relaxed
+            )
+            if exchanged.exchanged { break }
+            peak = exchanged.original
+        }
+    }
+
+    public func foregroundWriteBatch(frames: Int, bytes: Int) {
+        _ = foregroundFramesWritten.wrappingAdd(
+            UInt64(max(0, frames)), ordering: .relaxed
+        )
+        _ = foregroundBytesWritten.wrappingAdd(
+            UInt64(max(0, bytes)), ordering: .relaxed
+        )
+        _ = foregroundWriteBatches.wrappingAdd(1, ordering: .relaxed)
+    }
+
+    public func foregroundWriteDeferredForWritability() {
+        _ = foregroundNonWritableDeferrals.wrappingAdd(1, ordering: .relaxed)
+    }
+
+    public func foregroundGroupEventSubmitted(
+        duplicateSuppressed: Bool,
+        outOfOrder: Bool,
+        lateAfterPublication: Bool,
+        degradedToWake: Bool
+    ) {
+        _ = foregroundGroupEventsSubmitted.wrappingAdd(1, ordering: .relaxed)
+        if duplicateSuppressed {
+            _ = foregroundGroupEventDuplicatesSuppressed.wrappingAdd(1, ordering: .relaxed)
+        }
+        if outOfOrder {
+            _ = foregroundGroupEventOutOfOrderArrivals.wrappingAdd(1, ordering: .relaxed)
+        }
+        if lateAfterPublication {
+            _ = foregroundGroupEventLateArrivals.wrappingAdd(1, ordering: .relaxed)
+        }
+        if degradedToWake {
+            _ = foregroundGroupEventBatchDegradations.wrappingAdd(1, ordering: .relaxed)
+        }
+    }
+
+    public func foregroundGroupEventBatchPublished(eventCount: Int) {
+        _ = foregroundGroupEventsPublished.wrappingAdd(
+            UInt64(max(0, eventCount)), ordering: .relaxed
+        )
+        _ = foregroundGroupEventBatchesPublished.wrappingAdd(1, ordering: .relaxed)
+    }
+
+    public func foregroundGroupInboundNotificationDropped() {
+        _ = foregroundGroupInboundNotificationsDropped.wrappingAdd(
+            1,
+            ordering: .relaxed
+        )
+    }
+
+    public func foregroundGroupCoveredWakeSuppressed() {
+        _ = foregroundGroupCoveredWakesSuppressed.wrappingAdd(
+            1,
+            ordering: .relaxed
+        )
+    }
+
+    public func foregroundGroupWakeDeferred() {
+        _ = foregroundGroupWakesDeferred.wrappingAdd(1, ordering: .relaxed)
+    }
+
+    public func foregroundGroupDeferredWakeDelivered() {
+        _ = foregroundGroupDeferredWakesDelivered.wrappingAdd(
+            1,
+            ordering: .relaxed
+        )
+    }
+
     public func gatewayTransportMetricsSnapshot() -> V2GatewayTransportMetricsSnapshot {
         storage.withLock { storage in
             .init(
                 activeConnections: storage.activeConnections,
                 peakQueuedInboundBytes: storage.peakQueuedInboundBytes,
+                foregroundFramesSubmitted:
+                    foregroundFramesSubmitted.load(ordering: .relaxed),
+                foregroundBytesSubmitted:
+                    foregroundBytesSubmitted.load(ordering: .relaxed),
+                foregroundRecoveryFramesQueued:
+                    foregroundRecoveryFramesQueued.load(ordering: .relaxed),
+                foregroundRecoveryFramesReplaced:
+                    foregroundRecoveryFramesReplaced.load(ordering: .relaxed),
+                foregroundFramesWritten:
+                    foregroundFramesWritten.load(ordering: .relaxed),
+                foregroundBytesWritten:
+                    foregroundBytesWritten.load(ordering: .relaxed),
+                foregroundWriteBatches:
+                    foregroundWriteBatches.load(ordering: .relaxed),
+                foregroundNonWritableDeferrals:
+                    foregroundNonWritableDeferrals.load(ordering: .relaxed),
+                peakQueuedForegroundBytes:
+                    peakQueuedForegroundBytes.load(ordering: .relaxed),
+                foregroundGroupEventsSubmitted:
+                    foregroundGroupEventsSubmitted.load(ordering: .relaxed),
+                foregroundGroupEventsPublished:
+                    foregroundGroupEventsPublished.load(ordering: .relaxed),
+                foregroundGroupEventBatchesPublished:
+                    foregroundGroupEventBatchesPublished.load(ordering: .relaxed),
+                foregroundGroupEventDuplicatesSuppressed:
+                    foregroundGroupEventDuplicatesSuppressed.load(ordering: .relaxed),
+                foregroundGroupEventOutOfOrderArrivals:
+                    foregroundGroupEventOutOfOrderArrivals.load(ordering: .relaxed),
+                foregroundGroupEventLateArrivals:
+                    foregroundGroupEventLateArrivals.load(ordering: .relaxed),
+                foregroundGroupEventBatchDegradations:
+                    foregroundGroupEventBatchDegradations.load(ordering: .relaxed),
+                foregroundGroupInboundNotificationsDropped:
+                    foregroundGroupInboundNotificationsDropped.load(
+                        ordering: .relaxed
+                    ),
+                foregroundGroupCoveredWakesSuppressed:
+                    foregroundGroupCoveredWakesSuppressed.load(
+                        ordering: .relaxed
+                    ),
+                foregroundGroupWakesDeferred:
+                    foregroundGroupWakesDeferred.load(ordering: .relaxed),
+                foregroundGroupDeferredWakesDelivered:
+                    foregroundGroupDeferredWakesDelivered.load(
+                        ordering: .relaxed
+                    ),
                 closures: storage.closures
             )
         }
@@ -150,6 +423,66 @@ public func v2RenderPrometheusGatewayTransportMetrics(_ snapshot: V2GatewayTrans
         "# HELP im_v2_gateway_inbound_queue_peak_bytes Process-lifetime peak bytes queued before gateway command processing.",
         "# TYPE im_v2_gateway_inbound_queue_peak_bytes gauge",
         "im_v2_gateway_inbound_queue_peak_bytes \(snapshot.peakQueuedInboundBytes)",
+        "# HELP im_v2_gateway_foreground_frames_submitted_total Best-effort foreground frames submitted to connection FIFOs.",
+        "# TYPE im_v2_gateway_foreground_frames_submitted_total counter",
+        "im_v2_gateway_foreground_frames_submitted_total \(snapshot.foregroundFramesSubmitted)",
+        "# HELP im_v2_gateway_foreground_bytes_submitted_total Bytes submitted to foreground connection FIFOs before coalescing.",
+        "# TYPE im_v2_gateway_foreground_bytes_submitted_total counter",
+        "im_v2_gateway_foreground_bytes_submitted_total \(snapshot.foregroundBytesSubmitted)",
+        "# HELP im_v2_gateway_foreground_recovery_frames_total Foreground queue overflows retaining a latest recovery frame.",
+        "# TYPE im_v2_gateway_foreground_recovery_frames_total counter",
+        "im_v2_gateway_foreground_recovery_frames_total \(snapshot.foregroundRecoveryFramesQueued)",
+        "# HELP im_v2_gateway_foreground_recovery_replacements_total Newer recovery frames replacing an already retained recovery frame.",
+        "# TYPE im_v2_gateway_foreground_recovery_replacements_total counter",
+        "im_v2_gateway_foreground_recovery_replacements_total \(snapshot.foregroundRecoveryFramesReplaced)",
+        "# HELP im_v2_gateway_foreground_frames_written_total Complete foreground protocol frames written after coalescing.",
+        "# TYPE im_v2_gateway_foreground_frames_written_total counter",
+        "im_v2_gateway_foreground_frames_written_total \(snapshot.foregroundFramesWritten)",
+        "# HELP im_v2_gateway_foreground_bytes_written_total Foreground protocol bytes written before TLS encryption.",
+        "# TYPE im_v2_gateway_foreground_bytes_written_total counter",
+        "im_v2_gateway_foreground_bytes_written_total \(snapshot.foregroundBytesWritten)",
+        "# HELP im_v2_gateway_foreground_write_batches_total NIO writes after coalescing foreground protocol frames.",
+        "# TYPE im_v2_gateway_foreground_write_batches_total counter",
+        "im_v2_gateway_foreground_write_batches_total \(snapshot.foregroundWriteBatches)",
+        "# HELP im_v2_gateway_foreground_nonwritable_deferrals_total Foreground drains deferred by Channel writability backpressure.",
+        "# TYPE im_v2_gateway_foreground_nonwritable_deferrals_total counter",
+        "im_v2_gateway_foreground_nonwritable_deferrals_total \(snapshot.foregroundNonWritableDeferrals)",
+        "# HELP im_v2_gateway_foreground_queue_peak_bytes Process-lifetime maximum bytes retained by one foreground connection FIFO.",
+        "# TYPE im_v2_gateway_foreground_queue_peak_bytes gauge",
+        "im_v2_gateway_foreground_queue_peak_bytes \(snapshot.peakQueuedForegroundBytes)",
+        "# HELP im_v2_gateway_foreground_group_events_submitted_total Committed Hybrid group events submitted to the process-local foreground dispatcher.",
+        "# TYPE im_v2_gateway_foreground_group_events_submitted_total counter",
+        "im_v2_gateway_foreground_group_events_submitted_total \(snapshot.foregroundGroupEventsSubmitted)",
+        "# HELP im_v2_gateway_foreground_group_events_published_total Hybrid group events published in foreground batches.",
+        "# TYPE im_v2_gateway_foreground_group_events_published_total counter",
+        "im_v2_gateway_foreground_group_events_published_total \(snapshot.foregroundGroupEventsPublished)",
+        "# HELP im_v2_gateway_foreground_group_event_batches_total Foreground Hybrid group event batches published.",
+        "# TYPE im_v2_gateway_foreground_group_event_batches_total counter",
+        "im_v2_gateway_foreground_group_event_batches_total \(snapshot.foregroundGroupEventBatchesPublished)",
+        "# HELP im_v2_gateway_foreground_group_event_duplicates_total Duplicate group sequence submissions suppressed in the current dispatcher window.",
+        "# TYPE im_v2_gateway_foreground_group_event_duplicates_total counter",
+        "im_v2_gateway_foreground_group_event_duplicates_total \(snapshot.foregroundGroupEventDuplicatesSuppressed)",
+        "# HELP im_v2_gateway_foreground_group_event_out_of_order_total Group event submissions lower than an event already pending for the same room.",
+        "# TYPE im_v2_gateway_foreground_group_event_out_of_order_total counter",
+        "im_v2_gateway_foreground_group_event_out_of_order_total \(snapshot.foregroundGroupEventOutOfOrderArrivals)",
+        "# HELP im_v2_gateway_foreground_group_event_late_total Group event submissions at or below a sequence already published for the same recent room.",
+        "# TYPE im_v2_gateway_foreground_group_event_late_total counter",
+        "im_v2_gateway_foreground_group_event_late_total \(snapshot.foregroundGroupEventLateArrivals)",
+        "# HELP im_v2_gateway_foreground_group_event_degradations_total Full group event batches degraded to metadata-only wakes.",
+        "# TYPE im_v2_gateway_foreground_group_event_degradations_total counter",
+        "im_v2_gateway_foreground_group_event_degradations_total \(snapshot.foregroundGroupEventBatchDegradations)",
+        "# HELP im_v2_gateway_foreground_group_inbound_notifications_dropped_total Decoded NATS group notifications evicted from the bounded socket-fanout mailbox after recovery-cache ingestion.",
+        "# TYPE im_v2_gateway_foreground_group_inbound_notifications_dropped_total counter",
+        "im_v2_gateway_foreground_group_inbound_notifications_dropped_total \(snapshot.foregroundGroupInboundNotificationsDropped)",
+        "# HELP im_v2_gateway_foreground_group_covered_wakes_suppressed_total Durable group wakes suppressed because completed local live fan-out already covered their high watermark.",
+        "# TYPE im_v2_gateway_foreground_group_covered_wakes_suppressed_total counter",
+        "im_v2_gateway_foreground_group_covered_wakes_suppressed_total \(snapshot.foregroundGroupCoveredWakesSuppressed)",
+        "# HELP im_v2_gateway_foreground_group_wakes_deferred_total Durable group wakes briefly deferred so an in-flight live payload can cover them.",
+        "# TYPE im_v2_gateway_foreground_group_wakes_deferred_total counter",
+        "im_v2_gateway_foreground_group_wakes_deferred_total \(snapshot.foregroundGroupWakesDeferred)",
+        "# HELP im_v2_gateway_foreground_group_deferred_wakes_delivered_total Deferred durable group wakes released because no live payload covered their high watermark.",
+        "# TYPE im_v2_gateway_foreground_group_deferred_wakes_delivered_total counter",
+        "im_v2_gateway_foreground_group_deferred_wakes_delivered_total \(snapshot.foregroundGroupDeferredWakesDelivered)",
         "# HELP im_v2_gateway_connection_closures_total Gateway connection closures by closed transport reason.",
         "# TYPE im_v2_gateway_connection_closures_total counter",
     ]

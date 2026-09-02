@@ -2,6 +2,14 @@ import Foundation
 import IMV2Core
 import Synchronization
 
+/// Non-suspending post-commit boundary for optional process-local delivery
+/// acceleration. The observer receives only results whose database work has
+/// finished successfully. It must enqueue bounded work and return; durable
+/// room-log visibility and request success never depend on the observer.
+public protocol V2CommittedMessageBatchObserving: Sendable {
+    func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome])
+}
+
 /// One memory bound shared by room-keyed admission lanes.
 ///
 /// Per-lane FIFO actors still own ordering and batch selection. Sharing only
@@ -223,13 +231,41 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    private struct Pending {
+    /// Reference-backed queue node.
+    ///
+    /// `V2RoomWriteRequest` retains several copy-on-write values and the
+    /// continuation itself is reference counted. Storing the node as a value
+    /// in the intrusive dictionary made every neighbour-link update copy the
+    /// complete request and retain/release all of those fields. The node never
+    /// escapes this actor while it is linked, so mutating the two links in
+    /// place preserves the same ownership and FIFO contract without that hot
+    /// ARC traffic.
+    // Once dequeued, the actor clears both mutable links before handing the
+    // node to a child task. No linked node crosses isolation and no detached
+    // node is mutated, which makes this narrow unchecked conformance safe.
+    private final class Pending: @unchecked Sendable {
         let id: UInt64
         let request: V2RoomWriteRequest
         let continuation: CheckedContinuation<V2SendMessageOutcome, any Error>
         let enqueuedAt: ContinuousClock.Instant
         var previousID: UInt64?
         var nextID: UInt64?
+
+        init(
+            id: UInt64,
+            request: consuming V2RoomWriteRequest,
+            continuation: CheckedContinuation<V2SendMessageOutcome, any Error>,
+            enqueuedAt: ContinuousClock.Instant,
+            previousID: UInt64?,
+            nextID: UInt64?
+        ) {
+            self.id = id
+            self.request = request
+            self.continuation = continuation
+            self.enqueuedAt = enqueuedAt
+            self.previousID = previousID
+            self.nextID = nextID
+        }
     }
 
     private enum ScheduledDelay: Equatable, Sendable {
@@ -287,18 +323,23 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// real atomic batch instead acquires exactly one permit immediately
     /// before its database transaction begins.
     nonisolated public let managesForegroundWriteAdmission: Bool
+    nonisolated public let publishesCommittedGroupEvents: Bool
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
+    private let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
 
     public init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: Configuration,
-        databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil
     ) {
         self.store = store
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.committedMessageObserver = committedMessageObserver
         sharedPendingCapacity = nil
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
+        publishesCommittedGroupEvents = committedMessageObserver != nil
     }
 
     /// Internal construction path for a room-keyed router. Keeping the
@@ -308,13 +349,16 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         store: any V2AtomicRoomWriteBatchStore,
         configuration: Configuration,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
-        sharedPendingCapacity: V2SharedSendMessagePendingCapacity
+        sharedPendingCapacity: V2SharedSendMessagePendingCapacity,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)?
     ) {
         self.store = store
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.committedMessageObserver = committedMessageObserver
         self.sharedPendingCapacity = sharedPendingCapacity
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
+        publishesCommittedGroupEvents = committedMessageObserver != nil
     }
 
     deinit {
@@ -349,7 +393,10 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         )
     }
 
-    public func accept(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
+    public func accept(
+        _ request: consuming V2RoomWriteRequest
+    ) async throws -> V2SendMessageOutcome {
+        let ownedRequest = consume request
         try Task.checkCancellation()
         nextPendingID &+= 1
         precondition(nextPendingID != 0, "pending request identity exhausted")
@@ -368,7 +415,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 }
                 enqueuePending(.init(
                     id: pendingID,
-                    request: request,
+                    request: ownedRequest,
                     continuation: continuation,
                     enqueuedAt: clock.now,
                     previousID: nil,
@@ -406,6 +453,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             selectedDelay = .base
             delay = configuration.maximumDelay
         }
+        installDelayedFlush(selectedDelay, after: delay)
+    }
+
+    private func installDelayedFlush(
+        _ selectedDelay: ScheduledDelay,
+        after delay: Duration
+    ) {
         scheduledDelay = selectedDelay
         flushTask = Task { [weak self] in
             do {
@@ -415,6 +469,23 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             }
             await self?.delayedFlushFired()
         }
+    }
+
+    /// Sustained traffic commonly starts filling the successor while its
+    /// predecessor is still in PostgreSQL. The high-activity timer begins at
+    /// that first arrival, but making the successor wait its entire remainder
+    /// after the room becomes available adds database latency and almost a
+    /// second full aggregation window to every ACK. Preserve a small, bounded
+    /// post-completion opportunity instead: production uses the ordinary
+    /// interactive delay (currently 2 ms), while an actually full batch still
+    /// starts immediately through the existing enqueue path.
+    private func shortenHighActivitySuccessorFlushIfNeeded() {
+        guard pendingCount > 0,
+              scheduledDelay == .highActivity,
+              flushTask != nil
+        else { return }
+        flushTask?.cancel()
+        installDelayedFlush(.highActivity, after: configuration.maximumDelay)
     }
 
     private func delayedFlushFired() {
@@ -472,6 +543,16 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private func startAvailableBatchesIfPossible() {
+        // A request that arrives while the preceding batch is executing has
+        // already installed the normal/adaptive flush timer.  Completing the
+        // preceding batch must not bypass that timer and immediately drain an
+        // underfilled successor: doing so makes the effective aggregation
+        // window equal to database latency instead of the configured bound.
+        // A full batch still cancels its timer in `accept` and starts without
+        // delay, so this guard never withholds work that has reached the hard
+        // batching threshold.
+        guard flushTask == nil || pendingCount >= configuration.maximumBatchSize
+        else { return }
         while inFlightBatchCount < configuration.maximumInFlightBatches {
             guard let batch = dequeueNextBatch() else { return }
             let batchRoomIDs = Set(batch.map(\.request.command.roomID))
@@ -538,11 +619,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private func enqueuePending(_ item: Pending) {
-        var item = item
         item.previousID = pendingTailID
-        if let tailID = pendingTailID, var tail = pendingByID[tailID] {
+        if let tailID = pendingTailID, let tail = pendingByID[tailID] {
             tail.nextID = item.id
-            pendingByID[tailID] = tail
         } else {
             pendingHeadID = item.id
         }
@@ -554,24 +633,21 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     @discardableResult
     private func removePending(_ id: UInt64) -> Pending? {
         guard let item = pendingByID.removeValue(forKey: id) else { return nil }
-        if let previousID = item.previousID, var previous = pendingByID[previousID] {
+        if let previousID = item.previousID, let previous = pendingByID[previousID] {
             previous.nextID = item.nextID
-            pendingByID[previousID] = previous
         } else {
             pendingHeadID = item.nextID
         }
-        if let nextID = item.nextID, var next = pendingByID[nextID] {
+        if let nextID = item.nextID, let next = pendingByID[nextID] {
             next.previousID = item.previousID
-            pendingByID[nextID] = next
         } else {
             pendingTailID = item.previousID
         }
         pendingCount -= 1
         sharedPendingCapacity?.release()
-        var detached = item
-        detached.previousID = nil
-        detached.nextID = nil
-        return detached
+        item.previousID = nil
+        item.nextID = nil
+        return item
     }
 
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
@@ -624,13 +700,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     /// Preserves the atomic-store contract for each compatible subset.
     ///
-    /// PostgreSQL's room-log statements advance one durable cursor per room,
-    /// so one store call must never contain the same room twice.  The staging
-    /// selector may nevertheless include later commands for a hot room to
-    /// avoid starving it behind colder traffic.  Execute those commands as
-    /// ordered, unique-room waves: a later command from one room cannot begin
-    /// before its predecessor has completed, while unrelated rooms still
-    /// retain set-based transaction amortisation inside every wave.
+    /// Most PostgreSQL room-log statements advance one durable cursor per
+    /// room, so their store calls use ordered, unique-room waves. A store may
+    /// explicitly advertise that one partition can reduce repeated rooms in
+    /// arrival order and persist only each room's final state; that partition
+    /// is then executed once across the whole staging batch. This keeps hot
+    /// group traffic from degenerating into one transaction per message while
+    /// preserving the default defensive contract for every other route.
     ///
     /// Compatibility partitions execute serially inside a wave because they
     /// can still contend on shared shard-admission rows. An atomic attempt
@@ -647,6 +723,34 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         var dispositions: [BatchDisposition] = []
         var preclassifiedRequestCount = 0
         var remainingIndices = Array(batch.indices)
+
+        // First collect opt-in partitions across all duplicate-room waves.
+        // Equal-room requests cannot straddle two real routes, but keep the
+        // selection partition-local so an advisory classifier bug still
+        // falls back at the authoritative store boundary instead of merging
+        // incompatible SQL graphs.
+        var repeatedRoomPartitions: [V2AtomicRoomWriteBatchPartition] = []
+        for partition in partitions.compactMap({ $0 }) where
+            !repeatedRoomPartitions.contains(partition)
+        {
+            if await store.atomicBatchSupportsRepeatedRooms(in: partition) {
+                repeatedRoomPartitions.append(partition)
+            }
+        }
+        var consumedIndices: Set<Int> = []
+        for partition in repeatedRoomPartitions {
+            let indices = batch.indices.filter { partitions[$0] == partition }
+            guard indices.count >= 2 else { continue }
+            let execution = await executeAtomic(indices.map { batch[$0] })
+            for (index, result) in zip(indices, execution.results) {
+                results[index] = result
+            }
+            dispositions.append(execution.disposition)
+            consumedIndices.formUnion(indices)
+        }
+        if !consumedIndices.isEmpty {
+            remainingIndices.removeAll { consumedIndices.contains($0) }
+        }
 
         while !remainingIndices.isEmpty {
             var waveRoomIDs: Set<RoomID> = []
@@ -885,6 +989,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         )
         inFlightBatchCount -= 1
         activeRoomIDs.subtract(roomIDs)
+        shortenHighActivitySuccessorFlushIfNeeded()
         switch disposition {
         case .atomicCommitted(let requestCount):
             atomicBatchAttempts &+= 1
@@ -912,6 +1017,21 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             batch.forEach { $0.continuation.resume(throwing: V2RoomWriteStoreError.corruptPersistenceState) }
             startAvailableBatchesIfPossible()
             return
+        }
+        // This actor still owns every room in `roomIDs` here. Submit the
+        // committed batch before request continuations can resume and before
+        // the next batch for one of those rooms can begin. That preserves the
+        // durable room-sequence order across the post-commit acceleration
+        // boundary instead of asking independently resumed handlers to race.
+        if let committedMessageObserver {
+            committedMessageObserver.observeCommittedMessages(
+                results.compactMap { result in
+                    guard case .success(.accepted(let message)) = result else {
+                        return nil
+                    }
+                    return .accepted(message)
+                }
+            )
         }
         for (pending, result) in zip(batch, results) {
             switch result {

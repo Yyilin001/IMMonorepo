@@ -8,6 +8,11 @@ import Observation
 final class V2ConversationDetailStore {
     private static let initialTimelinePageSize = 80
     private static let timelinePageSize = 80
+    /// Metadata-only repair wakes and full foreground payloads can come from
+    /// different Gateway publishers. A short, bounded grace lets the ordered
+    /// payload catch up without turning that harmless inversion into a room-log
+    /// query. A genuinely missing payload still falls back after 100 ms.
+    private static let hybridGroupRecoveryGrace: Duration = .milliseconds(100)
     /// Keeps SwiftUI diffing and duplicate render models bounded while still
     /// allowing arbitrarily old history through a sliding keyset window.
     private static let maximumRetainedTimelineItems = 800
@@ -349,7 +354,14 @@ final class V2ConversationDetailStore {
                     continue
                 }
                 if let wake {
-                    requiresDurablePull = !(try await synchronizer.applyLiveEvent(wake))
+                    if try await synchronizer.applyLiveEvent(wake) {
+                        requiresDurablePull = false
+                    } else {
+                        requiresDurablePull = try await shouldPullAfterHybridGroupRecoveryGrace(
+                            initialWake: wake,
+                            synchronizer: synchronizer
+                        )
+                    }
                 } else {
                     // The low-frequency fallback is deliberately a durable
                     // pull, because it has no event payload to apply.
@@ -364,6 +376,39 @@ final class V2ConversationDetailStore {
                 await waitAfterRealtimeWakeFailure()
             }
         }
+    }
+
+    /// Waits only for a metadata-only wake. A malformed or non-contiguous live
+    /// payload still enters durable recovery immediately; it must never be used
+    /// to advance the cursor. The total wait is deadline-bounded even if newer
+    /// metadata wakes continue arriving.
+    private func shouldPullAfterHybridGroupRecoveryGrace(
+        initialWake: V2ActiveHybridGroupWake,
+        synchronizer: any V2ActiveHybridGroupSynchronizing
+    ) async throws -> Bool {
+        guard initialWake.liveEvents.isEmpty else { return true }
+        var requiredHighWatermark = initialWake.highWatermark
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: Self.hybridGroupRecoveryGrace)
+
+        while !Task.isCancelled, clock.now < deadline {
+            let remaining = clock.now.duration(to: deadline)
+            guard let wake = try await nextHybridWake(
+                synchronizer,
+                timeout: remaining
+            ) else { return true }
+            guard wake.roomID == roomID else { continue }
+            requiredHighWatermark = max(
+                requiredHighWatermark,
+                wake.highWatermark
+            )
+            if try await synchronizer.applyLiveEvent(wake),
+               wake.highWatermark >= requiredHighWatermark {
+                return false
+            }
+        }
+        try Task.checkCancellation()
+        return true
     }
 
     /// Existing injected fakes and deliberately unavailable realtime paths use
@@ -418,6 +463,27 @@ final class V2ConversationDetailStore {
                 return nil
             }
             guard let result = try await group.next() else { throw CancellationError() }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func nextHybridWake(
+        _ synchronizer: any V2ActiveHybridGroupSynchronizing,
+        timeout: Duration
+    ) async throws -> V2ActiveHybridGroupWake? {
+        guard timeout > .zero else { return nil }
+        return try await withThrowingTaskGroup(
+            of: V2ActiveHybridGroupWake?.self
+        ) { group in
+            group.addTask { try await synchronizer.nextWake() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                return nil
+            }
+            guard let result = try await group.next() else {
+                throw CancellationError()
+            }
             group.cancelAll()
             return result
         }

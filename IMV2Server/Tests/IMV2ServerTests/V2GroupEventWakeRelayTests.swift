@@ -94,6 +94,237 @@ struct V2GroupEventWakeRelayTests {
         dispatcher.finish()
         await task.value
     }
+
+    @Test("foreground dispatcher orders and microbatches group events")
+    func foregroundDispatcherMicrobatchesGroupEvents() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let metrics = V2GatewayTransportMetrics()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: publisher,
+            groupBatchDelay: .milliseconds(5),
+            metrics: metrics
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d21")
+        for sequence in [22, 21] as [UInt64] {
+            dispatcher.submitForegroundDirectEvent(try .init(
+                roomID: roomID,
+                highWatermark: sequence,
+                sourceEventID: .init(String(
+                    format: "00000000-0000-0000-0000-%012llx", sequence
+                )),
+                roomSequence: sequence,
+                projectionKind: "message",
+                payload: Data("event-\(sequence)".utf8),
+                recipientUserIDs: [],
+                groupMembershipRevision: 4,
+                acceptedMembershipRevision: 4
+            ))
+        }
+
+        let task = Task { await dispatcher.run() }
+        try await waitForGroupBatches(publisher, count: 1)
+        #expect(publisher.groupBatchSequences == [[21, 22]])
+        #expect(publisher.immediateCount == 0)
+        let snapshot = metrics.gatewayTransportMetricsSnapshot()
+        #expect(snapshot.foregroundGroupEventsSubmitted == 2)
+        #expect(snapshot.foregroundGroupEventsPublished == 2)
+        #expect(snapshot.foregroundGroupEventBatchesPublished == 1)
+        #expect(snapshot.foregroundGroupEventOutOfOrderArrivals == 1)
+        #expect(snapshot.foregroundGroupEventLateArrivals == 0)
+        #expect(snapshot.foregroundGroupEventBatchDegradations == 0)
+        dispatcher.finish()
+        await task.value
+    }
+
+    @Test("hot foreground room receives one bounded batch extension")
+    func foregroundDispatcherExtendsOnlyHotBatch() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: publisher,
+            maximumGroupEventsPerBatch: 16,
+            groupBatchDelay: .milliseconds(10),
+            groupBatchExtensionDelay: .milliseconds(20),
+            groupBatchExtensionMinimumEvents: 2
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d25")
+        for sequence in [1, 2] as [UInt64] {
+            dispatcher.submitForegroundDirectEvent(try groupLiveEvent(
+                roomID: roomID,
+                sequence: sequence
+            ))
+        }
+
+        let task = Task { await dispatcher.run() }
+        // This event arrives after the base window but inside the single
+        // pressure extension, so all three must share one publication.
+        try await Task.sleep(for: .milliseconds(18))
+        dispatcher.submitForegroundDirectEvent(try groupLiveEvent(
+            roomID: roomID,
+            sequence: 3
+        ))
+        // A full-suite run can delay the cooperative dispatcher task well
+        // beyond the nominal timer. Wait for the observable publication
+        // boundary instead of turning scheduler contention into a false
+        // batching failure.
+        for _ in 0..<100 where publisher.groupBatchSequences.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(publisher.groupBatchSequences == [[1, 2, 3]])
+        dispatcher.finish()
+        await task.value
+    }
+
+    @Test("hot room backlog is split into ordered frame-sized batches")
+    func foregroundDispatcherSplitsHotRoomBacklog() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let metrics = V2GatewayTransportMetrics()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: publisher,
+            maximumGroupEventsPerBatch: 2,
+            maximumPendingGroupEventsPerRoom: 8,
+            groupBatchDelay: .zero,
+            groupBatchExtensionDelay: .zero,
+            groupBatchExtensionMinimumEvents: 1,
+            metrics: metrics
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d26")
+        for sequence in 1...5 as ClosedRange<UInt64> {
+            dispatcher.submitForegroundDirectEvent(try groupLiveEvent(
+                roomID: roomID,
+                sequence: sequence
+            ))
+        }
+
+        let task = Task { await dispatcher.run() }
+        try await Task.sleep(for: .milliseconds(10))
+
+        #expect(publisher.groupBatchSequences == [[1, 2], [3, 4], [5]])
+        let snapshot = metrics.gatewayTransportMetricsSnapshot()
+        #expect(snapshot.foregroundGroupEventsPublished == 5)
+        #expect(snapshot.foregroundGroupEventBatchesPublished == 3)
+        #expect(snapshot.foregroundGroupEventBatchDegradations == 0)
+        dispatcher.finish()
+        await task.value
+    }
+
+    @Test("overflowed hot room remains one recovery wake until drain")
+    func foregroundDispatcherRetainsOverflowRecoveryWake() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let metrics = V2GatewayTransportMetrics()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: publisher,
+            maximumGroupEventsPerBatch: 2,
+            maximumPendingGroupEventsPerRoom: 3,
+            groupBatchDelay: .zero,
+            groupBatchExtensionDelay: .zero,
+            groupBatchExtensionMinimumEvents: 1,
+            metrics: metrics
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d27")
+        for sequence in 1...5 as ClosedRange<UInt64> {
+            dispatcher.submitForegroundDirectEvent(try groupLiveEvent(
+                roomID: roomID,
+                sequence: sequence
+            ))
+        }
+
+        let task = Task { await dispatcher.run() }
+        try await Task.sleep(for: .milliseconds(10))
+
+        #expect(publisher.groupBatchSequences.isEmpty)
+        #expect(publisher.asynchronousCount == 1)
+        let snapshot = metrics.gatewayTransportMetricsSnapshot()
+        #expect(snapshot.foregroundGroupEventBatchDegradations == 1)
+        #expect(snapshot.foregroundGroupEventsPublished == 0)
+        dispatcher.finish()
+        await task.value
+    }
+
+    @Test("post-commit observer orders accepted Hybrid events and ignores idempotent outcomes")
+    func committedObserverOrdersOnlyFreshHybridEvents() async throws {
+        let publisher = ImmediateForegroundHintPublisherFake()
+        let dispatcher = V2ForegroundGroupEventHintDispatcher(
+            publisher: publisher,
+            groupBatchDelay: .milliseconds(5)
+        )
+        let observer = V2CommittedHybridGroupEventObserver(
+            directRoomLogEventCache: nil
+        )
+        observer.install(sink: dispatcher)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000d31")
+        let higher = try acceptedHybridMessage(roomID: roomID, sequence: 32)
+        let lower = try acceptedHybridMessage(roomID: roomID, sequence: 31)
+
+        observer.observeCommittedMessages([
+            .accepted(higher),
+            .idempotent(try acceptedHybridMessage(roomID: roomID, sequence: 30)),
+            .rateLimited(retryAfterSeconds: 1),
+            .accepted(lower),
+        ])
+        let task = Task { await dispatcher.run() }
+        try await waitForGroupBatches(publisher, count: 1)
+
+        #expect(publisher.groupBatchSequences == [[31, 32]])
+        dispatcher.finish()
+        await task.value
+    }
+
+}
+
+private func waitForGroupBatches(
+    _ publisher: ImmediateForegroundHintPublisherFake,
+    count: Int
+) async throws {
+    for _ in 0..<100 {
+        if publisher.groupBatchSequences.count >= count { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+private func groupLiveEvent(
+    roomID: RoomID,
+    sequence: UInt64
+) throws -> V2DirectRoomLiveEvent {
+    try .init(
+        roomID: roomID,
+        highWatermark: sequence,
+        sourceEventID: .init(String(
+            format: "00000000-0000-0000-0004-%012llx", sequence
+        )),
+        roomSequence: sequence,
+        projectionKind: "message",
+        payload: Data("event-\(sequence)".utf8),
+        recipientUserIDs: [],
+        groupMembershipRevision: 4,
+        acceptedMembershipRevision: 4
+    )
+}
+
+private func acceptedHybridMessage(
+    roomID: RoomID,
+    sequence: UInt64
+) throws -> V2AcceptedMessage {
+    try .init(
+        messageID: .init(String(format:
+            "00000000-0000-0000-0001-%012llx", sequence
+        )),
+        roomID: roomID,
+        roomSequence: sequence,
+        senderUserID: .init("00000000-0000-0000-0000-000000000d32"),
+        clientMessageID: .init(String(format:
+            "00000000-0000-0000-0002-%012llx", sequence
+        )),
+        text: "event-\(sequence)",
+        mediaPresentations: [],
+        groupDeliveryMode: .largeGroupHybrid,
+        usesRoomEventLog: true,
+        sourceEventID: .init(String(format:
+            "00000000-0000-0000-0003-%012llx", sequence
+        )),
+        acceptedMembershipRevision: 4,
+        createdAt: Date(timeIntervalSince1970: TimeInterval(sequence))
+    )
 }
 
 private actor GroupWakeStoreFake: V2GroupEventWakeStore {
@@ -181,12 +412,13 @@ private final class ImmediateForegroundHintPublisherFake:
     private struct State: Sendable {
         var immediateCount = 0
         var asynchronousCount = 0
+        var groupBatchSequences: [[UInt64]] = []
     }
 
     private let state = Mutex(State())
-
     var immediateCount: Int { state.withLock(\.immediateCount) }
     var asynchronousCount: Int { state.withLock(\.asynchronousCount) }
+    var groupBatchSequences: [[UInt64]] { state.withLock(\.groupBatchSequences) }
 
     func publishForegroundHint(_: V2GroupEventWake) async {
         state.withLock { $0.asynchronousCount += 1 }
@@ -194,6 +426,13 @@ private final class ImmediateForegroundHintPublisherFake:
 
     func publishForegroundDirectEventImmediately(_: V2DirectRoomLiveEvent) -> Bool {
         state.withLock { $0.immediateCount += 1 }
+        return true
+    }
+
+    func publishForegroundGroupEventsImmediately(
+        _ events: [V2DirectRoomLiveEvent]
+    ) -> Bool {
+        state.withLock { $0.groupBatchSequences.append(events.map(\.roomSequence)) }
         return true
     }
 }

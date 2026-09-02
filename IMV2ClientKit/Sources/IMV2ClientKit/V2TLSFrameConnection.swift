@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
 #if canImport(Network) && canImport(Security)
 import Network
@@ -23,6 +24,21 @@ public struct V2AuthenticatedClientSession: Equatable, Sendable {
     public let deviceID: DeviceID
     public let protocolVersion: UInt8
     public let capabilityProfile: String
+    public let frameCompression: V2NegotiatedFrameCompression?
+
+    public init(
+        userID: UserID,
+        deviceID: DeviceID,
+        protocolVersion: UInt8,
+        capabilityProfile: String,
+        frameCompression: V2NegotiatedFrameCompression? = nil
+    ) {
+        self.userID = userID
+        self.deviceID = deviceID
+        self.protocolVersion = protocolVersion
+        self.capabilityProfile = capabilityProfile
+        self.frameCompression = frameCompression
+    }
 }
 
 public enum V2TLSFrameConnectionError: Error, Equatable, Sendable {
@@ -56,12 +72,63 @@ public struct V2SyncAvailabilityHint: Equatable, Sendable {
 public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
     public let roomID: RoomID
     public let highWatermark: UInt64
-    public let liveEvent: V2ClientGroupEvent?
+    public let liveEvents: [V2ClientGroupEvent]
 
-    public init(roomID: RoomID, highWatermark: UInt64, liveEvent: V2ClientGroupEvent? = nil) {
+    /// Compatibility view for callers that only understand the legacy
+    /// single-event accelerator. A real batch deliberately appears absent to
+    /// such a caller so it safely takes the durable room-log recovery path.
+    public var liveEvent: V2ClientGroupEvent? {
+        liveEvents.count == 1 ? liveEvents[0] : nil
+    }
+
+    public init(
+        roomID: RoomID,
+        highWatermark: UInt64,
+        liveEvents: [V2ClientGroupEvent] = []
+    ) {
         self.roomID = roomID
         self.highWatermark = highWatermark
-        self.liveEvent = liveEvent
+        self.liveEvents = liveEvents
+    }
+
+    public init(roomID: RoomID, highWatermark: UInt64, liveEvent: V2ClientGroupEvent?) {
+        self.roomID = roomID
+        self.highWatermark = highWatermark
+        liveEvents = liveEvent.map { [$0] } ?? []
+    }
+
+    /// There is one active group-detail consumer per connection, but it may
+    /// be projecting a previous frame while Network.framework receives the
+    /// next one. Preserve a bounded contiguous batch instead of replacing the
+    /// older acceleration payload and manufacturing a cursor gap locally.
+    func coalescing(with newer: Self) -> Self {
+        guard roomID == newer.roomID else { return newer }
+        guard newer.highWatermark >= highWatermark else { return self }
+        guard newer.highWatermark > highWatermark else {
+            return liveEvents.isEmpty && !newer.liveEvents.isEmpty ? newer : self
+        }
+        guard !liveEvents.isEmpty, !newer.liveEvents.isEmpty else {
+            return .init(roomID: roomID, highWatermark: newer.highWatermark)
+        }
+        var merged = liveEvents
+        var lastSequence = merged.last!.roomSequence
+        for event in newer.liveEvents where event.roomSequence > lastSequence {
+            guard event.roomSequence == lastSequence + 1,
+                  merged.count < V2GroupEventLogLimits.maximumPageSize
+            else {
+                return .init(roomID: roomID, highWatermark: newer.highWatermark)
+            }
+            merged.append(event)
+            lastSequence = event.roomSequence
+        }
+        guard lastSequence == newer.highWatermark else {
+            return .init(roomID: roomID, highWatermark: newer.highWatermark)
+        }
+        return .init(
+            roomID: roomID,
+            highWatermark: newer.highWatermark,
+            liveEvents: merged
+        )
     }
 }
 
@@ -123,6 +190,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private var bufferedFrames: [V2Frame] = []
     private var connection: NWConnection?
     private var authenticatedVersion: UInt8?
+    private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
     private var responseWaiters: [UInt64: CheckedContinuation<V2Frame, Error>] = [:]
     private var availabilityWaiter: CheckedContinuation<V2SyncAvailabilityHint, Error>?
     private var pendingAvailabilityHint: V2SyncAvailabilityHint?
@@ -156,12 +224,21 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             hello.clientHello.supportedProtocolVersions = [UInt32(IMV2ProtocolVersion.current)]
             hello.clientHello.supportedCapabilityProfiles = Array(supportedCapabilityProfiles).sorted()
             hello.clientHello.deviceID = deviceID.rawValue
+            hello.clientHello.supportedFrameCompressions = [.zlib]
             let helloResponse = try await sendBootstrap(hello, version: 0)
             guard case .serverHello(let serverHello)? = helloResponse.body,
                   let version = UInt8(exactly: serverHello.selectedProtocolVersion),
                   version == UInt8(IMV2ProtocolVersion.current),
                   supportedCapabilityProfiles.contains(serverHello.selectedCapabilityProfile)
             else { throw V2TLSFrameConnectionError.unsupportedVersion }
+            switch serverHello.selectedFrameCompression {
+            case .unspecified:
+                negotiatedFrameCompression = nil
+            case .zlib:
+                negotiatedFrameCompression = .zlib
+            case .UNRECOGNIZED:
+                throw V2TLSFrameConnectionError.unsupportedCompression
+            }
 
             var authenticate = IMV2Envelope()
             authenticate.requestID = 2
@@ -173,12 +250,19 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             guard case .authenticated(let response)? = authenticated.body,
                   response.deviceID == deviceID.rawValue,
                   response.selectedCapabilityProfile == serverHello.selectedCapabilityProfile,
+                  response.selectedFrameCompression == serverHello.selectedFrameCompression,
                   let userID = try? UserID(response.userID)
             else { throw V2TLSFrameConnectionError.authenticationFailed }
             authenticatedVersion = version
             guard let connection else { throw V2TLSFrameConnectionError.connectionClosed }
             startReader(connection)
-            return .init(userID: userID, deviceID: deviceID, protocolVersion: version, capabilityProfile: response.selectedCapabilityProfile)
+            return .init(
+                userID: userID,
+                deviceID: deviceID,
+                protocolVersion: version,
+                capabilityProfile: response.selectedCapabilityProfile,
+                frameCompression: negotiatedFrameCompression
+            )
         } catch {
             disconnect()
             throw error
@@ -333,7 +417,6 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         try await send(frame, on: connection)
         while true {
             let response = try await nextFrame(connection: connection)
-            guard !response.flags.contains(.compressed) else { throw V2TLSFrameConnectionError.unsupportedCompression }
             guard response.flags.isEmpty else { throw V2TLSFrameConnectionError.unsupportedFrameFlags }
             if response.requestID == frame.requestID { return response }
             throw V2TLSFrameConnectionError.unexpectedResponse
@@ -415,9 +498,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     private func acceptInbound(_ frame: V2Frame) throws {
-        guard !frame.flags.contains(.compressed) else { throw V2TLSFrameConnectionError.unsupportedCompression }
-        guard frame.flags.isEmpty else { throw V2TLSFrameConnectionError.unsupportedFrameFlags }
         if frame.requestID == 0 {
+            guard frame.flags.isEmpty else {
+                throw V2TLSFrameConnectionError.unsupportedFrameFlags
+            }
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
             switch envelope.body {
             case .syncAvailable(let hint):
@@ -432,12 +516,15 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                 let value = try V2GroupEventAvailabilityHint(
                     roomID: .init(hint.roomID),
                     highWatermark: hint.highWatermark,
-                    liveEvent: Self.liveGroupEvent(from: hint)
+                    liveEvents: Self.liveGroupEvents(from: hint)
                 )
                 if let groupEventAvailabilityWaiter {
                     self.groupEventAvailabilityWaiter = nil
                     groupEventAvailabilityWaiter.resume(returning: value)
-                } else if pendingGroupEventAvailabilityHint == nil || value.highWatermark >= pendingGroupEventAvailabilityHint!.highWatermark {
+                } else if let pendingGroupEventAvailabilityHint {
+                    self.pendingGroupEventAvailabilityHint = pendingGroupEventAvailabilityHint
+                        .coalescing(with: value)
+                } else {
                     pendingGroupEventAvailabilityHint = value
                 }
             case .presenceChanged(let state):
@@ -451,6 +538,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             }
             return
         }
+        guard frame.flags.isEmpty || frame.flags == [.headerBoundRequestID] else {
+            throw V2TLSFrameConnectionError.unsupportedFrameFlags
+        }
         guard let waiter = responseWaiters.removeValue(forKey: frame.requestID) else {
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
@@ -460,19 +550,52 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     /// A malformed optional acceleration payload is never a transport error:
     /// treating it as a normal metadata wake preserves the durable recovery
     /// path and prevents an untrusted payload from advancing a cursor.
-    private static func liveGroupEvent(from hint: IMV2GroupEventAvailable) -> V2ClientGroupEvent? {
-        guard !hint.sourceEventID.isEmpty,
-              hint.roomSequence > 0,
-              hint.roomSequence == hint.highWatermark,
-              !hint.projectionKind.isEmpty,
-              !hint.eventPayload.isEmpty,
-              let sourceEventID = try? EventID(hint.sourceEventID)
-        else { return nil }
-        return .init(
-            sourceEventID: sourceEventID,
+    static func liveGroupEvents(from hint: IMV2GroupEventAvailable) -> [V2ClientGroupEvent] {
+        if !hint.liveEvents.isEmpty {
+            let events = hint.liveEvents.compactMap(Self.liveGroupEvent(from:))
+            guard events.count == hint.liveEvents.count,
+                  events.last?.roomSequence == hint.highWatermark,
+                  zip(events, events.dropFirst()).allSatisfy({
+                      $1.roomSequence == $0.roomSequence + 1
+                  })
+            else { return [] }
+            return events
+        }
+        guard hint.roomSequence == hint.highWatermark else { return [] }
+        return Self.liveGroupEvent(
+            sourceEventID: hint.sourceEventID,
             roomSequence: hint.roomSequence,
             projectionKind: hint.projectionKind,
             payload: hint.eventPayload
+        ).map { [$0] } ?? []
+    }
+
+    private static func liveGroupEvent(from event: IMV2GroupEvent) -> V2ClientGroupEvent? {
+        liveGroupEvent(
+            sourceEventID: event.sourceEventID,
+            roomSequence: event.roomSequence,
+            projectionKind: event.projectionKind,
+            payload: event.payload
+        )
+    }
+
+    private static func liveGroupEvent(
+        sourceEventID: String,
+        roomSequence: UInt64,
+        projectionKind: String,
+        payload: Data
+    ) -> V2ClientGroupEvent? {
+        guard !sourceEventID.isEmpty,
+              roomSequence > 0,
+              !projectionKind.isEmpty,
+              !payload.isEmpty,
+              let sourceEventID = try? EventID(sourceEventID)
+        else { return nil }
+        return .init(
+            sourceEventID: sourceEventID,
+            roomSequence: roomSequence,
+            projectionKind: projectionKind,
+            payload: payload
         )
     }
 
@@ -520,6 +643,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         connection?.cancel()
         connection = nil
         authenticatedVersion = nil
+        negotiatedFrameCompression = nil
         bufferedFrames.removeAll(keepingCapacity: false)
         decoder = .init(limits: limits)
         let waiters = responseWaiters.values
@@ -537,7 +661,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
     private func nextFrame(connection: NWConnection) async throws -> V2Frame {
-        if !bufferedFrames.isEmpty { return bufferedFrames.removeFirst() }
+        if !bufferedFrames.isEmpty { return try normalizeInboundFrame(bufferedFrames.removeFirst()) }
         while true {
             let frames: [V2Frame]
             if decoder.hasBufferedBytes {
@@ -552,9 +676,44 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             }
             if let first = frames.first {
                 bufferedFrames.append(contentsOf: frames.dropFirst())
-                return first
+                return try normalizeInboundFrame(first)
             }
         }
+    }
+
+    /// The transport consumes the negotiated wire representation once and
+    /// returns an ordinary protobuf frame to higher layers. This keeps every
+    /// existing domain decoder and request-correlation boundary unchanged.
+    private func normalizeInboundFrame(_ frame: V2Frame) throws -> V2Frame {
+        guard !frame.flags.isEmpty else { return frame }
+        let knownFlags: V2FrameFlags = [.compressed, .headerBoundRequestID]
+        guard frame.flags.subtracting(knownFlags).isEmpty else {
+            throw V2TLSFrameConnectionError.unsupportedFrameFlags
+        }
+        guard frame.flags.contains(.compressed) else { return frame }
+        guard negotiatedFrameCompression == .zlib else {
+            if frame.flags.contains(.compressed) {
+                throw V2TLSFrameConnectionError.unsupportedCompression
+            }
+            throw V2TLSFrameConnectionError.unsupportedFrameFlags
+        }
+        let payload: Data
+        do {
+            payload = try V2ZlibFrameCompression.decompress(
+                frame.payload,
+                maximumOutputBytes: limits.maximumPayloadBytes,
+                maximumExpansionRatio: V2ZlibFrameCompression.defaultMaximumExpansionRatio
+            )
+        } catch {
+            throw V2TLSFrameConnectionError.unsupportedCompression
+        }
+        return .init(
+            version: frame.version,
+            flags: frame.flags.subtracting(.compressed),
+            command: frame.command,
+            requestID: frame.requestID,
+            payload: payload
+        )
     }
 
     private func receiveChunk(connection: NWConnection) async throws -> Data {

@@ -152,16 +152,26 @@ message MessagesForwarded { repeated ForwardMessageResult results = 1; }
 
 message Acknowledged {}
 
+// Compression is negotiated explicitly before either peer may set the frame
+// compressed flag. Every compressed frame is an independent member so loss,
+// reconnect and cursor recovery never depend on hidden transport state.
+enum FrameCompression {
+  FRAME_COMPRESSION_UNSPECIFIED = 0;
+  FRAME_COMPRESSION_ZLIB = 1;
+}
+
 message ClientHello {
   repeated uint32 supported_protocol_versions = 1;
   repeated string supported_capability_profiles = 2;
   string device_id = 3;
+  repeated FrameCompression supported_frame_compressions = 4;
 }
 
 message ServerHello {
   uint32 selected_protocol_version = 1;
   string selected_capability_profile = 2;
   int64 server_time_ms = 3;
+  FrameCompression selected_frame_compression = 4;
 }
 
 message Authenticate {
@@ -173,6 +183,7 @@ message Authenticated {
   string user_id = 1;
   string device_id = 2;
   string selected_capability_profile = 3;
+  FrameCompression selected_frame_compression = 4;
 }
 
 // Heartbeats carry no delivery or cursor semantics. They only keep a live
@@ -612,6 +623,12 @@ message GroupEventSubscribe {
 message GroupEventSubscribed {
   string room_id = 1;
   uint64 high_watermark = 2;
+  // Authorization epoch captured by the same durable membership check that
+  // admitted this foreground subscription. A live group payload is usable
+  // only when its committed membership revision is exactly equal to this
+  // value; otherwise the server sends a metadata wake and the client pulls
+  // the durable room log.
+  uint64 membership_revision = 3;
 }
 
 message GroupEventUnsubscribe {
@@ -621,14 +638,20 @@ message GroupEventUnsubscribe {
 message GroupEventAvailable {
   string room_id = 1;
   uint64 high_watermark = 2;
-  // Optional acceleration payload for a plain direct room-log event.  Its
-  // absence (and all group-room wakes) retains the original metadata-only
-  // contract.  Clients must accept it only when it is the next contiguous
+  // Optional acceleration payload for a plain room-log event. Its absence
+  // retains the original metadata-only contract. Group payload publication
+  // is additionally fenced by the subscription's membership revision on the
+  // server. Clients must accept it only when it is the next contiguous
   // cursor event; otherwise they use GroupEventPull for durable recovery.
   string source_event_id = 3;
   uint64 room_sequence = 4;
   string projection_kind = 5;
   bytes event_payload = 6;
+  // Ordered, encode-once foreground batch for a Hybrid group. The server
+  // routes the batch only to subscriptions authorized at the exact committed
+  // membership revision shared by every entry. Clients skip duplicates,
+  // apply only a contiguous prefix, then cursor-pull on any gap.
+  repeated GroupEvent live_events = 7;
 }
 
 enum StrangerMessagePermission {

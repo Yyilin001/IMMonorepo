@@ -55,11 +55,17 @@ BEGIN
     INSERT INTO im_v2.group_event_wake_outbox (
         room_id, target_room_sequence, revision, state, next_attempt_at, updated_at
     )
-    SELECT NEW.room_id, NEW.room_sequence, 1, 'pending', NEW.created_at, NEW.created_at
-    FROM im_v2.rooms
-    WHERE room_id = NEW.room_id
-      AND room_kind = 'group'
-      AND delivery_mode = 'large_group_hybrid'
+    SELECT inserted.room_id,
+           max(inserted.room_sequence),
+           1,
+           'pending',
+           min(inserted.created_at),
+           max(inserted.created_at)
+    FROM inserted_room_events AS inserted
+    JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
+    WHERE room.room_kind = 'group'
+      AND room.delivery_mode = 'large_group_hybrid'
+    GROUP BY inserted.room_id
     ON CONFLICT (room_id) DO UPDATE
     SET target_room_sequence = GREATEST(
             im_v2.group_event_wake_outbox.target_room_sequence,
@@ -69,9 +75,68 @@ BEGIN
         state = 'pending',
         lease_token = NULL,
         lease_expires_at = NULL,
-        next_attempt_at = EXCLUDED.next_attempt_at,
-        updated_at = EXCLUDED.updated_at;
-    RETURN NEW;
+        next_attempt_at = LEAST(
+            im_v2.group_event_wake_outbox.next_attempt_at,
+            EXCLUDED.next_attempt_at
+        ),
+        updated_at = GREATEST(
+            im_v2.group_event_wake_outbox.updated_at,
+            EXCLUDED.updated_at
+        )
+    -- A pending row already guarantees that the relay will revisit this room.
+    -- Its authoritative high-watermark is read from `rooms` after the relay
+    -- owns the lease, so rewriting this hot row for every append is redundant.
+    -- A leased row must still be replaced: that revision/token transition is
+    -- the durable fence that prevents an in-flight publisher from deleting a
+    -- wake created by a later commit.
+    WHERE im_v2.group_event_wake_outbox.state = 'leased';
+    RETURN NULL;
+END;
+$$;
+
+-- Plain message-row events are the canonical accepted event for the compact
+-- hybrid-group path.  Keep wake publication in the same transaction and
+-- coalesce it once per affected room, exactly like the legacy room-event
+-- source.  Direct rooms also use message-row events but deliberately do not
+-- enter the group wake pipeline.
+CREATE FUNCTION im_v2.enqueue_hybrid_group_message_wake() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO im_v2.group_event_wake_outbox (
+        room_id, target_room_sequence, revision, state, next_attempt_at, updated_at
+    )
+    SELECT inserted.room_id,
+           max(inserted.room_sequence),
+           1,
+           'pending',
+           min(inserted.created_at),
+           max(inserted.created_at)
+    FROM inserted_messages AS inserted
+    JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
+    WHERE inserted.accepted_event_storage = 'message_row'
+      AND room.room_kind = 'group'
+      AND room.delivery_mode = 'large_group_hybrid'
+    GROUP BY inserted.room_id
+    ON CONFLICT (room_id) DO UPDATE
+    SET target_room_sequence = GREATEST(
+            im_v2.group_event_wake_outbox.target_room_sequence,
+            EXCLUDED.target_room_sequence
+        ),
+        revision = im_v2.group_event_wake_outbox.revision + 1,
+        state = 'pending',
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_attempt_at = LEAST(
+            im_v2.group_event_wake_outbox.next_attempt_at,
+            EXCLUDED.next_attempt_at
+        ),
+        updated_at = GREATEST(
+            im_v2.group_event_wake_outbox.updated_at,
+            EXCLUDED.updated_at
+        )
+    WHERE im_v2.group_event_wake_outbox.state = 'leased';
+    RETURN NULL;
 END;
 $$;
 
@@ -183,6 +248,24 @@ CREATE FUNCTION im_v2.reject_room_event_mutation() RETURNS trigger
     AS $$
 BEGIN
     RAISE EXCEPTION 'room events are append-only';
+END;
+$$;
+
+-- A shard admission lease is also the epoch for the room-local command and
+-- fanout windows.  `ON UPDATE CASCADE` advances the durable room fence when a
+-- lease is replaced; reset only the epoch-scoped counters in that same row
+-- update.  Outstanding work is intentionally preserved because it has its
+-- own completion/release lifecycle and remains bounded across lease epochs.
+CREATE FUNCTION im_v2.reset_room_admission_windows_on_shard_lease_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.shard_lease_id IS DISTINCT FROM OLD.shard_lease_id
+       OR NEW.shard_lease_generation IS DISTINCT FROM OLD.shard_lease_generation THEN
+        NEW.command_window_used := 0;
+        NEW.fanout_window_used := 0;
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
@@ -1502,6 +1585,75 @@ CREATE TABLE im_v2.direct_room_owner_routes (
     CONSTRAINT direct_room_owner_routes_route_epoch_check CHECK ((route_epoch >= 0))
 );
 
+-- A group has no existing room route while it is being created. This
+-- control-plane intent fixes its owner and generated identifiers before any
+-- owner-database transaction starts, allowing retries to finish an
+-- owner-committed/control-not-finalized saga without re-hashing the request.
+CREATE TABLE im_v2.group_room_creation_intents (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    event_id uuid NOT NULL,
+    plan_id uuid NOT NULL,
+    room_shard_id text NOT NULL,
+    route_epoch bigint DEFAULT 0 NOT NULL,
+    request_fingerprint bytea NOT NULL,
+    audience_member_count integer NOT NULL,
+    state text DEFAULT 'prepared'::text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT group_room_creation_intents_pkey PRIMARY KEY (actor_user_id, operation_id),
+    CONSTRAINT group_room_creation_intents_room_id_key UNIQUE (room_id),
+    CONSTRAINT group_room_creation_intents_event_id_key UNIQUE (event_id),
+    CONSTRAINT group_room_creation_intents_plan_id_key UNIQUE (plan_id),
+    CONSTRAINT group_room_creation_intents_room_shard_id_check CHECK ((length(btrim(room_shard_id)) > 0)),
+    CONSTRAINT group_room_creation_intents_route_epoch_check CHECK ((route_epoch >= 0)),
+    CONSTRAINT group_room_creation_intents_request_fingerprint_check CHECK ((octet_length(request_fingerprint) = 32)),
+    CONSTRAINT group_room_creation_intents_audience_member_count_check CHECK (((audience_member_count >= 1) AND (audience_member_count <= 100000))),
+    CONSTRAINT group_room_creation_intents_state_check CHECK ((state = ANY (ARRAY['prepared'::text, 'committed'::text])))
+);
+
+-- The control transaction validates this immutable audience against global
+-- account state before owner work. Persisting the exact set (instead of only
+-- trusting a later client retry) lets a crashed coordinator resume the same
+-- cross-database creation without weakening member eligibility.
+CREATE TABLE im_v2.group_room_creation_intent_members (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT group_room_creation_intent_members_pkey PRIMARY KEY (actor_user_id, operation_id, user_id),
+    CONSTRAINT group_room_creation_intent_members_intent_fkey
+        FOREIGN KEY (actor_user_id, operation_id)
+        REFERENCES im_v2.group_room_creation_intents(actor_user_id, operation_id)
+        ON DELETE CASCADE
+);
+
+-- Owner-side staged audience transfer ledger. Each bounded, sorted page is
+-- immutable and digest-fenced; finalization requires a contiguous page range
+-- whose declared and materialized member counts equal the control intent.
+CREATE TABLE im_v2.group_room_creation_intent_pages (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    page_number integer NOT NULL,
+    member_count integer NOT NULL,
+    page_digest bytea NOT NULL,
+    is_final boolean NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT group_room_creation_intent_pages_pkey PRIMARY KEY (actor_user_id, operation_id, page_number),
+    CONSTRAINT group_room_creation_intent_pages_intent_fkey
+        FOREIGN KEY (actor_user_id, operation_id)
+        REFERENCES im_v2.group_room_creation_intents(actor_user_id, operation_id)
+        ON DELETE CASCADE,
+    CONSTRAINT group_room_creation_intent_pages_page_number_check CHECK ((page_number >= 0)),
+    CONSTRAINT group_room_creation_intent_pages_member_count_check CHECK (((member_count >= 1) AND (member_count <= 512))),
+    CONSTRAINT group_room_creation_intent_pages_page_digest_check CHECK ((octet_length(page_digest) = 32))
+);
+
+CREATE UNIQUE INDEX group_room_creation_intent_pages_final_key
+    ON im_v2.group_room_creation_intent_pages (actor_user_id, operation_id)
+    WHERE is_final;
+
 CREATE TABLE im_v2.schema_contract (
     schema_id text DEFAULT 'im-v2-current-3'::text NOT NULL,
     CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-3'::text))
@@ -2763,9 +2915,13 @@ CREATE TRIGGER fanout_deliveries_fresh_direct_immutable BEFORE UPDATE OF source_
 
 CREATE TRIGGER fanout_plans_identity_immutable BEFORE UPDATE OF source_event_id, target_rule ON im_v2.fanout_plans FOR EACH ROW EXECUTE FUNCTION im_v2.reject_fanout_plan_identity_mutation();
 
-CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
+CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events REFERENCING NEW TABLE AS inserted_room_events FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
+
+CREATE TRIGGER messages_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.messages REFERENCING NEW TABLE AS inserted_messages FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_message_wake();
 
 CREATE TRIGGER room_events_immutable BEFORE DELETE OR UPDATE ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_event_mutation();
+
+CREATE TRIGGER room_admission_windows_follow_shard_lease BEFORE UPDATE OF shard_lease_id, shard_lease_generation ON im_v2.room_admission FOR EACH ROW WHEN ((NEW.shard_lease_id IS DISTINCT FROM OLD.shard_lease_id) OR (NEW.shard_lease_generation IS DISTINCT FROM OLD.shard_lease_generation)) EXECUTE FUNCTION im_v2.reset_room_admission_windows_on_shard_lease_change();
 
 CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON im_v2.rooms FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_delivery_mode_mutation();
 

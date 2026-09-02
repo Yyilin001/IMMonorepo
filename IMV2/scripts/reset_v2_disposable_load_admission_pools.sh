@@ -100,6 +100,18 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'room admission fences did not follow the new shard lease';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM im_v2.rooms AS room
+    JOIN im_v2.room_admission AS admission USING (room_id)
+    WHERE room.capacity_profile_id = (
+      SELECT profile_id FROM disposable_pool_reset_config
+    )
+      AND (admission.command_window_used <> 0
+           OR admission.fanout_window_used <> 0)
+  ) THEN
+    RAISE EXCEPTION 'room admission windows did not reset with the new shard lease';
+  END IF;
 END
 $verify$;
 

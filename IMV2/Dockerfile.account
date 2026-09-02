@@ -16,6 +16,7 @@ RUN apt-get update \
 
 WORKDIR /workspace
 COPY IMV2Core ./IMV2Core
+COPY IMV2Compression ./IMV2Compression
 COPY IMV2Server ./IMV2Server
 
 # The local stack runs the account issuer, V2 TLS gateway, and the separately

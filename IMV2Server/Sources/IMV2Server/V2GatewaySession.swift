@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
 
 /// Authentication is an injected server boundary; the gateway never decodes a
@@ -53,6 +54,35 @@ extension V2GatewayCommandHandler {
     }
 }
 
+struct V2PreparedGroupEventCommandContext: Sendable {
+    let requestID: UInt64
+    let frameVersion: UInt8
+    let compression: V2NegotiatedFrameCompression?
+    let maximumUncompressedPayloadBytes: Int
+    let compressionThresholdBytes: Int
+    let maximumExpansionRatio: Int
+    let cache: V2PreparedGroupEventPageCache
+}
+
+struct V2AuthenticatedGatewayFrameContract: Sendable {
+    let protocolVersion: UInt8
+    let compression: V2NegotiatedFrameCompression?
+}
+
+enum V2PreparedGroupEventGatewayResponse: Sendable {
+    case envelope(IMV2Envelope)
+    case prepared(V2PreparedGroupEventPageResponse)
+}
+
+protocol V2PreparedGroupEventCommandHandling: Sendable {
+    func handlePreparedGroupEventPull(
+        _ request: IMV2GroupEventPull,
+        identity: V2AuthenticatedConnection,
+        originatingConnectionID: UUID?,
+        context: V2PreparedGroupEventCommandContext
+    ) async throws -> V2PreparedGroupEventGatewayResponse
+}
+
 /// One fully validated request/response exchange. The session owns protobuf
 /// decoding so transport-side lifecycle bookkeeping can inspect the same
 /// envelope without parsing untrusted bytes a second time.
@@ -75,9 +105,15 @@ public actor V2GatewaySession {
     private let supportedVersions: Set<UInt8>
     private let capabilityProfile: String
     private let maximumProtobufMessageDepth: Int
+    private let supportedFrameCompression: V2NegotiatedFrameCompression?
+    private let maximumUncompressedPayloadBytes: Int
+    private let compressionThresholdBytes: Int
+    private let maximumCompressionExpansionRatio: Int
+    private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let commandAdmission: any V2AuthenticatedGatewayCommandAdmitting
     private let now: @Sendable () -> Date
     private var authenticatedSessionExpiresAt: Date?
+    private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
 
     public init(
         limits: V2ConnectionLimits,
@@ -85,6 +121,11 @@ public actor V2GatewaySession {
         supportedVersions: Set<UInt8> = [UInt8(IMV2ProtocolVersion.current)],
         capabilityProfile: String,
         maximumProtobufMessageDepth: Int = V2ServerProtobufFrameCodec.defaultMaximumMessageDepth,
+        supportedFrameCompression: V2NegotiatedFrameCompression? = nil,
+        maximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec.defaultMaximumUncompressedPayloadBytes,
+        compressionThresholdBytes: Int = V2ServerProtobufFrameCodec.defaultCompressionThresholdBytes,
+        maximumCompressionExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio,
+        preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         commandAdmission: any V2AuthenticatedGatewayCommandAdmitting,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -93,7 +134,15 @@ public actor V2GatewaySession {
         self.supportedVersions = supportedVersions
         self.capabilityProfile = capabilityProfile
         precondition(maximumProtobufMessageDepth > 0)
+        precondition(maximumUncompressedPayloadBytes > 0)
+        precondition(compressionThresholdBytes >= 0)
+        precondition(maximumCompressionExpansionRatio > 0)
         self.maximumProtobufMessageDepth = maximumProtobufMessageDepth
+        self.supportedFrameCompression = supportedFrameCompression
+        self.maximumUncompressedPayloadBytes = maximumUncompressedPayloadBytes
+        self.compressionThresholdBytes = compressionThresholdBytes
+        self.maximumCompressionExpansionRatio = maximumCompressionExpansionRatio
+        self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.commandAdmission = commandAdmission
         self.now = now
     }
@@ -144,6 +193,12 @@ public actor V2GatewaySession {
             let profiles = Set(hello.supportedCapabilityProfiles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
             guard profiles.contains(capabilityProfile) else { throw V2GatewaySessionError.unsupportedCapabilityProfile }
             let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: supportedVersions)
+            if supportedFrameCompression == .zlib,
+               hello.supportedFrameCompressions.contains(.zlib) {
+                negotiatedFrameCompression = .zlib
+            } else {
+                negotiatedFrameCompression = nil
+            }
             var response = IMV2Envelope()
             response.requestID = envelope.requestID
             response.protocolVersion = UInt32(selected)
@@ -151,6 +206,7 @@ public actor V2GatewaySession {
             response.serverHello.selectedProtocolVersion = UInt32(selected)
             response.serverHello.selectedCapabilityProfile = capabilityProfile
             response.serverHello.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)
+            response.serverHello.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
             return try .init(
                 envelope: response,
                 frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: selected)
@@ -177,6 +233,7 @@ public actor V2GatewaySession {
             response.authenticated.userID = userID.rawValue
             response.authenticated.deviceID = deviceID.rawValue
             response.authenticated.selectedCapabilityProfile = capabilityProfile
+            response.authenticated.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
             return try .init(
                 envelope: response,
                 frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: version)
@@ -195,6 +252,14 @@ public actor V2GatewaySession {
     public func authenticatedProtocolVersion() -> UInt8? {
         guard case .authenticated(let version, _) = state.phase else { return nil }
         return version
+    }
+
+    func authenticatedFrameContract() -> V2AuthenticatedGatewayFrameContract? {
+        guard case .authenticated(let version, _) = state.phase else { return nil }
+        return .init(
+            protocolVersion: version,
+            compression: negotiatedFrameCompression
+        )
     }
 
     public func receiveAuthenticated(_ frame: V2Frame, handler: any V2GatewayCommandHandler) async throws -> V2Frame {
@@ -222,6 +287,7 @@ public actor V2GatewaySession {
         try state.receiveAuthenticatedRequest(frame)
         do {
             var response: IMV2Envelope
+            var preparedFrame: V2Frame?
             if !(await commandAdmission.admit(identity: identity, now: now())) {
                 response = IMV2Envelope()
                 response.error = .init()
@@ -232,6 +298,41 @@ public actor V2GatewaySession {
                 response = IMV2Envelope()
                 response.heartbeatAck = .init()
                 response.heartbeatAck.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)
+            } else if case .groupEventPull(let request) = envelope.body,
+                      version >= 21,
+                      let preparedGroupEventPageCache,
+                      let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {
+                switch try await preparedHandler.handlePreparedGroupEventPull(
+                    request,
+                    identity: identity,
+                    originatingConnectionID: originatingConnectionID,
+                    context: .init(
+                        requestID: envelope.requestID,
+                        frameVersion: version,
+                        compression: negotiatedFrameCompression,
+                        maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+                        compressionThresholdBytes: compressionThresholdBytes,
+                        maximumExpansionRatio: maximumCompressionExpansionRatio,
+                        cache: preparedGroupEventPageCache
+                    )
+                ) {
+                case .envelope(let ordinary):
+                    response = ordinary
+                case .prepared(let prepared):
+                    guard prepared.frame.version == version,
+                          prepared.frame.requestID == envelope.requestID,
+                          prepared.frame.command == .groupEventPage
+                    else { throw V2GatewaySessionError.unsupportedCommand }
+                    preparedFrame = prepared.frame
+                    // Lifecycle bookkeeping never inspects a pull response.
+                    // Retain only its public cursor summary here; the actual
+                    // client frame contains the complete shared event page.
+                    response = IMV2Envelope()
+                    response.groupEventPage = .init()
+                    response.groupEventPage.roomID = prepared.roomID.rawValue
+                    response.groupEventPage.nextRoomSequence = prepared.nextRoomSequence
+                    response.groupEventPage.hasMore_p = prepared.hasMore
+                }
             } else {
                 response = try await handler.handle(
                     envelope: envelope,
@@ -241,7 +342,26 @@ public actor V2GatewaySession {
             }
             response.requestID = envelope.requestID
             response.protocolVersion = UInt32(version)
-            let encoded = try V2ServerProtobufFrameCodec.encode(response, frameVersion: version)
+            let responseCompression: V2NegotiatedFrameCompression? = if case .groupEventPage? = response.body {
+                negotiatedFrameCompression
+            } else {
+                nil
+            }
+            let encoded = try preparedFrame ?? preparedGroupEventPageCache?.frame(
+                for: response,
+                frameVersion: version,
+                compression: responseCompression,
+                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+                compressionThresholdBytes: compressionThresholdBytes,
+                maximumExpansionRatio: maximumCompressionExpansionRatio
+            ) ?? V2ServerProtobufFrameCodec.encode(
+                response,
+                frameVersion: version,
+                compression: responseCompression,
+                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+                compressionThresholdBytes: compressionThresholdBytes,
+                maximumExpansionRatio: maximumCompressionExpansionRatio
+            )
             try state.completeResponse(requestID: envelope.requestID)
             return .init(envelope: response, frame: encoded)
         } catch {
@@ -255,7 +375,10 @@ public actor V2GatewaySession {
     private func decode(_ frame: V2Frame) throws -> IMV2Envelope {
         try V2ServerProtobufFrameCodec.decode(
             frame,
-            maximumMessageDepth: maximumProtobufMessageDepth
+            maximumMessageDepth: maximumProtobufMessageDepth,
+            compression: negotiatedFrameCompression,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            maximumExpansionRatio: maximumCompressionExpansionRatio
         )
     }
 

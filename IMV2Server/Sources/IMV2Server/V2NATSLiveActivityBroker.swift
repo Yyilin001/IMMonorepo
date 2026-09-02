@@ -23,7 +23,17 @@ public protocol V2LiveActivityPublishing: Sendable {
 /// live-activity subjects use a distinct suffix and HMAC-derived identifiers,
 /// so raw user and room UUIDs never become broker subject names.
 public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveActivityPublishing {
-    private struct Connect: Encodable { let verbose = false; let pedantic = false; let token: String? }
+    private struct Connect: Encodable {
+        let verbose = false
+        let pedantic = false
+        let token: String?
+
+        enum CodingKeys: String, CodingKey {
+            case verbose
+            case pedantic
+            case token = "auth_token"
+        }
+    }
     private struct WireEvent: Codable, Sendable {
         enum Kind: String, Codable, Sendable { case presence, typing }
         let sourceID: UUID

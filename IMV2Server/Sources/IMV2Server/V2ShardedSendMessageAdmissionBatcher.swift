@@ -13,18 +13,21 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     private let lanes: [V2SendMessageAdmissionBatcher]
 
     nonisolated public let managesForegroundWriteAdmission: Bool
+    nonisolated public let publishesCommittedGroupEvents: Bool
 
     public init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: V2SendMessageAdmissionBatcher.Configuration,
         laneCount: Int,
-        databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil
     ) {
         precondition(laneCount > 1)
         precondition(laneCount <= configuration.maximumInFlightBatches)
         precondition(laneCount <= configuration.maximumPendingRequests)
 
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
+        publishesCommittedGroupEvents = committedMessageObserver != nil
         let sharedPendingCapacity = V2SharedSendMessagePendingCapacity(
             maximum: configuration.maximumPendingRequests
         )
@@ -57,18 +60,20 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                     maximumPendingRequests: configuration.maximumPendingRequests
                 ),
                 databaseWorkAdmission: databaseWorkAdmission,
-                sharedPendingCapacity: sharedPendingCapacity
+                sharedPendingCapacity: sharedPendingCapacity,
+                committedMessageObserver: committedMessageObserver
             )
         }
     }
 
     public func accept(
-        _ request: V2RoomWriteRequest
+        _ request: consuming V2RoomWriteRequest
     ) async throws -> V2SendMessageOutcome {
-        try await lanes[Self.laneIndex(
-            for: request.command.roomID,
+        let ownedRequest = consume request
+        return try await lanes[Self.laneIndex(
+            for: ownedRequest.command.roomID,
             laneCount: lanes.count
-        )].accept(request)
+        )].accept(ownedRequest)
     }
 
     public func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot {

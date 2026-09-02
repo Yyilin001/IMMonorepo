@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLIENT_DIR="$ROOT_DIR/IMV2ClientKit/Sources/IMV2ClientKit/Generated"
 SERVER_DIR="$ROOT_DIR/IMV2Server/Sources/IMV2Server/Generated"
 
-[[ -d "$CLIENT_DIR/Protobuf" && -d "$SERVER_DIR/Protobuf" ]] || {
+[[ -d "$CLIENT_DIR/Protobuf" && -d "$SERVER_DIR/Protobuf" \
+   && -f "$SERVER_DIR/Protobuf/im_realtime/internal/v1/group_event_notification.pb.swift" ]] || {
   echo "V2 generated protobuf is missing. Run scripts/generate_v2_protobuf.sh." >&2
   exit 1
 }

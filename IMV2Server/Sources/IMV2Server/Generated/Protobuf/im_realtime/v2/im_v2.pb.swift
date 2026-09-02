@@ -25,6 +25,43 @@ fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobu
   typealias Version = _2
 }
 
+/// Compression is negotiated explicitly before either peer may set the frame
+/// compressed flag. Every compressed frame is an independent member so loss,
+/// reconnect and cursor recovery never depend on hidden transport state.
+public nonisolated enum IMV2FrameCompression: SwiftProtobuf.Enum, Swift.CaseIterable {
+  public typealias RawValue = Int
+  case unspecified // = 0
+  case zlib // = 1
+  case UNRECOGNIZED(Int)
+
+  public init() {
+    self = .unspecified
+  }
+
+  public init?(rawValue: Int) {
+    switch rawValue {
+    case 0: self = .unspecified
+    case 1: self = .zlib
+    default: self = .UNRECOGNIZED(rawValue)
+    }
+  }
+
+  public var rawValue: Int {
+    switch self {
+    case .unspecified: return 0
+    case .zlib: return 1
+    case .UNRECOGNIZED(let i): return i
+    }
+  }
+
+  // The compiler won't synthesize support with the UNRECOGNIZED case.
+  public static let allCases: [IMV2FrameCompression] = [
+    .unspecified,
+    .zlib,
+  ]
+
+}
+
 public nonisolated enum IMV2MessageEntityKind: SwiftProtobuf.Enum, Swift.CaseIterable {
   public typealias RawValue = Int
   case unspecified // = 0
@@ -1677,6 +1714,8 @@ public nonisolated struct IMV2ClientHello: Sendable {
 
   public var deviceID: String = String()
 
+  public var supportedFrameCompressions: [IMV2FrameCompression] = []
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1692,6 +1731,8 @@ public nonisolated struct IMV2ServerHello: Sendable {
   public var selectedCapabilityProfile: String = String()
 
   public var serverTimeMs: Int64 = 0
+
+  public var selectedFrameCompression: IMV2FrameCompression = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1722,6 +1763,8 @@ public nonisolated struct IMV2Authenticated: Sendable {
   public var deviceID: String = String()
 
   public var selectedCapabilityProfile: String = String()
+
+  public var selectedFrameCompression: IMV2FrameCompression = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2717,6 +2760,13 @@ public nonisolated struct IMV2GroupEventSubscribed: Sendable {
 
   public var highWatermark: UInt64 = 0
 
+  /// Authorization epoch captured by the same durable membership check that
+  /// admitted this foreground subscription. A live group payload is usable
+  /// only when its committed membership revision is exactly equal to this
+  /// value; otherwise the server sends a metadata wake and the client pulls
+  /// the durable room log.
+  public var membershipRevision: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -2743,9 +2793,10 @@ public nonisolated struct IMV2GroupEventAvailable: Sendable {
 
   public var highWatermark: UInt64 = 0
 
-  /// Optional acceleration payload for a plain direct room-log event.  Its
-  /// absence (and all group-room wakes) retains the original metadata-only
-  /// contract.  Clients must accept it only when it is the next contiguous
+  /// Optional acceleration payload for a plain room-log event. Its absence
+  /// retains the original metadata-only contract. Group payload publication
+  /// is additionally fenced by the subscription's membership revision on the
+  /// server. Clients must accept it only when it is the next contiguous
   /// cursor event; otherwise they use GroupEventPull for durable recovery.
   public var sourceEventID: String = String()
 
@@ -2754,6 +2805,12 @@ public nonisolated struct IMV2GroupEventAvailable: Sendable {
   public var projectionKind: String = String()
 
   public var eventPayload: Data = Data()
+
+  /// Ordered, encode-once foreground batch for a Hybrid group. The server
+  /// routes the batch only to subscriptions authorized at the exact committed
+  /// membership revision shared by every entry. Clients skip duplicates,
+  /// apply only a contiguous prefix, then cursor-pull on any gap.
+  public var liveEvents: [IMV2GroupEvent] = []
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3240,6 +3297,10 @@ public nonisolated struct IMV2Error: Sendable {
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate nonisolated let _protobuf_package = "im.realtime.v2"
+
+nonisolated extension IMV2FrameCompression: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0FRAME_COMPRESSION_UNSPECIFIED\0\u{1}FRAME_COMPRESSION_ZLIB\0")
+}
 
 nonisolated extension IMV2MessageEntityKind: SwiftProtobuf._ProtoNameProviding {
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0MESSAGE_ENTITY_KIND_UNSPECIFIED\0\u{1}MESSAGE_ENTITY_KIND_BOLD\0\u{1}MESSAGE_ENTITY_KIND_ITALIC\0\u{1}MESSAGE_ENTITY_KIND_UNDERLINE\0\u{1}MESSAGE_ENTITY_KIND_STRIKETHROUGH\0\u{1}MESSAGE_ENTITY_KIND_SPOILER\0\u{1}MESSAGE_ENTITY_KIND_CODE\0\u{1}MESSAGE_ENTITY_KIND_PREFORMATTED\0\u{1}MESSAGE_ENTITY_KIND_LINK\0")
@@ -5643,7 +5704,7 @@ nonisolated extension IMV2Acknowledged: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientHello"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}supported_protocol_versions\0\u{3}supported_capability_profiles\0\u{3}device_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}supported_protocol_versions\0\u{3}supported_capability_profiles\0\u{3}device_id\0\u{3}supported_frame_compressions\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5654,6 +5715,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 1: try { try decoder.decodeRepeatedUInt32Field(value: &self.supportedProtocolVersions) }()
       case 2: try { try decoder.decodeRepeatedStringField(value: &self.supportedCapabilityProfiles) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.deviceID) }()
+      case 4: try { try decoder.decodeRepeatedEnumField(value: &self.supportedFrameCompressions) }()
       default: break
       }
     }
@@ -5669,6 +5731,9 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.deviceID.isEmpty {
       try visitor.visitSingularStringField(value: self.deviceID, fieldNumber: 3)
     }
+    if !self.supportedFrameCompressions.isEmpty {
+      try visitor.visitPackedEnumField(value: self.supportedFrameCompressions, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5676,6 +5741,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.supportedProtocolVersions != rhs.supportedProtocolVersions {return false}
     if lhs.supportedCapabilityProfiles != rhs.supportedCapabilityProfiles {return false}
     if lhs.deviceID != rhs.deviceID {return false}
+    if lhs.supportedFrameCompressions != rhs.supportedFrameCompressions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5683,7 +5749,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerHello"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}selected_protocol_version\0\u{3}selected_capability_profile\0\u{3}server_time_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}selected_protocol_version\0\u{3}selected_capability_profile\0\u{3}server_time_ms\0\u{3}selected_frame_compression\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5694,6 +5760,7 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 1: try { try decoder.decodeSingularUInt32Field(value: &self.selectedProtocolVersion) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.selectedCapabilityProfile) }()
       case 3: try { try decoder.decodeSingularInt64Field(value: &self.serverTimeMs) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self.selectedFrameCompression) }()
       default: break
       }
     }
@@ -5709,6 +5776,9 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.serverTimeMs != 0 {
       try visitor.visitSingularInt64Field(value: self.serverTimeMs, fieldNumber: 3)
     }
+    if self.selectedFrameCompression != .unspecified {
+      try visitor.visitSingularEnumField(value: self.selectedFrameCompression, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5716,6 +5786,7 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.selectedProtocolVersion != rhs.selectedProtocolVersion {return false}
     if lhs.selectedCapabilityProfile != rhs.selectedCapabilityProfile {return false}
     if lhs.serverTimeMs != rhs.serverTimeMs {return false}
+    if lhs.selectedFrameCompression != rhs.selectedFrameCompression {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5758,7 +5829,7 @@ nonisolated extension IMV2Authenticate: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Authenticated"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}device_id\0\u{3}selected_capability_profile\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}device_id\0\u{3}selected_capability_profile\0\u{3}selected_frame_compression\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5769,6 +5840,7 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
       case 1: try { try decoder.decodeSingularStringField(value: &self.userID) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.deviceID) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.selectedCapabilityProfile) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self.selectedFrameCompression) }()
       default: break
       }
     }
@@ -5784,6 +5856,9 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.selectedCapabilityProfile.isEmpty {
       try visitor.visitSingularStringField(value: self.selectedCapabilityProfile, fieldNumber: 3)
     }
+    if self.selectedFrameCompression != .unspecified {
+      try visitor.visitSingularEnumField(value: self.selectedFrameCompression, fieldNumber: 4)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5791,6 +5866,7 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.userID != rhs.userID {return false}
     if lhs.deviceID != rhs.deviceID {return false}
     if lhs.selectedCapabilityProfile != rhs.selectedCapabilityProfile {return false}
+    if lhs.selectedFrameCompression != rhs.selectedFrameCompression {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8026,7 +8102,7 @@ nonisolated extension IMV2GroupEventSubscribe: SwiftProtobuf.Message, SwiftProto
 
 nonisolated extension IMV2GroupEventSubscribed: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GroupEventSubscribed"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}membership_revision\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8036,6 +8112,7 @@ nonisolated extension IMV2GroupEventSubscribed: SwiftProtobuf.Message, SwiftProt
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.highWatermark) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.membershipRevision) }()
       default: break
       }
     }
@@ -8048,12 +8125,16 @@ nonisolated extension IMV2GroupEventSubscribed: SwiftProtobuf.Message, SwiftProt
     if self.highWatermark != 0 {
       try visitor.visitSingularUInt64Field(value: self.highWatermark, fieldNumber: 2)
     }
+    if self.membershipRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.membershipRevision, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2GroupEventSubscribed, rhs: IMV2GroupEventSubscribed) -> Bool {
     if lhs.roomID != rhs.roomID {return false}
     if lhs.highWatermark != rhs.highWatermark {return false}
+    if lhs.membershipRevision != rhs.membershipRevision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8091,7 +8172,7 @@ nonisolated extension IMV2GroupEventUnsubscribe: SwiftProtobuf.Message, SwiftPro
 
 nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GroupEventAvailable"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}source_event_id\0\u{3}room_sequence\0\u{3}projection_kind\0\u{3}event_payload\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}source_event_id\0\u{3}room_sequence\0\u{3}projection_kind\0\u{3}event_payload\0\u{3}live_events\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8105,6 +8186,7 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
       case 4: try { try decoder.decodeSingularUInt64Field(value: &self.roomSequence) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.projectionKind) }()
       case 6: try { try decoder.decodeSingularBytesField(value: &self.eventPayload) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.liveEvents) }()
       default: break
       }
     }
@@ -8129,6 +8211,9 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
     if !self.eventPayload.isEmpty {
       try visitor.visitSingularBytesField(value: self.eventPayload, fieldNumber: 6)
     }
+    if !self.liveEvents.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.liveEvents, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -8139,6 +8224,7 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
     if lhs.roomSequence != rhs.roomSequence {return false}
     if lhs.projectionKind != rhs.projectionKind {return false}
     if lhs.eventPayload != rhs.eventPayload {return false}
+    if lhs.liveEvents != rhs.liveEvents {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

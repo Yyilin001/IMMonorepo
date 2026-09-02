@@ -149,6 +149,15 @@ struct V2VaporMetricsRoutesTests {
                 atomicPreclassifiedIndividualRequests: 37,
                 singletonDispatches: 6
             ),
+            readReceiptBatching: .init(
+                pendingRequests: 5,
+                inFlightBatches: 2,
+                completedBatches: 43,
+                completedRequests: 517,
+                maximumObservedBatchSize: 24,
+                queueFullRejections: 3,
+                cancelledPendingRequests: 1
+            ),
             directRoomLogAppendStages: .init(histograms: [
                 .transaction: .init(
                     samples: 3,
@@ -177,6 +186,10 @@ struct V2VaporMetricsRoutesTests {
                 cachedEvents: 31, cachedRooms: 7, cachedBytes: 4096,
                 hits: 101, misses: 9, bypassedIneligibleEvents: 3,
                 pendingWrites: 5, droppedWrites: 2
+            ),
+            preparedGroupEventPageCache: .init(
+                entries: 23, bytes: 8192, hits: 401,
+                misses: 17, evictions: 4
             ),
             livePresenceRenewals: .init(
                 pendingConnections: 4, submittedRequests: 1_001,
@@ -212,6 +225,13 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"preflight_mismatch\"} 1"))
             #expect(body.contains("im_v2_direct_room_log_append_same_room_deferred_requests_total 23"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
+            #expect(body.contains("im_v2_read_receipt_batch_pending_requests 5"))
+            #expect(body.contains("im_v2_read_receipt_batch_in_flight 2"))
+            #expect(body.contains("im_v2_read_receipt_batches_completed_total 43"))
+            #expect(body.contains("im_v2_read_receipt_requests_completed_total 517"))
+            #expect(body.contains("im_v2_read_receipt_batch_maximum_observed_size 24"))
+            #expect(body.contains("im_v2_read_receipt_batch_rejections_total{reason=\"queue_full\"} 3"))
+            #expect(body.contains("im_v2_read_receipt_batch_cancellations_total 1"))
             #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_bucket{stage=\"transaction\",le=\"32\"} 2"))
             #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_count{stage=\"transaction\"} 3"))
             #expect(body.contains("im_v2_direct_room_log_append_stage_milliseconds_max{stage=\"transaction\"} 51"))
@@ -230,6 +250,11 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_direct_room_log_event_cache_lookups_total{outcome=\"miss\"} 9"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_pending_writes 5"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_dropped_writes_total 2"))
+            #expect(body.contains("im_v2_prepared_group_event_page_cache_entries 23"))
+            #expect(body.contains("im_v2_prepared_group_event_page_cache_bytes 8192"))
+            #expect(body.contains("im_v2_prepared_group_event_page_cache_lookups_total{outcome=\"hit\"} 401"))
+            #expect(body.contains("im_v2_prepared_group_event_page_cache_lookups_total{outcome=\"miss\"} 17"))
+            #expect(body.contains("im_v2_prepared_group_event_page_cache_evictions_total 4"))
             #expect(body.contains("im_v2_live_presence_renewal_pending_connections 4"))
             #expect(body.contains("im_v2_live_presence_renewal_requests_total 1001"))
             #expect(body.contains("im_v2_live_presence_renewal_batches_total{outcome=\"executed\"} 42"))

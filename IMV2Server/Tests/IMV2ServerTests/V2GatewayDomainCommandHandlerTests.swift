@@ -475,6 +475,43 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(hints.directExclusions() == [connectionID])
     }
 
+    @Test("an accepted plain Hybrid group handler emits a fenced live event")
+    func acceptedHybridGroupHandlerEmitsFencedLiveEvent() async throws {
+        let fixture = try GatewayDomainFixture()
+        let accepted = V2AcceptedMessage(
+            messageID: try .init("00000000-0000-0000-0000-000000000053"),
+            roomID: fixture.roomID,
+            roomSequence: 12,
+            senderUserID: fixture.userID,
+            clientMessageID: fixture.clientMessageID,
+            text: "group-live",
+            mediaPresentations: [],
+            groupDeliveryMode: .largeGroupHybrid,
+            usesRoomEventLog: true,
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000054"),
+            acceptedMembershipRevision: 7,
+            createdAt: fixture.now
+        )
+        let hints = GatewayForegroundHintRecorder()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(
+                store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))
+            ),
+            foregroundGroupEventHints: hints,
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.sendMessage = .init()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content = .init(); request.sendMessage.content.text = "group-live"
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.messageAccepted.roomSequence == 12)
+        #expect(hints.groupMembershipRevisions() == [7])
+        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 12)])
+    }
+
     @Test("invalid sync state is returned as a stable protocol error")
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()
@@ -935,6 +972,7 @@ private final class GatewayForegroundHintRecorder:
 {
     private let hints = Mutex<[V2GroupEventWake]>([])
     private let exclusions = Mutex<[UUID?]>([])
+    private let membershipRevisions = Mutex<[UInt64?]>([])
 
     func submitForegroundHint(_ hint: V2GroupEventWake) {
         hints.withLock { $0.append(hint) }
@@ -950,6 +988,7 @@ private final class GatewayForegroundHintRecorder:
 
     func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
         exclusions.withLock { $0.append(event.excludedConnectionID) }
+        membershipRevisions.withLock { $0.append(event.groupMembershipRevision) }
         submitForegroundHint(.init(
             roomID: event.roomID,
             highWatermark: event.highWatermark
@@ -968,6 +1007,9 @@ private final class GatewayForegroundHintRecorder:
     }
 
     func values() -> [V2GroupEventWake] { hints.withLock { $0 } }
+    func groupMembershipRevisions() -> [UInt64] {
+        membershipRevisions.withLock { $0.compactMap { $0 } }
+    }
     func directExclusions() -> [UUID?] { exclusions.withLock { $0 } }
 }
 

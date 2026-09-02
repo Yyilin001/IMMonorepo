@@ -109,6 +109,11 @@ public struct V2FrameFlags: OptionSet, Equatable, Sendable {
     /// Valid only after version/compression negotiation. The codec never
     /// decompresses data and callers must enforce a separate decoded limit.
     public static let compressed = Self(rawValue: 1 << 0)
+
+    /// Protocol v21 group-event pages may bind correlation exclusively to
+    /// the authenticated frame header. Their protobuf request_id is zero so
+    /// one immutable payload can be shared across authorized connections.
+    public static let headerBoundRequestID = Self(rawValue: 1 << 1)
 }
 
 public struct V2Frame: Equatable, Sendable {

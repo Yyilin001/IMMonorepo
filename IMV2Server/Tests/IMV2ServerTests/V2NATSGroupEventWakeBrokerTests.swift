@@ -3,6 +3,7 @@ import IMV2Core
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
 import Synchronization
+import SwiftProtobuf
 @testable import IMV2Server
 import Testing
 
@@ -65,7 +66,11 @@ struct V2NATSGroupEventWakeBrokerTests {
             .bind(host: "127.0.0.1", port: 0)
             .get()
         do {
-            let broker = try makeBroker(port: try #require(server.localAddress?.port), timeout: 1)
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1,
+                token: "test-auth-token"
+            )
             await #expect(throws: V2NATSGroupEventWakeBrokerError.unavailable) {
                 try await broker.activate(roomID: try RoomID("00000000-0000-0000-0000-000000000902"))
             }
@@ -90,7 +95,11 @@ struct V2NATSGroupEventWakeBrokerTests {
             .bind(host: "127.0.0.1", port: 0)
             .get()
         do {
-            let broker = try makeBroker(port: try #require(server.localAddress?.port), timeout: 1)
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1,
+                token: "test-auth-token"
+            )
             let first = try RoomID("00000000-0000-0000-0000-000000000903")
             let second = try RoomID("00000000-0000-0000-0000-000000000904")
             async let firstActivation: Void = broker.activate(roomID: first)
@@ -102,9 +111,572 @@ struct V2NATSGroupEventWakeBrokerTests {
             #expect(observation.connectionCount == 1)
             #expect(observation.subscriptionCount == 2)
             #expect(observation.publishCount == 1)
+            #expect(observation.authenticationTokens == ["test-auth-token"])
+            #expect(observation.legacyTokenFieldCount == 0)
             // Both interests may be coalesced into the initial confirmed
             // replay, or the second may become one incremental SUB.
             #expect((2...3).contains(observation.pingCount))
+            await broker.shutdown()
+            try await server.close().get()
+            try await group.shutdownGracefully()
+        } catch {
+            try? await server.close().get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
+    @Test("ordered group microbatch crosses NATS in one publication")
+    func publishesOneOrderedGroupMicrobatch() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let recorder = V2NATSGroupWakeTestRecorder()
+        let server = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(
+                    V2NATSConfirmingGroupWakeTestHandler(recorder: recorder)
+                )
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        do {
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1
+            )
+            let roomID = try RoomID("00000000-0000-0000-0000-000000000906")
+            let first = try natsGroupEvent(roomID: roomID, sequence: 1, revision: 7)
+            let second = try natsGroupEvent(roomID: roomID, sequence: 2, revision: 7)
+
+            await broker.publishForegroundGroupEvents([second, first])
+            try await recorder.waitForPublishes(1)
+
+            let observation = recorder.observation()
+            #expect(observation.connectionCount == 1)
+            #expect(observation.publishCount == 1)
+            // The only PING confirms connection setup. Foreground live
+            // publications are advisory and must not add a broker round trip.
+            #expect(observation.pingCount == 1)
+            let payload = try #require(observation.publishedPayloads.first)
+            #expect(
+                V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
+                    == .groupEvents([first, second])
+            )
+
+            // A mixed membership epoch must never become a live audience.
+            // It degrades to a durable room-log cursor wake instead.
+            var object = try #require(
+                JSONSerialization.jsonObject(with: payload) as? [String: Any]
+            )
+            var directEvents = try #require(
+                object["direct_events"] as? [[String: Any]]
+            )
+            directEvents[1]["group_membership_revision"] = 8
+            object["direct_events"] = directEvents
+            let invalidPayload = try JSONSerialization.data(withJSONObject: object)
+            #expect(
+                V2NATSGroupEventWakeBroker.decodeNotificationPayload(invalidPayload)
+                    == .wake(.init(roomID: roomID, highWatermark: 2))
+            )
+
+            await broker.shutdown()
+            try await server.close().get()
+            try await group.shutdownGracefully()
+        } catch {
+            try? await server.close().get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
+    @Test("group microbatch splits before the Core NATS payload ceiling")
+    func splitsLargeGroupMicrobatch() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let recorder = V2NATSGroupWakeTestRecorder()
+        let server = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(
+                    V2NATSConfirmingGroupWakeTestHandler(recorder: recorder)
+                )
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        do {
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1
+            )
+            let roomID = try RoomID("00000000-0000-0000-0000-000000000907")
+            let first = try natsGroupEvent(
+                roomID: roomID,
+                sequence: 1,
+                revision: 9,
+                payload: Data(repeating: 1, count: 300 * 1_024)
+            )
+            let second = try natsGroupEvent(
+                roomID: roomID,
+                sequence: 2,
+                revision: 9,
+                payload: Data(repeating: 2, count: 300 * 1_024)
+            )
+
+            await broker.publishForegroundGroupEvents([first, second])
+            try await recorder.waitForPublishes(2)
+
+            let observation = recorder.observation()
+            #expect(observation.publishCount == 2)
+            #expect(observation.pingCount == 1)
+            #expect(observation.publishedPayloads.allSatisfy { $0.count < 1_024 * 1_024 })
+            #expect(
+                observation.publishedPayloads.compactMap(
+                    V2NATSGroupEventWakeBroker.decodeNotificationPayload
+                ) == [.groupEvents([first]), .groupEvents([second])]
+            )
+
+            await broker.shutdown()
+            try await server.close().get()
+            try await group.shutdownGracefully()
+        } catch {
+            try? await server.close().get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
+    @Test("protobuf group microbatch is compact, ordered, and fail-closed")
+    func protobufGroupMicrobatchContract() throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000916")
+        let first = try natsGroupEvent(
+            roomID: roomID,
+            sequence: 1,
+            revision: 17,
+            payload: Data(repeating: 1, count: 128)
+        )
+        let second = try natsGroupEvent(
+            roomID: roomID,
+            sequence: 2,
+            revision: 17,
+            payload: Data(repeating: 2, count: 128)
+        )
+        let notification = V2ForegroundGroupEventNotification.groupEvents([
+            first, second,
+        ])
+        let binary = try V2NATSGroupEventProtobufCodec.encode(notification)
+        #expect(V2NATSGroupEventProtobufCodec.recognizes(binary))
+        #expect(
+            V2NATSGroupEventWakeBroker.decodeNotificationPayload(binary)
+                == notification
+        )
+
+        let json = try natsGroupBatchPayload(events: [first, second])
+        #expect(binary.count < json.count)
+
+        let mixedRevision = try natsGroupEvent(
+            roomID: roomID,
+            sequence: 3,
+            revision: 18
+        )
+        #expect(throws: V2NATSGroupEventWakeBrokerError.invalidPayload) {
+            _ = try V2NATSGroupEventProtobufCodec.encode(.groupEvents([
+                second, mixedRevision,
+            ]))
+        }
+
+        var wire = try IMV2InternalGroupEventNotification(
+            serializedBytes: binary.dropFirst(5)
+        )
+        wire.groupEvents.events[0].sourceEventID.removeLast()
+        let invalidBody = Data([0x49, 0x4D, 0x4E, 0x47, 0x01])
+            + (try wire.serializedData())
+        #expect(
+            V2NATSGroupEventWakeBroker.decodeNotificationPayload(invalidBody)
+                == .wake(.init(roomID: roomID, highWatermark: 2))
+        )
+
+        var unknownVersion = binary
+        unknownVersion[4] = 2
+        #expect(
+            V2NATSGroupEventWakeBroker.decodeNotificationPayload(unknownVersion)
+                == nil
+        )
+    }
+
+    @Test("protobuf exact-audience direct event preserves recipient and exclusion fences")
+    func protobufExactAudienceDirectEventContract() throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000917")
+        let firstUser = try UserID("00000000-0000-0000-0001-000000000917")
+        let secondUser = try UserID("00000000-0000-0000-0002-000000000917")
+        let excluded = try #require(UUID(uuidString: "00000000-0000-0000-0003-000000000917"))
+        let event = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 4,
+            sourceEventID: .init("00000000-0000-0000-0004-000000000917"),
+            roomSequence: 4,
+            projectionKind: "message",
+            payload: Data("private-event".utf8),
+            recipientUserIDs: [firstUser, secondUser],
+            groupMembershipRevision: nil,
+            acceptedMembershipRevision: nil,
+            excludedConnectionID: excluded
+        )
+        let notification = V2ForegroundGroupEventNotification.directEvent(event)
+        let binary = try V2NATSGroupEventProtobufCodec.encode(notification)
+        #expect(
+            V2NATSGroupEventWakeBroker.decodeNotificationPayload(binary)
+                == notification
+        )
+    }
+
+    @Test("broker publishes configured protobuf payload without a per-batch PONG")
+    func publishesConfiguredProtobufPayload() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let recorder = V2NATSGroupWakeTestRecorder()
+        let server = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(
+                    V2NATSConfirmingGroupWakeTestHandler(recorder: recorder)
+                )
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        do {
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1,
+                payloadEncoding: .protobufV1
+            )
+            let roomID = try RoomID("00000000-0000-0000-0000-000000000918")
+            let events = [
+                try natsGroupEvent(roomID: roomID, sequence: 1, revision: 19),
+                try natsGroupEvent(roomID: roomID, sequence: 2, revision: 19),
+            ]
+            await broker.publishForegroundGroupEvents(events)
+            try await recorder.waitForPublishes(1)
+
+            let observation = recorder.observation()
+            #expect(observation.pingCount == 1)
+            let payload = try #require(observation.publishedPayloads.first)
+            #expect(V2NATSGroupEventProtobufCodec.recognizes(payload))
+            #expect(
+                V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
+                    == .groupEvents(events)
+            )
+
+            await broker.shutdown()
+            try await server.close().get()
+            try await group.shutdownGracefully()
+        } catch {
+            try? await server.close().get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
+    @Test("sharded notification dispatch repairs bounded cross-publisher inversions")
+    func shardedNotificationDispatchRepairsRoomOrder() async throws {
+        let firstRoom = try RoomID("00000000-0000-0000-0000-000000000908")
+        let secondRoom = try RoomID("00000000-0000-0000-0000-000000000909")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 8,
+            capacityPerLane: 128,
+            receiveNotification: { notification in
+                recorder.record(notification)
+            }
+        )
+
+        for lower in stride(from: 1, through: 49, by: 2) {
+            let higher = lower + 1
+            dispatcher.submit(try natsGroupPayload(
+                roomID: firstRoom,
+                sequence: UInt64(higher),
+                revision: 11
+            ))
+            dispatcher.submit(try natsGroupPayload(
+                roomID: secondRoom,
+                sequence: UInt64(higher),
+                revision: 13
+            ))
+            dispatcher.submit(try natsGroupPayload(
+                roomID: firstRoom,
+                sequence: UInt64(lower),
+                revision: 11
+            ))
+            dispatcher.submit(try natsGroupPayload(
+                roomID: secondRoom,
+                sequence: UInt64(lower),
+                revision: 13
+            ))
+        }
+
+        try await recorder.waitForCount(100)
+        #expect(dispatcher.droppedPayloadCount() == 0)
+        #expect(recorder.sequences(for: firstRoom) == Array(1...50).map(UInt64.init))
+        #expect(recorder.sequences(for: secondRoom) == Array(1...50).map(UInt64.init))
+    }
+
+    @Test("a live window suppresses only metadata wakes it fully covers")
+    func coalescedLiveWindowSuppressesCoveredWake() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000912")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .milliseconds(10),
+            receiveNotification: { notification in
+                recorder.record(notification)
+            }
+        )
+
+        dispatcher.submit(try natsWakePayload(roomID: roomID, highWatermark: 2))
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 2,
+            revision: 17
+        ))
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 1,
+            revision: 17
+        ))
+
+        try await recorder.waitForCount(2)
+        #expect(recorder.sequences(for: roomID) == [1, 2])
+        #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
+    }
+
+    @Test("completed live fanout suppresses a covered wake from a later window")
+    func completedLiveFanoutSuppressesLateCoveredWake() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000913")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let suppressed = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .milliseconds(5),
+            coveredWakeSuppressedObserver: {
+                _ = suppressed.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { recorder.record($0) }
+        )
+
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 4,
+            revision: 17
+        ))
+        try await recorder.waitForCount(1)
+        dispatcher.submit(try natsWakePayload(
+            roomID: roomID,
+            highWatermark: 4
+        ))
+
+        try await waitForAtomic(suppressed, toReach: 1)
+        #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
+    }
+
+    @Test("a wake beyond completed live fanout is still delivered")
+    func futureWakeIsNotSuppressed() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000914")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let suppressed = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .milliseconds(5),
+            coveredWakeSuppressedObserver: {
+                _ = suppressed.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { recorder.record($0) }
+        )
+
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 4,
+            revision: 17
+        ))
+        try await recorder.waitForCount(1)
+        dispatcher.submit(try natsWakePayload(
+            roomID: roomID,
+            highWatermark: 5
+        ))
+
+        try await recorder.waitForWakeCount(1)
+        #expect(recorder.wakeHighWatermarks(for: roomID) == [5])
+        #expect(suppressed.load(ordering: .relaxed) == 0)
+    }
+
+    @Test("an early durable wake is covered by live fanout during deferral")
+    func earlyWakeIsCoveredDuringDeferral() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000917")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let deferred = Atomic<Int>(0)
+        let suppressed = Atomic<Int>(0)
+        let delivered = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .milliseconds(5),
+            coveredWakeSuppressedObserver: {
+                _ = suppressed.wrappingAdd(1, ordering: .relaxed)
+            },
+            wakeDeferralDelay: .milliseconds(80),
+            wakeDeferredObserver: {
+                _ = deferred.wrappingAdd(1, ordering: .relaxed)
+            },
+            deferredWakeDeliveredObserver: {
+                _ = delivered.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { recorder.record($0) }
+        )
+
+        dispatcher.submit(try natsWakePayload(
+            roomID: roomID,
+            highWatermark: 11
+        ))
+        try await waitForAtomic(deferred, toReach: 1)
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 11,
+            revision: 17
+        ))
+
+        try await recorder.waitForCount(1)
+        try await waitForAtomic(suppressed, toReach: 1)
+        #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
+        #expect(delivered.load(ordering: .relaxed) == 0)
+    }
+
+    @Test("live watermark advances only after local fanout returns")
+    func liveWatermarkWaitsForFanoutCompletion() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000915")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let gate = V2NATSNotificationDispatchGate()
+        let suppressed = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .milliseconds(5),
+            coveredWakeSuppressedObserver: {
+                _ = suppressed.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { notification in
+                recorder.record(notification)
+                if case .groupEvents = notification { await gate.wait() }
+            }
+        )
+
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 7,
+            revision: 17
+        ))
+        try await recorder.waitForCount(1)
+        dispatcher.submit(try natsWakePayload(
+            roomID: roomID,
+            highWatermark: 7
+        ))
+        #expect(suppressed.load(ordering: .relaxed) == 0)
+
+        await gate.release()
+        try await waitForAtomic(suppressed, toReach: 1)
+        #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
+    }
+
+    @Test("a live notification evicted before fanout cannot suppress recovery wake")
+    func droppedLiveNotificationDoesNotSuppressWake() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000916")
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let suppressed = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 1,
+            reorderingDelay: .milliseconds(30),
+            coveredWakeSuppressedObserver: {
+                _ = suppressed.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { recorder.record($0) }
+        )
+
+        dispatcher.submit(try natsGroupPayload(
+            roomID: roomID,
+            sequence: 9,
+            revision: 17
+        ))
+        dispatcher.submit(try natsWakePayload(
+            roomID: roomID,
+            highWatermark: 9
+        ))
+
+        try await recorder.waitForWakeCount(1)
+        #expect(dispatcher.droppedPayloadCount() == 1)
+        #expect(recorder.sequences(for: roomID).isEmpty)
+        #expect(recorder.wakeHighWatermarks(for: roomID) == [9])
+        #expect(suppressed.load(ordering: .relaxed) == 0)
+    }
+
+    @Test("recovery ingestion is not blocked or dropped with slow socket fan-out")
+    func recoveryIngestionPrecedesLossySocketFanout() throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000911")
+        let recoveryCount = Atomic<Int>(0)
+        let observedDrops = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 1,
+            recordRecoveryNotification: { _ in
+                _ = recoveryCount.wrappingAdd(1, ordering: .relaxed)
+            },
+            droppedPayloadObserver: {
+                _ = observedDrops.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { _ in
+                try? await Task.sleep(for: .seconds(1))
+            }
+        )
+
+        for sequence in 1...100 {
+            dispatcher.submit(try natsGroupPayload(
+                roomID: roomID,
+                sequence: UInt64(sequence),
+                revision: 17
+            ))
+        }
+
+        #expect(recoveryCount.load(ordering: .relaxed) == 100)
+        #expect(dispatcher.droppedPayloadCount() > 0)
+        #expect(
+            observedDrops.load(ordering: .relaxed)
+                == Int(dispatcher.droppedPayloadCount())
+        )
+    }
+
+    @Test("an interested broker reconnects and replays subscriptions after socket loss")
+    func reconnectsAndReplaysSubscriptions() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let recorder = V2NATSGroupWakeTestRecorder()
+        let server = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(
+                    V2NATSReconnectGroupWakeTestHandler(recorder: recorder)
+                )
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        do {
+            let broker = try makeBroker(
+                port: try #require(server.localAddress?.port),
+                timeout: 1
+            )
+            let roomID = try RoomID("00000000-0000-0000-0000-000000000910")
+            try await broker.activate(roomID: roomID)
+
+            // The first test socket closes itself after confirming activation.
+            // No publish or duplicate activation is allowed to trigger healing.
+            try await recorder.waitForConnections(2)
+            try await recorder.waitForSubscriptions(2)
+            let observation = recorder.observation()
+            #expect(observation.connectionCount == 2)
+            #expect(observation.subscriptionCount == 2)
+
             await broker.shutdown()
             try await server.close().get()
             try await group.shutdownGracefully()
@@ -151,13 +723,20 @@ struct V2NATSGroupEventWakeBrokerTests {
         }
     }
 
-    private func makeBroker(port: Int, timeout: TimeInterval) throws -> V2NATSGroupEventWakeBroker {
+    private func makeBroker(
+        port: Int,
+        timeout: TimeInterval,
+        token: String? = nil,
+        payloadEncoding: V2NATSGroupEventPayloadEncoding = .json
+    ) throws -> V2NATSGroupEventWakeBroker {
         let url = try #require(URL(string: "nats://127.0.0.1:\(port)"))
         return V2NATSGroupEventWakeBroker(
             configuration: try .init(
                 url: url,
                 subjectPrefix: "imv2.test.group",
+                token: token,
                 routingKey: Data(repeating: 9, count: 32),
+                payloadEncoding: payloadEncoding,
                 acknowledgementTimeout: timeout
             ),
             receiveWake: { _ in }
@@ -267,21 +846,112 @@ private final class V2NATSGroupWakeTestRecorder: Sendable {
         var subscriptionCount = 0
         var publishCount = 0
         var pingCount = 0
+        var publishedPayloads: [Data] = []
+        var authenticationTokens: [String] = []
+        var legacyTokenFieldCount = 0
     }
 
-    private let state = Mutex(Observation())
+    private struct State: Sendable {
+        var observation = Observation()
+        var pendingBytes: [UInt8] = []
+    }
 
-    func recordConnection() { state.withLock { $0.connectionCount += 1 } }
-    func record(commands: String) -> Int {
+    private let state = Mutex(State())
+
+    func recordConnection() -> Int {
         state.withLock { state in
-            state.subscriptionCount += commands.components(separatedBy: "SUB ").count - 1
-            state.publishCount += commands.components(separatedBy: "PUB ").count - 1
-            let pings = commands.components(separatedBy: "PING\r\n").count - 1
-            state.pingCount += pings
+            state.observation.connectionCount += 1
+            return state.observation.connectionCount
+        }
+    }
+
+    func record(bytes: [UInt8]) -> Int {
+        state.withLock { state in
+            state.pendingBytes.append(contentsOf: bytes)
+            var pings = 0
+            while let lineEnd = Self.firstCRLF(in: state.pendingBytes) {
+                let lineBytes = state.pendingBytes[..<lineEnd]
+                guard let line = String(bytes: lineBytes, encoding: .utf8) else {
+                    state.pendingBytes.removeFirst(lineEnd + 2)
+                    continue
+                }
+                if line.hasPrefix("PUB ") {
+                    guard let lengthText = line.split(separator: " ").last,
+                          let payloadLength = Int(lengthText),
+                          payloadLength >= 0
+                    else {
+                        state.pendingBytes.removeFirst(lineEnd + 2)
+                        continue
+                    }
+                    let payloadStart = lineEnd + 2
+                    let commandEnd = payloadStart + payloadLength + 2
+                    guard state.pendingBytes.count >= commandEnd else { break }
+                    let payload = Data(
+                        state.pendingBytes[payloadStart..<(payloadStart + payloadLength)]
+                    )
+                    state.observation.publishCount += 1
+                    state.observation.publishedPayloads.append(payload)
+                    state.pendingBytes.removeFirst(commandEnd)
+                    continue
+                }
+                state.pendingBytes.removeFirst(lineEnd + 2)
+                if line.hasPrefix("CONNECT "),
+                   let jsonStart = line.firstIndex(of: "{") {
+                    let encoded = Data(line[jsonStart...].utf8)
+                    if let object = try? JSONSerialization.jsonObject(with: encoded)
+                        as? [String: Any] {
+                        if let token = object["auth_token"] as? String {
+                            state.observation.authenticationTokens.append(token)
+                        }
+                        if object["token"] != nil {
+                            state.observation.legacyTokenFieldCount += 1
+                        }
+                    }
+                }
+                if line.hasPrefix("SUB ") {
+                    state.observation.subscriptionCount += 1
+                }
+                if line == "PING" {
+                    state.observation.pingCount += 1
+                    pings += 1
+                }
+            }
             return pings
         }
     }
-    func observation() -> Observation { state.withLock { $0 } }
+
+    func observation() -> Observation { state.withLock { $0.observation } }
+
+    func waitForConnections(_ expected: Int) async throws {
+        try await waitUntil { $0.connectionCount >= expected }
+    }
+
+    func waitForSubscriptions(_ expected: Int) async throws {
+        try await waitUntil { $0.subscriptionCount >= expected }
+    }
+
+    func waitForPublishes(_ expected: Int) async throws {
+        try await waitUntil { $0.publishCount >= expected }
+    }
+
+    private func waitUntil(
+        _ predicate: @escaping @Sendable (Observation) -> Bool
+    ) async throws {
+        for _ in 0..<400 {
+            if predicate(observation()) { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw V2NATSDelayedConfirmationTestError.timeout
+    }
+
+    private static func firstCRLF(in bytes: [UInt8]) -> Int? {
+        guard bytes.count >= 2 else { return nil }
+        for index in 0..<(bytes.count - 1)
+        where bytes[index] == 13 && bytes[index + 1] == 10 {
+            return index
+        }
+        return nil
+    }
 }
 
 private final class V2NATSConfirmingGroupWakeTestHandler: ChannelInboundHandler, Sendable {
@@ -292,17 +962,239 @@ private final class V2NATSConfirmingGroupWakeTestHandler: ChannelInboundHandler,
     init(recorder: V2NATSGroupWakeTestRecorder) { self.recorder = recorder }
 
     func channelActive(context: ChannelHandlerContext) {
-        recorder.recordConnection()
+        _ = recorder.recordConnection()
         context.fireChannelActive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
-        let commands = buffer.readString(length: buffer.readableBytes) ?? ""
-        let pings = recorder.record(commands: commands)
+        let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let pings = recorder.record(bytes: bytes)
         guard pings > 0 else { return }
         var response = context.channel.allocator.buffer(capacity: pings * 6)
         for _ in 0..<pings { response.writeString("PONG\r\n") }
         context.writeAndFlush(wrapOutboundOut(response), promise: nil)
     }
+}
+
+private final class V2NATSReconnectGroupWakeTestHandler: ChannelInboundHandler, Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private let recorder: V2NATSGroupWakeTestRecorder
+    private let connectionIndex = Mutex(0)
+
+    init(recorder: V2NATSGroupWakeTestRecorder) { self.recorder = recorder }
+
+    func channelActive(context: ChannelHandlerContext) {
+        connectionIndex.withLock { $0 = recorder.recordConnection() }
+        context.fireChannelActive()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
+        let pings = recorder.record(bytes: bytes)
+        guard pings > 0 else { return }
+        var response = context.channel.allocator.buffer(capacity: pings * 6)
+        for _ in 0..<pings { response.writeString("PONG\r\n") }
+        let closeFirstConnection = connectionIndex.withLock { $0 == 1 }
+        let channel = context.channel
+        context.writeAndFlush(wrapOutboundOut(response)).whenComplete { _ in
+            guard closeFirstConnection else { return }
+            channel.eventLoop.scheduleTask(in: .milliseconds(10)) {
+                channel.close(promise: nil)
+            }
+        }
+    }
+}
+
+private final class V2NATSNotificationDispatchRecorder: Sendable {
+    private struct State: Sendable {
+        var sequencesByRoom: [RoomID: [UInt64]] = [:]
+        var wakeHighWatermarksByRoom: [RoomID: [UInt64]] = [:]
+        var count = 0
+    }
+
+    private let state = Mutex(State())
+
+    func record(_ notification: V2ForegroundGroupEventNotification) {
+        switch notification {
+        case .wake(let wake):
+            state.withLock {
+                $0.wakeHighWatermarksByRoom[wake.roomID, default: []]
+                    .append(wake.highWatermark)
+            }
+        case .groupEvents(let events):
+            guard let roomID = events.first?.roomID else { return }
+            state.withLock { state in
+                state.sequencesByRoom[roomID, default: []].append(
+                    contentsOf: events.map(\.roomSequence)
+                )
+                state.count += events.count
+            }
+        case .directEvent:
+            break
+        }
+    }
+
+    func waitForCount(_ expected: Int) async throws {
+        for _ in 0..<400 {
+            if state.withLock({ $0.count >= expected }) { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw V2NATSDelayedConfirmationTestError.timeout
+    }
+
+    func waitForWakeCount(_ expected: Int) async throws {
+        for _ in 0..<400 {
+            let count = state.withLock {
+                $0.wakeHighWatermarksByRoom.values.reduce(0) {
+                    $0 + $1.count
+                }
+            }
+            if count >= expected { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw V2NATSDelayedConfirmationTestError.timeout
+    }
+
+    func sequences(for roomID: RoomID) -> [UInt64] {
+        state.withLock { $0.sequencesByRoom[roomID] ?? [] }
+    }
+
+    func wakeHighWatermarks(for roomID: RoomID) -> [UInt64] {
+        state.withLock { $0.wakeHighWatermarksByRoom[roomID] ?? [] }
+    }
+}
+
+private actor V2NATSNotificationDispatchGate {
+    private var isReleased = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
+private func waitForAtomic(
+    _ value: borrowing Atomic<Int>,
+    toReach expected: Int
+) async throws {
+    for _ in 0..<400 {
+        if value.load(ordering: .relaxed) >= expected { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    throw V2NATSDelayedConfirmationTestError.timeout
+}
+
+private func natsGroupEvent(
+    roomID: RoomID,
+    sequence: UInt64,
+    revision: UInt64,
+    payload: Data? = nil
+) throws -> V2DirectRoomLiveEvent {
+    try .init(
+        roomID: roomID,
+        highWatermark: sequence,
+        sourceEventID: .init(String(
+            format: "00000000-0000-0000-0006-%012llx", sequence
+        )),
+        roomSequence: sequence,
+        projectionKind: "message",
+        payload: payload ?? Data("event-\(sequence)".utf8),
+        recipientUserIDs: [],
+        groupMembershipRevision: revision,
+        acceptedMembershipRevision: revision
+    )
+}
+
+private func natsGroupPayload(
+    roomID: RoomID,
+    sequence: UInt64,
+    revision: UInt64
+) throws -> Data {
+    try natsGroupBatchPayload(events: [natsGroupEvent(
+        roomID: roomID,
+        sequence: sequence,
+        revision: revision
+    )])
+}
+
+private func natsGroupBatchPayload(
+    events: [V2DirectRoomLiveEvent]
+) throws -> Data {
+    struct WireEvent: Encodable {
+        let sourceEventID: String
+        let roomSequence: UInt64
+        let projectionKind: String
+        let payload: Data
+        let recipientUserIDs: [String]
+        let groupMembershipRevision: UInt64
+        let excludedConnectionID: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case sourceEventID = "source_event_id"
+            case roomSequence = "room_sequence"
+            case projectionKind = "projection_kind"
+            case payload
+            case recipientUserIDs = "recipient_user_ids"
+            case groupMembershipRevision = "group_membership_revision"
+            case excludedConnectionID = "excluded_connection_id"
+        }
+    }
+    struct WireWake: Encodable {
+        let roomID: String
+        let highWatermark: UInt64
+        let directEvents: [WireEvent]
+
+        enum CodingKeys: String, CodingKey {
+            case roomID = "room_id"
+            case highWatermark = "high_watermark"
+            case directEvents = "direct_events"
+        }
+    }
+    let first = try #require(events.first)
+    let last = try #require(events.last)
+    return try JSONEncoder().encode(WireWake(
+        roomID: first.roomID.rawValue,
+        highWatermark: last.highWatermark,
+        directEvents: try events.map { event in
+            .init(
+                sourceEventID: event.sourceEventID.rawValue,
+                roomSequence: event.roomSequence,
+                projectionKind: event.projectionKind,
+                payload: event.payload,
+                recipientUserIDs: event.recipientUserIDs.map(\.rawValue).sorted(),
+                groupMembershipRevision: try #require(event.groupMembershipRevision),
+                excludedConnectionID: event.excludedConnectionID
+            )
+        }
+    ))
+}
+
+private func natsWakePayload(
+    roomID: RoomID,
+    highWatermark: UInt64
+) throws -> Data {
+    struct WireWake: Encodable {
+        let roomID: String
+        let highWatermark: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case roomID = "room_id"
+            case highWatermark = "high_watermark"
+        }
+    }
+    return try JSONEncoder().encode(WireWake(
+        roomID: roomID.rawValue,
+        highWatermark: highWatermark
+    ))
 }

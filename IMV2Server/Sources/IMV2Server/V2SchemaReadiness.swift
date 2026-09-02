@@ -10,7 +10,7 @@ public enum V2SchemaReadiness {
     public static let currentSchemaID = "im-v2-current-3"
     private static let requiredTables = [
         "schema_contract", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
-        "rooms", "room_owner_routes", "direct_room_owner_routes", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
+        "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
         "shard_admission_pools", "messages", "message_content_versions", "message_projection_states", "message_projection_state_values", "room_events", "room_outbox", "group_event_wake_outbox", "durable_work_replay_audit",
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_permission_operations", "group_role_operations", "message_forward_operations",
         "fanout_plans", "fanout_plan_targets", "fanout_completion_units", "fanout_deliveries", "consumer_inbox",
@@ -217,6 +217,32 @@ public enum V2SchemaReadiness {
             """).first(decoding: ExistsRow.self), directMessageEventSourceContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(
                 "\(schema).messages[direct-event-source]"
+            )
+        }
+        // Compact hybrid-group accepts are materialized by the same message
+        // row contract, but they additionally require a transactional wake so
+        // connected members learn the new room high-watermark. A missing or
+        // disabled statement trigger would make durable messages discoverable
+        // only by polling, so fail startup before enabling that writer.
+        guard let hybridGroupMessageWakeContract = try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_trigger AS trigger_record
+                JOIN pg_class AS relation
+                  ON relation.oid = trigger_record.tgrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = \(bind: schema)
+                  AND relation.relname = 'messages'
+                  AND trigger_record.tgname =
+                      'messages_enqueue_hybrid_group_wake'
+                  AND trigger_record.tgenabled <> 'D'
+                  AND NOT trigger_record.tgisinternal
+                  AND trigger_record.tgtype & 1 = 0
+            ) AS exists
+            """).first(decoding: ExistsRow.self), hybridGroupMessageWakeContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable(
+                "\(schema).messages[hybrid-group-wake]"
             )
         }
         guard let freshDeliveryContract = try await sql.raw("""

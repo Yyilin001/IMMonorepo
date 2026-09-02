@@ -957,23 +957,34 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
     func nextWake() async throws -> V2ActiveHybridGroupWake {
         let wake = try await wakeSource.nextGroupEventAvailabilityHint()
-        return .init(roomID: wake.roomID.rawValue, highWatermark: wake.highWatermark, liveEvent: wake.liveEvent)
+        return .init(
+            roomID: wake.roomID.rawValue,
+            highWatermark: wake.highWatermark,
+            liveEvents: wake.liveEvents
+        )
     }
 
     func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) async throws -> Bool {
         guard let roomID = try? RoomID(wake.roomID),
-              let event = wake.liveEvent,
-              event.roomSequence == wake.highWatermark,
+              !wake.liveEvents.isEmpty,
+              wake.liveEvents.last?.roomSequence == wake.highWatermark,
+              zip(wake.liveEvents, wake.liveEvents.dropFirst()).allSatisfy({
+                  $1.roomSequence == $0.roomSequence + 1
+              }),
               let access = try await localStore.groupEventAccess(roomID: roomID),
               access.isAuthorized,
               access.delivery == .durableRoomLog
         else { return false }
         let cursor = try await localStore.groupEventCursor(roomID: roomID)
-        guard event.roomSequence == cursor + 1 else { return false }
+        if wake.highWatermark <= cursor { return true }
+        let unapplied = wake.liveEvents.drop(while: { $0.roomSequence <= cursor })
+        guard unapplied.first?.roomSequence == cursor + 1,
+              unapplied.last?.roomSequence == wake.highWatermark
+        else { return false }
         let page = V2ClientGroupEventPage(
             roomID: roomID,
-            events: [event],
-            nextRoomSequence: event.roomSequence,
+            events: Array(unapplied),
+            nextRoomSequence: wake.highWatermark,
             hasMore: false
         )
         _ = try await localStore.applyGroupEventPage(page)

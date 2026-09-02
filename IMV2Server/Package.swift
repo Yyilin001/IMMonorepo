@@ -15,6 +15,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../IMV2Core"),
+        .package(path: "../IMV2Compression"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
         .package(url: "https://github.com/vapor/fluent.git", from: "4.11.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver.git", from: "2.9.0"),
@@ -31,6 +32,7 @@ let package = Package(
             name: "IMV2Server",
             dependencies: [
                 "IMV2Core",
+                "IMV2Compression",
                 .product(name: "Fluent", package: "fluent"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "AsyncKit", package: "async-kit"),
@@ -89,6 +91,7 @@ let package = Package(
                 "IMV2Core",
                 "IMV2Server",
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ]
@@ -99,6 +102,7 @@ let package = Package(
             name: "IMV2GatewayLoadGenerator",
             dependencies: [
                 "IMV2Core",
+                "IMV2Compression",
                 "IMV2Server",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

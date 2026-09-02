@@ -4,6 +4,164 @@ import IMV2Core
 import Testing
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("frame compression is opt-in and bounded by the frame policy")
+    func validatesFrameCompressionPolicy() throws {
+        let defaults = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(defaults.frameCompression == nil)
+        #expect(defaults.frameCompressionThresholdBytes == 1_024)
+        #expect(defaults.frameCompressionMaximumExpansionRatio == 64)
+
+        var enabled = runtimeValues
+        enabled["IM_V2_FRAME_COMPRESSION"] = "zlib"
+        enabled["IM_V2_FRAME_COMPRESSION_THRESHOLD_BYTES"] = "2048"
+        enabled["IM_V2_FRAME_COMPRESSION_MAX_EXPANSION_RATIO"] = "32"
+        let configured = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(enabled)
+        )
+        #expect(configured.frameCompression == .zlib)
+        #expect(configured.frameCompressionThresholdBytes == 2_048)
+        #expect(configured.frameCompressionMaximumExpansionRatio == 32)
+
+        var oversizedThreshold = enabled
+        oversizedThreshold["IM_V2_FRAME_COMPRESSION_THRESHOLD_BYTES"] = "65537"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_FRAME_COMPRESSION_THRESHOLD_BYTES"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversizedThreshold)
+            )
+        }
+    }
+
+    @Test("foreground group batching has a bounded pressure extension")
+    func validatesForegroundGroupBatchingPolicy() throws {
+        let defaults = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(defaults.foregroundGroupBatchMaximumEvents == 64)
+        #expect(defaults.foregroundGroupPendingMaximumEventsPerRoom == 1_024)
+        #expect(defaults.foregroundGroupBatchDelayMilliseconds == 10)
+        #expect(defaults.foregroundGroupBatchExtensionDelayMilliseconds == 10)
+        #expect(defaults.foregroundGroupBatchExtensionMinimumEvents == 8)
+        #expect(defaults.readReceiptBatchSize == 32)
+        #expect(defaults.readReceiptBatchMaximumDelayMilliseconds == 2)
+        #expect(defaults.readReceiptBatchMaximumInFlightBatches == 8)
+        #expect(
+            defaults.readReceiptBatchMaximumPendingRequests ==
+                defaults.foregroundWriteDatabaseWorkMaximumQueued
+        )
+
+        var configured = runtimeValues
+        configured["IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS"] = "128"
+        configured["IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM"] = "2048"
+        configured["IM_V2_FOREGROUND_GROUP_BATCH_DELAY_MS"] = "5"
+        configured["IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_DELAY_MS"] = "15"
+        configured["IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_MIN_EVENTS"] = "16"
+        configured["IM_V2_READ_RECEIPT_BATCH_SIZE"] = "64"
+        configured["IM_V2_READ_RECEIPT_BATCH_MAX_DELAY_MS"] = "4"
+        configured["IM_V2_READ_RECEIPT_BATCH_MAX_IN_FLIGHT"] = "6"
+        configured["IM_V2_READ_RECEIPT_BATCH_MAX_PENDING_REQUESTS"] = "4096"
+        let parsed = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(configured)
+        )
+        #expect(parsed.foregroundGroupBatchMaximumEvents == 128)
+        #expect(parsed.foregroundGroupPendingMaximumEventsPerRoom == 2_048)
+        #expect(parsed.foregroundGroupBatchDelayMilliseconds == 5)
+        #expect(parsed.foregroundGroupBatchExtensionDelayMilliseconds == 15)
+        #expect(parsed.foregroundGroupBatchExtensionMinimumEvents == 16)
+        #expect(parsed.readReceiptBatchSize == 64)
+        #expect(parsed.readReceiptBatchMaximumDelayMilliseconds == 4)
+        #expect(parsed.readReceiptBatchMaximumInFlightBatches == 6)
+        #expect(parsed.readReceiptBatchMaximumPendingRequests == 4_096)
+
+        let error = V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS/IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM/IM_V2_FOREGROUND_GROUP_BATCH_DELAY_MS/IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_DELAY_MS/IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_MIN_EVENTS"
+        )
+        var invalidThreshold = runtimeValues
+        invalidThreshold["IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS"] = "8"
+        invalidThreshold["IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM"] = "8"
+        invalidThreshold["IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_MIN_EVENTS"] = "9"
+        #expect(throws: error) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidThreshold)
+            )
+        }
+
+        var invalidPendingBound = runtimeValues
+        invalidPendingBound["IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS"] = "128"
+        invalidPendingBound["IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM"] = "64"
+        #expect(throws: error) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidPendingBound)
+            )
+        }
+
+        var invalidTotalDelay = runtimeValues
+        invalidTotalDelay["IM_V2_FOREGROUND_GROUP_BATCH_DELAY_MS"] = "80"
+        invalidTotalDelay["IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_DELAY_MS"] = "30"
+        #expect(throws: error) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidTotalDelay)
+            )
+        }
+
+        var invalidReceiptBatch = runtimeValues
+        invalidReceiptBatch["IM_V2_READ_RECEIPT_BATCH_SIZE"] = "129"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_READ_RECEIPT_BATCH_SIZE"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidReceiptBatch)
+            )
+        }
+
+        var invalidReceiptPending = runtimeValues
+        invalidReceiptPending["IM_V2_READ_RECEIPT_BATCH_SIZE"] = "64"
+        invalidReceiptPending[
+            "IM_V2_READ_RECEIPT_BATCH_MAX_PENDING_REQUESTS"
+        ] = "63"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_READ_RECEIPT_BATCH_MAX_PENDING_REQUESTS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidReceiptPending)
+            )
+        }
+    }
+
+    @Test("prepared group-event page cache is opt-in and requires both bounds")
+    func validatesPreparedGroupEventPageCachePolicy() throws {
+        let defaults = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(runtimeValues)
+        )
+        #expect(defaults.preparedGroupEventPageCacheMaximumEntries == 0)
+        #expect(defaults.preparedGroupEventPageCacheMaximumBytes == 0)
+        #expect(defaults.preparedGroupEventPageCacheShardCount == 0)
+
+        var enabled = runtimeValues
+        enabled["IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_ENTRIES"] = "8192"
+        enabled["IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_BYTES"] = "268435456"
+        enabled["IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_SHARDS"] = "16"
+        let configured = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(enabled)
+        )
+        #expect(configured.preparedGroupEventPageCacheMaximumEntries == 8_192)
+        #expect(configured.preparedGroupEventPageCacheMaximumBytes == 268_435_456)
+        #expect(configured.preparedGroupEventPageCacheShardCount == 16)
+
+        var missingByteBound = runtimeValues
+        missingByteBound["IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_ENTRIES"] = "8192"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_ENTRIES/IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_BYTES/IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_SHARDS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(missingByteBound)
+            )
+        }
+    }
+
     @Test("runtime has no secret or capacity defaults")
     func rejectsMissingConfiguration() {
         #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_DATABASE_URL")) {
@@ -38,6 +196,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.directRoomLogEventCacheMaximumPendingWrites == 0)
         #expect(defaults.livePresenceRenewalBatchSize == 256)
         #expect(defaults.livePresenceRenewalMaximumDelayMilliseconds == 2)
+        #expect(defaults.groupEventWakePollIntervalMilliseconds == 500)
         #expect(defaults.shutdownGraceMilliseconds == 20_000)
         #expect(defaults.fanoutPayloadWriteMode == .body)
 
@@ -252,6 +411,26 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(largeEventCache)
         ).directRoomLogEventCacheMaximumEntries == 262_144)
+
+        var deepHotRoomEventCache = largeEventCache
+        deepHotRoomEventCache[
+            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM"
+        ] = "4096"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(deepHotRoomEventCache)
+        ).directRoomLogEventCacheMaximumEntriesPerRoom == 4_096)
+
+        var oversizedHotRoomEventCache = largeEventCache
+        oversizedHotRoomEventCache[
+            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM"
+        ] = "16385"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_BYTES/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES_PER_ROOM/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_SHARDS/IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_PENDING_WRITES"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(oversizedHotRoomEventCache)
+            )
+        }
 
         var largerPolicyCache = runtimeValues
         largerPolicyCache["IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES"] = "131072"
@@ -777,6 +956,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.directRoomShardID == "rooms-primary")
         #expect(configuration.directRoomShardRouter.shardIDs == ["rooms-primary"])
         #expect(configuration.groupRoomShardID == "rooms-primary")
+        #expect(configuration.groupRoomShardIDs == ["rooms-primary"])
         #expect(configuration.strangerMessagePolicy.maximumMessagesPerWindow == 3)
         #expect(configuration.strangerMessagePolicy.window == 86_400)
         #expect(configuration.contentReviewSafetyActorUserID == nil)
@@ -875,10 +1055,79 @@ struct V2GatewayRuntimeConfigurationTests {
             return
         }
         #expect(nats.routingKey == Data(repeating: 9, count: 32))
+        #expect(nats.payloadEncoding == .json)
+        #expect(nats.wakeDeferralDelayMilliseconds == 60)
+
+        values["IM_V2_GROUP_WAKE_DEFERRAL_MS"] = "75"
+        let deferredConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(values)
+        )
+        guard case .nats(let deferredNATS) = deferredConfiguration.groupEventWake else {
+            Issue.record("Expected deferred NATS group wake configuration")
+            return
+        }
+        #expect(deferredNATS.wakeDeferralDelayMilliseconds == 75)
+        values.removeValue(forKey: "IM_V2_GROUP_WAKE_DEFERRAL_MS")
+
+        values["IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"] = "protobuf_v1"
+        let binaryConfiguration = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(values)
+        )
+        guard case .nats(let binaryNATS) = binaryConfiguration.groupEventWake else {
+            Issue.record("Expected binary NATS group wake configuration")
+            return
+        }
+        #expect(binaryNATS.payloadEncoding == .protobufV1)
+
+        values["IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"] = "unknown"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+        values.removeValue(forKey: "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING")
+
+        values["IM_V2_GROUP_WAKE_DEFERRAL_MS"] = "1001"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_GROUP_WAKE_DEFERRAL_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+        values.removeValue(forKey: "IM_V2_GROUP_WAKE_DEFERRAL_MS")
 
         values.removeValue(forKey: "IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("Hybrid durable wake cadence is independently bounded")
+    func validatesGroupEventWakePollInterval() throws {
+        var values = runtimeValues
+        values["IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS"] = "750"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(values)
+        ).groupEventWakePollIntervalMilliseconds == 750)
+
+        values["IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS"] = "0"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+        values["IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS"] = "2001"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
         }
     }
 
@@ -955,22 +1204,39 @@ struct V2GatewayRuntimeConfigurationTests {
 
         var values = runtimeValues
         values["IM_V2_DIRECT_ROOM_SHARD_ID"] = "rooms-00,rooms-01"
-        values["IM_V2_GROUP_ROOM_SHARD_ID"] = "groups-primary"
+        values["IM_V2_GROUP_ROOM_SHARD_ID"] = "groups-01,groups-00"
         values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
         [{"shard_id":"rooms-00","database_url":"postgres://v2:password@rooms-a/im_v2","schema":"im_v2"},
          {"shard_id":"rooms-01","database_url":"postgres://v2:password@rooms-b/im_v2","schema":"im_v2"},
-         {"shard_id":"groups-primary","database_url":"postgres://v2:password@control/im_v2","schema":"im_v2"}]
+         {"shard_id":"groups-00","database_url":"postgres://v2:password@groups-a/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-01","database_url":"postgres://v2:password@groups-b/im_v2","schema":"im_v2"}]
         """
         let configuration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(values)
         )
         #expect(configuration.roomShardStorage.map(\.shardID) == [
-            "rooms-00", "rooms-01", "groups-primary",
+            "rooms-00", "rooms-01", "groups-00", "groups-01",
         ])
+        #expect(configuration.groupRoomShardIDs == ["groups-00", "groups-01"])
 
         values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
         [{"shard_id":"rooms-00","database_url":"postgres://v2:password@rooms-a/im_v2","schema":"im_v2"},
-         {"shard_id":"groups-primary","database_url":"postgres://v2:password@control/im_v2","schema":"im_v2"}]
+         {"shard_id":"rooms-01","database_url":"postgres://v2:password@rooms-b/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-00","database_url":"postgres://v2:password@groups-a/im_v2","schema":"im_v2"}]
+        """
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+            "IM_V2_ROOM_SHARD_STORES_JSON"
+        )) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(values)
+            )
+        }
+
+        values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
+        [{"shard_id":"rooms-00","database_url":"postgres://v2:password@rooms-a/im_v2","schema":"room_00"},
+         {"shard_id":"rooms-01","database_url":"postgres://v2:password@rooms-b/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-00","database_url":"postgres://v2:password@groups-a/im_v2","schema":"im_v2"},
+         {"shard_id":"groups-01","database_url":"postgres://v2:password@groups-b/im_v2","schema":"im_v2"}]
         """
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
             "IM_V2_ROOM_SHARD_STORES_JSON"

@@ -1,0 +1,31 @@
+{
+  "name": "mixed-group-v1-base-500",
+  "seed": 20260830,
+  "roomWarmupTimeoutSeconds": 60,
+  "completionDrainSeconds": 60,
+  "postDrainHoldSeconds": 5,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 64,
+  "schedulerTicksPerSecond": 100,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 4,
+  "personas": [
+    {
+      "name": "group_sender",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "mixed_group_steady",
+      "durationSeconds": 15,
+      "messagesPerSecond": 500,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0.0
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
 import NIOCore
+import NIOEmbedded
 import Synchronization
 @testable import IMV2Server
 import Testing
@@ -130,6 +132,92 @@ struct V2GatewayByteStreamTests {
         try await stream.finish()
         #expect(!stream.submitGroupEventAvailable(preAuthentication))
         #expect(fastRecorder.count == 2)
+    }
+
+    @Test("NIO group batch submission retains authentication and transport lifecycle fences")
+    func nioGroupBatchSubmissionIsLifecycleFenced() async throws {
+        let limits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: limits)
+        let connectionID = UUID()
+        let stream = V2GatewayByteStream(
+            frameLimits: limits,
+            session: .init(
+                limits: try .init(maximumInFlightRequests: 1),
+                authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()
+            ),
+            handler: ByteStreamCommandFake(),
+            connectionID: connectionID,
+            registry: registry
+        )
+        let channel = EmbeddedChannel()
+        _ = try await channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1))
+        let writer = V2NIOGatewayForegroundWriter(
+            channel: channel,
+            scheduler: .init()
+        )
+        #expect(await stream.attachNIOTransport(
+            deviceRevocationHandler: {},
+            outboundWriter: { _ in },
+            foregroundWriter: writer
+        ))
+
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000cf3")
+        let prepared = try #require(V2PreparedGatewayGroupEventAvailable(
+            roomID: roomID,
+            highWatermark: 1,
+            directEvent: nil,
+            frameLimits: limits,
+            protocolVersion: protocolVersion
+        ))
+        #expect(stream.prepareNIOGroupEventAvailable(prepared) == nil)
+
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+        await registry.subscribeForegroundGroup(
+            stream,
+            connectionID: connectionID,
+            roomID: roomID
+        )
+
+        let direct = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 2,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000cf4"),
+            roomSequence: 2,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [try .init("user-a")]
+        )
+        let publisher = V2LocalGroupEventWakePublisher(registry: registry)
+        #expect(publisher.publishForegroundDirectEventImmediately(direct))
+        channel.embeddedEventLoop.run()
+        let outboundCandidate = try channel.readOutbound(as: ByteBuffer.self)
+        let outbound = try #require(outboundCandidate)
+        #expect(
+            try decode(Data(outbound.readableBytesView))
+                .groupEventAvailable.roomSequence == 2
+        )
+
+        try await stream.finish()
+        #expect(stream.prepareNIOGroupEventAvailable(prepared) == nil)
+        writer.finish()
+        #expect(try channel.finish().isClean)
     }
 
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
@@ -465,6 +553,179 @@ struct V2GatewayByteStreamTests {
         await registry.notifyForegroundDirectEvent(otherRecipient)
         try await Task.sleep(for: .milliseconds(20))
         #expect(await recorder.count() == 1)
+    }
+
+    @Test("a group live payload is routed only to the exact authorized membership epoch")
+    func routesGroupLivePayloadOnlyToMatchingMembershipRevision() async throws {
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: frameLimits)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c12")
+        let recorders = [OutboundFrameRecorder(), OutboundFrameRecorder()]
+        let revisions: [UInt64] = [7, 6]
+        var streams: [V2GatewayByteStream] = []
+        var connectionIDs: [UUID] = []
+
+        for index in recorders.indices {
+            let connectionID = UUID()
+            let stream = V2GatewayByteStream(
+                frameLimits: frameLimits,
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+                handler: ByteStreamCommandFake(),
+                connectionID: connectionID,
+                registry: registry
+            )
+            let recorder = recorders[index]
+            await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
+            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+            await registry.subscribeForegroundGroup(
+                stream,
+                connectionID: connectionID,
+                roomID: roomID,
+                membershipRevision: revisions[index]
+            )
+            streams.append(stream)
+            connectionIDs.append(connectionID)
+        }
+
+        let group = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 52,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e12"),
+            roomSequence: 52,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [],
+            groupMembershipRevision: 7,
+            acceptedMembershipRevision: 7
+        )
+        #expect(V2PreparedGatewayGroupEventAvailable(
+            groupEvents: [group],
+            frameLimits: frameLimits
+        ) != nil)
+        await registry.notifyForegroundGroupEvents([group])
+
+        let frame = try #require(await recorders[0].waitForFirst())
+        let available = try decode(frame).groupEventAvailable
+        #expect(available.roomSequence == 0)
+        #expect(available.liveEvents.map(\.roomSequence) == [52])
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await recorders[0].count() == 1)
+        #expect(await recorders[1].count() == 0)
+
+        // Updating one subscription invalidates the immutable room snapshot.
+        // The next publication must rebuild it once and include the newly
+        // matching stream without weakening the revision fence above.
+        await registry.subscribeForegroundGroup(
+            streams[1],
+            connectionID: connectionIDs[1],
+            roomID: roomID,
+            membershipRevision: 7
+        )
+        let nextGroup = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 53,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e13"),
+            roomSequence: 53,
+            projectionKind: "message",
+            payload: Data(#"{"kind":"message"}"#.utf8),
+            recipientUserIDs: [],
+            groupMembershipRevision: 7,
+            acceptedMembershipRevision: 7
+        )
+        await registry.notifyForegroundGroupEvents([nextGroup])
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await recorders[0].count() == 2)
+        #expect(await recorders[1].count() == 1)
+    }
+
+    @Test("one shared group batch serves compressed and legacy connection contracts")
+    func groupLiveBatchSelectsNegotiatedCompressionVariant() async throws {
+        let frameLimits = try V2FrameLimits(
+            maximumPayloadBytes: 4_096,
+            acceptedVersions: [0, protocolVersion]
+        )
+        let registry = V2DeviceConnectionRegistry(
+            foregroundFrameLimits: frameLimits,
+            foregroundFrameCompression: .zlib,
+            foregroundCompressionThresholdBytes: 1
+        )
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000c22")
+        let recorders = [OutboundFrameRecorder(), OutboundFrameRecorder()]
+
+        for index in recorders.indices {
+            let connectionID = UUID()
+            let stream = V2GatewayByteStream(
+                frameLimits: frameLimits,
+                session: .init(
+                    limits: try .init(maximumInFlightRequests: 1),
+                    authenticator: ByteStreamAuthFake(),
+                    capabilityProfile: "base",
+                    supportedFrameCompression: .zlib,
+                    commandAdmission: V2AllowingGatewayCommandAdmission()
+                ),
+                handler: ByteStreamCommandFake(),
+                connectionID: connectionID,
+                registry: registry
+            )
+            let recorder = recorders[index]
+            await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
+            var hello = IMV2Envelope()
+            hello.requestID = 1
+            hello.clientHello = .init()
+            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.supportedCapabilityProfiles = ["base"]
+            if index == 0 { hello.clientHello.supportedFrameCompressions = [.zlib] }
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var authenticate = IMV2Envelope()
+            authenticate.requestID = 2
+            authenticate.protocolVersion = UInt32(protocolVersion)
+            authenticate.authenticate = .init()
+            authenticate.authenticate.accessToken = "opaque"
+            authenticate.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
+            await registry.subscribeForegroundGroup(
+                stream,
+                connectionID: connectionID,
+                roomID: roomID,
+                membershipRevision: 9
+            )
+        }
+
+        let event = try V2DirectRoomLiveEvent(
+            roomID: roomID,
+            highWatermark: 61,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000e22"),
+            roomSequence: 61,
+            projectionKind: "message",
+            payload: Data(repeating: 0x61, count: 1_500),
+            recipientUserIDs: [],
+            groupMembershipRevision: 9,
+            acceptedMembershipRevision: 9
+        )
+        await registry.notifyForegroundGroupEvents([event])
+
+        let compressedBytes = try #require(await recorders[0].waitForFirst())
+        let plainBytes = try #require(await recorders[1].waitForFirst())
+        let compressedFrame = try V2FrameCodec.decodeExactlyOne(
+            compressedBytes,
+            limits: frameLimits
+        )
+        let plainFrame = try V2FrameCodec.decodeExactlyOne(plainBytes, limits: frameLimits)
+        #expect(compressedFrame.flags.contains(.compressed))
+        #expect(plainFrame.flags.isEmpty)
+        #expect(compressedBytes.count < plainBytes.count)
+        #expect(try V2ServerProtobufFrameCodec.decode(
+            compressedFrame,
+            compression: .zlib
+        ).groupEventAvailable.liveEvents.map(\.roomSequence) == [61])
+        #expect(try V2ServerProtobufFrameCodec.decode(plainFrame)
+            .groupEventAvailable.liveEvents.map(\.roomSequence) == [61])
     }
 
     @Test("a direct live payload reaches every small-fanout local stream exactly once")

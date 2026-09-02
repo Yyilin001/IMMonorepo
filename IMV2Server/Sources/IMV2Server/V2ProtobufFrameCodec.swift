@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Compression
 import IMV2Core
 import SwiftProtobuf
 
@@ -9,6 +10,10 @@ public enum V2ServerProtobufFrameCodecError: Error, Equatable, Sendable {
     case requestIDMismatch
     case protocolVersionMismatch
     case unsupportedFrameFlags
+    case unsupportedCompression
+    case uncompressedPayloadTooLarge
+    case compressionFailed
+    case decompressionFailed
     case invalidMessageDepthLimit
 }
 
@@ -18,28 +23,123 @@ public enum V2ServerProtobufFrameCodec {
     /// This is a wire-safety limit, independent of the frame byte limit. The
     /// production gateway always supplies its explicit runtime value.
     public static let defaultMaximumMessageDepth = 32
+    public static let defaultMaximumUncompressedPayloadBytes = 65_536
+    public static let defaultCompressionThresholdBytes = 1_024
 
-    public static func encode(_ envelope: IMV2Envelope, frameVersion: UInt8, flags: V2FrameFlags = []) throws -> V2Frame {
+    public static func encode(
+        _ envelope: IMV2Envelope,
+        frameVersion: UInt8,
+        flags: V2FrameFlags = [],
+        compression: V2NegotiatedFrameCompression? = nil,
+        maximumUncompressedPayloadBytes: Int = defaultMaximumUncompressedPayloadBytes,
+        compressionThresholdBytes: Int = defaultCompressionThresholdBytes,
+        maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio,
+        bindRequestIDToHeader: Bool = false
+    ) throws -> V2Frame {
         guard flags.isEmpty else { throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags }
+        guard maximumUncompressedPayloadBytes > 0,
+              compressionThresholdBytes >= 0,
+              maximumExpansionRatio > 0
+        else {
+            throw V2ServerProtobufFrameCodecError.compressionFailed
+        }
         let command = try command(for: envelope)
         try validate(envelope: envelope, frameVersion: frameVersion)
-        return .init(version: frameVersion, flags: flags, command: command, requestID: envelope.requestID, payload: try envelope.serializedData())
+        if bindRequestIDToHeader {
+            guard frameVersion >= 21, command == .groupEventPage else {
+                throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
+            }
+        }
+        var wireEnvelope = envelope
+        var outputFlags: V2FrameFlags = []
+        if bindRequestIDToHeader {
+            wireEnvelope.requestID = 0
+            outputFlags.insert(.headerBoundRequestID)
+        }
+        let uncompressed = try wireEnvelope.serializedData()
+        guard uncompressed.count <= maximumUncompressedPayloadBytes else {
+            throw V2ServerProtobufFrameCodecError.uncompressedPayloadTooLarge
+        }
+        guard compression != nil, uncompressed.count >= compressionThresholdBytes else {
+            return .init(version: frameVersion, flags: outputFlags, command: command, requestID: envelope.requestID, payload: uncompressed)
+        }
+        let compressed: Data
+        do {
+            compressed = try V2ZlibFrameCompression.compress(
+                uncompressed,
+                maximumInputBytes: maximumUncompressedPayloadBytes
+            )
+        } catch {
+            throw V2ServerProtobufFrameCodecError.compressionFailed
+        }
+        guard compressed.count < uncompressed.count,
+              compressed.count <= Int.max / maximumExpansionRatio,
+              uncompressed.count <= compressed.count * maximumExpansionRatio
+        else {
+            return .init(version: frameVersion, flags: outputFlags, command: command, requestID: envelope.requestID, payload: uncompressed)
+        }
+        outputFlags.insert(.compressed)
+        return .init(
+            version: frameVersion,
+            flags: outputFlags,
+            command: command,
+            requestID: envelope.requestID,
+            payload: compressed
+        )
     }
 
     public static func decode(
         _ frame: V2Frame,
-        maximumMessageDepth: Int = defaultMaximumMessageDepth
+        maximumMessageDepth: Int = defaultMaximumMessageDepth,
+        compression: V2NegotiatedFrameCompression? = nil,
+        maximumUncompressedPayloadBytes: Int = defaultMaximumUncompressedPayloadBytes,
+        maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio
     ) throws -> IMV2Envelope {
-        guard frame.flags.isEmpty else { throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags }
+        let knownFlags: V2FrameFlags = [.compressed, .headerBoundRequestID]
+        guard frame.flags.subtracting(knownFlags).isEmpty else {
+            throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
+        }
+        if frame.flags.contains(.headerBoundRequestID) {
+            guard frame.version >= 21, frame.command == .groupEventPage else {
+                throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
+            }
+        }
         guard maximumMessageDepth > 0 else { throw V2ServerProtobufFrameCodecError.invalidMessageDepthLimit }
-        let envelope: IMV2Envelope
+        let payload: Data
+        if frame.flags.contains(.compressed) {
+            guard compression != nil else { throw V2ServerProtobufFrameCodecError.unsupportedCompression }
+            do {
+                payload = try V2ZlibFrameCompression.decompress(
+                    frame.payload,
+                    maximumOutputBytes: maximumUncompressedPayloadBytes,
+                    maximumExpansionRatio: maximumExpansionRatio
+                )
+            } catch {
+                throw V2ServerProtobufFrameCodecError.decompressionFailed
+            }
+        } else {
+            guard frame.payload.count <= maximumUncompressedPayloadBytes else {
+                throw V2ServerProtobufFrameCodecError.uncompressedPayloadTooLarge
+            }
+            payload = frame.payload
+        }
+        var envelope: IMV2Envelope
         do {
             var options = BinaryDecodingOptions()
             options.messageDepthLimit = maximumMessageDepth
-            envelope = try .init(serializedBytes: frame.payload, options: options)
+            envelope = try .init(serializedBytes: payload, options: options)
         }
         catch { throw V2ServerProtobufFrameCodecError.payloadDecodeFailed }
-        guard envelope.requestID == frame.requestID else { throw V2ServerProtobufFrameCodecError.requestIDMismatch }
+        if frame.flags.contains(.headerBoundRequestID) {
+            guard envelope.requestID == 0 else {
+                throw V2ServerProtobufFrameCodecError.requestIDMismatch
+            }
+            envelope.requestID = frame.requestID
+        } else {
+            guard envelope.requestID == frame.requestID else {
+                throw V2ServerProtobufFrameCodecError.requestIDMismatch
+            }
+        }
         try validate(envelope: envelope, frameVersion: frame.version)
         guard try command(for: envelope) == frame.command else { throw V2ServerProtobufFrameCodecError.headerCommandMismatch }
         return envelope

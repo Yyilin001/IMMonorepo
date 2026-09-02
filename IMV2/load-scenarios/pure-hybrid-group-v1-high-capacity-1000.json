@@ -1,0 +1,31 @@
+{
+  "name": "pure-hybrid-group-v1-high-capacity-1000",
+  "seed": 20260831,
+  "roomWarmupTimeoutSeconds": 60,
+  "completionDrainSeconds": 60,
+  "postDrainHoldSeconds": 5,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 128,
+  "schedulerTicksPerSecond": 100,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 8,
+  "personas": [
+    {
+      "name": "hybrid_group_sender",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "pure_hybrid_group_high_capacity",
+      "durationSeconds": 30,
+      "messagesPerSecond": 6000,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0.0
+    }
+  ]
+}

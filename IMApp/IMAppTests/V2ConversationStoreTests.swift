@@ -1835,6 +1835,50 @@ struct V2ConversationStoreTests {
         #expect(await synchronizer.unsubscribedRoomIDs() == ["room-hybrid"])
     }
 
+    @Test func metadataWakeDoesNotPullWhenAContiguousLiveBatchArrivesWithinGrace() async throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let synchronizer = V2SubscribedHybridGroupSynchronizerFake(
+            appliesLiveEvents: true
+        )
+        let store = makeConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-hybrid-grace",
+            kind: .group,
+            activeHybridGroupSynchronizer: synchronizer
+        )
+        let event = V2ClientGroupEvent(
+            sourceEventID: try .init("00000000-0000-0000-0000-000000000e81"),
+            roomSequence: 8,
+            projectionKind: "message",
+            payload: Data([1])
+        )
+
+        let task = Task { await store.pollVisibleHybridGroupEvents() }
+        await synchronizer.waitForSynchronizationCount(1)
+        await synchronizer.waitForWakeCount(1)
+        await synchronizer.emitWake(.init(
+            roomID: "room-hybrid-grace",
+            highWatermark: 8
+        ))
+        await synchronizer.waitForWakeCount(2)
+        await synchronizer.emitWake(.init(
+            roomID: "room-hybrid-grace",
+            highWatermark: 8,
+            liveEvents: [event]
+        ))
+        await synchronizer.waitForWakeCount(3)
+
+        #expect(await synchronizer.synchronizations() == 1)
+        task.cancel()
+        await synchronizer.emitWake(.init(
+            roomID: "room-hybrid-grace",
+            highWatermark: 8
+        ))
+        await task.value
+    }
+
     @Test func messageSearchStorePublishesHitsAndPreservesTheNextPageCursor() async throws {
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000f01")
         let messageID: MessageID = try .init("00000000-0000-0000-0000-000000000f02")
@@ -2020,6 +2064,84 @@ struct V2ConversationStoreTests {
         // never enters a FORBIDDEN network loop.
         #expect(try await synchronizer.subscribe(roomID: roomID.rawValue) == .notHybridRoom)
         #expect(await subscriptionTransport.requestCount() == 1)
+    }
+
+    @Test func contiguousHybridLiveBatchCommitsInOneDurableCursorStep() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000f31")
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appending(path: "im-v2-live-batch-\(UUID().uuidString).sqlite")
+        let localStore = try await V2LocalStoreBootstrapper(
+            bindingStore: V2RuntimeInstallationBindingStoreFake(),
+            makeBinding: {
+                .init(value: UUID(uuidString: "00000000-0000-0000-0000-000000000f32")!)
+            }
+        ).open(databaseURL: databaseURL)
+        let membership = try V2ClientSyncRecord(
+            sequence: 1,
+            sourceEventID: .init("00000000-0000-0000-0000-000000000f33"),
+            projectionKind: "membership",
+            payload: JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed",
+                "room_id": roomID.rawValue,
+                "title": "批量实时事件大群",
+                "owner_user_id": "00000000-0000-0000-0000-000000000f34",
+                "target_user_id": "00000000-0000-0000-0000-000000000f35",
+                "action": "add",
+                "membership_revision": 2,
+                "delivery_mode": "large_group_hybrid",
+                "created_at_ms": 1_750_000_000_000,
+                "server_created_at_ms": 1_750_000_001_000,
+            ])
+        )
+        _ = try await localStore.apply(.init(
+            generation: 1,
+            records: [membership],
+            nextSyncToken: .init("live-batch-token"),
+            receipt: .init("live-batch-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+
+        let events = try (UInt64(1) ... 2).map { sequence in
+            V2ClientGroupEvent(
+                sourceEventID: try .init(
+                    String(format: "00000000-0000-0000-0000-%012llu", 0xf40 + sequence)
+                ),
+                roomSequence: sequence,
+                projectionKind: "message",
+                payload: try JSONSerialization.data(withJSONObject: [
+                    "event_type": "message.accepted",
+                    "message_id": String(
+                        format: "00000000-0000-0000-0000-%012llu",
+                        0xf50 + sequence
+                    ),
+                    "room_id": roomID.rawValue,
+                    "room_sequence": sequence,
+                    "message_revision": 1,
+                    "sender_user_id": "00000000-0000-0000-0000-000000000f36",
+                    "text": "live-\(sequence)",
+                    "mention_user_ids": [],
+                    "mentions_everyone": false,
+                    "server_created_at_ms": 1_750_000_002_000 + sequence,
+                ])
+            )
+        }
+        let eventTransport = V2UnusedGroupEventTransportFake()
+        let synchronizer = V2RealtimeActiveHybridGroupSynchronizer(
+            groupEventSync: .init(transport: eventTransport, store: localStore),
+            foregroundGroupPreview: .init(transport: eventTransport, store: localStore),
+            localStore: localStore,
+            subscriptionTransport: V2ForbiddenGroupEventSubscriptionTransportFake(),
+            wakeSource: V2UnusedGroupEventWakeSourceFake()
+        )
+
+        #expect(try await synchronizer.applyLiveEvent(.init(
+            roomID: roomID.rawValue,
+            highWatermark: 2,
+            liveEvents: events
+        )))
+        #expect(try await localStore.groupEventCursor(roomID: roomID) == 2)
+        #expect(try await localStore.messages(in: roomID).map(\.text) == ["live-1", "live-2"])
     }
 }
 
@@ -2227,13 +2349,18 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
 }
 
 private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
+    private let appliesLiveEvents: Bool
     private var synchronizationCount = 0
     private var wakeCount = 0
     private var synchronizationWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var wakeWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    private var wakeContinuation: CheckedContinuation<V2ActiveHybridGroupWake, Never>?
+    private var wakeContinuation: CheckedContinuation<V2ActiveHybridGroupWake, Error>?
     private var subscribed: [String] = []
     private var unsubscribed: [String] = []
+
+    init(appliesLiveEvents: Bool = false) {
+        self.appliesLiveEvents = appliesLiveEvents
+    }
 
     func synchronizeOnePage(roomID _: String) -> V2ActiveHybridGroupSyncOutcome {
         synchronizationCount += 1
@@ -2246,12 +2373,24 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
         return .subscribed(highWatermark: 0)
     }
 
-    func applyLiveEvent(_: V2ActiveHybridGroupWake) -> Bool { false }
+    func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) -> Bool {
+        appliesLiveEvents && !wake.liveEvents.isEmpty
+    }
     func nextWake() async throws -> V2ActiveHybridGroupWake {
         try Task.checkCancellation()
         wakeCount += 1
         resumeWakeWaiters()
-        return await withCheckedContinuation { wakeContinuation = $0 }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    wakeContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelPendingWake() }
+        }
     }
 
     func unsubscribe(roomID: String) { unsubscribed.append(roomID) }
@@ -2274,6 +2413,13 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
 
     func subscribedRoomIDs() -> [String] { subscribed }
     func unsubscribedRoomIDs() -> [String] { unsubscribed }
+    func synchronizations() -> Int { synchronizationCount }
+
+    private func cancelPendingWake() {
+        let continuation = wakeContinuation
+        wakeContinuation = nil
+        continuation?.resume(throwing: CancellationError())
+    }
 
     private func resumeSynchronizationWaiters() {
         let ready = synchronizationWaiters.filter { $0.0 <= synchronizationCount }

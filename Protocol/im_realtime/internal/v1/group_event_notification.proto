@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package im.realtime.internal.v1;
+
+option swift_prefix = "IMV2Internal";
+
+// Process-to-process Core NATS acceleration payload. PostgreSQL room events
+// remain authoritative; malformed or unsupported notifications are discarded
+// or degraded to a cursor wake by the receiving Gateway.
+message GroupEventNotification {
+  bytes room_id = 1;
+  uint64 high_watermark = 2;
+
+  oneof body {
+    Wake wake = 3;
+    DirectEvent direct_event = 4;
+    GroupEventBatch group_events = 5;
+  }
+}
+
+message Wake {}
+
+message DirectEvent {
+  bytes source_event_id = 1;
+  uint64 room_sequence = 2;
+  string projection_kind = 3;
+  bytes payload = 4;
+  repeated bytes recipient_user_ids = 5;
+  optional uint64 group_membership_revision = 6;
+  optional bytes excluded_connection_id = 7;
+}
+
+message GroupEventBatch {
+  uint64 membership_revision = 1;
+  repeated GroupEvent events = 2;
+}
+
+message GroupEvent {
+  bytes source_event_id = 1;
+  uint64 room_sequence = 2;
+  string projection_kind = 3;
+  bytes payload = 4;
+}

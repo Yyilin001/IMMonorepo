@@ -11,33 +11,55 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     public init(database: any Database) { self.database = database }
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2GroupEventWakeLease] {
-        guard let sql = database as? any SQLDatabase,
-              leaseDuration > 0,
+        guard leaseDuration > 0,
               limit > 0
         else { throw V2GroupEventWakeStoreError.corruptPersistenceState }
         let token = UUID()
         let expiry = now.addingTimeInterval(leaseDuration)
-        let rows = try await sql.raw("""
-            WITH candidates AS (
-                SELECT room_id
-                FROM im_v2.group_event_wake_outbox
-                WHERE (state = 'pending' AND next_attempt_at <= \(bind: now))
-                   OR (state = 'leased' AND lease_expires_at <= \(bind: now))
-                ORDER BY next_attempt_at, updated_at
-                LIMIT \(bind: limit)
-                FOR UPDATE SKIP LOCKED
-            )
-            UPDATE im_v2.group_event_wake_outbox AS wake
-            SET state = 'leased',
-                lease_token = \(bind: token),
-                lease_expires_at = \(bind: expiry),
-                attempt_count = wake.attempt_count + 1,
-                updated_at = \(bind: now)
-            FROM candidates
-            WHERE wake.room_id = candidates.room_id
-            RETURNING wake.room_id, wake.target_room_sequence, wake.revision,
-                      wake.attempt_count
-            """).all(decoding: GroupEventWakeLeaseRow.self)
+        let rows = try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2GroupEventWakeStoreError.corruptPersistenceState
+            }
+            try await sql.raw("""
+                WITH candidates AS (
+                    SELECT room_id
+                    FROM im_v2.group_event_wake_outbox
+                    WHERE (state = 'pending' AND next_attempt_at <= \(bind: now))
+                       OR (state = 'leased' AND lease_expires_at <= \(bind: now))
+                    ORDER BY next_attempt_at, updated_at
+                    LIMIT \(bind: limit)
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE im_v2.group_event_wake_outbox AS wake
+                SET state = 'leased',
+                    lease_token = \(bind: token),
+                    lease_expires_at = \(bind: expiry),
+                    attempt_count = wake.attempt_count + 1,
+                    updated_at = \(bind: now)
+                FROM candidates
+                WHERE wake.room_id = candidates.room_id
+                """).run()
+
+            // This deliberately is a second READ COMMITTED statement. A
+            // message transaction that committed before the lease lock became
+            // ours is now visible here. A transaction that is still appending
+            // must update the leased outbox row before it can commit, which
+            // replaces this revision and preserves another wake. Reading the
+            // room counter in the claim UPDATE's original statement snapshot
+            // would leave a narrow lost-watermark race after lock waits.
+            return try await sql.raw("""
+                SELECT wake.room_id,
+                       GREATEST(wake.target_room_sequence, room.room_sequence)
+                           AS target_room_sequence,
+                       wake.revision,
+                       wake.attempt_count
+                FROM im_v2.group_event_wake_outbox AS wake
+                JOIN im_v2.rooms AS room ON room.room_id = wake.room_id
+                WHERE wake.lease_token = \(bind: token)
+                  AND wake.state = 'leased'
+                ORDER BY wake.next_attempt_at, wake.updated_at
+                """).all(decoding: GroupEventWakeLeaseRow.self)
+        }
         return try rows.map { row in
             guard row.targetRoomSequence > 0, row.revision > 0, row.attemptCount > 0 else {
                 throw V2GroupEventWakeStoreError.corruptPersistenceState

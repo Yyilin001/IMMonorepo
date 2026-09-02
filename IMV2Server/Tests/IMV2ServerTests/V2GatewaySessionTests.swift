@@ -6,6 +6,190 @@ import Testing
 struct V2GatewaySessionTests {
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
 
+    @Test("zlib is negotiated explicitly and only group pages use the compressed response path")
+    func negotiatesBoundedGroupPageCompression() async throws {
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            supportedFrameCompression: .zlib,
+            compressionThresholdBytes: 1,
+            maximumCompressionExpansionRatio: 1_024,
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 0) }
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.supportedFrameCompressions = [.zlib]
+        let helloResponse = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
+        )
+        #expect(helloResponse.flags.isEmpty)
+        #expect(
+            try V2ServerProtobufFrameCodec.decode(helloResponse)
+                .serverHello.selectedFrameCompression == .zlib
+        )
+
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        let authenticated = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
+        )
+        #expect(authenticated.flags.isEmpty)
+        #expect(
+            try V2ServerProtobufFrameCodec.decode(authenticated)
+                .authenticated.selectedFrameCompression == .zlib
+        )
+
+        var request = IMV2Envelope()
+        request.requestID = 3
+        request.protocolVersion = UInt32(protocolVersion)
+        request.groupEventPull = .init()
+        request.groupEventPull.roomID = "group-compression-test"
+        let response = try await session.receiveAuthenticated(
+            try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
+            handler: GroupPageCommandFake()
+        )
+        #expect(response.flags == [.compressed])
+        #expect(
+            try V2ServerProtobufFrameCodec.decode(
+                response,
+                compression: .zlib,
+                maximumExpansionRatio: 1_024
+            )
+                .groupEventPage.events.count == 1
+        )
+    }
+
+    @Test("authenticated group-page responses reuse the prepared payload without caching authorization")
+    func reusesPreparedGroupPagePayload() async throws {
+        let cache = V2PreparedGroupEventPageCache(configuration: .init(
+            maximumEntries: 8,
+            maximumBytes: 1_048_576,
+            shardCount: 4
+        ))
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            preparedGroupEventPageCache: cache,
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 0) }
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
+        )
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
+        )
+
+        func pull(_ requestID: UInt64) async throws -> V2Frame {
+            var request = IMV2Envelope()
+            request.requestID = requestID
+            request.protocolVersion = UInt32(protocolVersion)
+            request.groupEventPull = .init()
+            request.groupEventPull.roomID = "group-compression-test"
+            return try await session.receiveAuthenticated(
+                try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
+                handler: GroupPageCommandFake()
+            )
+        }
+
+        let first = try await pull(3)
+        let second = try await pull(4)
+        #expect(first.payload == second.payload)
+        #expect(first.flags == [.headerBoundRequestID])
+        #expect(second.flags == [.headerBoundRequestID])
+        #expect(try V2ServerProtobufFrameCodec.decode(first).requestID == 3)
+        #expect(try V2ServerProtobufFrameCodec.decode(second).requestID == 4)
+        #expect(cache.snapshot().hits == 1)
+        #expect(cache.snapshot().misses == 1)
+    }
+
+    @Test("protocol v21 dispatches authorized prepared pages without rebuilding the ordinary envelope")
+    func dispatchesPreparedGroupPageHandler() async throws {
+        let cache = V2PreparedGroupEventPageCache(configuration: .init(
+            maximumEntries: 8,
+            maximumBytes: 1_048_576,
+            shardCount: 1
+        ))
+        let handler = PreparedGroupPageCommandFake()
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            preparedGroupEventPageCache: cache,
+            commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 0) }
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
+        )
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(
+                authenticate,
+                frameVersion: protocolVersion
+            )
+        )
+
+        func pull(_ requestID: UInt64) async throws -> V2Frame {
+            var request = IMV2Envelope()
+            request.requestID = requestID
+            request.protocolVersion = UInt32(protocolVersion)
+            request.groupEventPull = .init()
+            request.groupEventPull.roomID = PreparedGroupPageCommandFake.roomID.rawValue
+            request.groupEventPull.pageSize = 100
+            return try await session.receiveAuthenticated(
+                try V2ServerProtobufFrameCodec.encode(
+                    request,
+                    frameVersion: protocolVersion
+                ),
+                handler: handler
+            )
+        }
+
+        let first = try await pull(3)
+        let second = try await pull(4)
+        let decoded = try V2ServerProtobufFrameCodec.decode(second)
+
+        #expect(first.payload == second.payload)
+        #expect(decoded.requestID == 4)
+        #expect(decoded.groupEventPage.events.map(\.roomSequence) == [1])
+        #expect(await handler.preparedCalls == 2)
+        #expect(await handler.ordinaryCalls == 0)
+        #expect(cache.snapshot().misses == 1)
+        #expect(cache.snapshot().hits == 1)
+    }
+
     @Test("hello then authenticated device identity is the only session identity")
     func bootstrapAuthentication() async throws {
         let auth = GatewayAuthFake(userID: try .init("user-a"))
@@ -171,5 +355,87 @@ private struct GatewayCommandFake: V2GatewayCommandHandler {
     func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         var response = IMV2Envelope(); response.error = .init(); response.error.code = "UNAVAILABLE"; response.error.retryable = true
         return response
+    }
+}
+
+private struct GroupPageCommandFake: V2GatewayCommandHandler {
+    func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        var response = IMV2Envelope()
+        response.groupEventPage = .init()
+        response.groupEventPage.roomID = "group-compression-test"
+        var event = IMV2GroupEvent()
+        event.sourceEventID = "00000000-0000-0000-0000-000000000003"
+        event.roomSequence = 1
+        event.projectionKind = "message"
+        event.payload = Data(repeating: 0x63, count: 8_192)
+        response.groupEventPage.events = [event]
+        return response
+    }
+}
+
+private actor PreparedGroupPageCommandFake:
+    V2GatewayCommandHandler,
+    V2PreparedGroupEventCommandHandling {
+    static let roomID = try! RoomID("00000000-0000-0000-0000-000000000901")
+    private(set) var ordinaryCalls = 0
+    private(set) var preparedCalls = 0
+
+    func handle(
+        envelope _: IMV2Envelope,
+        identity _: V2AuthenticatedConnection
+    ) async throws -> IMV2Envelope {
+        ordinaryCalls += 1
+        var response = IMV2Envelope()
+        response.error = .init()
+        response.error.code = "ORDINARY_PATH_USED"
+        return response
+    }
+
+    func handlePreparedGroupEventPull(
+        _ request: IMV2GroupEventPull,
+        identity _: V2AuthenticatedConnection,
+        originatingConnectionID _: UUID?,
+        context: V2PreparedGroupEventCommandContext
+    ) async throws -> V2PreparedGroupEventGatewayResponse {
+        preparedCalls += 1
+        let key = V2PreparedGroupEventPageCache.PageKey(
+            protocolVersion: context.frameVersion,
+            roomID: request.roomID,
+            firstEventID: "00000000-0000-0000-0000-000000000902",
+            lastEventID: "00000000-0000-0000-0000-000000000902",
+            firstRoomSequence: 1,
+            lastRoomSequence: 1,
+            eventCount: 1,
+            nextRoomSequence: 1,
+            hasMore: false
+        )
+        let frame = try context.cache.frame(
+            for: key,
+            requestID: context.requestID,
+            compression: context.compression,
+            maximumUncompressedPayloadBytes: context.maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: context.compressionThresholdBytes,
+            maximumExpansionRatio: context.maximumExpansionRatio
+        ) {
+            var response = IMV2Envelope()
+            response.requestID = context.requestID
+            response.protocolVersion = UInt32(context.frameVersion)
+            response.groupEventPage = .init()
+            response.groupEventPage.roomID = request.roomID
+            response.groupEventPage.nextRoomSequence = 1
+            var event = IMV2GroupEvent()
+            event.sourceEventID = key.firstEventID
+            event.roomSequence = 1
+            event.projectionKind = "message"
+            event.payload = Data("payload".utf8)
+            response.groupEventPage.events = [event]
+            return response
+        }
+        return .prepared(.init(
+            frame: frame,
+            roomID: Self.roomID,
+            nextRoomSequence: 1,
+            hasMore: false
+        ))
     }
 }
