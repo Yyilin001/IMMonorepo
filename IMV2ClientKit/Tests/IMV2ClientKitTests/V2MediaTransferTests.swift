@@ -78,7 +78,7 @@ struct V2MediaTransferTests {
         let expiry = Date(timeIntervalSince1970: 1_750_000_020)
         let envelope = try V2MediaDownloadTargetEnvelope(
             url: #require(URL(string: "https://provider.invalid/object")),
-            headers: ["x-provider": "opaque"],
+            headers: ["x-oss-meta-provider": "opaque"],
             expiresAt: expiry,
             expectedByteCount: 9
         )
@@ -106,7 +106,7 @@ struct V2MediaTransferTests {
         let target = try await resolver.resolveDownloadTarget(mediaID: .init("media"))
 
         #expect(target.url == providerURL)
-        #expect(target.headers == ["x-provider": "opaque"])
+        #expect(target.headers == ["x-oss-meta-provider": "opaque"])
         #expect(target.expectedByteCount == 9)
         let request = try #require(await transport.lastRequest())
         #expect(request.httpMethod == "GET")
@@ -191,7 +191,7 @@ struct V2MediaTransferTests {
         let expiry = Date(timeIntervalSince1970: 1_750_000_020)
         let envelope = try V2MediaUploadTargetEnvelope(
             url: #require(URL(string: "https://provider.invalid/upload")),
-            headers: ["x-provider": "opaque"],
+            headers: ["x-oss-meta-provider": "opaque"],
             expiresAt: expiry,
             expectedByteCount: 4
         )
@@ -199,9 +199,9 @@ struct V2MediaTransferTests {
         let completionResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/media/complete"))
         let statusResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/media/upload-status"))
         let transport = SequencedEdgeTransport(responses: [
-            .success((try JSONEncoder().encode(envelope), try #require(HTTPURLResponse(url: uploadResponseURL, statusCode: 200, httpVersion: nil, headerFields: nil)))),
+            .success((try JSONEncoder().encode(envelope), try #require(HTTPURLResponse(url: uploadResponseURL, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))),
             .success((Data(), try #require(HTTPURLResponse(url: completionResponseURL, statusCode: 204, httpVersion: nil, headerFields: nil)))),
-            .success((try JSONEncoder().encode(V2MediaUploadStatusEnvelope(state: .available)), try #require(HTTPURLResponse(url: statusResponseURL, statusCode: 200, httpVersion: nil, headerFields: nil)))),
+            .success((try JSONEncoder().encode(V2MediaUploadStatusEnvelope(state: .available)), try #require(HTTPURLResponse(url: statusResponseURL, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))),
         ])
         let client = try V2HTTPMediaUploadEdgeClient(
             endpoint: #require(URL(string: "https://edge.invalid/v2/media")),
@@ -239,7 +239,7 @@ struct V2MediaTransferTests {
     }
 
     private func target(expiresAt: Date) throws -> V2ClientMediaTransferTarget {
-        try .init(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-media": "opaque"], expiresAt: expiresAt, expectedByteCount: 4)
+        try .init(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-oss-meta-media": "opaque"], expiresAt: expiresAt, expectedByteCount: 4)
     }
 }
 

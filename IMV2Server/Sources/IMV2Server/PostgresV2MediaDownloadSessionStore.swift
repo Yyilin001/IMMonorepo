@@ -28,37 +28,39 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
         let session = try mediaDownloadUUID(downloadSessionID)
         let token = makeUUID()
         let leaseExpiresAt = now.addingTimeInterval(leaseDuration)
-        return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            guard let grant = try await sql.raw("""
-                SELECT media_id, expires_at
-                FROM im_v2.media_download_grants
-                WHERE download_session_id = \(bind: session)
-                  AND user_id = \(bind: requester)
-                  AND device_id = \(bind: device)
-                  AND expires_at > \(bind: now)
-                  AND (state = 'pending' OR (state = 'claimed' AND lease_expires_at <= \(bind: now)))
-                FOR UPDATE
-                """).first(decoding: MediaDownloadGrantRow.self) else {
-                throw V2MediaDownloadSessionStoreError.sessionUnavailable
-            }
-            guard try await isCurrentlyAuthorized(mediaID: grant.mediaID, requester: requester, device: device, on: sql) else {
-                throw V2MediaDownloadSessionStoreError.sessionUnavailable
-            }
-            try await sql.raw("""
-                UPDATE im_v2.media_download_grants
-                SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: leaseExpiresAt), retry_count = retry_count + 1
-                WHERE download_session_id = \(bind: session)
-                """).run()
-            return try .init(
-                mediaID: .init(grant.mediaID.uuidString),
-                downloadSessionID: downloadSessionID,
-                expiresAt: grant.expiresAt,
-                claimToken: token
-            )
+        guard let sql = database as? any SQLDatabase else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        let authorization = V2PostgresMediaVisibilityAuthorization.predicate(
+            mediaID: "download_grant.media_id",
+            requesterUserID: requester,
+            deviceID: device
+        )
+        guard let grant = try await sql.raw("""
+            UPDATE im_v2.media_download_grants AS download_grant
+            SET state = 'claimed',
+                claim_token = \(bind: token),
+                lease_expires_at = \(bind: leaseExpiresAt),
+                retry_count = download_grant.retry_count + 1
+            WHERE download_grant.download_session_id = \(bind: session)
+              AND download_grant.user_id = \(bind: requester)
+              AND download_grant.device_id = \(bind: device)
+              AND download_grant.expires_at > \(bind: now)
+              AND (
+                  download_grant.state = 'pending'
+                  OR (download_grant.state = 'claimed'
+                      AND download_grant.lease_expires_at <= \(bind: now))
+              )
+              AND \(authorization)
+            RETURNING download_grant.media_id, download_grant.expires_at
+            """).first(decoding: MediaDownloadGrantRow.self)
+        else { throw V2MediaDownloadSessionStoreError.sessionUnavailable }
+        return try .init(
+            mediaID: .init(grant.mediaID.uuidString),
+            downloadSessionID: downloadSessionID,
+            expiresAt: grant.expiresAt,
+            claimToken: token
+        )
     }
 
     public func completeDownload(_ claim: V2ClaimedMediaDownload, now: Date) async throws {
@@ -83,14 +85,6 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
             """).run()
     }
 
-    private func isCurrentlyAuthorized(mediaID: UUID, requester: UUID, device: UUID, on sql: any SQLDatabase) async throws -> Bool {
-        try await V2PostgresMediaVisibilityAuthorization.isAuthorized(
-            mediaID: mediaID,
-            requesterUserID: requester,
-            deviceID: device,
-            on: sql
-        )
-    }
 }
 
 public enum V2MediaDownloadSessionStoreError: Error, Equatable, Sendable {

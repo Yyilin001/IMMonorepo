@@ -10,7 +10,6 @@ DESTINATION="${DESTINATION:-generic/platform=iOS Simulator}"
 EXPECTED_ACCOUNT_URL="${EXPECTED_DEBUG_V2_ACCOUNT_BASE_URL:-https://localhost:8443}"
 EXPECTED_GATEWAY_HOST="${EXPECTED_DEBUG_V2_GATEWAY_HOST:-localhost}"
 EXPECTED_GATEWAY_PORT="${EXPECTED_DEBUG_V2_GATEWAY_PORT:-7443}"
-EXPECTED_RP_ID="${EXPECTED_DEBUG_V2_PASSKEY_RP_ID:-localhost}"
 
 if [[ "${IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST:-false}" == "true" ]]; then
   tmpdir="$(mktemp -d)"
@@ -19,9 +18,9 @@ if [[ "${IMAPP_DEBUG_NETWORK_DEFAULTS_SELF_TEST:-false}" == "true" ]]; then
   cat >"${fake_xcodebuild}" <<'EOF'
 #!/usr/bin/env bash
 case "${FAKE_XCODEBUILD_CASE:-local}" in
-  local) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://localhost:8443' '    IM_V2_GATEWAY_HOST = localhost' '    IM_V2_GATEWAY_PORT = 7443' '    IM_V2_PASSKEY_RP_ID = localhost' ;;
-  public) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://im.example.com' '    IM_V2_GATEWAY_HOST = gateway.im.example.com' '    IM_V2_GATEWAY_PORT = 7443' '    IM_V2_PASSKEY_RP_ID = im.example.com' ;;
-  unresolved) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = $(IM_V2_ACCOUNT_BASE_URL)' '    IM_V2_GATEWAY_HOST = $(IM_V2_GATEWAY_HOST)' '    IM_V2_GATEWAY_PORT = $(IM_V2_GATEWAY_PORT)' '    IM_V2_PASSKEY_RP_ID = $(IM_V2_PASSKEY_RP_ID)' ;;
+  local) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://localhost:8443' '    IM_V2_GATEWAY_HOST = localhost' '    IM_V2_GATEWAY_PORT = 7443' ;;
+  public) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = https://im.example.com' '    IM_V2_GATEWAY_HOST = gateway.im.example.com' '    IM_V2_GATEWAY_PORT = 7443' ;;
+  unresolved) printf '%s\n' '    IM_V2_ACCOUNT_BASE_URL = $(IM_V2_ACCOUNT_BASE_URL)' '    IM_V2_GATEWAY_HOST = $(IM_V2_GATEWAY_HOST)' '    IM_V2_GATEWAY_PORT = $(IM_V2_GATEWAY_PORT)' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -41,21 +40,21 @@ build_settings_file="$(mktemp)"
 trap 'rm -f "${build_settings_file}"' EXIT
 xcodebuild -project "${PROJECT_FILE}" -scheme "${SCHEME}" -configuration "${CONFIGURATION}" -destination "${DESTINATION}" -showBuildSettings >"${build_settings_file}"
 
-python3 - "${build_settings_file}" "${EXPECTED_ACCOUNT_URL}" "${EXPECTED_GATEWAY_HOST}" "${EXPECTED_GATEWAY_PORT}" "${EXPECTED_RP_ID}" <<'PY'
+python3 - "${build_settings_file}" "${EXPECTED_ACCOUNT_URL}" "${EXPECTED_GATEWAY_HOST}" "${EXPECTED_GATEWAY_PORT}" <<'PY'
 import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-settings_file, expected_url, expected_gateway_host, expected_gateway_port, expected_rp = sys.argv[1:]
+settings_file, expected_url, expected_gateway_host, expected_gateway_port = sys.argv[1:]
 settings = {}
 for line in Path(settings_file).read_text(encoding="utf-8").splitlines():
-    match = re.match(r"\s*(IM_V2_ACCOUNT_BASE_URL|IM_V2_GATEWAY_HOST|IM_V2_GATEWAY_PORT|IM_V2_PASSKEY_RP_ID)\s*=\s*(.*?)\s*$", line)
+    match = re.match(r"\s*(IM_V2_ACCOUNT_BASE_URL|IM_V2_GATEWAY_HOST|IM_V2_GATEWAY_PORT)\s*=\s*(.*?)\s*$", line)
     if match:
         settings[match.group(1)] = match.group(2)
 
 errors = []
-for key in ("IM_V2_ACCOUNT_BASE_URL", "IM_V2_GATEWAY_HOST", "IM_V2_GATEWAY_PORT", "IM_V2_PASSKEY_RP_ID"):
+for key in ("IM_V2_ACCOUNT_BASE_URL", "IM_V2_GATEWAY_HOST", "IM_V2_GATEWAY_PORT"):
     value = settings.get(key, "")
     if not value:
         errors.append(f"missing_{key}")
@@ -63,13 +62,10 @@ for key in ("IM_V2_ACCOUNT_BASE_URL", "IM_V2_GATEWAY_HOST", "IM_V2_GATEWAY_PORT"
         errors.append(f"unresolved_{key}:{value}")
 
 url = settings.get("IM_V2_ACCOUNT_BASE_URL", "")
-rp_id = settings.get("IM_V2_PASSKEY_RP_ID", "")
 gateway_host = settings.get("IM_V2_GATEWAY_HOST", "")
 gateway_port = settings.get("IM_V2_GATEWAY_PORT", "")
 if url and url != expected_url:
     errors.append(f"unexpected_IM_V2_ACCOUNT_BASE_URL:{url}:expected_{expected_url}")
-if rp_id and rp_id != expected_rp:
-    errors.append(f"unexpected_IM_V2_PASSKEY_RP_ID:{rp_id}:expected_{expected_rp}")
 if gateway_host and gateway_host != expected_gateway_host:
     errors.append(f"unexpected_IM_V2_GATEWAY_HOST:{gateway_host}:expected_{expected_gateway_host}")
 if gateway_port and gateway_port != expected_gateway_port:
@@ -77,8 +73,6 @@ if gateway_port and gateway_port != expected_gateway_port:
 parsed = urlsplit(url) if url else None
 if parsed and (parsed.scheme != "https" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}):
     errors.append(f"debug_v2_account_must_be_local_https:{url}")
-if rp_id not in {"localhost", "127.0.0.1"}:
-    errors.append(f"debug_v2_passkey_rp_must_be_local:{rp_id}")
 if gateway_host not in {"localhost", "127.0.0.1", "::1"}:
     errors.append(f"debug_v2_gateway_must_be_local:{gateway_host}")
 if gateway_port != "7443":
@@ -86,5 +80,5 @@ if gateway_port != "7443":
 if errors:
     print(f"debug-network-defaults result=fail configuration={settings!r} errors={','.join(errors)}", file=sys.stderr)
     raise SystemExit(1)
-print(f"debug-network-defaults result=pass v2AccountBaseURL={url} v2GatewayHost={gateway_host} v2GatewayPort={gateway_port} v2PasskeyRelyingPartyID={rp_id}")
+print(f"debug-network-defaults result=pass v2AccountBaseURL={url} v2GatewayHost={gateway_host} v2GatewayPort={gateway_port}")
 PY

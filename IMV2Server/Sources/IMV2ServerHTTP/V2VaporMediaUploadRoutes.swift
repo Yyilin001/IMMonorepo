@@ -117,16 +117,7 @@ public struct V2VaporMediaUploadRoutes: Sendable {
     }
 
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
-        guard let accessToken = request.headers.bearerAuthorization?.token,
-              let rawDeviceID = request.headers.first(name: "X-IM-Device-ID"),
-              let deviceID = try? DeviceID(rawDeviceID)
-        else { throw Abort(.unauthorized) }
-        do {
-            let userID = try await authenticator.authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
-            return .init(userID: userID, deviceID: deviceID, capabilityProfile: "media-edge")
-        } catch {
-            throw Abort(.unauthorized)
-        }
+        try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
     private func noStoreJSONResponse<Payload: Encodable>(_ payload: Payload) throws -> Response {

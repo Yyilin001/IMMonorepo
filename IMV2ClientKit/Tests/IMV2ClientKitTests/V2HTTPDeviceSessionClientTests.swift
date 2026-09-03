@@ -60,7 +60,9 @@ struct V2HTTPDeviceSessionClientTests {
     }
 
     private func response(status: Int, endpoint: URL, body: String) throws -> (Data, HTTPURLResponse) {
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: nil, headerFields: ["Cache-Control": "no-store"]))
+        var headers = ["Cache-Control": "no-store"]
+        if status == 200 { headers["Content-Type"] = "application/json" }
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: nil, headerFields: headers))
         return (Data(body.utf8), response)
     }
 }

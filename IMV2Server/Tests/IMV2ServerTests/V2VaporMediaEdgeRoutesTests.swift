@@ -18,7 +18,7 @@ struct V2VaporMediaEdgeRoutesTests {
             let sessionStore = RouteSessionStore(claim: .init(mediaID: mediaID, downloadSessionID: sessionID, expiresAt: now.addingTimeInterval(30), claimToken: UUID()))
             let target = V2MediaProviderObjectTarget(
                 url: try #require(URL(string: "https://provider.invalid/object")),
-                headers: ["x-provider": "opaque"],
+                headers: ["x-oss-meta-provider": "opaque"],
                 expiresAt: now.addingTimeInterval(20),
                 expectedByteCount: 5
             )
@@ -61,7 +61,7 @@ struct V2VaporMediaEdgeRoutesTests {
                 providerSessions: .init(store: UnusedSessionStore(), provider: UnusedProvider())
             )
             V2VaporMediaEdgeRoutes(
-                authenticator: RouteAuthenticator(result: .failure(RouteAuthenticationFailure.denied)),
+                authenticator: RouteAuthenticator(result: .failure(RouteAuthenticationFailure.unauthenticated)),
                 handler: .init(edge: edge)
             ).register(on: app)
 
@@ -176,7 +176,7 @@ private struct RouteAuthenticator: V2GatewayAuthenticator {
     }
 }
 
-private enum RouteAuthenticationFailure: Error { case denied }
+private typealias RouteAuthenticationFailure = V2GatewayAuthenticationError
 
 private actor UnusedMediaStore: V2MediaStore {
     func requestUpload(_: V2RequestMediaUploadCommand, deviceID _: DeviceID, expiresAt _: Date, now _: Date) -> V2MediaUploadGrant { fatalError("unused") }

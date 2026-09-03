@@ -226,8 +226,10 @@ evidence remains local-stack coverage, not a production deployment approval.
   state; polling recovers it. The current adapter retains one serial Core NATS
   connection per process publisher, discards it on failure, bounds connection
   and broker confirmation to two seconds, and requires `PONG` after each
-  `PUB`. It has no NATS TLS/NKey, autonomous reconnect loop, circuit breaker or
-  broker-health metrics. The isolated suite does prove a real Core
+  `PUB`. A non-loopback endpoint must use TLS plus token authentication;
+  private-CA and SNI overrides are explicit. It has no NKey, autonomous
+  reconnect loop, circuit breaker or broker-health metrics. The isolated suite
+  does prove a real Core
   NATS subscriber receives the privacy-safe trigger envelope, but the adapter
   is still not a delivery dependency.
 - Groups use the existing authenticated TLS/protobuf connection rather than
@@ -239,10 +241,13 @@ evidence remains local-stack coverage, not a production deployment approval.
   committed Hybrid event is coalesced in a PostgreSQL wake outbox, while an
   accepted message in either group mode may emit an immediate lossy hint.
   In a multi-Gateway deployment set
-  `IM_V2_GROUP_WAKE_NATS_URL`, `...SUBJECT_PREFIX`, optional `...TOKEN`, and
+  `IM_V2_GROUP_WAKE_NATS_URL`, `...SUBJECT_PREFIX`, `...TOKEN`, and
   `...ROUTING_KEY_BASE64` on every replica. The routing key derives opaque HMAC
-  room subjects; NATS loss or duplication only delays visibility because the
-  Hybrid cursor or standard personal sync remains authoritative.
+  room subjects and a distinct payload-authentication key. Every live payload
+  MAC is bound to its actual NATS subject, so a broker credential cannot forge
+  or move a captured event across subjects. NATS loss or duplication only
+  delays visibility because the Hybrid cursor or standard personal sync
+  remains authoritative.
 - `IM_V2_DURABLE_RETRY_*` is an explicit exponential-backoff budget for that
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;

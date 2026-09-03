@@ -10,7 +10,7 @@ struct V2MediaProviderSessionServiceTests {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let claim = try makeClaim(expiresAt: now.addingTimeInterval(30))
         let store = RecordingDownloadSessionStore(claim: claim)
-        let target = V2MediaProviderObjectTarget(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-test": "opaque"], expiresAt: now.addingTimeInterval(20))
+        let target = V2MediaProviderObjectTarget(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-oss-meta-test": "opaque"], expiresAt: now.addingTimeInterval(20))
         let service = try V2MediaProviderSessionService(store: store, provider: FixedMediaProvider(target: target), now: { now })
 
         let result = try await service.exchangeDownload(actorUserID: .init("user"), deviceID: .init("device"), downloadSessionID: claim.downloadSessionID)
@@ -60,6 +60,32 @@ struct V2MediaProviderSessionServiceTests {
             _ = try await service.exchangeDownload(actorUserID: .init("user"), deviceID: .init("device"), downloadSessionID: claim.downloadSessionID)
         }
         #expect(await store.releasedClaims() == [claim])
+    }
+
+    @Test("provider targets cannot inject ambient authorization headers or URL userinfo")
+    func rejectsCredentialInjectionTargets() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let claim = try makeClaim(expiresAt: now.addingTimeInterval(30))
+        let targets = [
+            V2MediaProviderObjectTarget(
+                url: try #require(URL(string: "https://media.invalid/object")),
+                headers: ["Authorization": "Bearer provider-secret"],
+                expiresAt: now.addingTimeInterval(20)
+            ),
+            V2MediaProviderObjectTarget(
+                url: try #require(URL(string: "https://user:password@media.invalid/object")),
+                expiresAt: now.addingTimeInterval(20)
+            ),
+        ]
+
+        for target in targets {
+            let store = RecordingDownloadSessionStore(claim: claim)
+            let service = try V2MediaProviderSessionService(store: store, provider: FixedMediaProvider(target: target), now: { now })
+            await #expect(throws: V2MediaProviderSessionError.invalidProviderTarget) {
+                _ = try await service.exchangeDownload(actorUserID: .init("user"), deviceID: .init("device"), downloadSessionID: claim.downloadSessionID)
+            }
+            #expect(await store.releasedClaims() == [claim])
+        }
     }
 
     private func makeClaim(expiresAt: Date) throws -> V2ClaimedMediaDownload {

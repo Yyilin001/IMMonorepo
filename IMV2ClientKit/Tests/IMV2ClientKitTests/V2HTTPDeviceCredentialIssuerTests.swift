@@ -138,7 +138,12 @@ struct V2HTTPDeviceCredentialIssuerTests {
     }
 
     private func response(status: Int, endpoint: URL) throws -> HTTPURLResponse {
-        try #require(HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: nil, headerFields: nil))
+        try #require(HTTPURLResponse(
+            url: endpoint,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: status == 200 ? ["Content-Type": "application/json"] : nil
+        ))
     }
 }
 

@@ -134,7 +134,8 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
             throw V2AccountAuthenticationError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2AccountAuthenticationError.invalidResponse
         case 401: throw V2AccountAuthenticationError.authenticationRejected
         case 409: throw V2AccountAuthenticationError.accountAlreadyExists
         default: throw V2AccountAuthenticationError.serverStatus(response.statusCode)

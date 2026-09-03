@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 import IMV2Server
-import IMV2ServerHTTP
+@testable import IMV2ServerHTTP
 import NIOCore
 import Testing
 import Vapor
@@ -128,6 +128,16 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             ) { response async in
                 #expect(response.status == .forbidden)
             }
+        }
+    }
+
+    @Test("the streaming counter rejects bytes beyond the declared edge budget")
+    func streamingCounterEnforcesActualBytes() throws {
+        let counter = V2StreamingUploadByteCounter(maximumBytes: 5)
+        try counter.consume(3)
+        try counter.consume(2)
+        #expect(throws: Abort.self) {
+            try counter.consume(1)
         }
     }
 

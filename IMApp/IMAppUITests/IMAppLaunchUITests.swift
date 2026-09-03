@@ -6,7 +6,7 @@ final class IMAppLaunchUITests: XCTestCase {
     }
 
     @MainActor
-    func testFreshLaunchShowsPasswordControlsAndHonorsDisabledPasskeyConfiguration() throws {
+    func testFreshLaunchShowsOnlySupportedPasswordControls() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-v2-ui-testing-signed-out"]
         app.launch()

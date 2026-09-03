@@ -76,71 +76,78 @@ struct V2RootView: View {
     }
 
     var body: some View {
-        Group {
-            switch store.route {
-            case .launching:
-                ProgressView("正在恢复 V2 会话…")
-            case .signedOut:
-                V2SignInView(
-                    store: store,
-                    authenticationMessage: store.authenticationMessage,
-                    initialPasswordMode: initialPasswordMode,
-                    initialAccountHandle: initialLocalE2ETestAccountHandle,
-                    initialPassword: initialLocalE2ETestPassword,
-                    initialPublicHandle: initialLocalE2ETestPublicHandle,
-                    initialDisplayName: initialLocalE2ETestDisplayName
-                )
-            case .authenticating:
-                ProgressView("正在验证身份…")
-            case .signedIn:
-                if let conversationStore = store.conversationStore,
-                   let contactsStore = store.contactsStore,
-                   let privacySettingsStore = store.privacySettingsStore {
-                   V2SignedInRootView(
-                        conversationStore: conversationStore,
-                        contactsStore: contactsStore,
-                        privacySettingsStore: privacySettingsStore,
-                        userBlockSettingsStore: store.userBlockSettingsStore,
-                        publicIdentitySettingsStore: store.publicIdentitySettingsStore,
-                        pushWakeSettingsStore: store.pushWakeSettingsStore,
-                        deviceSessionsStore: store.deviceSessionsStore,
-                        localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
-                        signOut: { await store.signOut() }
+        ZStack {
+            Group {
+                switch store.route {
+                case .launching:
+                    ProgressView("正在恢复 V2 会话…")
+                case .signedOut:
+                    V2SignInView(
+                        store: store,
+                        authenticationMessage: store.authenticationMessage,
+                        initialPasswordMode: initialPasswordMode,
+                        initialAccountHandle: initialLocalE2ETestAccountHandle,
+                        initialPassword: initialLocalE2ETestPassword,
+                        initialPublicHandle: initialLocalE2ETestPublicHandle,
+                        initialDisplayName: initialLocalE2ETestDisplayName
                     )
-                } else {
-                    ProgressView("正在打开本地会话…")
-                }
-            case .uiTestingLiveLocalAccountCleanupCompleted:
-                Text("本地 E2E 测试数据已清理")
-                    .accessibilityIdentifier("v2.local-e2e.cleanup.completed")
-            case .protectedDataUnavailable:
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        "受保护凭据暂不可用",
-                        systemImage: "lock.trianglebadge.exclamationmark",
-                        description: Text("请解锁设备后重试。")
-                    )
-                    Button("重试") {
-                        protectedDataRetryTask?.cancel()
-                        protectedDataRetryTask = Task { await store.retryProtectedDataAccess() }
+                case .authenticating:
+                    ProgressView("正在验证身份…")
+                case .signedIn:
+                    if let conversationStore = store.conversationStore,
+                       let contactsStore = store.contactsStore,
+                       let privacySettingsStore = store.privacySettingsStore {
+                        V2SignedInRootView(
+                            conversationStore: conversationStore,
+                            contactsStore: contactsStore,
+                            privacySettingsStore: privacySettingsStore,
+                            userBlockSettingsStore: store.userBlockSettingsStore,
+                            publicIdentitySettingsStore: store.publicIdentitySettingsStore,
+                            pushWakeSettingsStore: store.pushWakeSettingsStore,
+                            deviceSessionsStore: store.deviceSessionsStore,
+                            localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
+                            signOut: { await store.signOut() }
+                        )
+                    } else {
+                        ProgressView("正在打开本地会话…")
                     }
-                    .accessibilityIdentifier("v2.protected-data.retry")
-                }
-            case .signOutPendingCredentialDeletion:
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        "正在完成退出登录",
-                        systemImage: "lock.trianglebadge.exclamationmark",
-                        description: Text("请联网并解锁设备后重试，以移除后台唤醒端点并删除受保护凭据。")
-                    )
-                    Button("重试") {
-                        protectedDataRetryTask?.cancel()
-                        protectedDataRetryTask = Task { await store.retryPendingCredentialDeletion() }
+                case .uiTestingLiveLocalAccountCleanupCompleted:
+                    Text("本地 E2E 测试数据已清理")
+                        .accessibilityIdentifier("v2.local-e2e.cleanup.completed")
+                case .protectedDataUnavailable:
+                    VStack(spacing: 16) {
+                        ContentUnavailableView(
+                            "受保护凭据暂不可用",
+                            systemImage: "lock.trianglebadge.exclamationmark",
+                            description: Text("请解锁设备后重试。")
+                        )
+                        Button("重试") {
+                            protectedDataRetryTask?.cancel()
+                            protectedDataRetryTask = Task { await store.retryProtectedDataAccess() }
+                        }
+                        .accessibilityIdentifier("v2.protected-data.retry")
                     }
-                    .accessibilityIdentifier("v2.sign-out.pending.retry")
+                case .signOutPendingCredentialDeletion:
+                    VStack(spacing: 16) {
+                        ContentUnavailableView(
+                            "正在完成退出登录",
+                            systemImage: "lock.trianglebadge.exclamationmark",
+                            description: Text("请联网并解锁设备后重试，以移除后台唤醒端点并删除受保护凭据。")
+                        )
+                        Button("重试") {
+                            protectedDataRetryTask?.cancel()
+                            protectedDataRetryTask = Task { await store.retryPendingCredentialDeletion() }
+                        }
+                        .accessibilityIdentifier("v2.sign-out.pending.retry")
+                    }
+                case .unavailable(let message):
+                    ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
                 }
-            case .unavailable(let message):
-                ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
+            }
+
+            if scenePhase != .active {
+                V2PrivacyShieldView()
+                    .zIndex(1)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -174,6 +181,23 @@ struct V2RootView: View {
     #endif
 }
 
+/// Covers sensitive conversation pixels before UIKit records the application
+/// switcher snapshot. It is intentionally opaque and unanimated so no frame of
+/// the underlying hierarchy is exposed during the active-to-inactive change.
+private struct V2PrivacyShieldView: View {
+    var body: some View {
+        Color(.systemBackground)
+            .ignoresSafeArea()
+            .overlay {
+                Image(systemName: "lock.fill")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            .accessibilityIdentifier("v2.privacy-shield")
+    }
+}
+
 private struct V2SignInView: View {
     @Bindable var store: V2AppStore
     let authenticationMessage: String?
@@ -205,21 +229,7 @@ private struct V2SignInView: View {
 
     var body: some View {
         Form {
-            if store.isPasskeyAuthenticationEnabled {
-                Section {
-                    Button {
-                        run { await store.signInWithPasskey() }
-                    } label: {
-                        Image(systemName: "key.fill")
-                    }
-                    .accessibilityLabel("使用 Passkey 登录")
-                    .accessibilityIdentifier("v2.passkey.sign-in")
-                } footer: {
-                    Text("系统会使用 Face ID、Touch ID 或设备密码。")
-                }
-            }
-
-            Section(store.isPasskeyAuthenticationEnabled ? "密码兜底" : "账号密码") {
+            Section("账号密码") {
                 TextField("账号", text: $accountHandle)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

@@ -65,9 +65,8 @@ enum IMV2AccountServerApp {
                 limitedPaths: [
                     "/v2/account-auth/password/register",
                     "/v2/account-auth/password/assertion",
-                    "/v2/account-auth/passkeys/assertion-options",
-                    "/v2/account-auth/passkeys/assertion",
-                    "/v2/device-credentials"
+                    "/v2/device-credentials",
+                    "/v2/device-credentials/refresh"
                 ]
             ))
 
@@ -82,6 +81,9 @@ enum IMV2AccountServerApp {
                 database: database,
                 tokenKey: configuration.accessTokenKey
             )
+            let authenticatedAccountRoutes = app
+                .grouped(V2AuthenticatedAccountMiddleware(authenticator: authenticator))
+                .grouped(V2AuthenticatedAccountRateLimitMiddleware(limiter: edgeClientRateLimiter))
             await runtimeTasks.start {
                 while !Task.isCancelled {
                     do {
@@ -120,11 +122,11 @@ enum IMV2AccountServerApp {
                 V2VaporMediaUploadRoutes(
                     authenticator: authenticator,
                     handler: .init(edge: .init(media: media, providerSessions: uploadProviderSessions))
-                ).register(on: app)
+                ).register(on: authenticatedAccountRoutes)
                 V2VaporMediaEdgeRoutes(
                     authenticator: authenticator,
                     handler: .init(edge: .init(media: media, providerSessions: downloadProviderSessions))
-                ).register(on: app)
+                ).register(on: authenticatedAccountRoutes)
                 try V2VaporLocalFilesystemMediaRoutes(
                     provider: provider,
                     publicBaseURL: localMediaConfiguration.publicBaseURL,
@@ -171,31 +173,31 @@ enum IMV2AccountServerApp {
                     database: database,
                     envelopeKey: configuration.pushEndpointEnvelopeKey
                 )
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             V2VaporDeviceSessionRoutes(
                 authenticator: authenticator,
                 sessions: V2PostgresDeviceSessionService(database: database)
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             V2VaporPublicIdentityRoutes(
                 authenticator: authenticator,
                 directory: V2PostgresPublicIdentityDirectory(
                     database: database,
                     policy: configuration.publicIdentityLookupRateLimit
                 )
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             V2VaporProfileViewRoutes(
                 authenticator: authenticator,
                 profiles: .init(store: PostgresV2ProfileViewStore(database: database))
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,
                 profiles: .init(store: profileUpdateStore, reader: profileUpdateStore)
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             V2VaporProfilePresentationRoutes(
                 authenticator: authenticator,
                 presentations: PostgresV2ProfilePresentationStore(database: database)
-            ).register(on: app)
+            ).register(on: authenticatedAccountRoutes)
             V2PasswordAccountRoutes(
                 store: V2PostgresPasswordAccountStore(database: database),
                 assertionIssuer: assertionIssuer,

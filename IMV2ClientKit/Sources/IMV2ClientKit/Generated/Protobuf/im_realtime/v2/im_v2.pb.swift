@@ -1712,6 +1712,9 @@ public nonisolated struct IMV2ClientHello: Sendable {
 
   public var supportedCapabilityProfiles: [String] = []
 
+  /// When present, Authenticate must repeat this exact device ID. Current
+  /// clients always send it; accepting an empty value remains a bounded bridge
+  /// for pre-binding protocol fixtures.
   public var deviceID: String = String()
 
   public var supportedFrameCompressions: [IMV2FrameCompression] = []

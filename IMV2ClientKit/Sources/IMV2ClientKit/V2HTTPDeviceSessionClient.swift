@@ -51,7 +51,7 @@ public protocol V2ClientDeviceSessionHTTPTransport: Sendable {
 
 public actor V2URLSessionDeviceSessionHTTPTransport: V2ClientDeviceSessionHTTPTransport {
     private let session: URLSession
-    public init(session: URLSession = .shared) { self.session = session }
+    public init(session: URLSession = V2SecureURLSession.account) { self.session = session }
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw V2ClientDeviceSessionError.invalidResponse }
@@ -85,7 +85,12 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         if let cursor { queryItems.append(.init(name: "cursor", value: cursor)) }
         let request = try await authenticatedRequest(path: [], method: "GET", queryItems: queryItems)
         let (data, response) = try await send(request)
-        guard (200 ... 299).contains(response.statusCode) else { throw try failure(for: response) }
+        guard response.statusCode == 200,
+              V2HTTPContract.isJSON(response)
+        else {
+            if response.statusCode == 200 { throw V2ClientDeviceSessionError.invalidResponse }
+            throw try failure(for: response)
+        }
         do {
             let body = try JSONDecoder().decode(SessionPageBody.self, from: data)
             let sessions: [V2ClientDeviceSession] = try body.sessions.map {
@@ -116,7 +121,7 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         do { request.httpBody = try JSONEncoder().encode(body) }
         catch { throw V2ClientDeviceSessionError.invalidRequest }
         let (_, response) = try await send(request)
-        guard (200 ... 299).contains(response.statusCode) else { throw try failure(for: response) }
+        guard response.statusCode == 204 else { throw try failure(for: response) }
     }
 
     private func authenticatedRequest(path: [String], method: String, queryItems: [URLQueryItem] = []) async throws -> URLRequest {

@@ -212,6 +212,113 @@ struct V2GatewaySessionTests {
         #expect(try V2ServerProtobufFrameCodec.decode(response).error.code == "UNAVAILABLE")
     }
 
+    @Test("hello device identity must match authentication")
+    func rejectsHelloAuthenticationDeviceMismatch() async throws {
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission()
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
+        )
+
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-b"
+        await #expect(throws: V2GatewaySessionError.invalidAuthenticatePayload) {
+            _ = try await session.receiveBootstrap(
+                try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
+            )
+        }
+    }
+
+    @Test("gateway admission charges commands by bounded work amplification")
+    func chargesAuthenticatedCommandsByWorkAmplification() async throws {
+        let admission = RecordingGatewayCommandAdmission()
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")),
+            capabilityProfile: "base",
+            commandAdmission: admission,
+            now: { Date(timeIntervalSince1970: 0) }
+        )
+
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
+        )
+
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "opaque"
+        authenticate.authenticate.deviceID = "device-a"
+        _ = try await session.receiveBootstrap(
+            try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
+        )
+
+        func send(_ request: IMV2Envelope) async throws {
+            _ = try await session.receiveAuthenticated(
+                try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
+                handler: GatewayCommandFake()
+            )
+        }
+
+        var heartbeat = IMV2Envelope()
+        heartbeat.requestID = 3
+        heartbeat.protocolVersion = UInt32(protocolVersion)
+        heartbeat.heartbeat = .init()
+        try await send(heartbeat)
+
+        var syncPull = IMV2Envelope()
+        syncPull.requestID = 4
+        syncPull.protocolVersion = UInt32(protocolVersion)
+        syncPull.syncPull = .init()
+        syncPull.syncPull.maxRecords = 500
+        try await send(syncPull)
+
+        var groupPull = IMV2Envelope()
+        groupPull.requestID = 5
+        groupPull.protocolVersion = UInt32(protocolVersion)
+        groupPull.groupEventPull = .init()
+        groupPull.groupEventPull.pageSize = 500
+        try await send(groupPull)
+
+        var forward = IMV2Envelope()
+        forward.requestID = 6
+        forward.protocolVersion = UInt32(protocolVersion)
+        forward.forwardMessages = .init()
+        forward.forwardMessages.sourceMessageIds = (0..<10).map { "source-\($0)" }
+        forward.forwardMessages.targetRoomIds = (0..<10).map { "target-\($0)" }
+        try await send(forward)
+
+        var appendMembers = IMV2Envelope()
+        appendMembers.requestID = 7
+        appendMembers.protocolVersion = UInt32(protocolVersion)
+        appendMembers.appendGroupRoomCreationMembers = .init()
+        appendMembers.appendGroupRoomCreationMembers.memberUserIds = (0..<64).map { "user-\($0)" }
+        try await send(appendMembers)
+
+        #expect(await admission.recordedCosts() == [0, 6, 6, 5, 3])
+    }
+
     @Test("production receive returns the same validated request used for dispatch")
     func productionReceiveReturnsValidatedRequest() async throws {
         let session = V2GatewaySession(
@@ -344,6 +451,17 @@ private actor CombinedGatewayAuthFake: V2GatewayAuthenticator {
             expiresAt: Date(timeIntervalSince1970: 20)
         )
     }
+}
+
+private actor RecordingGatewayCommandAdmission: V2AuthenticatedGatewayCommandAdmitting {
+    private var costs: [Int] = []
+
+    func admit(identity _: V2AuthenticatedConnection, cost: Int, now _: Date) -> Bool {
+        costs.append(cost)
+        return true
+    }
+
+    func recordedCosts() -> [Int] { costs }
 }
 
 private final class SessionClock: @unchecked Sendable {

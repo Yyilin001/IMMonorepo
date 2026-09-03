@@ -30,10 +30,6 @@
 	<string>$(IM_V2_GATEWAY_HOST)</string>
 	<key>IMV2GatewayPort</key>
 	<string>$(IM_V2_GATEWAY_PORT)</string>
-	<key>IMV2PasskeyRelyingPartyID</key>
-	<string>$(IM_V2_PASSKEY_RP_ID)</string>
-	<key>IMV2PasskeyAuthenticationEnabled</key>
-	<false/>
 	<key>IMV2PushEnvironment</key>
 	<string>$(IM_V2_PUSH_ENVIRONMENT)</string>
 	<key>NSAppTransportSecurity</key>

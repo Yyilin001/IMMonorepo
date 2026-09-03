@@ -58,6 +58,7 @@ services:
       # signed targets still traverse Caddy over HTTPS, so the iOS upload and
       # download path exercises the same client boundary as production.
       IM_V2_LOCAL_MEDIA_MODE: filesystem
+      IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
       IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
       IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL: https://localhost:8443
       IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800

@@ -3,6 +3,7 @@ import IMV2Core
 import Crypto
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
+@preconcurrency import NIOSSL
 
 /// Best-effort cross-gateway fan-out for ephemeral activity. Privacy and
 /// presence authority stay in Postgres; this broker only avoids waiting for a
@@ -236,7 +237,12 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
     }
 
     private func publish(_ event: WireEvent, subject: String) async {
-        guard let payload = try? JSONEncoder().encode(event) else { return }
+        guard let body = try? JSONEncoder().encode(event) else { return }
+        let payload = V2NATSAuthenticatedPayloadCodec.seal(
+            body,
+            subject: subject,
+            routingKey: configuration.routingKey
+        )
         do {
             let connection = try await connectedChannel()
             let channel = connection.channel
@@ -286,10 +292,8 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
             pending = pendingConnection
         } else {
             let group = eventLoopGroup
-            let host = configuration.url.host!
-            let port = configuration.url.port ?? 4222
             let timeout = acknowledgementTimeout
-            let token = configuration.token
+            let configuration = self.configuration
             let sourceID = self.sourceID
             let receivePresence = self.receivePresence
             let receiveTyping = self.receiveTyping
@@ -299,10 +303,10 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
                 (typingSubject(for: $0.key), $0.value)
             }
             pendingReplaySubscriptionIDs = Set(replay.map(\.1))
-            pending = Task { [group, host, port, timeout, token, sourceID, receivePresence, receiveTyping, replay] in
+            pending = Task { [group, timeout, configuration, sourceID, receivePresence, receiveTyping, replay] in
                 try await Self.openConnection(
-                    group: group, host: host, port: port, timeout: timeout,
-                    token: token, sourceID: sourceID,
+                    group: group, configuration: configuration, timeout: timeout,
+                    sourceID: sourceID,
                     receivePresence: receivePresence, receiveTyping: receiveTyping,
                     replay: replay
                 )
@@ -355,17 +359,20 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
 
     private static func openConnection(
         group: MultiThreadedEventLoopGroup,
-        host: String,
-        port: Int,
+        configuration: V2NATSGroupEventWakeConfiguration,
         timeout: TimeAmount,
-        token: String?,
         sourceID: UUID,
         receivePresence: @escaping @Sendable (UserID, Bool, Date) async -> Void,
         receiveTyping: @escaping @Sendable (V2TypingState) async -> Void,
         replay: [(subject: String, subscriptionID: Int)]
     ) async throws -> Connection {
-        let handler = V2NATSConfirmedInboundHandler(invalidMessagePolicy: .ignore) { payload in
-            guard let event = try? JSONDecoder().decode(WireEvent.self, from: payload),
+        let handler = V2NATSConfirmedInboundHandler(invalidMessagePolicy: .ignore) { subject, payload in
+            guard let verified = V2NATSAuthenticatedPayloadCodec.open(
+                payload,
+                subject: subject,
+                routingKey: configuration.routingKey
+            ),
+                  let event = try? JSONDecoder().decode(WireEvent.self, from: verified),
                   event.sourceID != sourceID,
                   let userID = try? UserID(event.userID)
             else { return }
@@ -383,10 +390,41 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
                 ))
             }
         }
+        let sslContext: NIOSSLContext?
+        if configuration.usesTLS {
+            var tls = TLSConfiguration.makeClientConfiguration()
+            tls.minimumTLSVersion = .tlsv13
+            if let path = configuration.tlsCAPath {
+                tls.trustRoots = .certificates(
+                    try NIOSSLCertificate.fromPEMFile(path)
+                )
+            }
+            sslContext = try NIOSSLContext(configuration: tls)
+        } else {
+            sslContext = nil
+        }
+        let serverName = configuration.tlsServerName ?? configuration.url.host!
         let channel = try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.connectTimeout, value: timeout)
-            .channelInitializer { channel in channel.pipeline.addHandler(handler) }
-            .connect(host: host, port: port)
+            .channelInitializer { channel in
+                do {
+                    if let sslContext {
+                        let tlsHandler = try NIOSSLClientHandler(
+                                context: sslContext,
+                                serverHostname: serverName
+                            )
+                        try channel.pipeline.syncOperations.addHandler(tlsHandler)
+                    }
+                    try channel.pipeline.syncOperations.addHandler(handler)
+                    return channel.eventLoop.makeSucceededFuture(())
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+            }
+            .connect(
+                host: configuration.url.host!,
+                port: configuration.url.port ?? 4222
+            )
             .get()
         do {
             guard !Task.isCancelled,
@@ -396,7 +434,7 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
                 if handler.timeout(acknowledgement) { channel.close(promise: nil) }
             }
             defer { watchdog.cancel() }
-            let connect = String(decoding: try JSONEncoder().encode(Connect(token: token)), as: UTF8.self)
+            let connect = String(decoding: try JSONEncoder().encode(Connect(token: configuration.token)), as: UTF8.self)
             var command = channel.allocator.buffer(capacity: connect.utf8.count + replay.count * 96 + 20)
             command.writeString("CONNECT \(connect)\r\n")
             for item in replay {

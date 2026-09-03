@@ -99,11 +99,12 @@ public struct V2MediaUploadProviderSessionService: Sendable {
                   target.expiresAt <= claim.expiresAt,
                   target.url.scheme?.lowercased() == "https",
                   target.url.host != nil,
+                  target.url.user == nil,
+                  target.url.password == nil,
+                  target.url.fragment == nil,
                   target.expectedByteCount == claim.byteCount,
                   target.headers.allSatisfy({ name, value in
-                      !name.isEmpty
-                          && !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-                          && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+                      V2MediaProviderTargetHeaderPolicy.isAllowed(name: name, value: value)
                   })
             else { throw V2MediaUploadProviderSessionError.invalidProviderTarget }
             try await store.completeUploadTarget(claim, now: now())

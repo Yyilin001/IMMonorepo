@@ -15,10 +15,11 @@ struct V2NATSInboundFrameParserTests {
         let outputs = parser.consume(natsMessage(payload))
 
         #expect(outputs.count == 1)
-        guard case .payload(let decoded) = try #require(outputs.first) else {
+        guard case .payload(let subject, let decoded) = try #require(outputs.first) else {
             Issue.record("expected one decoded NATS payload")
             return
         }
+        #expect(subject == "imv2.test")
         #expect(decoded == payload)
     }
 
@@ -50,10 +51,36 @@ struct V2NATSInboundFrameParserTests {
         let outputs = parser.consume(wire)
 
         let decoded = outputs.compactMap { output -> Data? in
-            guard case .payload(let payload) = output else { return nil }
+            guard case .payload(_, let payload) = output else { return nil }
             return payload
         }
         #expect(decoded == [first, second])
+    }
+
+    @Test("the delivered subject is preserved and malformed subjects fail closed")
+    func validatesDeliveredSubject() throws {
+        let payload = Data([7])
+        var replyFrame = Data("MSG imv2.room.a 1 reply.inbox 1\r\n".utf8)
+        replyFrame.append(payload)
+        replyFrame.append(Data("\r\n".utf8))
+        var parser = V2NATSInboundFrameParser(invalidMessagePolicy: .closeChannel)
+
+        guard case .payload(let subject, let decoded) = try #require(
+            parser.consume(replyFrame).first
+        ) else {
+            Issue.record("expected a subject-bound payload")
+            return
+        }
+        #expect(subject == "imv2.room.a")
+        #expect(decoded == payload)
+
+        var invalid = V2NATSInboundFrameParser(invalidMessagePolicy: .closeChannel)
+        guard case .closeChannel = try #require(
+            invalid.consume(Data("MSG imv2.* 1 0\r\n\r\n".utf8)).first
+        ) else {
+            Issue.record("expected malformed delivered subject to close")
+            return
+        }
     }
 
     private func natsMessage(_ payload: Data) -> Data {

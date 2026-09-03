@@ -32,7 +32,7 @@ struct V2MediaEdgeDownloadServiceTests {
         let sessionStore = EdgeSessionStore(claim: .init(mediaID: mediaID, downloadSessionID: sessionID, expiresAt: now.addingTimeInterval(30), claimToken: UUID()))
         let target = V2MediaProviderObjectTarget(
             url: try #require(URL(string: "https://media.invalid/object")),
-            headers: ["x-provider": "opaque"],
+            headers: ["x-oss-meta-provider": "opaque"],
             expiresAt: now.addingTimeInterval(20),
             expectedByteCount: 42
         )
@@ -45,7 +45,7 @@ struct V2MediaEdgeDownloadServiceTests {
         let response = try await handler.downloadTarget(actorUserID: .init("user"), deviceID: .init("device"), rawMediaID: "media")
 
         #expect(response.url == "https://media.invalid/object")
-        #expect(response.headers == ["x-provider": "opaque"])
+        #expect(response.headers == ["x-oss-meta-provider": "opaque"])
         #expect(response.expectedByteCount == 42)
         #expect(response.expiresAtUnixMilliseconds == 1_750_000_020_000)
         await #expect(throws: V2MediaEdgeHTTPHandlerError.invalidMediaID) {

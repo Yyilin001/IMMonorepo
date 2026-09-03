@@ -59,7 +59,9 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
         guard (1...500).contains(limit) else { throw Abort(.badRequest) }
         return limit
     }
-    private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection { guard let token = request.headers.bearerAuthorization?.token, let rawDevice = request.headers.first(name: "X-IM-Device-ID"), let deviceID = try? DeviceID(rawDevice) else { throw Abort(.unauthorized) }; do { return .init(userID: try await authenticator.authenticateSession(accessToken: token, deviceID: deviceID).userID, deviceID: deviceID, capabilityProfile: "account-edge") } catch { throw Abort(.unauthorized) } }
+    private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
+        try await request.v2AuthenticatedAccountIdentity(using: authenticator)
+    }
     private func map(_ error: Error) -> Abort { guard let error = error as? V2ProfilePresentationError else { return Abort(.serviceUnavailable) }; switch error { case .forbidden: return Abort(.forbidden); case .unavailable: return Abort(.notFound); case .revisionConflict: return Abort(.conflict); case .operationPayloadMismatch, .invalidPresentation: return Abort(.badRequest); case .corruptPersistenceState: return Abort(.serviceUnavailable) } }
     private func response<T: Content>(_ value: T) throws -> Response { let data = try JSONEncoder().encode(value); var headers = HTTPHeaders(); headers.replaceOrAdd(name: .contentType, value: "application/json"); headers.replaceOrAdd(name: .cacheControl, value: "no-store"); headers.replaceOrAdd(name: "Pragma", value: "no-cache"); return .init(status: .ok, headers: headers, body: .init(data: data)) }
 }

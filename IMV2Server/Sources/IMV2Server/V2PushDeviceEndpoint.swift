@@ -104,6 +104,26 @@ public protocol V2PushDeviceEndpointStore: Sendable {
     ) async throws
     func endpoint(for deviceID: DeviceID) async throws -> V2PushDeviceEndpoint?
     func disable(_ endpoint: V2PushDeviceEndpoint, now: Date) async throws
+    func disableOwnedEndpoint(
+        actorUserID: UserID,
+        deviceID: DeviceID,
+        now: Date
+    ) async throws
+}
+
+public extension V2PushDeviceEndpointStore {
+    /// Compatibility implementation for stores that do not own an atomic
+    /// identity-aware update. PostgreSQL overrides this to avoid reading and
+    /// decrypting provider material for a user-initiated delete.
+    func disableOwnedEndpoint(
+        actorUserID _: UserID,
+        deviceID: DeviceID,
+        now: Date
+    ) async throws {
+        if let endpoint = try await endpoint(for: deviceID) {
+            try await disable(endpoint, now: now)
+        }
+    }
 }
 
 /// Encrypts opaque provider tokens at rest and checks the active device inside
@@ -210,6 +230,29 @@ public struct PostgresV2PushDeviceEndpointStore: V2PushDeviceEndpointStore {
               AND provider = \(bind: endpoint.provider.rawValue)
               AND endpoint_generation = \(bind: endpoint.generation)
               AND disabled_at IS NULL
+            """).run()
+    }
+
+    public func disableOwnedEndpoint(
+        actorUserID: UserID,
+        deviceID: DeviceID,
+        now: Date
+    ) async throws {
+        guard let sql = database as? any SQLDatabase else {
+            throw V2PushDeviceEndpointError.unavailable
+        }
+        let userUUID = try endpointUUID(actorUserID)
+        let deviceUUID = try endpointUUID(deviceID)
+        try await sql.raw("""
+            UPDATE im_v2.push_device_endpoints AS endpoint
+            SET disabled_at = COALESCE(endpoint.disabled_at, \(bind: now)),
+                updated_at = \(bind: now)
+            FROM im_v2.auth_devices AS device
+            WHERE endpoint.device_id = \(bind: deviceUUID)
+              AND device.user_id = \(bind: userUUID)
+              AND device.device_id = endpoint.device_id
+              AND device.revoked_at IS NULL
+              AND endpoint.disabled_at IS NULL
             """).run()
     }
 

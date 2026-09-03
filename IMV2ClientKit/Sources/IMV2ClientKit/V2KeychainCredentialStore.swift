@@ -4,8 +4,10 @@ import Security
 #endif
 
 /// Device-only Keychain persistence for the complete V2 credential record.
-/// `AfterFirstUnlockThisDeviceOnly` allows bounded background sync after the
-/// device has first been unlocked while preventing backup/restore migration.
+/// The refresh credential and its pending rotation ID remain one atomic item
+/// and are unavailable while the device is locked. Background wake processing
+/// must defer until protected data becomes available instead of widening the
+/// long-lived refresh secret's accessibility.
 #if canImport(Security)
 public actor V2KeychainCredentialStore: V2CredentialStore {
     private let service: String
@@ -25,6 +27,14 @@ public actor V2KeychainCredentialStore: V2CredentialStore {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw map(status) }
         guard let data = result as? Data else { throw V2CredentialStoreError.malformedRecord }
+        let hardeningStatus = SecItemUpdate(
+            baseQuery() as CFDictionary,
+            [
+                kSecAttrAccessible as String:
+                    kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            ] as CFDictionary
+        )
+        guard hardeningStatus == errSecSuccess else { throw map(hardeningStatus) }
         do {
             return try JSONDecoder().decode(V2AuthCredentialRecord.self, from: data)
         } catch {
@@ -39,14 +49,18 @@ public actor V2KeychainCredentialStore: V2CredentialStore {
         } catch {
             throw V2CredentialStoreError.malformedRecord
         }
-        let attributes: [String: Any] = [kSecValueData as String: data]
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String:
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
         let updateStatus = SecItemUpdate(baseQuery() as CFDictionary, attributes as CFDictionary)
         if updateStatus == errSecSuccess { return }
         guard updateStatus == errSecItemNotFound else { throw map(updateStatus) }
 
         var insert = baseQuery()
         insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let insertStatus = SecItemAdd(insert as CFDictionary, nil)
         guard insertStatus == errSecSuccess else { throw map(insertStatus) }
     }

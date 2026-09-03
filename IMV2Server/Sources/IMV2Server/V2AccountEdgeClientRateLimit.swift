@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import IMV2Core
 import NIOCore
 
 /// A network address supplied only by the authenticated HTTPS edge. It is
@@ -27,7 +28,13 @@ public struct V2AccountEdgeClientRateLimitPolicy: Equatable, Sendable {
     public let window: TimeInterval
 
     public init(maximumRequests: Int, window: TimeInterval) throws {
-        guard maximumRequests > 0, window > 0 else {
+        // PostgreSQL stores request_count as a signed 32-bit integer. Keep one
+        // sentinel value above the configured budget so an over-budget
+        // attempt can be represented without an overflow or a second query.
+        guard maximumRequests > 0,
+              maximumRequests < Int(Int32.max),
+              window > 0
+        else {
             throw V2AccountEdgeClientRateLimitError.invalidPolicy
         }
         self.maximumRequests = maximumRequests
@@ -55,9 +62,28 @@ public struct V2AccountEdgeClientRateLimitKey: Sendable {
     }
 
     public func digest(_ address: V2AccountEdgeClientAddress) -> String {
+        digest("ip|" + address.valueForKeyDerivation)
+    }
+
+    /// Uses the same deployment key while keeping authenticated budgets in a
+    /// separate namespace from IP budgets. The clear user/device identifiers
+    /// never enter the rate-limit table.
+    public func digest(
+        identity: V2AuthenticatedConnection,
+        scope: String
+    ) throws -> String {
+        guard !scope.isEmpty, scope.utf8.count <= 64,
+              !scope.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { throw V2AccountEdgeClientRateLimitError.invalidPolicy }
+        return digest(
+            "auth|\(scope)|\(identity.userID.rawValue)|\(identity.deviceID.rawValue)"
+        )
+    }
+
+    private func digest(_ value: String) -> String {
         let key = SymmetricKey(data: rawBytes)
         let code = HMAC<SHA256>.authenticationCode(
-            for: Data(address.valueForKeyDerivation.utf8),
+            for: Data(value.utf8),
             using: key
         )
         return code.map { String(format: "%02x", $0) }.joined()

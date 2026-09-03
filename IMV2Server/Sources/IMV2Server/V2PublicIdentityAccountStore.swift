@@ -45,34 +45,36 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
         guard let actorUUID = UUID(uuidString: actorUserID.rawValue) else {
             throw V2PublicIdentityDirectoryError.unavailable
         }
-        return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2PublicIdentityDirectoryError.unavailable
-            }
-            try await consumeLookupBudget(sql: sql, actorUserID: actorUUID)
-            guard let row = try await sql.raw("""
-                SELECT p.user_id, p.public_handle, p.display_name, p.account_kind
-                FROM im_v2.public_user_profiles p
-                WHERE p.public_handle = \(bind: handle.rawValue)
-                  AND p.state = 'active'
-                  AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables d WHERE d.user_id = p.user_id)
-                  AND NOT EXISTS (
-                    SELECT 1 FROM im_v2.user_blocks b
-                    WHERE b.blocker_user_id = p.user_id
-                      AND b.blocked_user_id = \(bind: actorUUID)
-                  )
-                """).first(decoding: PublicIdentityRow.self),
-                let userID = try? UserID(row.userID.uuidString),
-                let accountKind = V2AccountKind(rawValue: row.accountKind),
-                let profile = try? V2PublicIdentity(
-                    userID: userID,
-                    handle: .init(row.handle),
-                    displayName: row.displayName,
-                    accountKind: accountKind
-                )
-            else { return nil }
-            return profile
+        guard let sql = database as? any SQLDatabase else {
+            throw V2PublicIdentityDirectoryError.unavailable
         }
+        // Budget consumption is an atomic, independently committed statement.
+        // The following lookup is read-only and needs no shared snapshot; an
+        // explicit transaction would add BEGIN/COMMIT round trips and could
+        // incorrectly roll back an already-attempted lookup on read failure.
+        try await consumeLookupBudget(sql: sql, actorUserID: actorUUID)
+        guard let row = try await sql.raw("""
+            SELECT p.user_id, p.public_handle, p.display_name, p.account_kind
+            FROM im_v2.public_user_profiles p
+            WHERE p.public_handle = \(bind: handle.rawValue)
+              AND p.state = 'active'
+              AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables d WHERE d.user_id = p.user_id)
+              AND NOT EXISTS (
+                SELECT 1 FROM im_v2.user_blocks b
+                WHERE b.blocker_user_id = p.user_id
+                  AND b.blocked_user_id = \(bind: actorUUID)
+              )
+            """).first(decoding: PublicIdentityRow.self),
+            let userID = try? UserID(row.userID.uuidString),
+            let accountKind = V2AccountKind(rawValue: row.accountKind),
+            let profile = try? V2PublicIdentity(
+                userID: userID,
+                handle: .init(row.handle),
+                displayName: row.displayName,
+                accountKind: accountKind
+            )
+        else { return nil }
+        return profile
     }
 
     public func profile(for userID: UserID) async throws -> V2PublicIdentity? {
@@ -130,22 +132,33 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
 
     private func consumeLookupBudget(sql: any SQLDatabase, actorUserID: UUID) async throws {
         let current = now()
-        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-public-identity-lookup:" + actorUserID.uuidString), 0))").run()
-        guard let existing = try await sql.raw("SELECT window_started_at, query_count FROM im_v2.public_identity_lookup_rate_limits WHERE actor_user_id = \(bind: actorUserID)").first(decoding: LookupRateLimitRow.self) else {
-            try await sql.raw("INSERT INTO im_v2.public_identity_lookup_rate_limits (actor_user_id, window_started_at, query_count, updated_at) VALUES (\(bind: actorUserID), \(bind: current), 1, \(bind: current))").run()
-            return
-        }
-        let elapsed = current.timeIntervalSince(existing.windowStartedAt)
-        if elapsed >= policy.window {
-            try await sql.raw("UPDATE im_v2.public_identity_lookup_rate_limits SET window_started_at = \(bind: current), query_count = 1, updated_at = \(bind: current) WHERE actor_user_id = \(bind: actorUserID)").run()
-            return
-        }
-        guard existing.queryCount < policy.maximumQueries else {
+        let expiredBefore = current.addingTimeInterval(-policy.window)
+        let saturatedCount = policy.maximumQueries + 1
+        guard let row = try await sql.raw("""
+            INSERT INTO im_v2.public_identity_lookup_rate_limits AS rate
+                (actor_user_id, window_started_at, query_count, updated_at)
+            VALUES (\(bind: actorUserID), \(bind: current), 1, \(bind: current))
+            ON CONFLICT (actor_user_id) DO UPDATE
+            SET window_started_at = CASE
+                    WHEN rate.window_started_at <= \(bind: expiredBefore) THEN \(bind: current)
+                    ELSE rate.window_started_at
+                END,
+                query_count = CASE
+                    WHEN rate.window_started_at <= \(bind: expiredBefore) THEN 1
+                    WHEN rate.query_count < \(bind: policy.maximumQueries)
+                        THEN rate.query_count + 1
+                    ELSE \(bind: saturatedCount)
+                END,
+                updated_at = \(bind: current)
+            RETURNING window_started_at, query_count
+            """).first(decoding: LookupRateLimitRow.self)
+        else { throw V2PublicIdentityDirectoryError.unavailable }
+        guard row.queryCount <= policy.maximumQueries else {
+            let elapsed = max(0, current.timeIntervalSince(row.windowStartedAt))
             throw V2PublicIdentityDirectoryError.rateLimited(
                 retryAfterSeconds: max(1, Int(ceil(policy.window - elapsed)))
             )
         }
-        try await sql.raw("UPDATE im_v2.public_identity_lookup_rate_limits SET query_count = query_count + 1, updated_at = \(bind: current) WHERE actor_user_id = \(bind: actorUserID)").run()
     }
 
     private func profile(sql: any SQLDatabase, userID: UUID) async throws -> V2PublicIdentity? {

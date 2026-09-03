@@ -26,6 +26,25 @@ struct V2AuthenticatedGatewayAdmissionTests {
         #expect(await limiter.admit(identity: first, now: now.addingTimeInterval(1)))
     }
 
+    @Test("weighted commands consume their full cost while zero-cost liveness remains available")
+    func chargesWeightedCommands() async throws {
+        let limiter = V2AuthenticatedGatewayCommandRateLimiter(policy: .init(
+            deviceCommandsPerSecond: 1,
+            deviceBurst: 10,
+            userCommandsPerSecond: 1,
+            userBurst: 10,
+            maximumTrackedIdentities: 8
+        ))
+        let identity = try identity(user: 1, device: 1)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+
+        #expect(await limiter.admit(identity: identity, cost: 8, now: now))
+        #expect(await !limiter.admit(identity: identity, cost: 3, now: now))
+        #expect(await limiter.admit(identity: identity, cost: 0, now: now))
+        #expect(await limiter.admit(identity: identity, cost: 2, now: now))
+        #expect(await !limiter.admit(identity: identity, cost: 1, now: now))
+    }
+
     @Test("rate-limit identity churn remains hard bounded")
     func boundsTrackedIdentities() async throws {
         let limiter = V2AuthenticatedGatewayCommandRateLimiter(policy: .init(

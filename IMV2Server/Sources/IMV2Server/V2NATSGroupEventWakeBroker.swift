@@ -4,6 +4,7 @@ import Crypto
 import Synchronization
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
+@preconcurrency import NIOSSL
 
 /// Dynamic room interest is deliberately separate from durable wake outbox
 /// work. A broker may forget a subscription during a network split; the
@@ -27,6 +28,10 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     /// Per-deployment secret used to derive opaque room routing subjects. It
     /// keeps stable room UUIDs out of broker ACLs, traces and subject names.
     public let routingKey: Data
+    /// Optional private trust root and SNI override for an internal NATS TLS
+    /// endpoint. System trust and the URL host are used when omitted.
+    public let tlsCAPath: String?
+    public let tlsServerName: String?
     public let payloadEncoding: V2NATSGroupEventPayloadEncoding
     /// A durable wake may arrive on another publisher connection before the
     /// corresponding foreground microbatch finishes bounded aggregation.
@@ -42,16 +47,33 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
         subjectPrefix: String,
         token: String? = nil,
         routingKey: Data,
+        tlsCAPath: String? = nil,
+        tlsServerName: String? = nil,
         payloadEncoding: V2NATSGroupEventPayloadEncoding = .json,
         wakeDeferralDelayMilliseconds: Int = 60,
         acknowledgementTimeout: TimeInterval = 2
     ) throws {
         let normalizedPrefix = subjectPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard url.scheme?.lowercased() == "nats", url.host != nil,
+        guard let scheme = url.scheme?.lowercased(),
+              ["nats", "tls"].contains(scheme),
+              let host = url.host?.lowercased(),
+              url.user == nil,
+              url.password == nil,
+              url.query == nil,
+              url.fragment == nil,
               normalizedPrefix.range(of: "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$", options: .regularExpression) != nil
         else { throw V2NATSGroupEventWakeBrokerError.invalidConfiguration }
         let normalizedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedToken?.isEmpty != true, routingKey.count >= 32,
+        let isLoopback = ["localhost", "127.0.0.1", "::1"].contains(host)
+        let normalizedCAPath = tlsCAPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedServerName = tlsServerName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedToken?.isEmpty != true,
+              (isLoopback || normalizedToken != nil),
+              (scheme == "tls" || isLoopback),
+              (scheme == "tls" || (normalizedCAPath == nil && normalizedServerName == nil)),
+              normalizedCAPath?.hasPrefix("/") != false,
+              normalizedServerName?.isEmpty != true,
+              routingKey.count >= 32,
               (0 ... 1_000).contains(wakeDeferralDelayMilliseconds),
               acknowledgementTimeout.isFinite,
               acknowledgementTimeout > 0,
@@ -61,10 +83,14 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
         self.subjectPrefix = normalizedPrefix
         self.token = normalizedToken
         self.routingKey = routingKey
+        self.tlsCAPath = normalizedCAPath
+        self.tlsServerName = normalizedServerName
         self.payloadEncoding = payloadEncoding
         self.wakeDeferralDelayMilliseconds = wakeDeferralDelayMilliseconds
         self.acknowledgementTimeout = acknowledgementTimeout
     }
+
+    var usesTLS: Bool { url.scheme?.lowercased() == "tls" }
 }
 
 public enum V2NATSGroupEventWakeBrokerError: Error, Equatable, Sendable {
@@ -368,7 +394,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         }
     }
 
-    func submit(_ payload: Data) {
+    func submit(subject _: String, payload: Data) {
         guard let notification =
             V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
         else { return }
@@ -385,6 +411,12 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
             _ = droppedPayloads.wrappingAdd(1, ordering: .relaxed)
             droppedPayloadObserver()
         }
+    }
+
+    /// Direct decoder/ordering tests exercise this stage after transport
+    /// authentication has already been isolated by the wrapper dispatcher.
+    func submit(_ payload: Data) {
+        submit(subject: "imv2.test", payload: payload)
     }
 
     func droppedPayloadCount() -> UInt64 {
@@ -576,6 +608,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     /// roll through the versioned protobuf decoder. Both encodings remain
     /// below the ordinary 1 MiB Core NATS `max_payload`.
     private static let maximumInboundNotificationPayloadBytes = 896 * 1_024
+        + V2NATSAuthenticatedPayloadCodec.overheadBytes
 
     private struct Connect: Encodable {
         let verbose = false
@@ -898,15 +931,21 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
         let connection = try await connectedChannel()
         let channel = connection.channel
-        let payload: Data
+        let encodedPayload: Data
         switch configuration.payloadEncoding {
         case .json:
-            payload = try Self.encodeJSONNotification(notification)
+            encodedPayload = try Self.encodeJSONNotification(notification)
         case .protobufV1:
-            payload = try V2NATSGroupEventProtobufCodec.encode(notification)
+            encodedPayload = try V2NATSGroupEventProtobufCodec.encode(notification)
         }
+        let publishSubject = subject(for: roomID)
+        let payload = V2NATSAuthenticatedPayloadCodec.seal(
+            encodedPayload,
+            subject: publishSubject,
+            routingKey: configuration.routingKey
+        )
         var buffer = channel.allocator.buffer(capacity: payload.count + configuration.subjectPrefix.utf8.count + 64)
-        buffer.writeString("PUB \(subject(for: roomID)) \(payload.count)\r\n")
+        buffer.writeString("PUB \(publishSubject) \(payload.count)\r\n")
         buffer.writeBytes(payload)
         buffer.writeString("\r\n")
         do {
@@ -963,10 +1002,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             pending = pendingConnection
         } else {
             let group = eventLoopGroup
-            let host = configuration.url.host!
-            let port = configuration.url.port ?? 4222
             let timeout = acknowledgementTimeout
-            let token = configuration.token
+            let configuration = self.configuration
             let recordRecoveryNotification = self.recordRecoveryNotification
             let metrics = self.metrics
             let receiveWake = self.receiveWake
@@ -979,10 +1016,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             pending = Task {
                 [
                     group,
-                    host,
-                    port,
                     timeout,
-                    token,
+                    configuration,
                     replay,
                     recordRecoveryNotification,
                     metrics,
@@ -991,10 +1026,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                 ] in
                 try await Self.openConnection(
                     group: group,
-                    host: host,
-                    port: port,
+                    configuration: configuration,
                     timeout: timeout,
-                    token: token,
                     replay: replay,
                     recordRecoveryNotification: recordRecoveryNotification,
                     metrics: metrics,
@@ -1052,10 +1085,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     private static func openConnection(
         group: MultiThreadedEventLoopGroup,
-        host: String,
-        port: Int,
+        configuration: V2NATSGroupEventWakeConfiguration,
         timeout: TimeAmount,
-        token: String?,
         replay: [(subject: String, subscriptionID: Int)],
         recordRecoveryNotification: @escaping @Sendable (
             V2ForegroundGroupEventNotification
@@ -1085,14 +1116,52 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             },
             receiveNotification: receiveWake
         )
+        let authenticatedDispatcher = V2NATSAuthenticatedPayloadDispatcher(
+            routingKey: configuration.routingKey,
+            invalidPayload: {
+                metrics?.foregroundGroupInboundNotificationDropped()
+            },
+            downstream: notificationDispatcher
+        )
         let handler = V2NATSConfirmedInboundHandler(
             maximumPayloadBytes: Self.maximumInboundNotificationPayloadBytes,
-            payloadDispatcher: notificationDispatcher
+            payloadDispatcher: authenticatedDispatcher
         )
+        let sslContext: NIOSSLContext?
+        if configuration.usesTLS {
+            var tls = TLSConfiguration.makeClientConfiguration()
+            tls.minimumTLSVersion = .tlsv13
+            if let path = configuration.tlsCAPath {
+                tls.trustRoots = .certificates(
+                    try NIOSSLCertificate.fromPEMFile(path)
+                )
+            }
+            sslContext = try NIOSSLContext(configuration: tls)
+        } else {
+            sslContext = nil
+        }
+        let serverName = configuration.tlsServerName ?? configuration.url.host!
         let channel = try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.connectTimeout, value: timeout)
-            .channelInitializer { channel in channel.pipeline.addHandler(handler) }
-            .connect(host: host, port: port)
+            .channelInitializer { channel in
+                do {
+                    if let sslContext {
+                        let tlsHandler = try NIOSSLClientHandler(
+                                context: sslContext,
+                                serverHostname: serverName
+                            )
+                        try channel.pipeline.syncOperations.addHandler(tlsHandler)
+                    }
+                    try channel.pipeline.syncOperations.addHandler(handler)
+                    return channel.eventLoop.makeSucceededFuture(())
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+            }
+            .connect(
+                host: configuration.url.host!,
+                port: configuration.url.port ?? 4222
+            )
             .get()
         do {
             guard !Task.isCancelled else { throw CancellationError() }
@@ -1104,7 +1173,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             }
             defer { watchdog.cancel() }
             let connect = String(
-                decoding: try JSONEncoder().encode(Connect(token: token)),
+                decoding: try JSONEncoder().encode(Connect(token: configuration.token)),
                 as: UTF8.self
             )
             var command = channel.allocator.buffer(capacity: connect.utf8.count + replay.count * 96 + 20)
@@ -1409,7 +1478,7 @@ final class V2NATSConfirmedInboundHandler: ChannelInboundHandler, Sendable {
     init(
         invalidMessagePolicy: V2NATSInboundFrameParser.InvalidMessagePolicy = .closeChannel,
         maximumPayloadBytes: Int = V2NATSInboundFrameParser.defaultMaximumPayloadBytes,
-        onPayload: @escaping @Sendable (Data) async -> Void
+        onPayload: @escaping @Sendable (String, Data) async -> Void
     ) {
         payloadDispatcher = V2NATSPayloadDispatcher(onPayload: onPayload)
         parser = Mutex(.init(
@@ -1453,8 +1522,8 @@ final class V2NATSConfirmedInboundHandler: ChannelInboundHandler, Sendable {
         guard let bytes = buffer.readData(length: buffer.readableBytes) else { return }
         for output in parser.withLock({ $0.consume(bytes) }) {
             switch output {
-            case .payload(let payload):
-                payloadDispatcher.submit(payload)
+            case .payload(let subject, let payload):
+                payloadDispatcher.submit(subject: subject, payload: payload)
             case .ping:
                 var pong = context.channel.allocator.buffer(capacity: 6)
                 pong.writeString("PONG\r\n")

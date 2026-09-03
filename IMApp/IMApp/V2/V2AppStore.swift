@@ -176,9 +176,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
-    var isPasskeyAuthenticationEnabled: Bool {
-        configuration?.isPasskeyAuthenticationEnabled == true
-    }
 
     init(
         startupMode: StartupMode = .production,
@@ -338,49 +335,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = .launching
         await authSession?.retryCredentialStoreAccess()
         await restore()
-    }
-
-    func signInWithPasskey() async {
-        guard let configuration,
-              configuration.isPasskeyAuthenticationEnabled,
-              let bootstrapper,
-              let deviceIdentityProvider,
-              let localKeychainService
-        else {
-            authenticationMessage = "Passkey 服务尚未启用。"
-            return
-        }
-        let attemptGeneration = beginAuthenticationAttempt()
-        do {
-            let passkeyService = try V2HTTPPasskeyAssertionService(
-                optionsEndpoint: configuration.endpoint("v2/account-auth/passkeys/assertion-options"),
-                completionEndpoint: configuration.endpoint("v2/account-auth/passkeys/assertion")
-            )
-            let accountProvider = V2PasskeyAccountAssertionProvider(
-                requestProvider: passkeyService,
-                authorizer: V2ApplePasskeyAuthorizer(),
-                submitter: passkeyService
-            )
-            let issuer = try V2HTTPAccountAssertionDeviceCredentialProvider(
-                issueEndpoint: configuration.endpoint("v2/device-credentials"),
-                assertionProvider: accountProvider,
-                deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService),
-                registrationMetadata: Self.deviceRegistrationMetadata()
-            )
-            let localStore = try await bootstrapper.establishSession(using: issuer)
-            try Task.checkCancellation()
-            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
-            try await activate(localStore: localStore, authenticationAttemptGeneration: attemptGeneration)
-        } catch is CancellationError {
-            guard !Task.isCancelled else { return }
-            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
-            route = .signedOut
-        } catch {
-            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
-            route = .signedOut
-            authenticationMessage = "Passkey 服务尚未启用，或身份验证未通过。"
-        }
     }
 
     func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode, publicHandle: String? = nil, displayName: String? = nil) async {
@@ -749,8 +703,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
     /// Stops the foreground realtime connection only after iOS has actually
     /// backgrounded the scene. `inactive` is intentionally not treated as a
-    /// background transition because it also occurs while passkey and system
-    /// permission UI is presented over the app.
+    /// background transition because it also occurs while system permission
+    /// UI is presented over the app.
     func applicationDidEnterBackground() async {
         isApplicationActive = false
         messageSearchIndexTask?.cancel()

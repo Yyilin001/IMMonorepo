@@ -66,13 +66,12 @@ assertion or raw credential. That operation is removed only after
 `V2AuthSession` has durably stored the returned credential pair, so a lost
 response can safely replay the same registration operation.
 
-`V2PasskeyAccountAssertionProvider` is the selected primary factor: it obtains
-a server challenge, invokes the Apple platform authenticator, and posts only
-the resulting WebAuthn assertion artifacts back to the account service. The
-provider is device-bound, so the generic credential issuer asks it for an
-assertion only after resolving the local V2 device ID. Password support lives
-in `V2HTTPPasswordAccountAuthenticator` as an explicit fallback; callers pass
-the password only to a one-shot method and it is never persisted by ClientKit.
+The package contains framework-neutral WebAuthn building blocks, but the app
+does not expose them until the account service owns a complete challenge,
+origin, RP-ID, signature-counter and credential-revocation implementation.
+Password support currently lives in `V2HTTPPasswordAccountAuthenticator`;
+callers pass the password only to a one-shot method and it is never persisted
+by ClientKit.
 
 `V2RealtimeSessionCoordinator` is the only app-facing transition from the
 device-auth session to `V2TLSFrameConnection`: it obtains one coherent

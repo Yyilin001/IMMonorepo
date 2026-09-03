@@ -108,14 +108,42 @@ struct V2VaporDeviceCredentialRoutesTests {
             #expect(response.headers.first(name: "Pragma") == "no-cache")
         }
     }
+
+    @Test("invalid device metadata is rejected before assertion verification or credential issuance")
+    func rejectsInvalidDeviceMetadataEarly() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let userID = try UserID("00000000-0000-0000-0000-000000000741")
+        let deviceID = try DeviceID("00000000-0000-0000-0000-000000000742")
+        let verifier = RecordingRouteAssertionVerifier(userID: userID)
+        let issuer = DeviceCredentialRouteIssuer(registration: .terminalTestFallback, refresh: .terminalRejection)
+        V2VaporDeviceCredentialRoutes(assertionVerifier: verifier, issuer: issuer).register(on: app)
+
+        try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(
+                accountAssertion: "opaque-assertion",
+                deviceID: deviceID.rawValue,
+                operationID: UUID(),
+                deviceName: String(repeating: "x", count: 300),
+                platform: "iOS"
+            ))
+        }) { response async in
+            #expect(response.status == .badRequest)
+        }
+        #expect(await verifier.callCount() == 0)
+        #expect(await issuer.registrationRequest() == nil)
+    }
 }
 
-private struct RouteAssertionVerifier: V2AccountAssertionVerifier {
+private struct RouteAssertionVerifier: V2DeviceBoundAccountAssertionVerifier {
     let userID: UserID
     var accepts = true
     func verifiedUserID(for accountAssertion: String) throws -> UserID {
         guard accepts, accountAssertion == "opaque-assertion" else { throw RouteAssertionFailure.denied }
         return userID
+    }
+    func verifiedUserID(for accountAssertion: String, deviceID _: DeviceID) throws -> UserID {
+        try verifiedUserID(for: accountAssertion)
     }
 }
 
@@ -134,6 +162,15 @@ private struct DeviceBoundRouteAssertionVerifier: V2DeviceBoundAccountAssertionV
 
 private enum RouteAssertionFailure: Error { case denied }
 
+private actor RecordingRouteAssertionVerifier: V2DeviceBoundAccountAssertionVerifier {
+    let userID: UserID
+    private var calls = 0
+    init(userID: UserID) { self.userID = userID }
+    func verifiedUserID(for _: String) -> UserID { calls += 1; return userID }
+    func verifiedUserID(for _: String, deviceID _: DeviceID) -> UserID { calls += 1; return userID }
+    func callCount() -> Int { calls }
+}
+
 private actor DeviceCredentialRouteIssuer: V2DeviceCredentialIssuing {
     private let registration: V2DeviceRegistrationOutcome
     private let refresh: V2DeviceCredentialRefreshOutcome
@@ -151,4 +188,8 @@ private actor DeviceCredentialRouteIssuer: V2DeviceCredentialIssuing {
 
     func refresh(_: V2DeviceCredentialRefresh) -> V2DeviceCredentialRefreshOutcome { refresh }
     func registrationRequest() -> V2TrustedDeviceRegistration? { receivedRegistration }
+}
+
+private extension V2DeviceRegistrationOutcome {
+    static var terminalTestFallback: Self { .deviceUnavailable }
 }

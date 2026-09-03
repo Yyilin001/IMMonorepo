@@ -58,10 +58,10 @@ public struct V2DeviceCredentialRefreshHTTPRequest: Content, Sendable {
 /// provide an approved assertion verifier and mount it on the account-service
 /// listener with its own rate limits and TLS policy.
 public struct V2VaporDeviceCredentialRoutes: Sendable {
-    private let assertionVerifier: any V2AccountAssertionVerifier
+    private let assertionVerifier: any V2DeviceBoundAccountAssertionVerifier
     private let issuer: any V2DeviceCredentialIssuing
 
-    public init(assertionVerifier: any V2AccountAssertionVerifier, issuer: any V2DeviceCredentialIssuing) {
+    public init(assertionVerifier: any V2DeviceBoundAccountAssertionVerifier, issuer: any V2DeviceCredentialIssuing) {
         self.assertionVerifier = assertionVerifier
         self.issuer = issuer
     }
@@ -70,15 +70,18 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
         routes.post("v2", "device-credentials") { request async throws -> Response in
             let input = try request.content.decode(V2DeviceCredentialIssueHTTPRequest.self)
             guard !input.accountAssertion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  let deviceID = try? DeviceID(input.deviceID)
+                  let deviceID = try? DeviceID(input.deviceID),
+                  let metadata = try? V2DeviceRegistrationMetadata.validated(
+                      displayName: input.deviceName,
+                      platform: input.platform
+                  )
             else { throw Abort(.badRequest) }
             let userID: UserID
             do {
-                if let deviceBoundVerifier = assertionVerifier as? any V2DeviceBoundAccountAssertionVerifier {
-                    userID = try await deviceBoundVerifier.verifiedUserID(for: input.accountAssertion, deviceID: deviceID)
-                } else {
-                    userID = try await assertionVerifier.verifiedUserID(for: input.accountAssertion)
-                }
+                userID = try await assertionVerifier.verifiedUserID(
+                    for: input.accountAssertion,
+                    deviceID: deviceID
+                )
             } catch {
                 throw Abort(.unauthorized)
             }
@@ -88,10 +91,7 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
                     userID: userID,
                     deviceID: deviceID,
                     operationID: input.operationID,
-                    metadata: .init(
-                        displayName: input.deviceName ?? V2DeviceRegistrationMetadata.unknown.displayName,
-                        platform: input.platform ?? V2DeviceRegistrationMetadata.unknown.platform
-                    )
+                    metadata: metadata
                 ))
             } catch {
                 throw Abort(.serviceUnavailable)

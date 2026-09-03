@@ -66,8 +66,12 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                 throw Abort(.serviceUnavailable)
             }
             do {
+                let byteCounter = V2StreamingUploadByteCounter(maximumBytes: maximumUploadBytes)
                 let written = try await request.body
-                    .map { Data($0.readableBytesView) }
+                    .map { buffer in
+                        try byteCounter.consume(buffer.readableBytes)
+                        return Data(buffer.readableBytesView)
+                    }
                     .write(
                     toFileAt: .init(upload.fileURL.path),
                     options: .newFile(replaceExisting: false)
@@ -140,4 +144,23 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
 
 public enum V2VaporLocalFilesystemMediaRoutesError: Error, Equatable, Sendable {
     case invalidConfiguration
+}
+
+final class V2StreamingUploadByteCounter: @unchecked Sendable {
+    private let maximumBytes: Int
+    private let lock = NSLock()
+    private var consumedBytes = 0
+
+    init(maximumBytes: Int) {
+        self.maximumBytes = maximumBytes
+    }
+
+    func consume(_ count: Int) throws {
+        let accepted = lock.withLock { () -> Bool in
+            guard count >= 0, consumedBytes <= maximumBytes - count else { return false }
+            consumedBytes += count
+            return true
+        }
+        guard accepted else { throw Abort(.payloadTooLarge) }
+    }
 }

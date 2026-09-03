@@ -169,7 +169,8 @@ public struct V2HTTPPasskeyAssertionService: V2PasskeyAssertionRequestProviding,
             throw V2PasskeyAccountAssertionError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: return data
+        case 200 where V2HTTPContract.isJSON(response): return data
+        case 200: throw V2PasskeyAccountAssertionError.invalidResponse
         case 401, 403: throw V2PasskeyAccountAssertionError.authenticationRejected
         default: throw V2PasskeyAccountAssertionError.serverStatus(response.statusCode)
         }

@@ -4,10 +4,6 @@ import IMV2ClientKit
 struct V2AppConfiguration: Sendable {
     let accountBaseURL: URL
     let realtimeEndpoint: V2RealtimeEndpoint
-    let passkeyRelyingPartyID: String
-    /// Product capability gate. A relying-party identifier alone does not
-    /// prove the server has deployed challenge storage and WebAuthn checks.
-    let isPasskeyAuthenticationEnabled: Bool
     let keychainService: String
     let pushEndpointEnvironment: V2ClientPushEndpointEnvironment
 
@@ -33,9 +29,6 @@ struct V2AppConfiguration: Sendable {
               let accountBaseURL = URL(string: rawBaseURL),
               accountBaseURL.scheme?.lowercased() == "https", accountBaseURL.host != nil
         else { throw V2AppConfigurationError.invalidAccountBaseURL }
-        guard let passkeyRelyingPartyID = bundle.object(forInfoDictionaryKey: "IMV2PasskeyRelyingPartyID") as? String,
-              !passkeyRelyingPartyID.isEmpty, !passkeyRelyingPartyID.contains("/")
-        else { throw V2AppConfigurationError.invalidPasskeyRelyingPartyID }
         guard let gatewayHost = bundle.object(forInfoDictionaryKey: "IMV2GatewayHost") as? String,
               let rawGatewayPort = bundle.object(forInfoDictionaryKey: "IMV2GatewayPort"),
               let gatewayPort = UInt16(String(describing: rawGatewayPort))
@@ -46,8 +39,6 @@ struct V2AppConfiguration: Sendable {
         } else {
             realtimeEndpoint = try V2RealtimeEndpoint(host: gatewayHost, port: gatewayPort)
         }
-        self.passkeyRelyingPartyID = passkeyRelyingPartyID
-        isPasskeyAuthenticationEnabled = (bundle.object(forInfoDictionaryKey: "IMV2PasskeyAuthenticationEnabled") as? Bool) ?? false
         guard let rawPushEnvironment = bundle.object(forInfoDictionaryKey: "IMV2PushEnvironment") as? String,
               let pushEndpointEnvironment = V2ClientPushEndpointEnvironment(rawValue: rawPushEnvironment)
         else { throw V2AppConfigurationError.invalidPushEnvironment }
@@ -73,7 +64,6 @@ struct V2AppConfiguration: Sendable {
 
 enum V2AppConfigurationError: Error, Equatable {
     case invalidAccountBaseURL
-    case invalidPasskeyRelyingPartyID
     case invalidRealtimeEndpoint
     case invalidPushEnvironment
 }

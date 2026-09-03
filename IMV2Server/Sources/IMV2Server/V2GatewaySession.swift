@@ -114,6 +114,7 @@ public actor V2GatewaySession {
     private let now: @Sendable () -> Date
     private var authenticatedSessionExpiresAt: Date?
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
+    private var helloDeviceID: DeviceID?
 
     public init(
         limits: V2ConnectionLimits,
@@ -192,6 +193,12 @@ public actor V2GatewaySession {
             guard !versions.isEmpty else { throw V2GatewaySessionError.invalidClientHello }
             let profiles = Set(hello.supportedCapabilityProfiles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
             guard profiles.contains(capabilityProfile) else { throw V2GatewaySessionError.unsupportedCapabilityProfile }
+            if !hello.deviceID.isEmpty {
+                guard let deviceID = try? DeviceID(hello.deviceID) else {
+                    throw V2GatewaySessionError.invalidClientHello
+                }
+                helloDeviceID = deviceID
+            }
             let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: supportedVersions)
             if supportedFrameCompression == .zlib,
                hello.supportedFrameCompressions.contains(.zlib) {
@@ -216,6 +223,9 @@ public actor V2GatewaySession {
             try state.receiveAuthenticate(frame)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
+            guard helloDeviceID.map({ $0 == deviceID }) ?? true else {
+                throw V2GatewaySessionError.invalidAuthenticatePayload
+            }
             let authentication = try await authenticator.authenticateSession(
                 accessToken: request.accessToken,
                 deviceID: deviceID
@@ -288,7 +298,11 @@ public actor V2GatewaySession {
         do {
             var response: IMV2Envelope
             var preparedFrame: V2Frame?
-            if !(await commandAdmission.admit(identity: identity, now: now())) {
+            if !(await commandAdmission.admit(
+                identity: identity,
+                cost: commandAdmissionCost(for: envelope),
+                now: now()
+            )) {
                 response = IMV2Envelope()
                 response.error = .init()
                 response.error.code = "RATE_LIMITED"
@@ -369,6 +383,29 @@ public actor V2GatewaySession {
             // correlation before the connection decides whether to retry/close.
             try? state.completeResponse(requestID: envelope.requestID)
             throw error
+        }
+    }
+
+    private func commandAdmissionCost(for envelope: IMV2Envelope) -> Int {
+        switch envelope.body {
+        case .heartbeat:
+            // Liveness cannot be starved by a client's own foreground work.
+            return 0
+        case .forwardMessages(let request):
+            let combinations = request.sourceMessageIds.count * request.targetRoomIds.count
+            return min(64, max(1, 1 + combinations / 25))
+        case .appendGroupRoomCreationMembers(let request):
+            return min(32, max(1, 1 + request.memberUserIds.count / 32))
+        case .listRoomMembers(let request):
+            return min(8, max(1, 1 + Int(request.pageSize) / 100))
+        case .groupEventPull(let request):
+            return min(8, max(1, 1 + Int(request.pageSize) / 100))
+        case .listReadReceiptReaders(let request):
+            return min(4, max(1, 1 + Int(request.pageSize) / 50))
+        case .syncPull(let request):
+            return min(8, max(1, 1 + Int(request.maxRecords) / 100))
+        default:
+            return 1
         }
     }
 

@@ -7,17 +7,20 @@ public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
     public let deletedRows: Int
     public let purgedIdempotencyRows: Int
     public let purgedExpiredCredentialReplayRows: Int
+    public let purgedExpiredRefreshHistoryRows: Int
     public let purgedExpiredConnectionLeaseRows: Int
 
     public init(
         deletedRows: Int,
         purgedIdempotencyRows: Int = 0,
         purgedExpiredCredentialReplayRows: Int = 0,
+        purgedExpiredRefreshHistoryRows: Int = 0,
         purgedExpiredConnectionLeaseRows: Int = 0
     ) {
         self.deletedRows = max(0, deletedRows)
         self.purgedIdempotencyRows = max(0, purgedIdempotencyRows)
         self.purgedExpiredCredentialReplayRows = max(0, purgedExpiredCredentialReplayRows)
+        self.purgedExpiredRefreshHistoryRows = max(0, purgedExpiredRefreshHistoryRows)
         self.purgedExpiredConnectionLeaseRows = max(0, purgedExpiredConnectionLeaseRows)
     }
     public var didWork: Bool { deletedRows > 0 }
@@ -103,7 +106,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             // continuously busy fan-out table.
             var budget = ControlHousekeepingDeletionBudget(
                 total: limit,
-                categoryCount: 15
+                categoryCount: 16
             )
             var count = 0
             count += try await deleteSimple(
@@ -262,6 +265,11 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "replay_expires_at <= ", order: "replay_expires_at, ctid",
                 cutoff: now, limit: budget.take()
             )
+            let refreshHistory = try await deleteSimple(
+                sql: sql, table: "device_refresh_token_history", identity: "ctid",
+                where: "expires_at <= ", order: "expires_at, device_id, family_generation",
+                cutoff: now, limit: budget.take()
+            )
             let connectionLeases = try await deleteSimple(
                 sql: sql, table: "user_live_presence_leases", identity: "connection_id",
                 where: "expires_at <= ", order: "expires_at, connection_id",
@@ -273,11 +281,12 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 rotationSeed: now,
                 limit: budget.take()
             )
-            count += credentialReplays + connectionLeases + idempotencyRows
+            count += credentialReplays + refreshHistory + connectionLeases + idempotencyRows
             return .init(
                 deletedRows: count,
                 purgedIdempotencyRows: idempotencyRows,
                 purgedExpiredCredentialReplayRows: credentialReplays,
+                purgedExpiredRefreshHistoryRows: refreshHistory,
                 purgedExpiredConnectionLeaseRows: connectionLeases
             )
         }

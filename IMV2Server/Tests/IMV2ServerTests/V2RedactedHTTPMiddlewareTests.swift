@@ -21,6 +21,9 @@ struct V2RedactedHTTPMiddlewareTests {
             app.get("internal") { _ async throws -> Response in
                 throw SensitiveTestFailure()
             }
+            app.get("abort-reason") { _ async throws -> Response in
+                throw Abort(.badRequest, reason: SensitiveTestFailure.secret)
+            }
             let tester = try app.testing()
             try await tester.test(
                 .GET,
@@ -33,6 +36,12 @@ struct V2RedactedHTTPMiddlewareTests {
                 #expect(response.status == .internalServerError)
                 let body = String(decoding: response.body.readableBytesView, as: UTF8.self)
                 #expect(body.contains("Something went wrong."))
+                #expect(!body.contains(SensitiveTestFailure.secret))
+            }
+            try await tester.test(.GET, "/abort-reason") { response async throws in
+                #expect(response.status == .badRequest)
+                let body = String(decoding: response.body.readableBytesView, as: UTF8.self)
+                #expect(body.contains("Bad Request"))
                 #expect(!body.contains(SensitiveTestFailure.secret))
             }
 

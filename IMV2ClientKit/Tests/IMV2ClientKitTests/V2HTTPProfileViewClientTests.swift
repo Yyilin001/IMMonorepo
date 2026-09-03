@@ -13,7 +13,7 @@ struct V2HTTPProfileViewClientTests {
         let endpoint = try #require(URL(string: "https://account.invalid/v2/profile-views/batch"))
         let userID = "00000000-0000-0000-0000-000000000901"
         let roomID = "00000000-0000-0000-0000-000000000902"
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
         let body = try JSONEncoder().encode(ProfileViewResponseBody(results: [
             .init(userID: userID, context: "direct", roomID: nil, unavailable: false, handle: "profile_user", displayName: "资料名称", accountKind: .regular, state: "active", revision: 4, visibilityRevision: 2),
             .init(userID: userID, context: "room", roomID: roomID, unavailable: true, handle: nil, displayName: nil, accountKind: nil, state: nil, revision: nil, visibilityRevision: nil),

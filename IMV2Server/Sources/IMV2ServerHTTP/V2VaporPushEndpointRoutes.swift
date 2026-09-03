@@ -60,9 +60,11 @@ public struct V2VaporPushEndpointRoutes: Sendable {
         routes.delete("v2", "push-endpoint") { request async throws -> Response in
             let identity = try await authenticate(request)
             do {
-                if let endpoint = try await store.endpoint(for: identity.deviceID) {
-                    try await store.disable(endpoint, now: now())
-                }
+                try await store.disableOwnedEndpoint(
+                    actorUserID: identity.userID,
+                    deviceID: identity.deviceID,
+                    now: now()
+                )
             } catch {
                 throw Abort(.serviceUnavailable)
             }
@@ -71,16 +73,7 @@ public struct V2VaporPushEndpointRoutes: Sendable {
     }
 
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
-        guard let accessToken = request.headers.bearerAuthorization?.token,
-              let rawDeviceID = request.headers.first(name: "X-IM-Device-ID"),
-              let deviceID = try? DeviceID(rawDeviceID)
-        else { throw Abort(.unauthorized) }
-        do {
-            let userID = try await authenticator.authenticateSession(accessToken: accessToken, deviceID: deviceID).userID
-            return .init(userID: userID, deviceID: deviceID, capabilityProfile: "account-edge")
-        } catch {
-            throw Abort(.unauthorized)
-        }
+        try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
     private func noStoreNoContent() -> Response {

@@ -6208,13 +6208,23 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at)
                 VALUES (\(bind: senderUUID), \(bind: UUID(uuidString: deviceID.rawValue)!), \(bind: now), \(bind: now))
                 """).run()
-            _ = try await mediaStore.requestUpload(
+            let availableGrant = try await mediaStore.requestUpload(
                 .init(actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000093"), mediaID: availableID, contentType: "image/png", byteCount: 42, limits: uploadLimits),
                 deviceID: deviceID,
                 expiresAt: now.addingTimeInterval(600),
                 now: now
             )
-            try await sql.raw("UPDATE im_v2.media_upload_grants SET state = 'consumed', redeemed_at = \(bind: now) WHERE media_id = \(bind: UUID(uuidString: availableID.rawValue)!)").run()
+            let uploadSessions = PostgresV2MediaUploadSessionStore(database: app.db(.psql))
+            let uploadClaim = try await uploadSessions.claimUpload(
+                ownerUserID: senderID,
+                deviceID: deviceID,
+                uploadSessionID: availableGrant.uploadSessionID,
+                now: now.addingTimeInterval(1),
+                leaseDuration: 30
+            )
+            #expect(uploadClaim.mediaID == availableID)
+            #expect(uploadClaim.byteCount == 42)
+            try await uploadSessions.completeUploadTarget(uploadClaim, now: now.addingTimeInterval(1))
             try await mediaStore.markUploadCompleted(ownerUserID: senderID, deviceID: deviceID, mediaID: availableID, now: now.addingTimeInterval(1))
             #expect(try await mediaStore.uploadStatus(ownerUserID: senderID, deviceID: deviceID, mediaID: availableID, now: now.addingTimeInterval(1)) == .scanning)
             let scanStore = PostgresV2MediaScanStore(database: app.db(.psql), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000092")! })
@@ -7063,6 +7073,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await issuer.refresh(refresh) == .idempotent(successor))
             #expect(try await gateway.authenticateSession(accessToken: successor.accessToken, deviceID: deviceID).userID == userID)
 
+            let arbitraryMismatch = try V2DeviceCredentialRefresh(
+                userID: userID,
+                deviceID: deviceID,
+                refreshCredential: "attacker-controlled-random-value",
+                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000206")!
+            )
+            #expect(try await issuer.refresh(arbitraryMismatch) == .terminalRejection)
+            #expect(try await gateway.authenticateSession(accessToken: successor.accessToken, deviceID: deviceID).userID == userID)
+            #expect(try await count("im_v2.device_revocation_events", on: sql) == 0)
+
             let reuse = try V2DeviceCredentialRefresh(
                 userID: userID,
                 deviceID: deviceID,
@@ -7263,6 +7283,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 now: { now.addingTimeInterval(2) }
             )
             #expect(try await publicDirectory.resolve(handle: .init("account991"), actorUserID: try .init("00000000-0000-0000-0000-000000000990")) == nil)
+            #expect(try await publicDirectory.resolve(handle: .init("account991"), actorUserID: try .init("00000000-0000-0000-0000-000000000990")) == nil)
+            await #expect(throws: V2PublicIdentityDirectoryError.rateLimited(retryAfterSeconds: 60)) {
+                _ = try await publicDirectory.resolve(
+                    handle: .init("account991"),
+                    actorUserID: try .init("00000000-0000-0000-0000-000000000990")
+                )
+            }
             #expect(try await count("im_v2.account_disables", on: sql) == 1)
             #expect(try await count("im_v2.device_revocation_events", on: sql) == 2)
             #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 0)
@@ -9885,7 +9912,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
         let app = try await Application.make(.testing)
         do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
             guard let sql = app.db(.psql) as? any SQLDatabase else {
                 throw V2AccountEdgeClientRateLimitError.unavailable
             }
@@ -9907,6 +9934,27 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await firstReplica.consume(address: address) == .rateLimited(retryAfterSeconds: 60))
             #expect(try await firstReplica.consume(address: try V2AccountEdgeClientAddress("203.0.113.9")) == .allowed)
 
+            let concurrentPolicy = try V2AccountEdgeClientRateLimitPolicy(
+                maximumRequests: 1,
+                window: 60
+            )
+            let concurrentAddress = try V2AccountEdgeClientAddress("192.0.2.44")
+            let concurrentFirst = V2PostgresAccountEdgeClientRateLimiter(
+                database: app.db(.psql), policy: concurrentPolicy, key: key,
+                now: { Date(timeIntervalSince1970: 1_750_002_000) }
+            )
+            let concurrentSecond = V2PostgresAccountEdgeClientRateLimiter(
+                database: app.db(.psql), policy: concurrentPolicy, key: key,
+                now: { Date(timeIntervalSince1970: 1_750_002_000) }
+            )
+            async let concurrentFirstResult = concurrentFirst.consume(address: concurrentAddress)
+            async let concurrentSecondResult = concurrentSecond.consume(address: concurrentAddress)
+            let concurrentResults = try await [concurrentFirstResult, concurrentSecondResult]
+            #expect(concurrentResults.filter { $0 == .allowed }.count == 1)
+            #expect(concurrentResults.filter {
+                $0 == .rateLimited(retryAfterSeconds: 60)
+            }.count == 1)
+
             let secondReplica = V2PostgresAccountEdgeClientRateLimiter(
                 database: app.db(.psql), policy: policy, key: key,
                 now: { Date(timeIntervalSince1970: 1_750_002_061) }
@@ -9915,10 +9963,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await secondReplica.consume(address: try V2AccountEdgeClientAddress("2001:db8::8")) == .allowed)
 
             let persistedKeys = try await sql.raw("SELECT client_key FROM im_v2.account_edge_client_rate_limits ORDER BY client_key").all(decoding: EdgeClientRateLimitKeyRow.self)
-            #expect(persistedKeys.count == 3)
+            #expect(persistedKeys.count == 4)
             #expect(persistedKeys.allSatisfy { $0.clientKey != "198.51.100.8" && $0.clientKey != "2001:db8::8" })
             #expect(persistedKeys.allSatisfy { $0.clientKey.count == 64 })
-            #expect(try await secondReplica.purgeExpired(limit: 100) == 1)
+            #expect(try await secondReplica.purgeExpired(limit: 100) == 2)
             #expect(try await count("im_v2.account_edge_client_rate_limits", on: sql) == 2)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -13458,16 +13506,27 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                         \(bind: now.addingTimeInterval(-2)),
                         \(bind: now.addingTimeInterval(-1)), \(bind: veryOld))
                 """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.device_refresh_token_history
+                    (user_id, device_id, family_generation, refresh_hmac,
+                     consumed_at, expires_at)
+                VALUES (
+                    \(bind: user), \(bind: revokedDevice), 1,
+                    \(bind: String(repeating: "b", count: 64)),
+                    \(bind: veryOld), \(bind: now.addingTimeInterval(-1))
+                )
+                """).run()
 
             let controlReport = try await V2ControlPlaneHousekeepingWorker(
                 store: PostgresV2ControlPlaneHousekeepingStore(database: app.db(.psql)),
                 now: { now }
             ).runOnce(limit: 256)
-            #expect(controlReport.deletedRows == 9)
+            #expect(controlReport.deletedRows == 10)
             #expect(controlReport.deletedRows <= 256)
             #expect(controlReport.purgedIdempotencyRows == 1)
             #expect(controlReport.purgedExpiredConnectionLeaseRows == 1)
             #expect(controlReport.purgedExpiredCredentialReplayRows == 1)
+            #expect(controlReport.purgedExpiredRefreshHistoryRows == 1)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 0)
             #expect(try await count("im_v2.room_outbox", on: sql) == 0)
             #expect(try await count("im_v2.fanout_deliveries", on: sql) == 0)
@@ -13476,6 +13535,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.direct_room_operations", on: sql) == 0)
             #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
             #expect(try await count("im_v2.device_credential_operations", on: sql) == 0)
+            #expect(try await count("im_v2.device_refresh_token_history", on: sql) == 0)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()

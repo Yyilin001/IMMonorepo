@@ -5,7 +5,13 @@ public struct V2PublicIdentityLookupRateLimitPolicy: Equatable, Sendable {
     public let window: TimeInterval
 
     public init(maximumQueries: Int, window: TimeInterval) throws {
-        guard maximumQueries > 0, window > 0, window.isFinite else { throw V2PublicIdentityLookupRateLimitError.invalidPolicy }
+        // PostgreSQL stores query_count as a signed 32-bit integer. Reserve
+        // one value above the budget as the saturated/denied sentinel.
+        guard maximumQueries > 0,
+              maximumQueries < Int(Int32.max),
+              window > 0,
+              window.isFinite
+        else { throw V2PublicIdentityLookupRateLimitError.invalidPolicy }
         self.maximumQueries = maximumQueries
         self.window = window
     }

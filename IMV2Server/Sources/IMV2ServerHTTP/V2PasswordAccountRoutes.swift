@@ -33,13 +33,13 @@ public struct V2PasswordAccountRoutes: Sendable {
             let deviceID = try parsedDeviceID(input.deviceID)
             do {
                 try validatePassword(input.password)
+                let registration = try validateRegistration(input)
                 let passwordHash = try await request.password.async.hash(input.password).get()
-                guard let publicHandle = input.publicHandle, let displayName = input.displayName else { throw Abort(.badRequest) }
                 let userID = try await store.register(
-                    accountHandle: input.accountHandle,
+                    accountHandle: registration.accountHandle,
                     passwordHash: passwordHash,
-                    publicHandle: publicHandle,
-                    displayName: displayName,
+                    publicHandle: registration.publicHandle,
+                    displayName: registration.displayName,
                     deviceID: deviceID
                 )
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: userID, deviceID: deviceID)))
@@ -107,6 +107,26 @@ public struct V2PasswordAccountRoutes: Sendable {
 
     private func validatePassword(_ password: String) throws {
         guard password.utf8.count >= 12, password.utf8.count <= 1_024 else { throw V2PasswordRouteError.invalidPassword }
+    }
+
+    private func validateRegistration(
+        _ input: V2PasswordAccountHTTPRequest
+    ) throws -> (accountHandle: String, publicHandle: String, displayName: String) {
+        let accountHandle = try canonicalAccountHandle(input.accountHandle)
+        guard let publicHandle = input.publicHandle,
+              let displayName = input.displayName
+        else { throw Abort(.badRequest) }
+        do {
+            let identity = try V2PublicIdentity(
+                userID: .init("registration-validation"),
+                handle: .init(publicHandle),
+                displayName: displayName,
+                accountKind: .regular
+            )
+            return (accountHandle, identity.handle.rawValue, identity.displayName)
+        } catch {
+            throw V2PasswordAccountStoreError.invalidPublicIdentity
+        }
     }
 
     private func noStoreJSONResponse(_ response: V2AccountAssertionHTTPResponse) throws -> Response {

@@ -44,11 +44,18 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
     private let database: any Database
     private let tokenKey: V2AccessTokenHMACKey
     private let now: @Sendable () -> Date
+    private let activityWriteGate: V2DeviceActivityWriteGate
 
-    public init(database: any Database, tokenKey: V2AccessTokenHMACKey, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(
+        database: any Database,
+        tokenKey: V2AccessTokenHMACKey,
+        now: @escaping @Sendable () -> Date = Date.init,
+        activityWriteGate: V2DeviceActivityWriteGate = .init()
+    ) {
         self.database = database
         self.tokenKey = tokenKey
         self.now = now
+        self.activityWriteGate = activityWriteGate
     }
 
     public func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
@@ -58,6 +65,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         guard let deviceUUID = UUID(uuidString: deviceID.rawValue) else {
             throw V2GatewayAuthenticationError.unauthenticated
         }
+        let observedAt = now()
         guard let row = try await database.raw("""
             SELECT token.user_id, token.expires_at
             FROM im_v2.device_access_tokens AS token
@@ -65,7 +73,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               ON device.user_id = token.user_id AND device.device_id = token.device_id
             WHERE token.token_hmac = \(bind: tokenKey.digest(accessToken))
               AND token.device_id = \(bind: deviceUUID)
-              AND token.expires_at > \(bind: now())
+              AND token.expires_at > \(bind: observedAt)
               AND token.revoked_at IS NULL
               AND device.revoked_at IS NULL
               AND NOT EXISTS (
@@ -79,12 +87,44 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
-        // Activity is display metadata, never an authentication prerequisite.
-        // Bound writes to once per minute so a busy foreground device cannot
-        // turn account-edge reads into an unbounded write load.
-        let observedAt = now()
-        try? await database.raw("UPDATE im_v2.auth_devices SET last_active_at = \(bind: observedAt) WHERE device_id = \(bind: deviceUUID) AND (last_active_at IS NULL OR last_active_at < \(bind: observedAt.addingTimeInterval(-60)))").run()
+        // This timestamp is presentation metadata, not authentication state.
+        // The local gate removes repeated no-op UPDATE round trips; PostgreSQL's
+        // predicate remains the cross-replica correctness boundary.
+        if await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
+            try? await database.raw("""
+                UPDATE im_v2.auth_devices
+                SET last_active_at = \(bind: observedAt)
+                WHERE user_id = \(bind: row.userID)
+                  AND device_id = \(bind: deviceUUID)
+                  AND (last_active_at IS NULL
+                       OR last_active_at < \(bind: observedAt.addingTimeInterval(-60)))
+                """).run()
+        }
         return .init(userID: userID, expiresAt: row.expiresAt)
+    }
+}
+
+/// Process-local admission for best-effort device-activity writes. It changes
+/// no authorization decision and periodically discards inactive device keys.
+public actor V2DeviceActivityWriteGate {
+    private let interval: TimeInterval
+    private var nextEligibleAt: [DeviceID: Date] = [:]
+    private var acceptedWrites = 0
+
+    public init(interval: TimeInterval = 60) {
+        self.interval = max(1, interval)
+    }
+
+    public func shouldWrite(deviceID: DeviceID, at now: Date) -> Bool {
+        if let nextEligible = nextEligibleAt[deviceID], nextEligible > now {
+            return false
+        }
+        nextEligibleAt[deviceID] = now.addingTimeInterval(interval)
+        acceptedWrites += 1
+        if acceptedWrites.isMultiple(of: 1_024) {
+            nextEligibleAt = nextEligibleAt.filter { $0.value > now }
+        }
+        return true
     }
 }
 

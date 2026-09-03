@@ -14,11 +14,29 @@ enum V2PostgresMediaVisibilityAuthorization {
         deviceID: UUID,
         on sql: any SQLDatabase
     ) async throws -> Bool {
-        try await sql.raw("""
-            SELECT EXISTS (
+        let predicate = predicate(
+            mediaID: "\(bind: mediaID)",
+            requesterUserID: requesterUserID,
+            deviceID: deviceID
+        )
+        return try await sql.raw("""
+            SELECT \(predicate) AS authorized
+            """).first(decoding: MediaVisibilityAuthorizationRow.self)?.authorized ?? false
+    }
+
+    /// Shared SQL predicate used by both read-only checks and atomic grant
+    /// claims. The media expression is composed by trusted server code; every
+    /// caller-controlled identifier remains a bind parameter.
+    static func predicate(
+        mediaID: SQLQueryString,
+        requesterUserID: UUID,
+        deviceID: UUID
+    ) -> SQLQueryString {
+        """
+            EXISTS (
                 SELECT 1
                 FROM im_v2.media_objects AS media
-                WHERE media.media_id = \(bind: mediaID)
+                WHERE media.media_id = \(mediaID)
                   AND media.state = 'available'
                   AND EXISTS (
                       SELECT 1
@@ -106,8 +124,8 @@ enum V2PostgresMediaVisibilityAuthorization {
                             )
                       )
                   )
-            ) AS authorized
-            """).first(decoding: MediaVisibilityAuthorizationRow.self)?.authorized ?? false
+            )
+            """
     }
 }
 

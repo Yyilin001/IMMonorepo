@@ -21,7 +21,7 @@ public actor V2URLSessionAuthHTTPTransport: V2AuthHTTPTransport {
     private static let logger = Logger(subsystem: "com.stskcxfz.imapp", category: "v2.http-auth")
     #endif
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = V2SecureURLSession.account) {
         self.session = session
     }
 
@@ -94,7 +94,8 @@ public struct V2HTTPDeviceCredentialAuthTransport: V2AuthTransport, Sendable {
             throw V2HTTPAuthTransportError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2HTTPAuthTransportError.invalidResponse
         case 401, 403: throw V2AuthTransportError.terminalRejection
         default: throw V2HTTPAuthTransportError.serverStatus(response.statusCode)
         }

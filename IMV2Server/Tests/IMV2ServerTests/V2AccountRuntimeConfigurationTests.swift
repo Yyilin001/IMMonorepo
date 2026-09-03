@@ -77,6 +77,22 @@ struct V2AccountRuntimeConfigurationTests {
         }
     }
 
+    @Test("database-backed request counters reserve a safe saturation value")
+    func rejectsCounterOverflowPolicies() {
+        #expect(throws: V2AccountEdgeClientRateLimitError.invalidPolicy) {
+            _ = try V2AccountEdgeClientRateLimitPolicy(
+                maximumRequests: Int(Int32.max),
+                window: 60
+            )
+        }
+        #expect(throws: V2PublicIdentityLookupRateLimitError.invalidPolicy) {
+            _ = try V2PublicIdentityLookupRateLimitPolicy(
+                maximumQueries: Int(Int32.max),
+                window: 60
+            )
+        }
+    }
+
     @Test("account service rejects an invalid device registration budget")
     func rejectsInvalidDeviceRegistrationPolicy() {
         var invalidValues = values

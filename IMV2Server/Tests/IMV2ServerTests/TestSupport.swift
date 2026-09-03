@@ -150,7 +150,7 @@ func makeGatewayDomainCommandHandler(
 }
 
 struct V2AllowingGatewayCommandAdmission: V2AuthenticatedGatewayCommandAdmitting {
-    func admit(identity _: V2AuthenticatedConnection, now _: Date) -> Bool {
+    func admit(identity _: V2AuthenticatedConnection, cost _: Int, now _: Date) -> Bool {
         true
     }
 }

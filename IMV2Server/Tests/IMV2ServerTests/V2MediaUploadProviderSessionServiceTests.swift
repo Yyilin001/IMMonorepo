@@ -12,7 +12,7 @@ struct V2MediaUploadProviderSessionServiceTests {
         let store = RecordingUploadSessionStore(claim: claim)
         let target = V2MediaProviderObjectTarget(
             url: try #require(URL(string: "https://media.invalid/upload")),
-            headers: ["x-provider": "opaque"],
+            headers: ["x-oss-meta-provider": "opaque"],
             expiresAt: now.addingTimeInterval(20),
             expectedByteCount: 42
         )
@@ -45,6 +45,25 @@ struct V2MediaUploadProviderSessionServiceTests {
         let claim = try makeClaim(expiresAt: now.addingTimeInterval(30))
         let store = RecordingUploadSessionStore(claim: claim)
         let target = V2MediaProviderObjectTarget(url: try #require(URL(string: "https://media.invalid/upload")), expiresAt: now.addingTimeInterval(20))
+        let service = try V2MediaUploadProviderSessionService(store: store, provider: FixedUploadProvider(target: target), now: { now })
+
+        await #expect(throws: V2MediaUploadProviderSessionError.invalidProviderTarget) {
+            _ = try await service.exchangeUpload(actorUserID: .init("user"), deviceID: .init("device"), uploadSessionID: claim.uploadSessionID)
+        }
+        #expect(await store.releasedClaims() == [claim])
+    }
+
+    @Test("upload targets reject credential headers even when byte count matches")
+    func rejectsCredentialHeaderInjection() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let claim = try makeClaim(expiresAt: now.addingTimeInterval(30))
+        let store = RecordingUploadSessionStore(claim: claim)
+        let target = V2MediaProviderObjectTarget(
+            url: try #require(URL(string: "https://media.invalid/upload")),
+            headers: ["Cookie": "provider-secret"],
+            expiresAt: now.addingTimeInterval(20),
+            expectedByteCount: 42
+        )
         let service = try V2MediaUploadProviderSessionService(store: store, provider: FixedUploadProvider(target: target), now: { now })
 
         await #expect(throws: V2MediaUploadProviderSessionError.invalidProviderTarget) {

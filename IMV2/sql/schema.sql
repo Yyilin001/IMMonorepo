@@ -481,6 +481,18 @@ CREATE TABLE im_v2.device_refresh_sessions (
     CONSTRAINT device_refresh_sessions_refresh_hmac_check CHECK ((length(refresh_hmac) = 64))
 );
 
+CREATE TABLE im_v2.device_refresh_token_history (
+    user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    family_generation bigint NOT NULL,
+    refresh_hmac text NOT NULL,
+    consumed_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT device_refresh_token_history_generation_check CHECK ((family_generation > 0)),
+    CONSTRAINT device_refresh_token_history_refresh_hmac_check CHECK ((length(refresh_hmac) = 64)),
+    CONSTRAINT device_refresh_token_history_time_check CHECK ((expires_at > consumed_at))
+);
+
 CREATE TABLE im_v2.device_registration_rate_limits (
     user_id uuid NOT NULL,
     window_started_at timestamp with time zone NOT NULL,
@@ -1655,14 +1667,14 @@ CREATE UNIQUE INDEX group_room_creation_intent_pages_final_key
     WHERE is_final;
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-3'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-3'::text))
+    schema_id text DEFAULT 'im-v2-current-4'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-4'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-3');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-4');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2189,6 +2201,9 @@ ALTER TABLE ONLY im_v2.device_credential_operations
 ALTER TABLE ONLY im_v2.device_refresh_sessions
     ADD CONSTRAINT device_refresh_sessions_pkey PRIMARY KEY (device_id);
 
+ALTER TABLE ONLY im_v2.device_refresh_token_history
+    ADD CONSTRAINT device_refresh_token_history_pkey PRIMARY KEY (device_id, family_generation);
+
 ALTER TABLE ONLY im_v2.device_registration_rate_limits
     ADD CONSTRAINT device_registration_rate_limits_pkey PRIMARY KEY (user_id);
 
@@ -2679,6 +2694,10 @@ CREATE INDEX device_credential_operations_replay_idx ON im_v2.device_credential_
 
 CREATE UNIQUE INDEX device_refresh_sessions_active_refresh_hmac_idx ON im_v2.device_refresh_sessions USING btree (refresh_hmac) WHERE (revoked_at IS NULL);
 
+CREATE UNIQUE INDEX device_refresh_token_history_device_hmac_idx ON im_v2.device_refresh_token_history USING btree (device_id, refresh_hmac);
+
+CREATE INDEX device_refresh_token_history_expiry_idx ON im_v2.device_refresh_token_history USING btree (expires_at, device_id, family_generation);
+
 CREATE INDEX device_session_operations_cleanup_idx ON im_v2.device_session_operations USING btree (created_at);
 
 CREATE INDEX device_snapshot_resets_cleanup_idx ON im_v2.device_snapshot_resets USING btree (state, expires_at, user_id, device_id);
@@ -2952,6 +2971,9 @@ ALTER TABLE ONLY im_v2.device_credential_operations
 
 ALTER TABLE ONLY im_v2.device_refresh_sessions
     ADD CONSTRAINT device_refresh_sessions_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY im_v2.device_refresh_token_history
+    ADD CONSTRAINT device_refresh_token_history_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.device_revocation_events
     ADD CONSTRAINT device_revocation_events_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;

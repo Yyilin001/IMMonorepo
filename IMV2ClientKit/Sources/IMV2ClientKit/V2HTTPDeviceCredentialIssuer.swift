@@ -136,7 +136,8 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
             throw V2HTTPAuthTransportError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2HTTPAuthTransportError.invalidResponse
         case 401, 403: throw V2AccountAssertionCredentialProviderError.assertionRejected
         case 409: throw V2AccountAssertionCredentialProviderError.registrationConflict
         default: throw V2HTTPAuthTransportError.serverStatus(response.statusCode)

@@ -9,6 +9,33 @@ import Testing
 
 @Suite("V2 Core NATS group wake broker")
 struct V2NATSGroupEventWakeBrokerTests {
+    @Test("NATS client-affecting payloads require an intact deployment-key MAC")
+    func authenticatedPayloadRejectsForgery() throws {
+        let body = Data("durable-room-event".utf8)
+        let subject = "imv2.test.group.room-a"
+        let envelope = V2NATSAuthenticatedPayloadCodec.seal(
+            body,
+            subject: subject,
+            routingKey: Self.routingKey
+        )
+        #expect(authenticatedBody(envelope, subject: subject) == body)
+        #expect(V2NATSAuthenticatedPayloadCodec.open(
+            body,
+            subject: subject,
+            routingKey: Self.routingKey
+        ) == nil)
+        #expect(V2NATSAuthenticatedPayloadCodec.open(
+            envelope,
+            subject: subject,
+            routingKey: Data(repeating: 8, count: 32)
+        ) == nil)
+        #expect(authenticatedBody(envelope, subject: "imv2.test.group.room-b") == nil)
+
+        var modified = envelope
+        modified[modified.index(after: modified.startIndex)] ^= 0x01
+        #expect(authenticatedBody(modified, subject: subject) == nil)
+    }
+
     @Test("configuration bounds broker acknowledgement latency")
     func rejectsInvalidAcknowledgementTimeout() throws {
         let url = try #require(URL(string: "nats://127.0.0.1:4222"))
@@ -29,6 +56,27 @@ struct V2NATSGroupEventWakeBrokerTests {
                 acknowledgementTimeout: 31
             )
         }
+        #expect(throws: V2NATSGroupEventWakeBrokerError.invalidConfiguration) {
+            _ = try V2NATSGroupEventWakeConfiguration(
+                url: URL(string: "nats://nats.internal:4222")!,
+                subjectPrefix: "imv2.test.group",
+                token: "shared-token",
+                routingKey: key
+            )
+        }
+        #expect(throws: V2NATSGroupEventWakeBrokerError.invalidConfiguration) {
+            _ = try V2NATSGroupEventWakeConfiguration(
+                url: URL(string: "tls://nats.internal:4222")!,
+                subjectPrefix: "imv2.test.group",
+                routingKey: key
+            )
+        }
+        #expect(try V2NATSGroupEventWakeConfiguration(
+            url: URL(string: "tls://nats.internal:4222")!,
+            subjectPrefix: "imv2.test.group",
+            token: "shared-token",
+            routingKey: key
+        ).usesTLS)
     }
 
     @Test("a silent broker cannot indefinitely retain durable wake work")
@@ -157,15 +205,17 @@ struct V2NATSGroupEventWakeBrokerTests {
             // publications are advisory and must not add a broker round trip.
             #expect(observation.pingCount == 1)
             let payload = try #require(observation.publishedPayloads.first)
+            let subject = try #require(observation.publishedSubjects.first)
+            let verifiedPayload = try #require(authenticatedBody(payload, subject: subject))
             #expect(
-                V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
+                V2NATSGroupEventWakeBroker.decodeNotificationPayload(verifiedPayload)
                     == .groupEvents([first, second])
             )
 
             // A mixed membership epoch must never become a live audience.
             // It degrades to a durable room-log cursor wake instead.
             var object = try #require(
-                JSONSerialization.jsonObject(with: payload) as? [String: Any]
+                JSONSerialization.jsonObject(with: verifiedPayload) as? [String: Any]
             )
             var directEvents = try #require(
                 object["direct_events"] as? [[String: Any]]
@@ -227,9 +277,11 @@ struct V2NATSGroupEventWakeBrokerTests {
             #expect(observation.pingCount == 1)
             #expect(observation.publishedPayloads.allSatisfy { $0.count < 1_024 * 1_024 })
             #expect(
-                observation.publishedPayloads.compactMap(
-                    V2NATSGroupEventWakeBroker.decodeNotificationPayload
-                ) == [.groupEvents([first]), .groupEvents([second])]
+                zip(observation.publishedSubjects, observation.publishedPayloads).compactMap { subject, payload in
+                    authenticatedBody(payload, subject: subject).flatMap(
+                        V2NATSGroupEventWakeBroker.decodeNotificationPayload
+                    )
+                } == [.groupEvents([first]), .groupEvents([second])]
             )
 
             await broker.shutdown()
@@ -355,9 +407,11 @@ struct V2NATSGroupEventWakeBrokerTests {
             let observation = recorder.observation()
             #expect(observation.pingCount == 1)
             let payload = try #require(observation.publishedPayloads.first)
-            #expect(V2NATSGroupEventProtobufCodec.recognizes(payload))
+            let subject = try #require(observation.publishedSubjects.first)
+            let verifiedPayload = try #require(authenticatedBody(payload, subject: subject))
+            #expect(V2NATSGroupEventProtobufCodec.recognizes(verifiedPayload))
             #expect(
-                V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
+                V2NATSGroupEventWakeBroker.decodeNotificationPayload(verifiedPayload)
                     == .groupEvents(events)
             )
 
@@ -735,11 +789,21 @@ struct V2NATSGroupEventWakeBrokerTests {
                 url: url,
                 subjectPrefix: "imv2.test.group",
                 token: token,
-                routingKey: Data(repeating: 9, count: 32),
+                routingKey: Self.routingKey,
                 payloadEncoding: payloadEncoding,
                 acknowledgementTimeout: timeout
             ),
             receiveWake: { _ in }
+        )
+    }
+
+    private static let routingKey = Data(repeating: 9, count: 32)
+
+    private func authenticatedBody(_ payload: Data, subject: String) -> Data? {
+        V2NATSAuthenticatedPayloadCodec.open(
+            payload,
+            subject: subject,
+            routingKey: Self.routingKey
         )
     }
 }
@@ -846,6 +910,7 @@ private final class V2NATSGroupWakeTestRecorder: Sendable {
         var subscriptionCount = 0
         var publishCount = 0
         var pingCount = 0
+        var publishedSubjects: [String] = []
         var publishedPayloads: [Data] = []
         var authenticationTokens: [String] = []
         var legacyTokenFieldCount = 0
@@ -876,7 +941,10 @@ private final class V2NATSGroupWakeTestRecorder: Sendable {
                     continue
                 }
                 if line.hasPrefix("PUB ") {
-                    guard let lengthText = line.split(separator: " ").last,
+                    let parts = line.split(separator: " ")
+                    guard parts.count == 3,
+                          let subject = parts.dropFirst().first.map(String.init),
+                          let lengthText = parts.last,
                           let payloadLength = Int(lengthText),
                           payloadLength >= 0
                     else {
@@ -890,6 +958,7 @@ private final class V2NATSGroupWakeTestRecorder: Sendable {
                         state.pendingBytes[payloadStart..<(payloadStart + payloadLength)]
                     )
                     state.observation.publishCount += 1
+                    state.observation.publishedSubjects.append(subject)
                     state.observation.publishedPayloads.append(payload)
                     state.pendingBytes.removeFirst(commandEnd)
                     continue

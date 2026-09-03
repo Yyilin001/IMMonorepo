@@ -15,10 +15,14 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
 
     public init(url: URL, headers: [String: String] = [:], expiresAt: Date, expectedByteCount: Int64? = nil) throws {
         guard url.scheme?.lowercased() == "https", url.host != nil,
+              url.user == nil, url.password == nil, url.fragment == nil,
               expiresAt.timeIntervalSinceReferenceDate.isFinite,
               expectedByteCount.map({ $0 >= 0 }) ?? true,
               headers.allSatisfy({ key, value in
-                  !key.isEmpty && !key.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+                  Self.isAllowedProviderHeader(key)
+                      && key.utf8.count <= 128
+                      && value.utf8.count <= 8_192
+                      && !key.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
                       && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
               })
         else { throw V2ClientMediaTransferError.invalidTarget }
@@ -26,6 +30,16 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
         self.headers = headers
         self.expiresAt = expiresAt
         self.expectedByteCount = expectedByteCount
+    }
+
+    private static func isAllowedProviderHeader(_ name: String) -> Bool {
+        let canonical = name.lowercased()
+        return canonical == "content-type"
+            || canonical == "content-md5"
+            || canonical == "digest"
+            || canonical.hasPrefix("x-amz-")
+            || canonical.hasPrefix("x-oss-")
+            || canonical.hasPrefix("x-goog-")
     }
 }
 
@@ -82,7 +96,7 @@ public protocol V2ClientMediaEdgeHTTPTransport: Sendable {
 public actor V2URLSessionMediaEdgeHTTPTransport: V2ClientMediaEdgeHTTPTransport {
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = V2SecureURLSession.account) {
         self.session = session
     }
 
@@ -152,7 +166,8 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
             throw V2ClientMediaTransferError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2ClientMediaTransferError.invalidMediaEdgeResponse
         case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
         default: throw V2ClientMediaTransferError.serverStatus(response.statusCode)
         }
@@ -220,7 +235,8 @@ public struct V2HTTPMediaUploadEdgeClient: V2ClientMediaUploadTargetResolver, V2
         }
         let (data, response) = try await send(request)
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2ClientMediaTransferError.invalidMediaEdgeResponse
         case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
         case 409: throw V2ClientMediaTransferError.uploadStateConflict
         default: throw V2ClientMediaTransferError.serverStatus(response.statusCode)
@@ -248,7 +264,7 @@ public struct V2HTTPMediaUploadEdgeClient: V2ClientMediaUploadTargetResolver, V2
         )
         let (_, response) = try await send(request)
         switch response.statusCode {
-        case 200 ... 299: return
+        case 204: return
         case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
         case 404, 409: throw V2ClientMediaTransferError.uploadStateConflict
         default: throw V2ClientMediaTransferError.serverStatus(response.statusCode)
@@ -262,7 +278,8 @@ public struct V2HTTPMediaUploadEdgeClient: V2ClientMediaUploadTargetResolver, V2
         )
         let (data, response) = try await send(request)
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2ClientMediaTransferError.invalidMediaEdgeResponse
         case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
         case 404: throw V2ClientMediaTransferError.uploadStateConflict
         default: throw V2ClientMediaTransferError.serverStatus(response.statusCode)
@@ -328,7 +345,7 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
     private let session: URLSession
     private let fileManager: FileManager
 
-    public init(session: URLSession = .shared, fileManager: FileManager = .default) {
+    public init(session: URLSession = V2SecureURLSession.mediaProvider, fileManager: FileManager = .default) {
         self.session = session
         self.fileManager = fileManager
     }

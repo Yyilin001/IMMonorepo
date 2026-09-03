@@ -118,6 +118,8 @@ struct V2PasswordAccountRoutesTests {
     func passwordRegistrationMissingPublicProfileReturnsBadRequest() async throws {
         let app = try await Application.make(.testing)
         defer { Task { try? await app.asyncShutdown() } }
+        let passwordHasher = RecordingPasswordHasher()
+        app.passwords.use { _ in passwordHasher }
         app.databases.use(
             try .postgres(url: "postgres://im_v2_test:im_v2_test@127.0.0.1:1/im_v2_test"),
             as: .psql,
@@ -141,6 +143,7 @@ struct V2PasswordAccountRoutesTests {
         }) { response async in
             #expect(response.status == .badRequest)
         }
+        #expect(passwordHasher.hashCallCount == 0)
     }
 
     @Test("password transport depends on a store capability and never passes plaintext to persistence")
@@ -190,6 +193,31 @@ private struct AllowedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { nil }
     func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
+}
+
+private final class RecordingPasswordHasher: PasswordHasher, @unchecked Sendable {
+    private let lock = NSLock()
+    private var hashCalls = 0
+
+    var hashCallCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return hashCalls
+    }
+
+    func hash<Password>(_ password: Password) throws -> [UInt8] where Password: DataProtocol {
+        lock.lock()
+        hashCalls += 1
+        lock.unlock()
+        return Array("unused-digest".utf8)
+    }
+
+    func verify<Password, Digest>(
+        _ password: Password,
+        created digest: Digest
+    ) throws -> Bool where Password: DataProtocol, Digest: DataProtocol {
+        false
+    }
 }
 
 private actor PasswordAccountStoreFake: V2PasswordAccountStoring {

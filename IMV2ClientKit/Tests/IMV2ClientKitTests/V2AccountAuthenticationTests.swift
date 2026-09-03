@@ -76,8 +76,25 @@ struct V2AccountAuthenticationTests {
         }
     }
 
+    @Test("successful status with a non-JSON body is rejected")
+    func rejectsNonJSONSuccessResponse() async throws {
+        let registration = try #require(URL(string: "https://account.invalid/v2/account-auth/password/register"))
+        let assertion = try #require(URL(string: "https://account.invalid/v2/account-auth/password/assertion"))
+        let response = try #require(HTTPURLResponse(url: assertion, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html"]))
+        let transport = AccountHTTPTransport(result: .success((Data(#"{"accountAssertion":"forged"}"#.utf8), response)))
+        let authenticator = try V2HTTPPasswordAccountAuthenticator(registrationEndpoint: registration, assertionEndpoint: assertion, transport: transport)
+
+        await #expect(throws: V2AccountAuthenticationError.invalidResponse) {
+            try await authenticator.authenticate(
+                accountHandle: "alice_01",
+                password: "correct horse battery staple",
+                deviceID: try .init("00000000-0000-0000-0000-000000000901")
+            )
+        }
+    }
+
     private func response(for url: URL) throws -> HTTPURLResponse {
-        try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Cache-Control": "no-store"]))
+        try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Cache-Control": "no-store", "Content-Type": "application/json"]))
     }
 }
 

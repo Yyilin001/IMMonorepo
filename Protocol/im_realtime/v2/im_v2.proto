@@ -163,6 +163,9 @@ enum FrameCompression {
 message ClientHello {
   repeated uint32 supported_protocol_versions = 1;
   repeated string supported_capability_profiles = 2;
+  // When present, Authenticate must repeat this exact device ID. Current
+  // clients always send it; accepting an empty value remains a bounded bridge
+  // for pre-binding protocol fixtures.
   string device_id = 3;
   repeated FrameCompression supported_frame_compressions = 4;
 }

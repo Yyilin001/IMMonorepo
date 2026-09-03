@@ -65,10 +65,53 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         let actor = try uuid(actorUserID), room = try uuid(roomID)
         let afterUser = try afterUserID.map(uuid)
         guard let sql = database as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
-        guard try await activeMember(userID: actor, roomID: room, sql: sql) else { throw V2ProfilePresentationError.forbidden }
-        let rows = try await sql.raw("SELECT nickname.user_id, nickname.nickname, nickname.revision FROM im_v2.room_member_nicknames AS nickname JOIN im_v2.rooms AS room ON room.room_id = nickname.room_id WHERE nickname.room_id = \(bind: room) AND nickname.user_id > COALESCE(\(bind: afterUser), '00000000-0000-0000-0000-000000000000'::uuid) AND room.room_kind = 'group' AND EXISTS (SELECT 1 FROM im_v2.room_memberships AS membership WHERE membership.room_id = room.room_id AND membership.user_id = nickname.user_id AND membership.joined_revision <= room.membership_revision AND (membership.left_revision IS NULL OR membership.left_revision > room.membership_revision)) ORDER BY nickname.user_id LIMIT \(bind: limit + 1)").all(decoding: NicknameRow.self)
-        let values = try rows.prefix(limit).map { try $0.presentation(roomID: roomID) }
-        return .init(values: values, nextCursor: rows.count > limit ? values.last?.userID : nil)
+        let rows = try await sql.raw("""
+            WITH authorization AS MATERIALIZED (
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM im_v2.rooms AS room
+                    JOIN im_v2.room_memberships AS membership
+                      ON membership.room_id = room.room_id
+                     AND membership.user_id = \(bind: actor)
+                     AND membership.joined_revision <= room.membership_revision
+                     AND (membership.left_revision IS NULL
+                          OR membership.left_revision > room.membership_revision)
+                    WHERE room.room_id = \(bind: room)
+                      AND room.room_kind = 'group'
+                ) AS authorized
+            ), page AS MATERIALIZED (
+                SELECT nickname.user_id, nickname.nickname, nickname.revision
+                FROM im_v2.room_member_nicknames AS nickname
+                JOIN im_v2.rooms AS room ON room.room_id = nickname.room_id
+                WHERE (SELECT authorized FROM authorization)
+                  AND nickname.room_id = \(bind: room)
+                  AND nickname.user_id > COALESCE(
+                      \(bind: afterUser),
+                      '00000000-0000-0000-0000-000000000000'::uuid
+                  )
+                  AND room.room_kind = 'group'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM im_v2.room_memberships AS membership
+                      WHERE membership.room_id = room.room_id
+                        AND membership.user_id = nickname.user_id
+                        AND membership.joined_revision <= room.membership_revision
+                        AND (membership.left_revision IS NULL
+                             OR membership.left_revision > room.membership_revision)
+                  )
+                ORDER BY nickname.user_id
+                LIMIT \(bind: limit + 1)
+            )
+            SELECT authorization.authorized,
+                   page.user_id, page.nickname, page.revision
+            FROM authorization
+            LEFT JOIN page ON TRUE
+            ORDER BY page.user_id NULLS LAST
+            """).all(decoding: AuthorizedNicknameRow.self)
+        guard rows.first?.authorized == true else { throw V2ProfilePresentationError.forbidden }
+        let allValues = try rows.compactMap { try $0.presentation(roomID: roomID) }
+        let values = Array(allValues.prefix(limit))
+        return .init(values: values, nextCursor: allValues.count > limit ? values.last?.userID : nil)
     }
 
     public func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) async throws -> V2GroupMemberPresentation {
@@ -110,6 +153,25 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
 
 private struct AliasRow: Decodable { let target: UUID; let remarkName: String?; let revision: Int64; enum CodingKeys: String, CodingKey { case target = "target_user_id"; case remarkName = "remark_name"; case revision }; var profileRevision: V2ProfileRevision? { revision > 0 ? .init(rawValue: UInt64(revision)) : nil }; func alias(owner: UserID) throws -> V2ContactAlias { guard let rev = profileRevision else { throw V2ProfilePresentationError.corruptPersistenceState }; return try .init(ownerUserID: owner, targetUserID: .init(target.uuidString), remarkName: remarkName, revision: rev) } }
 private struct NicknameRow: Decodable { let user: UUID; let nickname: String?; let revision: Int64; enum CodingKeys: String, CodingKey { case user = "user_id"; case nickname; case revision }; var profileRevision: V2ProfileRevision? { revision > 0 ? .init(rawValue: UInt64(revision)) : nil }; func presentation(roomID: RoomID) throws -> V2GroupMemberPresentation { guard let rev = profileRevision else { throw V2ProfilePresentationError.corruptPersistenceState }; return try .init(roomID: roomID, userID: .init(user.uuidString), groupNickname: nickname, revision: rev) } }
+private struct AuthorizedNicknameRow: Decodable {
+    let authorized: Bool
+    let user: UUID?
+    let nickname: String?
+    let revision: Int64?
+    enum CodingKeys: String, CodingKey { case authorized; case user = "user_id"; case nickname; case revision }
+    func presentation(roomID: RoomID) throws -> V2GroupMemberPresentation? {
+        if user == nil, nickname == nil, revision == nil { return nil }
+        guard let user, let revision, revision > 0,
+              let profileRevision = V2ProfileRevision(rawValue: UInt64(revision))
+        else { throw V2ProfilePresentationError.corruptPersistenceState }
+        return try .init(
+            roomID: roomID,
+            userID: .init(user.uuidString),
+            groupNickname: nickname,
+            revision: profileRevision
+        )
+    }
+}
 private struct AliasOperationRow: Decodable { let target: UUID; let expectedRevision: Int64?; let remarkName: String?; let resultRevision: Int64; enum CodingKeys: String, CodingKey { case target = "target_user_id"; case expectedRevision = "expected_revision"; case remarkName = "requested_remark_name"; case resultRevision = "result_revision" } }
 private struct NicknameOperationRow: Decodable { let room: UUID; let expectedRevision: Int64?; let nickname: String?; let resultRevision: Int64; enum CodingKeys: String, CodingKey { case room = "room_id"; case expectedRevision = "expected_revision"; case nickname = "requested_nickname"; case resultRevision = "result_revision" } }
 private func uuid<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: value.rawValue) else { throw V2ProfilePresentationError.corruptPersistenceState }; return result }

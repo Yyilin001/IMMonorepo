@@ -19,7 +19,10 @@ public enum V2RedactedHTTPMiddlewareConfiguration {
 /// Templates keep log cardinality bounded and avoid persisting identifiers.
 private struct V2RedactedRouteLoggingMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
-        request.logger.info("HTTP request", metadata: request.v2RedactedHTTPMetadata)
+        // Successful request-per-line logging is diagnostic, not an
+        // operational event. Keeping it below the production info threshold
+        // avoids synchronous formatting and log-pipeline pressure at high QPS.
+        request.logger.debug("HTTP request", metadata: request.v2RedactedHTTPMetadata)
         return next.respond(to: request)
     }
 }
@@ -35,7 +38,10 @@ private struct V2RedactedErrorMiddleware: Middleware {
             var headers: HTTPHeaders
             if let abort = error as? any AbortError {
                 status = abort.status
-                reason = abort.reason
+                // Decoder and dependency errors may conform to AbortError and
+                // carry field names or implementation details in `reason`.
+                // The public contract is status based and deliberately stable.
+                reason = abort.status.reasonPhrase
                 headers = abort.headers
             } else {
                 status = .internalServerError

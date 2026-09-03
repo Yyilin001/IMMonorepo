@@ -1029,14 +1029,26 @@ struct V2GatewayRuntimeConfigurationTests {
     @Test("NATS hint requires both endpoint and subject")
     func parsesAndValidatesNATSHintConfiguration() throws {
         var values = runtimeValues
-        values["IM_V2_NATS_URL"] = "nats://nats.internal:4222"
+        values["IM_V2_NATS_URL"] = "tls://nats.internal:4222"
         values["IM_V2_NATS_SUBJECT"] = "imv2.fanout.wake"
+        values["IM_V2_NATS_TOKEN"] = "test-broker-token"
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         guard case .nats(let nats) = configuration.fanoutHint else {
             Issue.record("Expected NATS hint")
             return
         }
         #expect(nats.subject == "imv2.fanout.wake")
+
+        values["IM_V2_NATS_URL"] = "nats://nats.internal:4222"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+        values["IM_V2_NATS_URL"] = "tls://nats.internal:4222"
+        values.removeValue(forKey: "IM_V2_NATS_TOKEN")
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+        values["IM_V2_NATS_TOKEN"] = "test-broker-token"
         values.removeValue(forKey: "IM_V2_NATS_SUBJECT")
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
@@ -1046,8 +1058,9 @@ struct V2GatewayRuntimeConfigurationTests {
     @Test("Hybrid wake routing requires an opaque-subject key with its NATS configuration")
     func parsesAndValidatesGroupWakeNATSConfiguration() throws {
         var values = runtimeValues
-        values["IM_V2_GROUP_WAKE_NATS_URL"] = "nats://nats.internal:4222"
+        values["IM_V2_GROUP_WAKE_NATS_URL"] = "tls://nats.internal:4222"
         values["IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX"] = "imv2.group.wake"
+        values["IM_V2_GROUP_WAKE_NATS_TOKEN"] = "test-broker-token"
         values["IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64"] = Data(repeating: 9, count: 32).base64EncodedString()
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         guard case .nats(let nats) = configuration.groupEventWake else {
@@ -1057,6 +1070,13 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(nats.routingKey == Data(repeating: 9, count: 32))
         #expect(nats.payloadEncoding == .json)
         #expect(nats.wakeDeferralDelayMilliseconds == 60)
+        #expect(nats.usesTLS)
+
+        values["IM_V2_GROUP_WAKE_NATS_URL"] = "nats://nats.internal:4222"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+        values["IM_V2_GROUP_WAKE_NATS_URL"] = "tls://nats.internal:4222"
 
         values["IM_V2_GROUP_WAKE_DEFERRAL_MS"] = "75"
         let deferredConfiguration = try V2GatewayRuntimeConfiguration(

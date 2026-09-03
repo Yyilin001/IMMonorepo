@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
+@preconcurrency import NIOSSL
 
 /// A non-authoritative wake hint. Consumers reload every durable fact from
 /// PostgreSQL; a lost or duplicated hint cannot decide work completion.
@@ -19,6 +20,8 @@ public struct V2NATSFanoutHintConfiguration: Equatable, Sendable {
     public let url: URL
     public let subject: String
     public let token: String?
+    public let tlsCAPath: String?
+    public let tlsServerName: String?
     /// Bounds an optional wake hint. Durable PostgreSQL progression must never
     /// wait indefinitely for an unresponsive broker connection.
     public let acknowledgementTimeout: TimeInterval
@@ -27,21 +30,42 @@ public struct V2NATSFanoutHintConfiguration: Equatable, Sendable {
         url: URL,
         subject: String,
         token: String? = nil,
+        tlsCAPath: String? = nil,
+        tlsServerName: String? = nil,
         acknowledgementTimeout: TimeInterval = 2
     ) throws {
-        guard url.scheme?.lowercased() == "nats", url.host != nil,
+        guard let scheme = url.scheme?.lowercased(),
+              ["nats", "tls"].contains(scheme),
+              let host = url.host?.lowercased(),
+              url.user == nil,
+              url.password == nil,
+              url.query == nil,
+              url.fragment == nil,
               subject.range(of: "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$", options: .regularExpression) != nil,
               acknowledgementTimeout.isFinite,
               acknowledgementTimeout > 0,
               acknowledgementTimeout <= 30
         else { throw V2NATSFanoutHintConfigurationError.invalidConfiguration }
         let normalizedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedToken?.isEmpty != true else { throw V2NATSFanoutHintConfigurationError.invalidConfiguration }
+        let isLoopback = ["localhost", "127.0.0.1", "::1"].contains(host)
+        let normalizedCAPath = tlsCAPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedServerName = tlsServerName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedToken?.isEmpty != true,
+              (isLoopback || normalizedToken != nil),
+              (scheme == "tls" || isLoopback),
+              (scheme == "tls" || (normalizedCAPath == nil && normalizedServerName == nil)),
+              normalizedCAPath?.hasPrefix("/") != false,
+              normalizedServerName?.isEmpty != true
+        else { throw V2NATSFanoutHintConfigurationError.invalidConfiguration }
         self.url = url
         self.subject = subject
         self.token = normalizedToken
+        self.tlsCAPath = normalizedCAPath
+        self.tlsServerName = normalizedServerName
         self.acknowledgementTimeout = acknowledgementTimeout
     }
+
+    var usesTLS: Bool { url.scheme?.lowercased() == "tls" }
 }
 
 public enum V2NATSFanoutHintConfigurationError: Error, Equatable, Sendable { case invalidConfiguration }
@@ -122,10 +146,36 @@ public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
         }
         retainedConnection = nil
         let handler = V2NATSConnectionHandler()
+        let sslContext: NIOSSLContext?
+        if configuration.usesTLS {
+            var tls = TLSConfiguration.makeClientConfiguration()
+            tls.minimumTLSVersion = .tlsv13
+            if let path = configuration.tlsCAPath {
+                tls.trustRoots = .certificates(
+                    try NIOSSLCertificate.fromPEMFile(path)
+                )
+            }
+            sslContext = try NIOSSLContext(configuration: tls)
+        } else {
+            sslContext = nil
+        }
+        let serverName = configuration.tlsServerName ?? configuration.url.host!
         let channel = try await ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.connectTimeout, value: timeout)
             .channelInitializer { channel in
-                channel.pipeline.addHandler(handler)
+                do {
+                    if let sslContext {
+                        let tlsHandler = try NIOSSLClientHandler(
+                            context: sslContext,
+                            serverHostname: serverName
+                        )
+                        try channel.pipeline.syncOperations.addHandler(tlsHandler)
+                    }
+                    try channel.pipeline.syncOperations.addHandler(handler)
+                    return channel.eventLoop.makeSucceededFuture(())
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
             }
             .connect(host: configuration.url.host!, port: configuration.url.port ?? 4222)
             .get()

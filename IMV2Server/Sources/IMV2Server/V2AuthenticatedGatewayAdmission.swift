@@ -21,7 +21,13 @@ public enum V2AuthenticatedConnectionLeaseOutcome: Equatable, Sendable {
 }
 
 public protocol V2AuthenticatedGatewayCommandAdmitting: Sendable {
-    func admit(identity: V2AuthenticatedConnection, now: Date) async -> Bool
+    func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool
+}
+
+public extension V2AuthenticatedGatewayCommandAdmitting {
+    func admit(identity: V2AuthenticatedConnection, now: Date) async -> Bool {
+        await admit(identity: identity, cost: 1, now: now)
+    }
 }
 
 public struct V2GatewayCommandRateLimitPolicy: Equatable, Sendable {
@@ -82,8 +88,14 @@ public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGate
         }
     }
 
-    public func admit(identity: V2AuthenticatedConnection, now: Date) async -> Bool {
-        await shards[shardIndex(for: identity.userID)].admit(identity: identity, now: now)
+    public func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool {
+        guard cost >= 0 else { return false }
+        guard cost > 0 else { return true }
+        return await shards[shardIndex(for: identity.userID)].admit(
+            identity: identity,
+            cost: cost,
+            now: now
+        )
     }
 
     func trackedIdentityCount() async -> Int {
@@ -134,7 +146,7 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
 
     init(policy: V2GatewayCommandRateLimitPolicy) { self.policy = policy }
 
-    func admit(identity: V2AuthenticatedConnection, now: Date) -> Bool {
+    func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) -> Bool {
         var device = refilled(
             devices[identity.deviceID],
             capacity: policy.deviceBurst,
@@ -147,7 +159,8 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
             rate: policy.userCommandsPerSecond,
             now: now
         )
-        guard device.tokens >= 1, user.tokens >= 1 else {
+        let required = Double(cost)
+        guard device.tokens >= required, user.tokens >= required else {
             ensureCapacity(deviceID: identity.deviceID, userID: identity.userID)
             devices[identity.deviceID] = device
             users[identity.userID] = user
@@ -157,8 +170,8 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
             }
             return false
         }
-        device.tokens -= 1
-        user.tokens -= 1
+        device.tokens -= required
+        user.tokens -= required
         ensureCapacity(deviceID: identity.deviceID, userID: identity.userID)
         devices[identity.deviceID] = device
         users[identity.userID] = user

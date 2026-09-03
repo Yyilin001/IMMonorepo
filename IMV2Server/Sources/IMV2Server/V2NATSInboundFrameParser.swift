@@ -17,7 +17,7 @@ struct V2NATSInboundFrameParser {
     }
 
     enum Output: Sendable {
-        case payload(Data)
+        case payload(subject: String, payload: Data)
         /// The broker requests a keepalive response from this client.
         case ping
         /// Confirms that the broker parsed every command preceding our PING.
@@ -28,6 +28,7 @@ struct V2NATSInboundFrameParser {
 
     private var pending = Data()
     private var remainingPayloadBytes: Int?
+    private var pendingPayloadSubject: String?
     private let invalidMessagePolicy: InvalidMessagePolicy
     private let maximumPayloadBytes: Int
     private let maximumBufferedBytes: Int
@@ -57,6 +58,7 @@ struct V2NATSInboundFrameParser {
         guard pending.count <= maximumBufferedBytes else {
             pending.removeAll(keepingCapacity: false)
             remainingPayloadBytes = nil
+            pendingPayloadSubject = nil
             return [.closeChannel]
         }
         var outputs: [Output] = []
@@ -74,6 +76,7 @@ struct V2NATSInboundFrameParser {
             guard outputs.count < Self.maximumOutputsPerRead else {
                 pending.removeAll(keepingCapacity: false)
                 remainingPayloadBytes = nil
+                pendingPayloadSubject = nil
                 consumedBytes = 0
                 outputs.append(.closeChannel)
                 return outputs
@@ -82,16 +85,19 @@ struct V2NATSInboundFrameParser {
             if let remainingPayloadBytes {
                 guard available.count >= remainingPayloadBytes + 2 else { return outputs }
                 let payload = Data(available.prefix(remainingPayloadBytes))
-                guard available.dropFirst(remainingPayloadBytes).starts(with: [13, 10]) else {
+                guard let subject = pendingPayloadSubject,
+                      available.dropFirst(remainingPayloadBytes).starts(with: [13, 10]) else {
                     pending.removeAll(keepingCapacity: false)
                     self.remainingPayloadBytes = nil
+                    pendingPayloadSubject = nil
                     consumedBytes = 0
                     outputs.append(.closeChannel)
                     return outputs
                 }
                 consumedBytes += remainingPayloadBytes + 2
                 self.remainingPayloadBytes = nil
-                outputs.append(.payload(payload))
+                pendingPayloadSubject = nil
+                outputs.append(.payload(subject: subject, payload: payload))
                 continue
             }
 
@@ -112,7 +118,10 @@ struct V2NATSInboundFrameParser {
             }
             guard line.hasPrefix("MSG ") else { continue }
             let parts = line.split(separator: " ")
-            guard parts.count == 4, let count = Int(parts[3]), count >= 0 else {
+            guard (parts.count == 4 || parts.count == 5),
+                  let subject = validSubject(String(parts[1])),
+                  let countText = parts.last,
+                  let count = Int(countText), count >= 0 else {
                 if invalidMessagePolicy == .closeChannel {
                     outputs.append(.closeChannel)
                     return outputs
@@ -121,12 +130,36 @@ struct V2NATSInboundFrameParser {
             }
             guard count <= maximumPayloadBytes else {
                 pending.removeAll(keepingCapacity: false)
+                pendingPayloadSubject = nil
                 consumedBytes = 0
                 outputs.append(.closeChannel)
                 return outputs
             }
+            pendingPayloadSubject = subject
             remainingPayloadBytes = count
         }
+    }
+
+    private func validSubject(_ value: String) -> String? {
+        let bytes = value.utf8
+        guard !bytes.isEmpty, bytes.count <= 512 else { return nil }
+        var segmentLength = 0
+        for byte in bytes {
+            if byte == 46 { // `.`
+                guard segmentLength > 0 else { return nil }
+                segmentLength = 0
+                continue
+            }
+            let isAllowed = (48 ... 57).contains(byte)
+                || (65 ... 90).contains(byte)
+                || (97 ... 122).contains(byte)
+                || byte == 45 // `-`
+                || byte == 95 // `_`
+            guard isAllowed else { return nil }
+            segmentLength += 1
+        }
+        guard segmentLength > 0 else { return nil }
+        return value
     }
 }
 
@@ -135,29 +168,37 @@ struct V2NATSInboundFrameParser {
 /// per payload. These hints are non-authoritative, so overload coalesces old
 /// payloads and durable sync remains the recovery source.
 protocol V2NATSPayloadSubmitting: Sendable {
-    func submit(_ payload: Data)
+    func submit(subject: String, payload: Data)
 }
 
 final class V2NATSPayloadDispatcher: V2NATSPayloadSubmitting, Sendable {
-    private let continuation: AsyncStream<Data>.Continuation
+    private struct Submission: Sendable {
+        let subject: String
+        let payload: Data
+    }
+
+    private let continuation: AsyncStream<Submission>.Continuation
     private let worker: Task<Void, Never>
 
-    init(capacity: Int = 256, onPayload: @escaping @Sendable (Data) async -> Void) {
+    init(
+        capacity: Int = 256,
+        onPayload: @escaping @Sendable (String, Data) async -> Void
+    ) {
         precondition(capacity > 0)
-        let (stream, continuation) = AsyncStream<Data>.makeStream(
+        let (stream, continuation) = AsyncStream<Submission>.makeStream(
             bufferingPolicy: .bufferingNewest(capacity)
         )
         self.continuation = continuation
         worker = Task {
-            for await payload in stream {
+            for await submission in stream {
                 guard !Task.isCancelled else { break }
-                await onPayload(payload)
+                await onPayload(submission.subject, submission.payload)
             }
         }
     }
 
-    func submit(_ payload: Data) {
-        continuation.yield(payload)
+    func submit(subject: String, payload: Data) {
+        continuation.yield(.init(subject: subject, payload: payload))
     }
 
     deinit {

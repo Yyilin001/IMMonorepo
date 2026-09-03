@@ -12,9 +12,8 @@ TLS 会话与本地同步投影。
 - 密码兜底：注册或登录会将一次性密码直接交给 HTTPS 账户服务；App
   不持久化密码。
 - 设备凭证：账户断言必须绑定本机设备 ID，随后才换取访问/刷新凭证。
-- Passkey：客户端 AuthenticationServices 与 WebAuthn 传输边界已经存在，
-  但服务端的审计级 WebAuthn 验签和一次性 challenge 存储尚未部署，所以
-  当前本地栈应使用密码兜底。
+- Passkey：底层 ClientKit 仍保留 WebAuthn 构件，但服务端尚未部署完整的
+  challenge、验签和凭据生命周期，因此 App 当前不声明关联域能力，也不展示入口。
 
 认证完成后，App 会打开 V2 本地会话列表，并启动 TLS 网关的同步、心跳和
 持久化命令重试。普通私聊通过认证后的精确公开 ID（`@handle`）查询创建；服务端以
@@ -94,7 +93,6 @@ Debug 默认配置已经是：
 IM_V2_ACCOUNT_BASE_URL=https://localhost:8443
 IM_V2_GATEWAY_HOST=localhost
 IM_V2_GATEWAY_PORT=7443
-IM_V2_PASSKEY_RP_ID=localhost
 ```
 
 若要在指定模拟器上实际走一次“密码注册 → 设备凭证 → 本地 SQLite 会话”，并验证两份
@@ -178,13 +176,12 @@ IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID='<SENDER_SIMULATOR_UDID>' \
 `Config/IMAppInfo.plist` 从 Xcode build settings 读取：
 
 - `IMV2AccountBaseURL` / `IM_V2_ACCOUNT_BASE_URL`
-- `IMV2PasskeyRelyingPartyID` / `IM_V2_PASSKEY_RP_ID`
 - `IMV2GatewayHost` / `IM_V2_GATEWAY_HOST`
 - `IMV2GatewayPort` / `IM_V2_GATEWAY_PORT`
 - `IMV2PushEnvironment` / `IM_V2_PUSH_ENVIRONMENT`
 
-Release 校验要求账户入口为真实 HTTPS 域名（默认 443），RP ID 为该域名
-或其父域，且 Push 环境必须为 `production`；占位域名、裸 IP、localhost、
+Release 校验要求账户入口为真实 HTTPS 域名（默认 443），且 Push 环境必须为
+`production`；占位域名、裸 IP、localhost、
 明文 HTTP 和未解析的构建变量都会失败。`Config/IMApp.entitlements` 也会请求
 `aps-environment`，因此真实设备签名必须使用启用 Push 的 App ID 和描述文件。自检：
 

@@ -60,6 +60,24 @@ public struct V2DeviceRegistrationMetadata: Equatable, Sendable {
     }
 
     public static let unknown = Self(displayName: "This device", platform: "Unknown")
+
+    public static func validated(
+        displayName: String?,
+        platform: String?
+    ) throws -> Self {
+        func normalize(_ value: String?, fallback: String) -> String {
+            let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return normalized.isEmpty ? fallback : normalized
+        }
+        let displayName = normalize(displayName, fallback: unknown.displayName)
+        let platform = normalize(platform, fallback: unknown.platform)
+        guard displayName.utf8.count <= 128,
+              platform.utf8.count <= 64,
+              !displayName.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
+              !platform.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+        else { throw V2DeviceCredentialServiceError.invalidMetadata }
+        return .init(displayName: displayName, platform: platform)
+    }
 }
 
 public struct V2DeviceCredentialRefresh: Sendable {
@@ -89,13 +107,16 @@ public enum V2DeviceRegistrationOutcome: Equatable, Sendable {
 public enum V2DeviceCredentialRefreshOutcome: Equatable, Sendable {
     case rotated(V2IssuedDeviceCredentials)
     case idempotent(V2IssuedDeviceCredentials)
-    /// The refresh value was invalid, expired, or reused with a different
-    /// operation. The device family has been revoked atomically.
+    /// The refresh value was invalid or expired. A device family is revoked
+    /// only when the presented digest proves reuse of a previously consumed
+    /// refresh credential; an arbitrary mismatch is a state-preserving
+    /// rejection and cannot be used to log another installation out.
     case terminalRejection
 }
 
 public enum V2DeviceCredentialServiceError: Error, Equatable, Sendable {
     case invalidRefreshCredential
+    case invalidMetadata
     case invalidConfiguration
     case malformedPersistence
     case unavailable
@@ -320,9 +341,31 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             try await lock(sql, key: "refresh:" + deviceUUID.uuidString)
 
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
-                guard prior.operationKind == "refresh", prior.userID == userUUID, prior.requestRefreshHMAC == incomingRefreshHMAC,
-                      prior.replayExpiresAt > issuedAt
+                guard prior.operationKind == "refresh",
+                      prior.userID == userUUID,
+                      prior.requestRefreshHMAC == incomingRefreshHMAC
                 else {
+                    // An operation-ID collision does not prove possession or
+                    // reuse by itself. A separately retained consumed digest
+                    // may still prove that this value belongs to the family.
+                    if try await isConsumedRefreshCredential(
+                        sql,
+                        userID: userUUID,
+                        deviceID: deviceUUID,
+                        refreshHMAC: incomingRefreshHMAC
+                    ) {
+                        try await revokeDevice(
+                            sql,
+                            userID: userUUID,
+                            deviceID: deviceUUID,
+                            at: issuedAt
+                        )
+                    }
+                    return .terminalRejection
+                }
+                guard prior.replayExpiresAt > issuedAt else {
+                    // The digest is known to have rotated this family, but the
+                    // bounded encrypted response is no longer replayable.
                     try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
                     return .terminalRejection
                 }
@@ -330,16 +373,30 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             }
 
             guard let device = try await sql.raw("SELECT user_id, revoked_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self),
-                  device.userID == userUUID, device.revokedAt == nil,
-                  let session = try await sql.raw("SELECT refresh_hmac, expires_at, revoked_at FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: RefreshSessionRow.self),
-                  session.revokedAt == nil, session.expiresAt > issuedAt,
-                  session.refreshHMAC == incomingRefreshHMAC
-            else {
-                try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
+                  device.userID == userUUID,
+                  device.revokedAt == nil,
+                  let session = try await sql.raw("SELECT family_generation, refresh_hmac, expires_at, revoked_at FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: RefreshSessionRow.self),
+                  session.revokedAt == nil,
+                  session.expiresAt > issuedAt
+            else { return .terminalRejection }
+
+            guard session.refreshHMAC == incomingRefreshHMAC else {
+                if try await isConsumedRefreshCredential(
+                    sql,
+                    userID: userUUID,
+                    deviceID: deviceUUID,
+                    refreshHMAC: incomingRefreshHMAC
+                ) {
+                    // Rotation history is the proof required to classify this
+                    // request as refresh-token reuse. Unknown random values
+                    // remain a uniform, state-preserving rejection.
+                    try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
+                }
                 return .terminalRejection
             }
 
             let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, issuedAt: issuedAt)
+            try await sql.raw("INSERT INTO im_v2.device_refresh_token_history (user_id, device_id, family_generation, refresh_hmac, consumed_at, expires_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: session.familyGeneration), \(bind: session.refreshHMAC), \(bind: issuedAt), \(bind: session.expiresAt))").run()
             try await sql.raw("UPDATE im_v2.device_refresh_sessions SET refresh_hmac = \(bind: tokenHMACKey.digest(refreshCredential)), family_generation = family_generation + 1, issued_at = \(bind: issuedAt), expires_at = \(bind: issuedAt.addingTimeInterval(refreshCredentialLifetime)) WHERE device_id = \(bind: deviceUUID)").run()
             try await insertAccessToken(sql, credentials: credentials, issuedAt: issuedAt)
             try await insertOperation(sql, kind: "refresh", requestRefreshHMAC: incomingRefreshHMAC, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt)
@@ -380,6 +437,15 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
 
     private func credentialOperation(_ sql: any SQLDatabase, deviceID: UUID, operationID: UUID) async throws -> CredentialOperationRow? {
         try await sql.raw("SELECT device_id, operation_id, operation_kind, user_id, request_refresh_hmac, encrypted_access_token, encrypted_refresh_credential, access_token_expires_at, replay_expires_at FROM im_v2.device_credential_operations WHERE device_id = \(bind: deviceID) AND operation_id = \(bind: operationID)").first(decoding: CredentialOperationRow.self)
+    }
+
+    private func isConsumedRefreshCredential(
+        _ sql: any SQLDatabase,
+        userID: UUID,
+        deviceID: UUID,
+        refreshHMAC: String
+    ) async throws -> Bool {
+        try await sql.raw("SELECT 1 FROM im_v2.device_refresh_token_history WHERE device_id = \(bind: deviceID) AND user_id = \(bind: userID) AND refresh_hmac = \(bind: refreshHMAC) LIMIT 1").first() != nil
     }
 
     private func revokeDevice(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID, at now: Date) async throws {
@@ -480,17 +546,11 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     }
 
     private func normalizedMetadata(_ metadata: V2DeviceRegistrationMetadata) throws -> (displayName: String, platform: String) {
-        func normalize(_ value: String, fallback: String) -> String {
-            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return normalized.isEmpty ? fallback : normalized
-        }
-        let displayName = normalize(metadata.displayName, fallback: V2DeviceRegistrationMetadata.unknown.displayName)
-        let platform = normalize(metadata.platform, fallback: V2DeviceRegistrationMetadata.unknown.platform)
-        guard displayName.utf8.count <= 128, platform.utf8.count <= 64,
-              !displayName.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
-              !platform.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-        else { throw V2DeviceCredentialServiceError.malformedPersistence }
-        return (displayName, platform)
+        let validated = try V2DeviceRegistrationMetadata.validated(
+            displayName: metadata.displayName,
+            platform: metadata.platform
+        )
+        return (validated.displayName, validated.platform)
     }
 
     private func replayContext(userID: UserID, deviceID: DeviceID, operationID: UUID) -> Data {
@@ -516,10 +576,16 @@ private struct DeviceRegistrationRateLimitRow: Decodable {
 }
 
 private struct RefreshSessionRow: Decodable {
+    let familyGeneration: Int64
     let refreshHMAC: String
     let expiresAt: Date
     let revokedAt: Date?
-    enum CodingKeys: String, CodingKey { case refreshHMAC = "refresh_hmac"; case expiresAt = "expires_at"; case revokedAt = "revoked_at" }
+    enum CodingKeys: String, CodingKey {
+        case familyGeneration = "family_generation"
+        case refreshHMAC = "refresh_hmac"
+        case expiresAt = "expires_at"
+        case revokedAt = "revoked_at"
+    }
 }
 
 private struct CredentialOperationRow: Decodable {

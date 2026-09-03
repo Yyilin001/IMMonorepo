@@ -66,11 +66,15 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+    # Keep the broker-free production rule intact while allowing the real
+    # Core NATS integration test to use the explicitly permitted loopback
+    # plaintext mode. No NATS bytes cross the Compose bridge network.
+    network_mode: "service:nats"
     environment:
       IMV2_POSTGRES_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL: postgres://im_v2_secondary_test:im_v2_secondary_test@postgres-secondary:5432/im_v2_secondary_test
       IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
-      IMV2_NATS_TEST_URL: nats://nats:4222
+      IMV2_NATS_TEST_URL: nats://127.0.0.1:4222
       # A cold SwiftPM dependency mirror can take several minutes. This is a
       # wall-clock watchdog, not a relaxation of the CPU/memory/PID limits.
       V2_TEST_TIMEOUT_SECONDS: "1200"

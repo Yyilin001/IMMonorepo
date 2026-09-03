@@ -11,7 +11,7 @@ struct V2HTTPPublicIdentityDirectoryTests {
     @Test("exact public handle lookup is authenticated and never cached")
     func lookupUsesAuthenticatedNoStoreRequest() async throws {
         let endpoint = try #require(URL(string: "https://account.invalid/v2/public-identities/resolve"))
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
         let transport = PublicIdentityHTTPTransport(result: .success((try JSONEncoder().encode(IdentityBody(userID: "target-user", handle: "target_user", displayName: "Target", accountKind: .regular)), response)))
         let client = try V2HTTPPublicIdentityDirectory(endpoint: endpoint, credentials: PublicIdentityCredentials(), transport: transport)
 
@@ -31,7 +31,7 @@ struct V2HTTPPublicIdentityDirectoryTests {
     @Test("a response without the current account kind is rejected")
     func rejectsMissingAccountKind() async throws {
         let endpoint = try #require(URL(string: "https://account.invalid/v2/public-identities/resolve"))
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
         let data = Data(#"{"userID":"target-user","handle":"target_user","displayName":"Target"}"#.utf8)
         let client = try V2HTTPPublicIdentityDirectory(
             endpoint: endpoint,

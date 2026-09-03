@@ -64,7 +64,8 @@ public struct V2HTTPProfileViewClient: V2ProfileViewReading, Sendable {
         catch is CancellationError { throw CancellationError() }
         catch { throw V2ProfileViewClientError.networkFailure }
         switch response.statusCode {
-        case 200 ... 299: break
+        case 200 where V2HTTPContract.isJSON(response): break
+        case 200: throw V2ProfileViewClientError.invalidResponse
         case 400: throw V2ProfileViewClientError.invalidRequest
         case 401, 403: throw V2ProfileViewClientError.authorizationDenied
         default: throw V2ProfileViewClientError.serverStatus(response.statusCode)

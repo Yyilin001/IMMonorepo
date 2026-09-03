@@ -42,7 +42,7 @@ public protocol V2ClientPushEndpointHTTPTransport: Sendable {
 public actor V2URLSessionPushEndpointHTTPTransport: V2ClientPushEndpointHTTPTransport {
     private let session: URLSession
 
-    public init(session: URLSession = .shared) {
+    public init(session: URLSession = V2SecureURLSession.account) {
         self.session = session
     }
 
@@ -154,7 +154,7 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, Sendabl
             throw V2ClientPushEndpointError.networkFailure
         }
         switch response.statusCode {
-        case 200 ... 299: return
+        case 204: return
         case 400: throw V2ClientPushEndpointError.invalidRegistration
         case 401, 403: throw V2ClientPushEndpointError.authorizationDenied
         default: throw V2ClientPushEndpointError.serverStatus(response.statusCode)

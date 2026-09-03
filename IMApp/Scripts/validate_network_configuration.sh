@@ -20,7 +20,6 @@ Path(sys.argv[1]).write_bytes(plistlib.dumps({
     "IMV2AccountBaseURL": "$(IM_V2_ACCOUNT_BASE_URL)",
     "IMV2GatewayHost": "$(IM_V2_GATEWAY_HOST)",
     "IMV2GatewayPort": "$(IM_V2_GATEWAY_PORT)",
-    "IMV2PasskeyRelyingPartyID": "$(IM_V2_PASSKEY_RP_ID)",
     "IMV2PushEnvironment": "$(IM_V2_PUSH_ENVIRONMENT)",
 }))
 PY
@@ -31,7 +30,6 @@ PY
     IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com \
     IM_V2_GATEWAY_HOST=gateway.prod-domain.com \
     IM_V2_GATEWAY_PORT=7443 \
-    IM_V2_PASSKEY_RP_ID=prod-domain.com \
     IM_V2_PUSH_ENVIRONMENT=production \
       bash "${BASH_SOURCE[0]}" >/dev/null
 
@@ -54,15 +52,13 @@ PY
   }
 
   expect_failure production_v2_account_requires_https \
-    env IM_V2_ACCOUNT_BASE_URL=http://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PASSKEY_RP_ID=prod-domain.com IM_V2_PUSH_ENVIRONMENT=production
-  expect_failure v2_passkey_rp_must_cover_account_host \
-    env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PASSKEY_RP_ID=other-domain.com IM_V2_PUSH_ENVIRONMENT=production
+    env IM_V2_ACCOUNT_BASE_URL=http://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=production
   expect_failure production_v2_account_host_requires_domain \
-    env IM_V2_ACCOUNT_BASE_URL=https://127.0.0.1 IM_V2_GATEWAY_HOST=127.0.0.1 IM_V2_GATEWAY_PORT=7443 IM_V2_PASSKEY_RP_ID=127.0.0.1 IM_V2_PUSH_ENVIRONMENT=production
+    env IM_V2_ACCOUNT_BASE_URL=https://127.0.0.1 IM_V2_GATEWAY_HOST=127.0.0.1 IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=production
   expect_failure production_v2_gateway_host_requires_domain \
-    env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=127.0.0.1 IM_V2_GATEWAY_PORT=7443 IM_V2_PASSKEY_RP_ID=prod-domain.com IM_V2_PUSH_ENVIRONMENT=production
+    env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=127.0.0.1 IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=production
   expect_failure production_v2_push_environment_requires_production \
-    env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PASSKEY_RP_ID=prod-domain.com IM_V2_PUSH_ENVIRONMENT=development
+    env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=development
 
   printf 'network-config-self-test result=pass\n'
   exit 0
@@ -117,7 +113,6 @@ def config_value(env_key, plist_key):
 account_base_url, account_base_url_source = config_value("IM_V2_ACCOUNT_BASE_URL", "IMV2AccountBaseURL")
 gateway_host, gateway_host_source = config_value("IM_V2_GATEWAY_HOST", "IMV2GatewayHost")
 gateway_port_raw, gateway_port_source = config_value("IM_V2_GATEWAY_PORT", "IMV2GatewayPort")
-passkey_rp_id, passkey_rp_id_source = config_value("IM_V2_PASSKEY_RP_ID", "IMV2PasskeyRelyingPartyID")
 push_environment, push_environment_source = config_value("IM_V2_PUSH_ENVIRONMENT", "IMV2PushEnvironment")
 errors = []
 
@@ -127,8 +122,6 @@ if not gateway_host:
     errors.append("missing_IMV2GatewayHost")
 if not gateway_port_raw:
     errors.append("missing_IMV2GatewayPort")
-if not passkey_rp_id:
-    errors.append("missing_IMV2PasskeyRelyingPartyID")
 if not push_environment:
     errors.append("missing_IMV2PushEnvironment")
 if "$(" in account_base_url or ")" in account_base_url:
@@ -137,8 +130,6 @@ if "$(" in gateway_host or ")" in gateway_host:
     errors.append(f"unresolved_IMV2GatewayHost:{gateway_host}")
 if "$(" in gateway_port_raw or ")" in gateway_port_raw:
     errors.append(f"unresolved_IMV2GatewayPort:{gateway_port_raw}")
-if "$(" in passkey_rp_id or ")" in passkey_rp_id:
-    errors.append(f"unresolved_IMV2PasskeyRelyingPartyID:{passkey_rp_id}")
 if "$(" in push_environment or ")" in push_environment:
     errors.append(f"unresolved_IMV2PushEnvironment:{push_environment}")
 
@@ -161,7 +152,6 @@ if account_url is not None:
         if host_reason != "ok":
             errors.append(f"production_v2_account_host_requires_domain:{account_url.hostname}:{host_reason}")
 
-rp_id = passkey_rp_id.strip().rstrip(".").lower()
 try:
     gateway_port = int(gateway_port_raw)
 except ValueError:
@@ -173,15 +163,6 @@ if mode in production_modes:
     gateway_reason = public_host_policy_reason(gateway_host)
     if gateway_reason != "ok":
         errors.append(f"production_v2_gateway_host_requires_domain:{gateway_host}:{gateway_reason}")
-if mode in production_modes:
-    rp_reason = public_host_policy_reason(rp_id)
-    if rp_reason != "ok":
-        errors.append(f"production_v2_passkey_rp_requires_domain:{rp_id}:{rp_reason}")
-    if account_url is not None and account_url.hostname:
-        account_host = account_url.hostname.rstrip(".").lower()
-        if account_host != rp_id and not account_host.endswith("." + rp_id):
-            errors.append(f"v2_passkey_rp_must_cover_account_host:{rp_id}:{account_host}")
-
 if errors:
     print(
         "network-config result=fail "
@@ -192,8 +173,6 @@ if errors:
         f"v2GatewayHostSource={gateway_host_source} "
         f"v2GatewayPort={gateway_port_raw or '<missing>'} "
         f"v2GatewayPortSource={gateway_port_source} "
-        f"v2PasskeyRelyingPartyID={passkey_rp_id or '<missing>'} "
-        f"v2PasskeyRelyingPartyIDSource={passkey_rp_id_source} "
         f"v2PushEnvironment={push_environment or '<missing>'} "
         f"v2PushEnvironmentSource={push_environment_source} "
         f"errors={','.join(errors)}",
@@ -207,7 +186,6 @@ print(
     f"v2AccountBaseURL={account_base_url} v2AccountBaseURLSource={account_base_url_source} "
     f"v2GatewayHost={gateway_host} v2GatewayHostSource={gateway_host_source} "
     f"v2GatewayPort={gateway_port_raw} v2GatewayPortSource={gateway_port_source} "
-    f"v2PasskeyRelyingPartyID={passkey_rp_id} v2PasskeyRelyingPartyIDSource={passkey_rp_id_source} "
     f"v2PushEnvironment={push_environment} v2PushEnvironmentSource={push_environment_source}"
 )
 PY

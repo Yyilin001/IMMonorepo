@@ -1565,13 +1565,28 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let rawURL = optional("IM_V2_NATS_URL", environment: environment)
         let subject = optional("IM_V2_NATS_SUBJECT", environment: environment)
         let token = optional("IM_V2_NATS_TOKEN", environment: environment)
+        let tlsCAPath = optional("IM_V2_NATS_TLS_CA_PATH", environment: environment)
+        let tlsServerName = optional("IM_V2_NATS_TLS_SERVER_NAME", environment: environment)
         switch (rawURL, subject) {
         case (nil, nil):
             guard token == nil else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_TOKEN") }
+            guard tlsCAPath == nil, tlsServerName == nil else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_NATS_TLS_CA_PATH/IM_V2_NATS_TLS_SERVER_NAME"
+                )
+            }
             return .durablePollingOnly
         case let (rawURL?, subject?):
             guard let url = URL(string: rawURL) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL") }
-            do { return .nats(try .init(url: url, subject: subject, token: token)) }
+            do {
+                return .nats(try .init(
+                    url: url,
+                    subject: subject,
+                    token: token,
+                    tlsCAPath: tlsCAPath,
+                    tlsServerName: tlsServerName
+                ))
+            }
             catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT") }
         default: throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")
         }
@@ -1585,6 +1600,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let subject = optional("IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX", environment: environment)
         let token = optional("IM_V2_GROUP_WAKE_NATS_TOKEN", environment: environment)
         let routingKeyBase64 = optional("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64", environment: environment)
+        let tlsCAPath = optional("IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH", environment: environment)
+        let tlsServerName = optional("IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME", environment: environment)
         let rawPayloadEncoding = optional(
             "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING",
             environment: environment
@@ -1596,6 +1613,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         switch (rawURL, subject, routingKeyBase64) {
         case (nil, nil, nil):
             guard token == nil else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_TOKEN") }
+            guard tlsCAPath == nil, tlsServerName == nil else {
+                throw V2GatewayRuntimeConfigurationError.invalid(
+                    "IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH/IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME"
+                )
+            }
             guard rawPayloadEncoding == nil else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
                     "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"
@@ -1643,6 +1665,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                     subjectPrefix: subject,
                     token: token,
                     routingKey: routingKey,
+                    tlsCAPath: tlsCAPath,
+                    tlsServerName: tlsServerName,
                     payloadEncoding: payloadEncoding,
                     wakeDeferralDelayMilliseconds:
                         wakeDeferralDelayMilliseconds

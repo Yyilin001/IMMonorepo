@@ -604,7 +604,6 @@
 				IM_V2_ACCOUNT_BASE_URL = "https://localhost:8443";
 				IM_V2_GATEWAY_HOST = localhost;
 				IM_V2_GATEWAY_PORT = 7443;
-				IM_V2_PASSKEY_RP_ID = localhost;
 				IM_V2_PUSH_ENVIRONMENT = development;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -645,7 +644,6 @@
 				IM_V2_ACCOUNT_BASE_URL = "https://im.example.com";
 				IM_V2_GATEWAY_HOST = gateway.im.example.com;
 				IM_V2_GATEWAY_PORT = 7443;
-				IM_V2_PASSKEY_RP_ID = im.example.com;
 				IM_V2_PUSH_ENVIRONMENT = production;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

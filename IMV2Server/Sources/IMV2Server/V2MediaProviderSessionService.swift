@@ -95,11 +95,12 @@ public struct V2MediaProviderSessionService: Sendable {
                   target.expiresAt <= claim.expiresAt,
                   target.url.scheme?.lowercased() == "https",
                   target.url.host != nil,
+                  target.url.user == nil,
+                  target.url.password == nil,
+                  target.url.fragment == nil,
                   target.expectedByteCount.map({ $0 >= 0 }) ?? true,
                   target.headers.allSatisfy({ name, value in
-                      !name.isEmpty
-                          && !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-                          && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+                      V2MediaProviderTargetHeaderPolicy.isAllowed(name: name, value: value)
                   })
             else {
                 throw V2MediaProviderSessionError.invalidProviderTarget
@@ -110,6 +111,24 @@ public struct V2MediaProviderSessionService: Sendable {
             try? await store.releaseDownload(claim)
             throw error
         }
+    }
+}
+
+enum V2MediaProviderTargetHeaderPolicy {
+    static func isAllowed(name: String, value: String) -> Bool {
+        let canonical = name.lowercased()
+        let allowedName = canonical == "content-type"
+            || canonical == "content-md5"
+            || canonical == "digest"
+            || canonical.hasPrefix("x-amz-")
+            || canonical.hasPrefix("x-oss-")
+            || canonical.hasPrefix("x-goog-")
+        return allowedName
+            && !name.isEmpty
+            && name.utf8.count <= 128
+            && value.utf8.count <= 8_192
+            && !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
+            && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
     }
 }
 
