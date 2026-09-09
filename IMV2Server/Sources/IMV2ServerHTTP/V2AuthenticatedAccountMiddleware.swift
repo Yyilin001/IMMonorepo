@@ -2,13 +2,16 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
+/// 请求缓存的已鉴权连接上下文。
 private struct V2AuthenticatedAccountIdentityStorageKey: StorageKey {
     typealias Value = V2AuthenticatedConnection
 }
 
 public extension Request {
-    /// Returns the identity established by the production middleware, while
-    /// retaining a safe direct path for focused route tests.
+    /// 读取当前请求的已鉴权身份。
+    ///
+    /// - Parameter authenticator: 账户鉴权器。
+    /// - Returns: 已鉴权连接（用户 ID + 设备 ID）。
     func v2AuthenticatedAccountIdentity(
         using authenticator: any V2GatewayAuthenticator
     ) async throws -> V2AuthenticatedConnection {
@@ -39,9 +42,13 @@ public extension Request {
     }
 }
 
+/// 会话鉴权中间件。
+///
+/// 解析并缓存 `V2AuthenticatedConnection`，避免后续路由重复鉴权。
 public struct V2AuthenticatedAccountMiddleware: AsyncMiddleware, Sendable {
     private let authenticator: any V2GatewayAuthenticator
 
+    /// 初始化。
     public init(authenticator: any V2GatewayAuthenticator) {
         self.authenticator = authenticator
     }
@@ -59,9 +66,13 @@ public struct V2AuthenticatedAccountMiddleware: AsyncMiddleware, Sendable {
 /// Cross-replica device budget for authenticated account endpoints. Costs are
 /// endpoint based so batch and mutation surfaces cannot be amplified as one
 /// cheap request. Domain-level cardinality bounds remain authoritative.
+/// 鉴权后的路由级速率限制中间件。
+///
+/// 与鉴权器解耦，按路径和方法计算代价，避免单次请求消耗无限资源。
 public struct V2AuthenticatedAccountRateLimitMiddleware: AsyncMiddleware, Sendable {
     private let limiter: any V2AuthenticatedAccountRateLimiting
 
+    /// 初始化。
     public init(limiter: any V2AuthenticatedAccountRateLimiting) {
         self.limiter = limiter
     }
@@ -101,6 +112,7 @@ public struct V2AuthenticatedAccountRateLimitMiddleware: AsyncMiddleware, Sendab
         }
     }
 
+    /// 按路径和方法返回速率预算（scope 与 cost）。
     private static func budget(for request: Request) -> (scope: String, cost: Int)? {
         let path = request.url.path
         if path == "/v2/profile-views/batch" { return ("profile-views", 5) }

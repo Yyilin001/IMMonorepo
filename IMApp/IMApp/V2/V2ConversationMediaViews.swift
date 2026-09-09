@@ -162,6 +162,10 @@ extension EnvironmentValues {
     }
 }
 
+/// 单次账号激活拥有的有界缩略图缓存。
+///
+/// 只接受受管目录内的本地文件；同一尺寸与路径共享解码任务，最多保留 24 项。
+/// 解码不在 MainActor 执行。关闭等待任务并拒绝迟到结果，避免旧图片重新进入缓存。
 actor V2LocalMediaThumbnailCache {
     typealias Decoder = @Sendable (URL, Int) async -> V2SendableImage?
     private let directory: URL
@@ -173,8 +177,9 @@ actor V2LocalMediaThumbnailCache {
         self.decode = decode
     }
 
-    /// Closing is terminal for this account incarnation. Await decoders even
-    /// when ImageIO cannot interrupt synchronous work after cancellation.
+    /// 终止缓存，释放已存图片并取消、等待解码任务。
+    ///
+    /// ImageIO 同步解码未必立即响应取消；结束后的结果不会重新缓存或返回给旧调用者。
     func close() async {
         isClosed = true
         images.removeAll()
@@ -195,6 +200,13 @@ actor V2LocalMediaThumbnailCache {
     private var recency: [Key] = []
     private var inFlight: [Key: Task<V2SendableImage?, Never>] = [:]
 
+    /// 读取或生成本地文件的缩略图。
+    ///
+    /// - Parameters:
+    ///   - fileURL: 账号受管目录内的本地文件地址。
+    ///   - maximumPixelSize: ImageIO 下采样的最大像素边长，必须为正。
+    /// - Returns: 有效缩略图；关闭、取消、目录不匹配或解码失败时为 nil。
+    ///   同一请求的一个等待者取消不会直接取消其他等待者共享的解码任务。
     func thumbnail(fileURL: URL, maximumPixelSize: Int) async -> V2SendableImage? {
         let fileURL = fileURL.standardizedFileURL
         guard !isClosed, !Task.isCancelled, maximumPixelSize > 0,

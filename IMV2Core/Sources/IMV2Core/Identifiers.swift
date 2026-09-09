@@ -1,5 +1,6 @@
 import Foundation
 
+/// 基础领域输入不符合标识、数值或代次约束时的错误。
 public enum V2CoreError: Error, Equatable, Sendable {
     case invalidIdentifier
     case invalidNonNegativeValue
@@ -7,22 +8,29 @@ public enum V2CoreError: Error, Equatable, Sendable {
     case invalidGeneration
 }
 
+/// 标识用途的类型标签，使房间、用户、设备和操作 ID 在编译期不可混用。
 public protocol V2IdentifierTag: Sendable {}
 
-/// A deliberately opaque, URL-path-safe identifier. Its tag prevents
-/// accidental cross-domain use while its small RFC 3986 unreserved encoding
-/// keeps an ID safe for database keys, logs, URLs, and cache filenames without
-/// every boundary having to reinterpret or escape a raw value.
+/// 不透明且可安全放入 URL 路径的领域标识。
+///
+/// Tag 区分身份用途；输入仅允许 RFC 3986 unreserved ASCII，最多 128 UTF-8 字节。
+/// UUID 形式统一为 Foundation 规范表示，其他标识保留原拼写。
+/// 标识有效不等于调用者有权限使用它，授权由业务边界负责。
 public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, Comparable, CustomStringConvertible {
+    /// 验证并规范化后的标识文本；也是编码与相等比较使用的身份。
     public let rawValue: String
-    /// The already-validated UUID representation when this identifier came
-    /// from a UUID-shaped boundary. Persistence adapters can bind these 16
-    /// bytes directly instead of reparsing `rawValue` for every operation.
-    /// Opaque, non-UUID identifiers deliberately keep this value nil.
+    /// 输入为 UUID 时缓存其强类型表示；其他不透明标识为 nil。
+    ///
+    /// 持久化适配器可直接使用此值绑定 UUID 列，避免重复解析。
     public let uuidValue: UUID?
 
+    /// 原始标识允许的最大 UTF-8 字节数。
     public static var maximumUTF8Bytes: Int { 128 }
 
+    /// 验证外部标识，并规范化 UUID 的大小写形式。
+    ///
+    /// - Parameter rawValue: 非空、至多 128 字节的 URL 路径安全文本。
+    /// - Throws: 格式或长度不合规时抛出 ``V2CoreError/invalidIdentifier``。
     public init(_ rawValue: String) throws {
         guard !rawValue.isEmpty,
               rawValue.utf8.count <= Self.maximumUTF8Bytes,
@@ -47,42 +55,46 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
         }
     }
 
-    /// Constructs a canonical identifier from a value that is already a
-    /// strongly typed UUID. Unlike the string boundary above, this path does
-    /// not need to rescan URL safety or parse the same UUID a second time.
-    /// The resulting spelling is still exactly Foundation's canonical UUID
-    /// representation, so persistence and wire equality remain unchanged.
+    /// 由已解析的 UUID 构造标识，无需再次扫描字符或解析文本。
+    ///
+    /// - Parameter uuid: 由可信类型边界提供的 UUID；输出使用其规范字符串。
     public init(uuid: UUID) {
         self.rawValue = uuid.uuidString
         self.uuidValue = uuid
     }
 
+    /// 标识的规范文本表示；不包含额外类型标签。
     public var description: String { rawValue }
 
-    /// Keep decoding on the same validation and canonicalization boundary as
-    /// every other external identifier input. Synthesis would write directly
-    /// into `rawValue`, allowing an invalid or differently cased UUID to
-    /// bypass `init(_:)` when an identifier is embedded in a Codable model.
+    /// 按与直接构造相同的规则解码标识，避免 Codable 绕过验证。
+    ///
+    /// - Parameter decoder: 提供含 `rawValue` 字段的编码容器。
+    /// - Throws: 字段解码错误，或 ``V2CoreError/invalidIdentifier``。
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(container.decode(String.self, forKey: .rawValue))
     }
 
+    /// 将规范标识编码到 `rawValue` 字段；UUID 缓存不写入线格式。
+    ///
+    /// - Parameter encoder: 目标编码器。
+    /// - Throws: 编码器拒绝字段或容器时返回其错误。
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(rawValue, forKey: .rawValue)
     }
 
+    /// 按规范文本的字典序排序，不表示事件发生顺序或业务优先级。
     public static func < (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 
-    /// Identity semantics remain the canonical opaque spelling. The cached
-    /// UUID is an implementation representation, not another equality axis.
+    /// 按规范标识文本比较身份；缓存的 UUID 不构成另一条相等条件。
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.rawValue == rhs.rawValue
     }
 
+    /// 将与规范身份一致的表示加入哈希；UUID 标识复用已解析字节。
     public func hash(into hasher: inout Hasher) {
         if let uuidValue {
             // UUID-backed identifiers dominate server routing dictionaries.

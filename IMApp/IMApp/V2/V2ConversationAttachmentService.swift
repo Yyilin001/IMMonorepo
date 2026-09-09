@@ -3,9 +3,9 @@ import IMV2ClientKit
 import IMV2Core
 import UniformTypeIdentifiers
 
-/// Local, non-persisted staging metadata. A message outbox receives only the
-/// resulting opaque media reference; neither this file URL nor its display
-/// name can cross the App/ClientKit boundary.
+/// 设备本地的导入副本及非持久化元数据。
+///
+/// 消息 outbox 只保存上传后的媒体引用，不保存此路径或显示名。
 struct V2StagedConversationAttachment: Hashable, Identifiable, Sendable {
     let id: UUID
     let fileURL: URL
@@ -58,9 +58,10 @@ struct V2ConversationAttachmentStagingPolicy: Equatable, Sendable {
     )
 }
 
-/// Owns temporary importer copies in a dedicated App Support directory. The
-/// importer URL can be security-scoped and is accessed only during the copy;
-/// a sandbox-local file is then supplied to the foreground upload client.
+/// 账号暂存目录的所有者，执行受配额限制的文件导入。
+///
+/// 复制期间临时访问 security-scoped 源文件，按块检查容量与取消。
+/// 目录关闭是终态：等待 actor 中同步复制结束后删除副本，后续导入被拒绝。
 actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     private var isClosed = false
     private let directory: URL
@@ -83,6 +84,12 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         self.makeUUID = makeUUID
     }
 
+    /// 把用户选择的文件复制到受保护的账号暂存目录。
+    ///
+    /// - Parameter sourceURL: 本地普通文件，可为 security-scoped 导入 URL。
+    /// - Returns: 随机暂存身份、路径、内容类型、显示名和实际复制字节数。
+    /// - Throws: 取消、关闭后的请求、文件类型／大小／配额错误或文件系统错误。
+    ///   复制失败会尝试清理目标副本，原始文件保持不变。
     func stageImportedFile(at sourceURL: URL) throws -> V2StagedConversationAttachment {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
@@ -223,8 +230,11 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         return (entries.count, byteCount)
     }
 
-    /// Actor serialization waits for any synchronous importer copy before
-    /// deleting its files. This instance can never admit a later import.
+    /// 终止暂存器并删除其受管目录，可重复调用。
+    ///
+    /// actor 串行化保证同步复制已结束；调用者必须先等待上传者结束文件读取。
+    ///
+    /// - Throws: 无法删除目录时抛出文件系统错误，不能把清理失败当成退出成功。
     func close() throws {
         isClosed = true
         if fileManager.fileExists(atPath: directory.path) {
@@ -259,8 +269,10 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     }
 }
 
-/// App-facing adapter around ClientKit. It generates fresh opaque IDs for an
-/// upload attempt and never exposes the short-lived provider target to UI.
+/// 账号范围的前台上传任务所有者。
+///
+/// 为上传生成独立操作与媒体 ID，把调用者取消传递给该次任务。
+/// 关闭时停止新上传，取消并等待已接收任务，随后 App 才能清理暂存。
 actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUploading {
     private var isClosed = false
     private var transfers: [UUID: Task<V2MediaReference, Error>] = [:]
@@ -272,6 +284,12 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
         self.makeUUID = makeUUID
     }
 
+    /// 上传暂存附件并等待媒体达到可用状态。
+    ///
+    /// - Parameter attachment: 当前账号拥有、在上传期间保持可读的暂存附件。
+    /// - Returns: 可提交到消息命令的媒体引用，不包含 provider URL。
+    /// - Throws: 取消、上传器已关闭或 ClientKit 的传输／扫描错误。
+    ///   返回引用不表示消息本身已被服务端接受。
     func upload(_ attachment: V2StagedConversationAttachment) async throws -> V2MediaReference {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
@@ -289,6 +307,9 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
         } onCancel: { task.cancel() }
     }
 
+    /// 终止上传器，取消并等待全部已接收上传。
+    ///
+    /// 底层任务忽略取消时仍等待其返回，避免先删除它正在读取的暂存文件。
     func close() async {
         isClosed = true
         let pending = Array(transfers.values)

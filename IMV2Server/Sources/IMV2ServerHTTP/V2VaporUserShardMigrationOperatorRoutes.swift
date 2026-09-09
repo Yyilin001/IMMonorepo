@@ -3,6 +3,14 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
+/// 用户分片迁移复制校验请求体。
+///
+/// - Parameters:
+///   - migrationID: 迁移操作 ID。
+///   - userID: 用户 ID。
+///   - sourceBucket: 源分片。
+///   - targetBucket: 目标分片。
+///   - sourceRouterEpoch: 源路由器 epoch。
 public struct V2UserShardMigrationCopyVerifyHTTPRequest: Content, Sendable {
     public let migrationID: UUID
     public let userID: String
@@ -26,29 +34,40 @@ public struct V2UserShardMigrationCopyVerifyHTTPRequest: Content, Sendable {
     }
 }
 
+/// 复制校验结果响应体。
 public struct V2UserShardMigrationCopyVerifyHTTPResponse: Content, Equatable, Sendable {
     public let migrationID: UUID
     public let phase: V2UserShardMigrationPhase
     public let wasIdempotent: Bool
 }
 
+/// 转发链路校验请求体。
 public struct V2UserShardMigrationForwardingVerifyHTTPRequest: Content, Sendable {
     public let migrationID: UUID
     public init(migrationID: UUID) { self.migrationID = migrationID }
 }
 
-/// The operator may prepare and physically copy/verify precisely one user.
-/// It never accepts a connection string, raw SQL, a migration range or a
-/// cutover request; those boundaries prevent it becoming a shard admin API.
+/// 分片迁移操作员路由。
+///
+/// 该接口只允许对单个用户执行复制校验与转发校验，不接受连接串、SQL 或
+/// 批量迁移参数，避免变成通用分片管理 API。
 public struct V2VaporUserShardMigrationOperatorRoutes: Sendable {
     private let authenticator: V2OperatorReplayBearerAuthenticator
     private let service: any V2UserShardMigrationCopyVerifyHandling & V2UserShardMigrationForwardingVerifyHandling
 
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 操作员鉴权器。
+    ///   - service: 复制校验与转发校验服务。
     public init(authenticator: V2OperatorReplayBearerAuthenticator, service: any V2UserShardMigrationCopyVerifyHandling & V2UserShardMigrationForwardingVerifyHandling) {
         self.authenticator = authenticator
         self.service = service
     }
 
+    /// 挂载：
+    /// - `POST /internal/v2/user-shard-migrations/copy-verify`
+    /// - `POST /internal/v2/user-shard-migrations/verify-forwarding`
     public func register(on routes: RoutesBuilder) {
         routes.post("internal", "v2", "user-shard-migrations", "copy-verify") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else {

@@ -3,15 +3,18 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
-/// `POST /v2/account-auth/password/*` is deliberately a fallback surface.
-/// Both endpoints bind the returned assertion to the requested device, use
-/// `no-store`, and use the application-owned bounded password worker.
+/// 密码账户认证与注册路由。
+///
+/// `POST /v2/account-auth/password/register` 与
+/// `POST /v2/account-auth/password/assertion` 为降级鉴权路径。
+/// 两个接口均将下发断言绑定到请求设备，返回头部使用 `no-store`。
 public struct V2PasswordAccountRoutes: Sendable {
     private let store: any V2PasswordAccountStoring
     private let assertionIssuer: V2HMACAccountAssertionIssuer
     private let passwords: any V2PasswordHashing
     private let loginAttemptLimiter: any V2PasswordLoginAttemptLimiting
 
+    /// 初始化。
     public init(
         store: any V2PasswordAccountStoring,
         assertionIssuer: V2HMACAccountAssertionIssuer,
@@ -24,6 +27,9 @@ public struct V2PasswordAccountRoutes: Sendable {
         self.loginAttemptLimiter = loginAttemptLimiter
     }
 
+    /// 挂载：
+    /// - `POST /v2/account-auth/password/register`
+    /// - `POST /v2/account-auth/password/assertion`
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "account-auth", "password", "register") { request async throws -> Response in
             let input = try request.content.decode(V2PasswordAccountHTTPRequest.self)
@@ -100,15 +106,18 @@ public struct V2PasswordAccountRoutes: Sendable {
         }
     }
 
+    /// 解析并校验设备 ID。
     private func parsedDeviceID(_ value: String) throws -> DeviceID {
         guard let deviceID = try? DeviceID(value) else { throw Abort(.badRequest) }
         return deviceID
     }
 
+    /// 校验密码复杂度。
     private func validatePassword(_ password: String) throws {
         guard V2PasswordHashPolicy.accepts(password) else { throw V2PasswordRouteError.invalidPassword }
     }
 
+    /// 验证注册参数并构造公开身份。
     private func validateRegistration(
         _ input: V2PasswordAccountHTTPRequest
     ) throws -> (accountHandle: String, publicHandle: String, displayName: String) {
@@ -129,6 +138,7 @@ public struct V2PasswordAccountRoutes: Sendable {
         }
     }
 
+    /// 返回 no-store JSON。
     private func noStoreJSONResponse(_ response: V2AccountAssertionHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(response)
         var headers = HTTPHeaders()
@@ -138,6 +148,7 @@ public struct V2PasswordAccountRoutes: Sendable {
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
+    /// 下游忙碌时返回 503（no-store + Retry-After）。
     private func noStoreUnavailableResponse() -> Response {
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")
@@ -146,6 +157,7 @@ public struct V2PasswordAccountRoutes: Sendable {
         return .init(status: .serviceUnavailable, headers: headers)
     }
 
+    /// 返回限流重试响应。
     private func noStoreRetryAfterResponse(seconds: Int) -> Response {
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")
@@ -156,6 +168,7 @@ public struct V2PasswordAccountRoutes: Sendable {
 }
 
 public struct V2PasswordAccountHTTPRequest: Content, Sendable {
+    /// 密码接口请求体。
     public let accountHandle: String
     public let password: String
     public let deviceID: String
@@ -172,6 +185,7 @@ public struct V2PasswordAccountHTTPRequest: Content, Sendable {
 }
 
 public struct V2AccountAssertionHTTPResponse: Content, Sendable {
+    /// 账户断言返回体。
     public let accountAssertion: String
 }
 

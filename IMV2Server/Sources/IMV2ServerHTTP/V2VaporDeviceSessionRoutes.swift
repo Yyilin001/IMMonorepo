@@ -3,20 +3,32 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
+/// 设备会话管理响应模型（会话清单接口）。
 public struct V2DeviceSessionHTTPResponse: Content, Sendable {
+    /// 设备 ID。
     public let deviceID: String
+    /// 设备显示名。
     public let deviceName: String
+    /// 设备平台。
     public let platform: String
+    /// 创建时间（毫秒）。
     public let createdAtMilliseconds: Int64
+    /// 最近活跃时间（毫秒）。
     public let lastActiveAtMilliseconds: Int64
+    /// 当前请求是否为当前会话设备。
     public let isCurrentDevice: Bool
 }
 
+/// 设备会话分页响应。
 public struct V2DeviceSessionPageHTTPResponse: Content, Sendable {
+    /// 会话列表。
     public let sessions: [V2DeviceSessionHTTPResponse]
+    /// 翻页游标。
     public let nextCursor: String?
 }
 
+/// 设备会话变更请求模型。
+/// - deviceID: 指定目标设备；`revoke-current`/`revoke-others` 不应提供 deviceID。
 private struct V2DeviceSessionPageHTTPQuery: Content {
     let cursor: String?
     let pageSize: Int?
@@ -27,14 +39,19 @@ private struct V2DeviceSessionPageHTTPQuery: Content {
     }
 }
 
+/// 设备会话变更请求体。
+/// 可用于撤销单一设备、撤销当前设备、或批量撤销其他设备。
 public struct V2DeviceSessionMutationHTTPRequest: Content, Sendable {
+    /// 目标设备 ID，`revoke-current`/`revoke-others` 约定为空。
     public let deviceID: String?
+    /// 幂等 ID。
     public let operationID: UUID
     public init(deviceID: String? = nil, operationID: UUID) { self.deviceID = deviceID; self.operationID = operationID }
 }
 
-/// Authenticated account-session APIs. All responses are no-store because a
-/// session inventory is security-sensitive account metadata.
+/// 已鉴权账号会话管理路由。
+///
+/// 读写会话列表与会话撤销操作，响应均加 `no-store` 以避免缓存账号级敏感元数据。
 public struct V2VaporDeviceSessionRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let sessions: any V2DeviceSessionManaging
@@ -106,16 +123,19 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
         }
     }
 
+    /// 鉴权解析。
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
         try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
+    /// 将 `Date` 转为整数毫秒时间戳。
     private func milliseconds(_ date: Date) throws -> Int64 {
         let value = date.timeIntervalSince1970 * 1_000
         guard let milliseconds = Int64(exactly: value.rounded(.towardZero)) else { throw V2DeviceSessionServiceError.malformedPersistence }
         return milliseconds
     }
 
+    /// JSON no-store 响应。
     private func noStoreJSON(_ body: V2DeviceSessionPageHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(body)
         var headers = noStoreHeaders()
@@ -123,10 +143,12 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
+    /// no-content with no-store 响应。
     private func noStoreNoContent() -> Response {
         .init(status: .noContent, headers: noStoreHeaders())
     }
 
+    /// no-store 公共头。
     private func noStoreHeaders() -> HTTPHeaders {
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")

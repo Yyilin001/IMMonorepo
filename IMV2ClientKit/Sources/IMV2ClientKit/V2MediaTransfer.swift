@@ -437,9 +437,9 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
     }
 }
 
-/// Orchestrates a fresh authorization lookup and byte transfer. It makes no
-/// automatic authorization retry: a 401/403 can reflect withdrawal or member
-/// removal, so callers must return to the explicit media-edge policy flow.
+/// 前台媒体下载编排：每次解析新的受控目标，再将字节写入调用者指定路径。
+///
+/// 本类型不管理账号缓存和发布目录；App 负责 partial、关闭栅栏、文件保护与清理。
 public struct V2ClientMediaDownloadService: Sendable {
     private let targetResolver: any V2ClientMediaDownloadTargetResolver
     private let byteTransfer: any V2ClientMediaByteTransfer
@@ -467,9 +467,10 @@ public struct V2ClientMediaDownloadService: Sendable {
     }
 }
 
-/// Foreground upload orchestration. It deliberately stops after the durable
-/// completion callback: scan availability is asynchronous, so this method
-/// must not make a media reference or message send appear accepted early.
+/// 前台媒体上传编排：解析目标、上传字节、通知完成并等待扫描可用。
+///
+/// 每个异步业务阶段后检查取消，避免迟到成功继续触发下一阶段。
+/// 返回成功只证明媒体达到可用状态，不表示引用该媒体的消息已经发送。
 public struct V2ClientMediaUploadService: Sendable {
     private let targetResolver: any V2ClientMediaUploadTargetResolver
     private let byteTransfer: any V2ClientMediaByteTransfer

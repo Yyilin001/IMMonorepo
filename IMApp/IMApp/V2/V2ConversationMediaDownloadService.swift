@@ -101,11 +101,10 @@ enum V2DeviceLocalStoragePolicy {
     }
 }
 
-/// App-facing foreground download coordinator. A fresh ClientKit download is
-/// performed for every user request, so the edge rechecks current device,
-/// room-membership, withdrawal, and delivered-projection authorization before
-/// a cached file is replaced. The cache filename is a one-way digest of the
-/// opaque media ID and never exposes an identifier or provider URL on disk.
+/// 账号范围的前台媒体下载器，拥有传输任务和受管缓存目录。
+///
+/// 每次请求重新获取服务端授权，先写随机 partial，再发布为 opaque 缓存路径。
+/// 关闭后拒绝新请求；迟到传输不能重新发布已经结束账号的文件。
 actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
     private var isClosed = false
     private var transfers: [UUID: Task<V2DownloadedConversationMedia, Error>] = [:]
@@ -132,6 +131,14 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         self.now = now
     }
 
+    /// 重新授权并下载媒体，成功后返回本地可分享路径。
+    ///
+    /// - Parameters:
+    ///   - media: 不透明媒体引用。
+    ///   - message: 需要消息可见性授权时使用的位置；其他用途可为 nil。
+    /// - Returns: 当前媒体 ID 与完成发布的受管文件 URL。
+    /// - Throws: 取消、账号下载器关闭、授权／传输或文件系统错误。
+    ///   失败时尝试删除本次 partial，调用者不能将返回前的临时路径用于展示。
     func download(_ media: V2MediaReference, message: V2MediaMessageLocation? = nil) async throws -> V2DownloadedConversationMedia {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
@@ -149,8 +156,11 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         } onCancel: { task.cancel() }
     }
 
-    /// Terminal for this downloader. Do not erase the directory until even
-    /// a transfer that ignores cancellation has returned and removed partials.
+    /// 终止下载器并在所有传输结束后删除账号下载目录。
+    ///
+    /// 取消不能保证底层立刻停止写文件，因此先等待任务，再执行目录清理。
+    ///
+    /// - Throws: 目录删除失败时返回文件系统错误；可再次调用以重试清理。
     func close() async throws {
         isClosed = true
         let pending = Array(transfers.values)

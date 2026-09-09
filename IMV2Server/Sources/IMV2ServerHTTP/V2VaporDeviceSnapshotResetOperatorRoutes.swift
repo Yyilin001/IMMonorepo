@@ -3,6 +3,12 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
+/// 设备快照重置请求体。
+///
+/// - Parameters:
+///   - operationID: 幂等操作标识。
+///   - userID: 目标用户。
+///   - deviceID: 目标设备。
 public struct V2DeviceSnapshotResetHTTPRequest: Content, Sendable {
     public let operationID: UUID
     public let userID: String
@@ -13,6 +19,13 @@ public struct V2DeviceSnapshotResetHTTPRequest: Content, Sendable {
     }
 }
 
+/// 设备快照重置响应体。
+///
+/// - Parameters:
+///   - operationID: 当前操作 ID。
+///   - generation: 快照代次数。
+///   - state: 构建状态。
+///   - wasIdempotent: 是否幂等复用结果。
 public struct V2DeviceSnapshotResetHTTPResponse: Content, Equatable, Sendable {
     public let operationID: UUID
     public let generation: UInt64
@@ -20,17 +33,25 @@ public struct V2DeviceSnapshotResetHTTPResponse: Content, Equatable, Sendable {
     public let wasIdempotent: Bool
 }
 
-/// Recovery-only endpoint for staging one server-built snapshot. It runs only
-/// on the loopback operator service and shares its dedicated bearer boundary.
+/// 仅面向恢复流程的快照重置路由。
+///
+/// 运行在 operator 回放服务，并使用环回专用的 bearer 鉴权边界。
+/// 每次调用仅允许触发一次快照重置阶段。
 public struct V2VaporDeviceSnapshotResetOperatorRoutes: Sendable {
     private let authenticator: V2OperatorReplayBearerAuthenticator
     private let service: any V2DeviceSnapshotResetting
 
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 操作员 bearer 鉴权器。
+    ///   - service: 设备快照重置服务。
     public init(authenticator: V2OperatorReplayBearerAuthenticator, service: any V2DeviceSnapshotResetting) {
         self.authenticator = authenticator
         self.service = service
     }
 
+    /// 挂载 `POST /internal/v2/device-snapshots/reset`。
     public func register(on routes: RoutesBuilder) {
         routes.post("internal", "v2", "device-snapshots", "reset") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else { throw Abort(.unauthorized) }

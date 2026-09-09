@@ -3,11 +3,32 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
+/// 关系展示名与群昵称相关路由。
+///
+/// 本模块提供 `v2/profile-presentations` 相关接口，所有入口都要求鉴权用户身份。
+/// 响应统一加入 no-cache/no-store 头，避免展示名数据被缓存泄露。
 public struct V2VaporProfilePresentationRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let presentations: any V2ProfilePresentationManaging
-    public init(authenticator: any V2GatewayAuthenticator, presentations: any V2ProfilePresentationManaging) { self.authenticator = authenticator; self.presentations = presentations }
 
+    /// 初始化路由。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 请求上下文鉴权器。
+    ///   - presentations: 展示名服务依赖。
+    public init(authenticator: any V2GatewayAuthenticator, presentations: any V2ProfilePresentationManaging) {
+        self.authenticator = authenticator
+        self.presentations = presentations
+    }
+
+    /// 注册展示名路由。
+    ///
+    /// - GET `/v2/profile-presentations/contact-aliases`：分页读取联系人别名。
+    /// - PUT `/v2/profile-presentations/contact-aliases/:target`：更新联系人备注。
+    /// - GET `/v2/profile-presentations/groups/:room/nicknames`：分页读取群昵称。
+    /// - PUT `/v2/profile-presentations/groups/:room/nickname`：更新自己在群里的昵称。
+    ///
+    /// 所有异常统一转为 HTTP 错误码，其中鉴权和参数错误优先返回 4xx。
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "profile-presentations", "contact-aliases") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -49,30 +70,127 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             } catch { throw map(error) }
         }
     }
+
+    /// 解析可选的乐观锁版本。
+    ///
+    /// - Parameter raw: 请求中的版本整数。
+    /// - Returns: 解析后的版本。
+    /// - Throws: 当版本非法时报 `invalidPresentation`。
     private func validatedRevision(_ raw: UInt64?) throws -> V2ProfileRevision? {
         guard let raw else { return nil }
         guard let revision = V2ProfileRevision(rawValue: raw) else { throw V2ProfilePresentationError.invalidPresentation }
         return revision
     }
+
+    /// 获取 `cursor` 分页参数。
+    ///
+    /// - Returns: 游标用户 ID；未传入时返回 nil。
     private func paginationCursor(_ request: Request) throws -> UserID? {
         guard let raw = request.query[String.self, at: "cursor"] else { return nil }
         guard raw.utf8.count <= 64, let cursor = try? UserID(raw) else { throw Abort(.badRequest) }
         return cursor
     }
+
+    /// 获取 `limit` 分页参数。
+    ///
+    /// - Returns: 限制在 `1...500` 的取值。
+    /// - Throws: 超出边界时抛 `badRequest`。
     private func paginationLimit(_ request: Request) throws -> Int {
         let limit = request.query[Int.self, at: "limit"] ?? 200
         guard (1...500).contains(limit) else { throw Abort(.badRequest) }
         return limit
     }
+
+    /// 获取鉴权上下文。
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
         try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
-    private func map(_ error: Error) -> Abort { guard let error = error as? V2ProfilePresentationError else { return Abort(.serviceUnavailable) }; switch error { case .forbidden: return Abort(.forbidden); case .unavailable: return Abort(.notFound); case .revisionConflict: return Abort(.conflict); case .operationPayloadMismatch, .invalidPresentation: return Abort(.badRequest); case .corruptPersistenceState: return Abort(.serviceUnavailable) } }
-    private func response<T: Content>(_ value: T) throws -> Response { let data = try JSONEncoder().encode(value); var headers = HTTPHeaders(); headers.replaceOrAdd(name: .contentType, value: "application/json"); headers.replaceOrAdd(name: .cacheControl, value: "no-store"); headers.replaceOrAdd(name: "Pragma", value: "no-cache"); return .init(status: .ok, headers: headers, body: .init(data: data)) }
+
+    /// 映射业务错误为 HTTP 错误码。
+    private func map(_ error: Error) -> Abort {
+        guard let error = error as? V2ProfilePresentationError else { return Abort(.serviceUnavailable) }
+        switch error {
+        case .forbidden: return Abort(.forbidden)
+        case .unavailable: return Abort(.notFound)
+        case .revisionConflict: return Abort(.conflict)
+        case .operationPayloadMismatch, .invalidPresentation: return Abort(.badRequest)
+        case .corruptPersistenceState: return Abort(.serviceUnavailable)
+        }
+    }
+
+    /// 统一编码 JSON 响应体。
+    private func response<T: Content>(_ value: T) throws -> Response {
+        let data = try JSONEncoder().encode(value)
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: .contentType, value: "application/json")
+        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        return .init(status: .ok, headers: headers, body: .init(data: data))
+    }
 }
-private struct AliasUpdateRequest: Content { let operationID: String; let expectedRevision: UInt64?; let remarkName: String?; enum CodingKeys: String, CodingKey { case operationID = "operation_id"; case expectedRevision = "expected_revision"; case remarkName = "remark_name" } }
-private struct NicknameUpdateRequest: Content { let operationID: String; let expectedRevision: UInt64?; let nickname: String?; enum CodingKeys: String, CodingKey { case operationID = "operation_id"; case expectedRevision = "expected_revision"; case nickname } }
-private struct AliasListResponse: Content { let values: [V2ContactAlias]; let nextCursor: String?; enum CodingKeys: String, CodingKey { case values = "aliases"; case nextCursor = "next_cursor" } }
-private struct AliasResponse: Content { let value: V2ContactAlias; enum CodingKeys: String, CodingKey { case value = "alias" } }
-private struct NicknameListResponse: Content { let values: [V2GroupMemberPresentation]; let nextCursor: String?; enum CodingKeys: String, CodingKey { case values = "nicknames"; case nextCursor = "next_cursor" } }
-private struct NicknameResponse: Content { let value: V2GroupMemberPresentation; enum CodingKeys: String, CodingKey { case value = "nickname" } }
+
+/// 联系人别名更新请求。
+private struct AliasUpdateRequest: Content {
+    let operationID: String
+    let expectedRevision: UInt64?
+    let remarkName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case expectedRevision = "expected_revision"
+        case remarkName = "remark_name"
+    }
+}
+
+/// 群昵称更新请求。
+private struct NicknameUpdateRequest: Content {
+    let operationID: String
+    let expectedRevision: UInt64?
+    let nickname: String?
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case expectedRevision = "expected_revision"
+        case nickname
+    }
+}
+
+/// 联系人别名列表响应。
+private struct AliasListResponse: Content {
+    let values: [V2ContactAlias]
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case values = "aliases"
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// 单条联系人别名响应。
+private struct AliasResponse: Content {
+    let value: V2ContactAlias
+
+    enum CodingKeys: String, CodingKey {
+        case value = "alias"
+    }
+}
+
+/// 群昵称列表响应。
+private struct NicknameListResponse: Content {
+    let values: [V2GroupMemberPresentation]
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case values = "nicknames"
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// 单条群昵称响应。
+private struct NicknameResponse: Content {
+    let value: V2GroupMemberPresentation
+
+    enum CodingKeys: String, CodingKey {
+        case value = "nickname"
+    }
+}

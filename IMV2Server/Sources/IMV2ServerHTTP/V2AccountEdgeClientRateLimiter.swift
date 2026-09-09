@@ -1,20 +1,25 @@
 import IMV2Server
 import Vapor
 
-/// Runs after `V2AccountEdgeAuthenticationMiddleware`. A route cannot reach
-/// password derivation, token parsing, or database business logic unless Caddy both proves
-/// itself and supplies one syntactically valid client address.
+/// 账户边缘客户端速率限制中间件。
+///
+/// 在 `V2AccountEdgeAuthenticationMiddleware` 之后执行。
+/// 未携带由边缘注入且合法的客户端地址时会被拒绝。
 public struct V2AccountEdgeClientRateLimitMiddleware: AsyncMiddleware, Sendable {
     private let limiter: any V2AccountEdgeClientRateLimiting
     private let limitedPaths: Set<String>?
 
-    /// `nil` preserves an all-route policy for focused tests or deployments.
-    /// Production supplies only unauthenticated credential-issuance paths.
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - limiter: 速率限制器。
+    ///   - limitedPaths: 仅限制这些路径；传 `nil` 表示所有路径都限制。
     public init(limiter: any V2AccountEdgeClientRateLimiting, limitedPaths: Set<String>? = nil) {
         self.limiter = limiter
         self.limitedPaths = limitedPaths
     }
 
+    /// 先执行速率预检，超限时返回 429 + Retry-After。
     public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
         if let limitedPaths, !limitedPaths.contains(request.url.path) {
             return try await next.respond(to: request)

@@ -1,8 +1,10 @@
 import Foundation
 import GRDB
 
-/// Select exactly the lanes installed in a runtime. An unsupported pending
-/// table must never keep another runtime's worker in a ready-work loop.
+/// 运行时能够处理的持久化命令通道。
+///
+/// 调度时只选择实际安装了处理器的通道，避免不受支持的到期记录使其他运行时持续刷新。
+/// 会话能力包含会话状态与消息收藏；转发计划和旧版逐条转发分别调度。
 public enum V2DurableCommandLane: Sendable, CaseIterable, Hashable {
     case messages, withdrawals, redactions, edits, reactions, readReceipts
     case membership, memberMutes, moderatedMemberRemovals, groupCapabilities
@@ -10,6 +12,13 @@ public enum V2DurableCommandLane: Sendable, CaseIterable, Hashable {
 }
 
 extension GRDBV2LocalSyncStore {
+    /// 为指定命令通道创建最早重试时间查询与数据库观察。
+    ///
+    /// - Parameter lanes: 当前运行时实际支持的通道；空集合产生无到期时间的查询。
+    /// - Returns: 复用本地数据库池的调度来源，日期以 Unix 秒数读取。查询和观察错误由返回的闭包或流传播。
+    ///
+    /// 观察会合并重复的最早时间，通知仅表示需要重读；它不保证每条命令变化都有独立事件。
+    /// 流终止会请求取消观察任务。返回值持有数据库池，使用方应在存储关闭前停止相关调度。
     public nonisolated func commandRetrySchedule(lanes: Set<V2DurableCommandLane>) -> V2CommandRetrySchedule {
         let query = Self.commandRetryScheduleQuery(lanes: lanes)
         let pool = databasePool
@@ -38,6 +47,13 @@ extension GRDBV2LocalSyncStore {
         )
     }
 
+    /// 生成选定通道的最早重试时间查询，不读取命令载荷。
+    ///
+    /// - Parameter lanes: 从固定枚举选择的通道；表名和状态值均来自实现内的固定映射。
+    /// - Returns: 返回单个最早 Unix 秒数或 `NULL` 的 SQL；没有通道时为 `SELECT NULL`。
+    ///
+    /// 按枚举声明顺序组合查询，使观察范围和查询顺序稳定。一般通道只查询 pending 状态；
+    /// 建群额外包含 finalizing 和 cancelling。活跃转发计划缺少下一分块时使用零时间使其立即进入处理。
     static func commandRetryScheduleQuery(lanes: Set<V2DurableCommandLane>) -> String {
         var candidates: [String] = []
         func pending(_ table: String, states: String = "'pending'") {

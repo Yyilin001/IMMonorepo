@@ -3,20 +3,26 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
-/// Vapor transport adapter for the independently authenticated media edge.
-/// It deliberately delegates all content authorization to the V2 service and
-/// returns the same opaque 404 for unavailable and unauthorized media.
+/// 媒体边缘下载查询适配器。
+///
+/// 该端点仅负责协议层适配，媒体访问权限最终由 `V2MediaEdgeHTTPHandler` 决定。
+/// 不存在或无权限统一返回 404，避免区分“未找到”和“无权访问”。
 public struct V2VaporMediaEdgeRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let handler: V2MediaEdgeHTTPHandler
 
+    /// 初始化路由。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 鉴权来源。
+    ///   - handler: 媒体边缘业务处理器。
     public init(authenticator: any V2GatewayAuthenticator, handler: V2MediaEdgeHTTPHandler) {
         self.authenticator = authenticator
         self.handler = handler
     }
 
-    /// Registers `GET /v2/media/{mediaID}`. Deployment must mount this on the
-    /// dedicated media-edge listener, rather than the realtime TLS port.
+    /// 挂载 `GET /v2/media/{mediaID}`。
+    /// 该端点通常部署在独立 media-edge 监听器上。
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "media", ":mediaID") { request async throws -> Response in
             let identity = try await authenticate(request)
@@ -56,10 +62,12 @@ public struct V2VaporMediaEdgeRoutes: Sendable {
         }
     }
 
+    /// 鉴权上下文解析。
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
         try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
+    /// no-store JSON 响应，返回 `V2MediaDownloadTargetEnvelope`。
     private func makeNoStoreJSONResponse(_ target: V2MediaDownloadTargetEnvelope) throws -> Response {
         let data = try JSONEncoder().encode(target)
         var headers = HTTPHeaders()

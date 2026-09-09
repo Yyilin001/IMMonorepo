@@ -3,18 +3,30 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
-/// Authenticated own-profile mutation requires both a revision fence and a
-/// retry-safe operation ID, and treats avatar replacement as the same atomic
-/// profile fact.
+/// 个人资料更新要求携带版本号与幂等 ID，并把头像替换与其他字段更新放在同一原子事务中处理。
 public struct V2VaporProfileUpdateRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let profiles: V2ProfileUpdateService
 
+    /// 初始化资料更新路由。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 实现身份鉴权与当前连接上下文解析的网关鉴权器。
+    ///   - profiles: 负责执行用户资料变更与幂等校验的服务。
     public init(authenticator: any V2GatewayAuthenticator, profiles: V2ProfileUpdateService) {
         self.authenticator = authenticator
         self.profiles = profiles
     }
 
+    /// 注册 `/v2/profile/me` 相关端点：
+    ///
+    /// - GET: 返回当前账号当前资料视图。
+    /// - PUT: 提交昵称/头像更新命令，带 `expected_revision` 与 `operation_id` 进行幂等保护与并发保护。
+    ///
+    /// 错误映射：
+    /// - `.badRequest`：参数结构/校验失败。
+    /// - `.conflict`：资料版本冲突，返回当前版本。
+    /// - `.serviceUnavailable`：持久化状态异常。
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "profile", "me") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -74,10 +86,22 @@ public struct V2VaporProfileUpdateRoutes: Sendable {
         }
     }
 
+    /// 解析并返回已鉴权的账号上下文。
+    ///
+    /// 该方法封装认证调用，统一后续路由的鉴权入口。
+    /// - Parameter request: 请求对象。
+    /// - Returns: 已认证连接的上下文。
+    /// - Throws: 认证失败时抛出 `Abort`。
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
         try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
+    /// 以 `no-store` 响应头编码 JSON，避免网关和浏览器缓存。
+    ///
+    /// - Parameters:
+    ///   - result: 要序列化的响应体。
+    ///   - status: HTTP 状态码，默认 `.ok`。
+    /// - Returns: 已设置 `content-type`、`cache-control`、`pragma` 的响应对象。
     private func noStoreJSONResponse(_ result: V2ProfileUpdateHTTPResponse, status: HTTPResponseStatus = .ok) throws -> Response {
         let data = try JSONEncoder().encode(result)
         var headers = HTTPHeaders()
@@ -88,11 +112,17 @@ public struct V2VaporProfileUpdateRoutes: Sendable {
     }
 }
 
+/// 更新资料接口的请求对象。
+///
+/// 其中 `operation_id` 用于幂等，`expected_revision` 用于检测并发更新冲突。
 public struct V2ProfileUpdateHTTPRequest: Content, Sendable {
+    /// 本次操作的幂等 ID（幂等键）。
     public let operationID: String
+    /// 客户端已知的资料版本，服务端以此做乐观并发控制。
     public let expectedRevision: UInt64
+    /// 新显示名。传入空字符串将按业务规则交由服务层判定合法性。
     public let displayName: String
-    /// `null` clears the avatar; the profile write is a complete desired state.
+    /// Avatar 媒体 ID。`null` 表示清空头像；本字段与 `display_name` 一起形成完整目标状态。
     public let avatarMediaID: String?
 
     enum CodingKeys: String, CodingKey {
@@ -103,16 +133,29 @@ public struct V2ProfileUpdateHTTPRequest: Content, Sendable {
     }
 }
 
+/// 返回客户端的资料更新结果。
+///
+/// 当更新成功/幂等命中时返回完整资料镜像；冲突场景返回当前版本。
 public struct V2ProfileUpdateHTTPResponse: Content, Sendable {
+    /// 用户 ID。
     public let userID: String?
+    /// 用户公开句柄。
     public let handle: String?
+    /// 显示名。
     public let displayName: String?
+    /// 账号类型（普通/管理员等）。
     public let accountKind: V2AccountKind?
+    /// 当前绑定头像媒体 ID。
     public let avatarMediaID: String?
+    /// 账号状态字段。
     public let state: String?
+    /// 资料主版本号。
     public let revision: UInt64?
+    /// 可见性版本号。
     public let visibilityRevision: UInt64?
+    /// 本次请求是否幂等命中。
     public let idempotent: Bool?
+    /// 发生 `revisionConflict` 时返回的当前版本。
     public let currentRevision: UInt64?
 
     enum CodingKeys: String, CodingKey {

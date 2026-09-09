@@ -52,10 +52,9 @@ public struct V2DurableWorkReplayHTTPResponse: Content, Equatable, Sendable {
     }
 }
 
-/// `POST /internal/v2/durable-work/replay` belongs only on the separate,
-/// loopback operator process. It deliberately accepts no end-user credential,
-/// room role, free-form SQL, or batch target. One audited operation replays at
-/// most one paused row.
+/// `/internal/v2/durable-work/replay` 仅用于独立的 operator 回放进程。
+///
+/// 接口不接收端用户凭证、群角色参数、自由 SQL 或批量目标；每次仅允许回放一个挂起任务。
 public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
     private let authenticator: V2OperatorReplayBearerAuthenticator
     private let service: V2DurableWorkOperatorReplayService

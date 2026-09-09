@@ -4,41 +4,54 @@ import IMV2Core
 import Security
 #endif
 
-/// A non-secret, device-only installation marker. Its value is stored both in
-/// the device-only Keychain and in the V2 SQLite store. A copied database
-/// therefore cannot become trusted on a different installation.
+/// 非秘密的本地存储绑定标记，同时记录于设备限定 Keychain 与 V2 SQLite 数据库。
+///
+/// 打开数据库时由引导层比较标记，识别缺少匹配绑定的数据库；该 UUID 本身不是账户认证凭证。
 public struct V2LocalInstallationBinding: Codable, Equatable, Sendable {
+    /// 用于比较 Keychain 与数据库归属的 UUID。
     public let value: UUID
 
+    /// 包装调用方提供的绑定 UUID，不访问 Keychain 或数据库。
     public init(value: UUID) { self.value = value }
 }
 
+/// 安装绑定存储的访问、格式与失效错误分类。
 public enum V2InstallationBindingStoreError: Error, Equatable, Sendable {
+    /// 绑定项当前不可访问，不能据此推断数据库来自其他设备。
     case unavailable
+    /// 绑定记录类型或编码格式无效。
     case malformedRecord
+    /// 绑定项已被底层分类为永久失效。
     case permanentlyInvalidated
+    /// 未分类的 Keychain 状态码。
     case unexpectedStatus(Int32)
 }
 
+/// 独立于账户令牌轮换的本地数据库绑定存储边界。
 public protocol V2InstallationBindingStore: Sendable {
+    /// 读取绑定标记，不存在返回 nil；暂时不可用必须通过错误区分。
     func load() async throws -> V2LocalInstallationBinding?
+    /// 保存完整绑定标记，不与访问或刷新凭证混合存储。
     func save(_ binding: V2LocalInstallationBinding) async throws
+    /// 删除绑定标记，调用方负责协调受该绑定保护的数据库生命周期。
     func delete() async throws
 }
 
-/// Stores the binding in an item that never migrates through iCloud Keychain
-/// or device restore. It is intentionally separate from refresh credentials:
-/// credential rotation must not alter the local-store trust anchor.
 #if canImport(Security)
+/// 使用独立 Keychain 项保存安装绑定，新项目设置设备限定的首次解锁后保护级别；凭证轮换不应更改此标记。
 public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
+    /// 绑定存储的服务命名空间。
     private let service: String
+    /// 绑定项键，默认 local-installation-binding。
     private let account: String
 
+    /// 保存项目定位参数，不立即加载或创建绑定。
     public init(service: String, account: String = "local-installation-binding") {
         self.service = service
         self.account = account
     }
 
+    /// 读取完整 JSON 绑定，不存在返回 nil，类型或解码错误报告 malformedRecord。
     public func load() throws -> V2LocalInstallationBinding? {
         var query = baseQuery()
         query[kSecReturnData as String] = true
@@ -55,6 +68,7 @@ public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
         }
     }
 
+    /// 编码并更新绑定数据，不存在时插入并设置设备限定保护级别；更新不修改既有可访问属性。
     public func save(_ binding: V2LocalInstallationBinding) throws {
         let data: Data
         do {
@@ -74,11 +88,13 @@ public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
         guard insertStatus == errSecSuccess else { throw map(insertStatus) }
     }
 
+    /// 删除匹配绑定项，不存在视为成功，其他系统错误传播。
     public func delete() throws {
         let status = SecItemDelete(baseQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw map(status) }
     }
 
+    /// 以通用密码类别、服务名与账户键定位绑定项。
     private func baseQuery() -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -87,6 +103,7 @@ public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
         ]
     }
 
+    /// 映射不可访问、解码和认证失败状态，其他状态作为 unexpectedStatus 保留。
     private func map(_ status: OSStatus) -> V2InstallationBindingStoreError {
         switch status {
         case errSecInteractionNotAllowed, errSecNotAvailable: .unavailable
@@ -97,36 +114,49 @@ public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
     }
 }
 #else
-/// Linux test containers must not emulate a device-only Keychain. Returning a
-/// typed unavailable error keeps the production trust-boundary fail-closed.
+/// 非 Security 平台占位实现，明确返回绑定不可用，不模拟设备限定的 Keychain。
 public actor V2KeychainInstallationBindingStore: V2InstallationBindingStore {
+    /// 保留跨平台构造接口，不创建绑定。
     public init(service _: String, account _: String = "local-installation-binding") {}
 
+    /// 当前平台无法读取 Keychain，始终抛出 unavailable。
     public func load() throws -> V2LocalInstallationBinding? {
         throw V2InstallationBindingStoreError.unavailable
     }
 
+    /// 当前平台无法保存 Keychain，始终抛出 unavailable。
     public func save(_: V2LocalInstallationBinding) throws {
         throw V2InstallationBindingStoreError.unavailable
     }
 
+    /// 当前平台无法删除 Keychain，始终抛出 unavailable。
     public func delete() throws {
         throw V2InstallationBindingStoreError.unavailable
     }
 }
 #endif
 
+/// 本地存储引导错误，installationBindingUnavailable 表示无法取得可靠绑定状态。
 public enum V2LocalStoreBootstrapError: Error, Equatable, Sendable {
+    /// 安装绑定暂时不可读取，不能继续判断数据库归属。
     case installationBindingUnavailable
 }
 
-/// The sole production entry point for opening a V2 local store. It serializes
-/// trust-anchor decisions and never treats an unavailable Keychain as evidence
-/// that a database was imported.
+/// 根据设备限定绑定决定保留或重建 V2 本地数据库的生产入口。
+///
+/// Keychain 暂时不可用不作为数据库导入证据；缺失、明确失效或不匹配的绑定按对应恢复路径处理。
+/// actor 方法内部有异步存储调用，调用方仍需协调同一数据库的打开生命周期，不能仅依赖 actor 获得跨挂起的整体互斥。
 public actor V2LocalStoreBootstrapper {
+    /// 独立保存本地数据库绑定标记的持久化边界。
     private let bindingStore: any V2InstallationBindingStore
+    /// 需要重建绑定时生成新标记的可注入工厂。
     private let makeBinding: @Sendable () -> V2LocalInstallationBinding
 
+    /// 注入绑定存储及新标记工厂，不立即打开数据库。
+    ///
+    /// - Parameters:
+    ///   - bindingStore: 保存设备限定绑定的存储。
+    ///   - makeBinding: 需要新绑定时调用，默认生成随机 UUID。
     public init(
         bindingStore: any V2InstallationBindingStore,
         makeBinding: @escaping @Sendable () -> V2LocalInstallationBinding = { .init(value: UUID()) }
@@ -135,6 +165,16 @@ public actor V2LocalStoreBootstrapper {
         self.makeBinding = makeBinding
     }
 
+    /// 取得安装绑定并打开账户本地数据库，缺失或不匹配时按约定重建。
+    ///
+    /// - Parameters:
+    ///   - databaseURL: 要打开的 V2 数据库位置，恢复清理前相关数据库文件必须已关闭。
+    ///   - userID: 可选账户归属，交给本地存储构造器校验。
+    /// - Returns: 带匹配安装绑定的本地同步存储。
+    /// - Throws: 绑定暂时不可用、文件清理、存储访问或数据库初始化错误。
+    ///
+    /// 无绑定时先清理数据库文件再保存新标记；损坏或永久失效时先删除绑定再重建。
+    /// 数据库绑定不匹配时使用同一设备标记清理重开一次，第二次失败直接传播，不无限重建。
     public func open(databaseURL: URL, userID: UserID? = nil) async throws -> GRDBV2LocalSyncStore {
         var binding: V2LocalInstallationBinding
         do {
@@ -173,8 +213,13 @@ public actor V2LocalStoreBootstrapper {
         }
     }
 
-    /// Migration must distinguish a trusted legacy database from an imported
-    /// one without manufacturing an empty, unbound legacy store.
+    /// 为旧数据库迁移读取设备绑定，不为无绑定的历史库制造新归属。
+    ///
+    /// - Parameter databaseURL: 待检查的旧数据库位置，清理前须已关闭其文件。
+    /// - Returns: 绑定匹配时返回存储；绑定缺失、永久失效或数据库不匹配时清理并返回 nil。
+    /// - Throws: 绑定暂时不可用或清理、存储、数据库错误。
+    ///
+    /// 没有额外的文件存在性检查；有有效绑定时交给 GRDB 存储构造器打开该路径。
     public func openTrustedLegacyStore(databaseURL: URL) async throws -> GRDBV2LocalSyncStore? {
         let binding: V2LocalInstallationBinding
         do {
@@ -199,6 +244,7 @@ public actor V2LocalStoreBootstrapper {
         }
     }
 
+    /// 通过 V2LocalDatabaseArtifacts 清理指定数据库的已关闭文件，传播文件错误，不在此关闭活跃连接。
     private func eraseDatabaseArtifacts(at databaseURL: URL) throws {
         try V2LocalDatabaseArtifacts(primary: databaseURL).removeClosedFiles()
     }

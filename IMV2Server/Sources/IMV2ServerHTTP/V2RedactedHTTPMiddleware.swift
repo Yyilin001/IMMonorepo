@@ -6,6 +6,10 @@ import Vapor
 /// rate-limit middleware. Replacing Vapor's defaults is intentional: its
 /// default error logger records the complete URL, including signed capability
 /// query values.
+/// HTTP 中间件安装入口。
+///
+/// 按顺序安装 `V2RedactedRouteLoggingMiddleware` 与
+/// `V2RedactedErrorMiddleware`，减少敏感字段日志与错误信息泄露。
 public enum V2RedactedHTTPMiddlewareConfiguration {
     public static func install(on application: Application) {
         var middleware = Middlewares()
@@ -17,6 +21,7 @@ public enum V2RedactedHTTPMiddlewareConfiguration {
 
 /// Logs the matched route template, never the caller-controlled path or query.
 /// Templates keep log cardinality bounded and avoid persisting identifiers.
+/// 路由级日志中间件，记录路由模板而非原始路径。
 private struct V2RedactedRouteLoggingMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
         // Successful request-per-line logging is diagnostic, not an
@@ -30,6 +35,9 @@ private struct V2RedactedRouteLoggingMiddleware: Middleware {
 /// Produces the stable Vapor-compatible JSON error envelope while deliberately
 /// omitting the original error description from logs. Low-level errors can
 /// contain SQL, provider URLs, tokens, or filesystem paths.
+/// 错误响应中间件。
+///
+/// 使用稳定的错误 reason 并统一返回 JSON envelope，避免泄露底层异常细节。
 private struct V2RedactedErrorMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
         next.respond(to: request).flatMapErrorThrowing { error in
@@ -65,6 +73,7 @@ private struct V2RedactedErrorMiddleware: Middleware {
     }
 }
 
+/// 错误响应包体。
 private struct V2HTTPErrorEnvelope: Encodable {
     let error: Bool
     let reason: String

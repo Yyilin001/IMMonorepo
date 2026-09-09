@@ -4,10 +4,9 @@ import IMV2Server
 import Vapor
 import _NIOFileSystem
 
-/// Development-only object-byte edge for `V2LocalFilesystemMediaProvider`.
-/// The signed target is the capability: this adapter never accepts a raw file
-/// path, media storage key, or long-lived application credential. Production
-/// deployments must compose a provider-native object edge instead.
+/// 本地文件系统媒体边缘接口（开发/测试用途）。
+/// 目标路径由签名能力派生，本适配器不接受裸文件路径、原始存储 key 或长期凭证。
+/// 生产环境建议改为对象存储原生边缘实现。
 public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
     private let provider: V2LocalFilesystemMediaProvider
     private let publicBaseURL: URL
@@ -30,9 +29,9 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
         self.maximumUploadBytes = Int(maximumUploadBytes)
     }
 
-    /// Registers the short-lived signed targets emitted by the local provider:
-    /// `PUT /v2/local-media/upload/{mediaID}` and
-    /// `GET /v2/local-media/download/{mediaID}`.
+    /// 挂载短期签名资源相关接口：
+    /// - `PUT /v2/local-media/upload/{mediaID}`：开始并提交对象上传。
+    /// - `GET /v2/local-media/download/{mediaID}`：下载对象。
     public func register(on routes: RoutesBuilder) {
         routes.on(
             .PUT,

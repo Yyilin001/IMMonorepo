@@ -2,6 +2,15 @@ import Foundation
 import IMV2Server
 import Vapor
 
+/// 转发工作重放请求体。
+///
+/// - Parameters:
+///   - operationID: 幂等 ID。
+///   - shardID: 分片 ID。
+///   - kind: 重放类型。
+///   - exportID: 导出 ID。
+///   - ordinal: 分批序号（可选）。
+///   - reason: 重放原因。
 public struct V2ForwardWorkReplayHTTPRequest: Content, Sendable {
     public let operationID: UUID
     public let shardID: String
@@ -16,13 +25,20 @@ public struct V2ForwardWorkReplayHTTPRequest: Content, Sendable {
     }
 }
 
-/// Registered only on the separate loopback operator process.
+/// 仅在独立 loopback operator 进程注册的重放路由。
 public struct V2VaporForwardWorkOperatorReplayRoutes: Sendable {
     private let authenticator: V2OperatorReplayBearerAuthenticator
     private let service: V2ForwardWorkOperatorReplayService
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 操作员鉴权器。
+    ///   - service: 重放服务。
     public init(authenticator: V2OperatorReplayBearerAuthenticator, service: V2ForwardWorkOperatorReplayService) {
         self.authenticator = authenticator; self.service = service
     }
+
+    /// 挂载 `POST /internal/v2/forward-work/replay`。
     public func register(on routes: RoutesBuilder) {
         routes.post("internal", "v2", "forward-work", "replay") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else { throw Abort(.unauthorized) }

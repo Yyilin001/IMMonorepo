@@ -3,23 +3,30 @@ import IMV2Server
 import NIOCore
 import Vapor
 
+/// `V2ApplicationEventLoopDatabasePool` 的初始化错误。
 public enum V2ApplicationEventLoopDatabasePoolError: Error, Equatable, Sendable {
     case emptyEventLoopSet
     case databaseNotRegistered
     case duplicateEventLoop
 }
 
-/// Materializes one Fluent database handle for every application EventLoop.
+/// 为每个 EventLoop 预先构造一个 Fluent 数据库句柄。
 ///
-/// `Application.db(_:)` returns a handle bound to one EventLoop. Long-lived
-/// repositories must not retain that single handle when the configured
-/// connection budget is expressed per EventLoop. This factory makes the
-/// topology explicit and returns a round-robin database whose transactional
-/// operations remain pinned to one underlying handle.
+/// `Application.db(_:)` 会按 EventLoop 绑定数据库连接。
+/// 长生命周期仓储不应持有单个连接句柄，否则在按 EventLoop
+/// 分配连接预算时可能出现路由错配。
+/// 本类型显式建立事件循环到数据库句柄的映射，并返回均衡封装。
 public struct V2ApplicationEventLoopDatabasePool: Sendable {
     public let database: V2EventLoopBalancedDatabase
     public let eventLoopDatabases: [any Database]
 
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - application: Vapor 应用。
+    ///   - identifier: 数据库配置 ID。
+    ///   - eventLoops: 事件循环集合。
+    /// - Throws: 空集合、重复 EventLoop、数据库未注册等错误。
     public init(
         application: Application,
         identifier: DatabaseID,

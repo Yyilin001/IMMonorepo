@@ -3,19 +3,28 @@ import IMV2Core
 import IMV2Server
 import Vapor
 
-/// Authenticated, context-authorized profile hydration. Unlike the exact
-/// handle directory, this API accepts only stable IDs already learned from a
-/// direct room or an authorized group context, and returns an indistinguishable
-/// unavailable result for every non-readable key.
+/// 用户资料视图查询路由。
+///
+/// 该接口以 POST 批量查询为主，对外隐藏了内部查询上下文细节。
+/// 输入必须显式声明 context；当 context 为 `room` 时必须带 roomID。
 public struct V2VaporProfileViewRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let profiles: V2ProfileViewService
 
+    /// 初始化路由。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 鉴权器，获取调用者身份。
+    ///   - profiles: 资料视图读取服务。
     public init(authenticator: any V2GatewayAuthenticator, profiles: V2ProfileViewService) {
         self.authenticator = authenticator
         self.profiles = profiles
     }
 
+    /// 注册 `POST /v2/profile-views/batch`。
+    ///
+    /// 服务端对每个 key 做上下文权限校验后返回查询结果。
+    /// 找不到数据时返回可见性标记，而不是泄露不同错误语义。
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "profile-views", "batch") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -34,10 +43,12 @@ public struct V2VaporProfileViewRoutes: Sendable {
         }
     }
 
+    /// 解析鉴权连接。
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
         try await request.v2AuthenticatedAccountIdentity(using: authenticator)
     }
 
+    /// 统一 no-store JSON 响应。
     private func noStoreJSONResponse(_ result: V2ProfileViewBatchHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(result)
         var headers = HTTPHeaders()
@@ -48,16 +59,25 @@ public struct V2VaporProfileViewRoutes: Sendable {
     }
 }
 
+/// 批量 profile-view 请求体。
 public struct V2ProfileViewBatchHTTPRequest: Content, Sendable {
+    /// 查询 key 列表。
     public let keys: [V2ProfileViewLookupHTTPKey]
-    public init(keys: [V2ProfileViewLookupHTTPKey]) { self.keys = keys }
+
+    public init(keys: [V2ProfileViewLookupHTTPKey]) {
+        self.keys = keys
+    }
 }
 
+/// 单条查询 key，携带显示上下文。
 public struct V2ProfileViewLookupHTTPKey: Content, Sendable {
+    /// 目标用户 ID。
     public let userID: String
-    /// `context` is explicit so an absent room ID cannot accidentally turn a
-    /// relationship contact read into a direct-room authorization check.
+    /// 查询上下文：`direct`、`relationship`、`room`。
+    ///
+    /// - Note: context 为 `room` 时，`roomID` 必须存在。
     public let context: String
+    /// room 上下文时必填。
     public let roomID: String?
 
     public init(userID: String, context: String = "direct", roomID: String? = nil) {
@@ -90,22 +110,39 @@ public struct V2ProfileViewLookupHTTPKey: Content, Sendable {
     }
 }
 
+/// 批量 profile-view 响应体。
 public struct V2ProfileViewBatchHTTPResponse: Content, Sendable {
+    /// 查询结果。
     public let results: [V2ProfileViewBatchHTTPResult]
-    public init(results: [V2ProfileViewBatchHTTPResult]) { self.results = results }
+
+    public init(results: [V2ProfileViewBatchHTTPResult]) {
+        self.results = results
+    }
 }
 
+/// 单条 profile-view 返回结构。
 public struct V2ProfileViewBatchHTTPResult: Content, Sendable {
+    /// 目标用户。
     public let userID: String
+    /// 请求上下文。
     public let context: String
+    /// room context 的 room id。
     public let roomID: String?
+    /// 对外可见性。`true` 表示未命中或不可见。
     public let unavailable: Bool
+    /// 账号 handle。
     public let handle: String?
+    /// 显示名。
     public let displayName: String?
+    /// 账号类型。
     public let accountKind: V2AccountKind?
+    /// 头像 mediaID。
     public let avatarMediaID: String?
+    /// 状态。
     public let state: String?
+    /// 版本。
     public let revision: UInt64?
+    /// 可见性版本。
     public let visibilityRevision: UInt64?
 
     enum CodingKeys: String, CodingKey {

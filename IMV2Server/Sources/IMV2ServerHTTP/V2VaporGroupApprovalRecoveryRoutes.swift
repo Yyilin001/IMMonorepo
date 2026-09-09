@@ -2,6 +2,17 @@ import Foundation
 import IMV2Server
 import Vapor
 
+/// 群审批恢复请求体。
+///
+/// - Parameters:
+///   - operationID: 幂等操作标识。
+///   - shardID: 分片标识。
+///   - ownerEpoch: 分片拥有者 epoch。
+///   - roomID: 群组 ID。
+///   - requestID: 申请 ID。
+///   - reviewerUserID: 审批者用户 ID。
+///   - decisionOperationID: 决策幂等 ID。
+///   - reason: 恢复原因。
 public struct V2GroupApprovalRecoveryHTTPRequest: Content, Sendable {
     public let operationID: UUID
     public let shardID: String
@@ -17,6 +28,14 @@ public struct V2GroupApprovalRecoveryHTTPRequest: Content, Sendable {
         self.requestID = requestID; self.reviewerUserID = reviewerUserID; self.decisionOperationID = decisionOperationID; self.reason = reason
     }
 }
+/// 群审批候选查询请求体。
+///
+/// - Parameters:
+///   - shardID: 分片标识。
+///   - ownerEpoch: 分片拥有者 epoch。
+///   - roomID: 群组 ID。
+///   - after: 分页游标。
+///   - limit: 单页上限。
 public struct V2GroupApprovalRecoveryCandidatesHTTPRequest: Content, Sendable {
     public let shardID: String
     public let ownerEpoch: Int64
@@ -28,13 +47,22 @@ public struct V2GroupApprovalRecoveryCandidatesHTTPRequest: Content, Sendable {
     }
 }
 
-/// Only the independent loopback operator process registers these routes.
+/// 仅由独立的 operator 回放服务注册的群审批恢复路由。
+///
+/// - `POST /internal/v2/group-approvals/candidates`：查询待恢复候选。
+/// - `POST /internal/v2/group-approvals/recover`：重放恢复一条审批。
 public struct V2VaporGroupApprovalRecoveryRoutes: Sendable {
     private let authenticator: V2OperatorReplayBearerAuthenticator
     private let service: V2GroupApprovalRecoveryService
+    /// 初始化。
+    ///
+    /// - Parameters:
+    ///   - authenticator: 操作员鉴权器。
+    ///   - service: 群审批恢复服务。
     public init(authenticator: V2OperatorReplayBearerAuthenticator, service: V2GroupApprovalRecoveryService) {
         self.authenticator = authenticator; self.service = service
     }
+    /// 挂载恢复相关端点。
     public func register(on routes: RoutesBuilder) {
         routes.post("internal", "v2", "group-approvals", "candidates") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else { throw Abort(.unauthorized) }
@@ -64,6 +92,8 @@ private func approvalRecoveryResponse<T: Encodable>(_ value: T) throws -> Respon
     headers.replaceOrAdd(name: "Pragma", value: "no-cache")
     return .init(status: .ok, headers: headers, body: .init(data: try JSONEncoder().encode(value)))
 }
+
+/// 群审批恢复错误到 HTTP 状态码的统一映射。
 private func approvalRecoveryHTTPError(_ error: any Error) -> Abort {
     switch error {
     case V2GroupApprovalRecoveryError.invalidRequest: return Abort(.badRequest)

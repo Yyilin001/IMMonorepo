@@ -1,9 +1,17 @@
 import Crypto
 import Foundation
 
-/// Deterministic UUID identity for a lazily created forward-plan chunk. Its
-/// spelling is accepted by PostgreSQL UUID columns; it is not an ordering key.
+/// 为延迟创建的转发计划分块生成确定性 UUID 操作身份，同一父计划与分块序号得到同一值，不作为排序键。
 public enum V2ForwardChunkIdentity {
+    /// 根据用途前缀、父计划 UUID 字节和大端分块序号计算 SHA256，取前 16 字节并设置 UUID 版本与变体位。
+    ///
+    /// - Parameters:
+    ///   - planID: 原始值可解析为 UUID 的父转发计划身份。
+    ///   - chunkIndex: 从零开始的分块序号，最大为 Int64.max。
+    /// - Returns: 确定性的分块操作身份，重试必须复用同一父计划和序号。
+    /// - Throws: 父身份不是 UUID 时抛出 invalidIdentifier，分块序号越界时抛出 invalidNonNegativeValue。
+    ///
+    /// 生成的是应用定义版本 8 UUID；不读取时钟、随机数或持久化状态。
     public static func operationID(planID: MessageForwardOperationID, chunkIndex: UInt64) throws -> MessageForwardOperationID {
         guard let plan = planID.uuidValue else { throw V2CoreError.invalidIdentifier }
         guard chunkIndex <= UInt64(Int64.max) else { throw V2CoreError.invalidNonNegativeValue }

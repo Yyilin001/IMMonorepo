@@ -76,6 +76,11 @@ struct V2SignOutAttemptGate {
 
 @MainActor
 @Observable
+/// 应用账号根状态与依赖生命周期的 MainActor 所有者。
+///
+/// 负责登录／恢复 route、认证代次、前后台 runtime、页面依赖和退出收尾。
+/// 异步激活返回后需要重新验证 attempt generation 和认证 epoch，
+/// 防止旧账号结果覆盖新状态。普通退出保留数据库 outbox，与显式擦除不同。
 final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private static let authenticationLogger = Logger(
         subsystem: "com.stskcxfz.imapp",
@@ -625,6 +630,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = .signedOut
     }
 
+    /// 撤下账号界面，停止任务并关闭捕获的本地存储。
+    ///
+    /// 先隐藏页面，再依次等待观察、运行时、索引和媒体任务；上传结束后才删暂存。
+    /// 清理失败进入不可用 route，不伪装成已经完成。
+    ///
+    /// - Parameter nextRoute: 全部本地收尾成功后要进入的 route。
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
         authenticationObserver.stop()
         groupInvitationStore?.invalidate()
