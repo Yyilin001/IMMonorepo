@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "$#" -ne 4 ]]; then
   printf 'usage: %s <account-base-url> <ca-path> <credential-count> <output-jsonl>\n' "$0" >&2
@@ -51,6 +52,11 @@ umask 077
 mkdir -p "$(dirname "${output_path}")"
 touch "${output_path}"
 chmod 600 "${output_path}"
+# Keep authority outside disposable response staging. Interrupted runs retain
+# each exact cancellation request, including when curl receives no response.
+recovery_directory="${output_path}.registration-recovery"
+mkdir -p "${recovery_directory}"
+chmod 700 "${recovery_directory}"
 
 existing_count="$(awk 'NF { count += 1 } END { print count + 0 }' "${output_path}")"
 (( existing_count <= credential_count )) || {
@@ -67,12 +73,12 @@ trap cleanup EXIT INT TERM
 prepare_one() {
   local destination="$1"
   local suffix account_handle public_handle device_id operation_id password
-  local assertion_payload assertion issue_payload issued
+  local assertion_payload assertion issue_payload issued cancellation
   suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
   account_handle="load-${suffix:0:20}"
   public_handle="load${suffix:0:20}"
-  device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  device_id="$(uuidgen | tr '[:lower:]' '[:upper:]')"
+  operation_id="$(uuidgen | tr '[:lower:]' '[:upper:]')"
   password="load-$(openssl rand -hex 18)"
 
   assertion_payload="$(jq -cn \
@@ -88,11 +94,14 @@ prepare_one() {
     --data-binary @- \
     "${account_base_url}/v2/account-auth/password/register" | jq -er '.accountAssertion')"
 
+  cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
+    "${device_id}" "${operation_id}" "${recovery_directory}")"
   issue_payload="$(jq -cn \
     --arg accountAssertion "${assertion}" \
     --arg deviceID "${device_id}" \
     --arg operationID "${operation_id}" \
-    '{accountAssertion:$accountAssertion,deviceID:$deviceID,operationID:$operationID,deviceName:"Load Generator",platform:"macOS"}')"
+    --argjson cancellation "${cancellation}" \
+    '{accountAssertion:$accountAssertion,deviceID:$deviceID,operationID:$operationID,cancellation:$cancellation,deviceName:"Load Generator",platform:"macOS"}')"
   issued="$(printf '%s' "${issue_payload}" | curl_request --silent --show-error --fail \
     --cacert "${ca_path}" \
     --request POST \
@@ -100,7 +109,12 @@ prepare_one() {
     --data-binary @- \
     "${account_base_url}/v2/device-credentials")"
 
-  printf '%s\n' "$(printf '%s' "${issued}" | jq -ce '{userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential}')" > "${destination}"
+  printf '%s' "${issued}" | jq -e --argjson expected "${cancellation}" \
+    '.registrationCancellation == $expected' > /dev/null || {
+      printf 'credential issuer did not confirm cancellation binding; recovery retained\n' >&2
+      return 1
+    }
+  printf '%s\n' "$(printf '%s' "${issued}" | jq -ce '{userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential,revocationCredential,revocationCredentialExpiresAtMilliseconds,registrationCancellation}')" > "${destination}"
 }
 
 declare -a pids=()

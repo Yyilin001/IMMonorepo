@@ -35,7 +35,7 @@ public struct V2SnapshotProjectionItem: Equatable, Sendable {
     public let payload: Data
 
     public init(key: V2SnapshotProjectionKey, sourceEventID: EventID, sequence: UInt64, payload: Data) throws {
-        guard sequence > 0, !payload.isEmpty,
+        guard sequence > 0, sequence <= UInt64(Int64.max), !payload.isEmpty,
               payload.count <= V2SnapshotProjectionV3Codec.maximumItemBytes
         else { throw V2SnapshotProjectionV3Error.invalidItem }
         self.key = key

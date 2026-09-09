@@ -17,7 +17,7 @@ public struct V2RoutedContentReviewWorker: Sendable {
 
     public func runOnce(limitPerOwner: Int) async throws
         -> V2ContentReviewReport {
-        precondition(limitPerOwner > 0)
+        guard limitPerOwner > 0 else { throw V2ContentReviewWorkerError.invalidLimit }
         let result = await withTaskGroup(
             of: Result<V2ContentReviewReport, any Error>.self,
             returning: Result<

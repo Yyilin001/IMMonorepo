@@ -49,9 +49,9 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
             let identity = try await authenticate(request)
             let query: V2DeviceSessionPageHTTPQuery
             do { query = try request.query.decode(V2DeviceSessionPageHTTPQuery.self) }
-            catch { throw Abort(.badRequest) }
+            catch { throw Abort(.badRequest, headers: noStoreHeaders()) }
             let pageSize = query.pageSize ?? 50
-            guard (1 ... 100).contains(pageSize) else { throw Abort(.badRequest) }
+            guard (1 ... 100).contains(pageSize) else { throw Abort(.badRequest, headers: noStoreHeaders()) }
             do {
                 let page = try await sessions.sessions(for: identity.userID, cursor: query.cursor, pageSize: pageSize)
                 let values = try page.sessions.map { value in
@@ -66,9 +66,9 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
                 }
                 return try noStoreJSON(.init(sessions: values, nextCursor: page.nextCursor))
             } catch V2DeviceSessionServiceError.invalidRequest {
-                throw Abort(.badRequest)
+                throw Abort(.badRequest, headers: noStoreHeaders())
             } catch {
-                throw Abort(.serviceUnavailable)
+                throw Abort(.serviceUnavailable, headers: noStoreHeaders())
             }
         }
 
@@ -78,8 +78,19 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
             guard let rawDeviceID = input.deviceID, let target = try? DeviceID(rawDeviceID) else { throw Abort(.badRequest) }
             let result: V2DeviceSessionMutationOutcome
             do { result = try await sessions.revokeDevice(actorUserID: identity.userID, currentDeviceID: identity.deviceID, targetDeviceID: target, operationID: input.operationID) }
-            catch { throw Abort(.serviceUnavailable) }
+            catch { throw Abort(.serviceUnavailable, headers: noStoreHeaders()) }
             guard result != .targetUnavailable else { throw Abort(.notFound) }
+            return noStoreNoContent()
+        }
+
+        routes.post("v2", "devices", "revoke-current") { request async throws -> Response in
+            let identity = try await authenticate(request)
+            let input = try request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
+            guard input.deviceID == nil else { throw Abort(.badRequest) }
+            let result: V2DeviceSessionMutationOutcome
+            do { result = try await sessions.revokeCurrentDevice(actorUserID: identity.userID, currentDeviceID: identity.deviceID, operationID: input.operationID) }
+            catch { throw Abort(.serviceUnavailable, headers: noStoreHeaders()) }
+            guard result != .targetUnavailable else { throw Abort(.unauthorized) }
             return noStoreNoContent()
         }
 
@@ -89,7 +100,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
             guard input.deviceID == nil else { throw Abort(.badRequest) }
             let result: V2DeviceSessionMutationOutcome
             do { result = try await sessions.revokeOtherDevices(actorUserID: identity.userID, currentDeviceID: identity.deviceID, operationID: input.operationID) }
-            catch { throw Abort(.serviceUnavailable) }
+            catch { throw Abort(.serviceUnavailable, headers: noStoreHeaders()) }
             guard result != .targetUnavailable else { throw Abort(.unauthorized) }
             return noStoreNoContent()
         }
@@ -101,23 +112,25 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
 
     private func milliseconds(_ date: Date) throws -> Int64 {
         let value = date.timeIntervalSince1970 * 1_000
-        guard value.isFinite, value >= Double(Int64.min), value <= Double(Int64.max) else { throw V2DeviceSessionServiceError.malformedPersistence }
-        return Int64(value.rounded(.towardZero))
+        guard let milliseconds = Int64(exactly: value.rounded(.towardZero)) else { throw V2DeviceSessionServiceError.malformedPersistence }
+        return milliseconds
     }
 
     private func noStoreJSON(_ body: V2DeviceSessionPageHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(body)
-        var headers = HTTPHeaders()
+        var headers = noStoreHeaders()
         headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
     private func noStoreNoContent() -> Response {
+        .init(status: .noContent, headers: noStoreHeaders())
+    }
+
+    private func noStoreHeaders() -> HTTPHeaders {
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-        return .init(status: .noContent, headers: headers)
+        return headers
     }
 }

@@ -40,6 +40,8 @@ public enum V2MessageRedactionFlushResult: Equatable, Sendable {
 /// rules as every other mutating client operation. The operation ID is never
 /// regenerated during retry, so the server's audit record remains singular.
 public actor V2MessageRedactionOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2MessageRedactionFlushResult>()
+
     private let store: any V2LocalMessageRedactionStore
     private let transport: any V2ClientMessageRedactionTransport
     private let makeUUID: @Sendable () -> UUID
@@ -73,6 +75,10 @@ public actor V2MessageRedactionOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2MessageRedactionFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2MessageRedactionFlushResult {
         guard let command = try await store.nextReadyMessageRedaction(now: now()) else { return .idle }
         do {
             let result = try await transport.redactMessage(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, reasonCode: command.reasonCode)
@@ -88,18 +94,23 @@ public actor V2MessageRedactionOutboxEngine {
             switch error {
             case .server(let code, let retryable, let retryAfter, _):
                 if retryable {
-                    try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1))))
+                    try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: TimeInterval(max(retryAfter, 1))))
                     return .retryScheduled(command.operationID)
                 }
                 try await store.rejectMessageRedaction(operationID: command.operationID, code: code)
                 return .rejected(command.operationID, code: code)
             default:
-                try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+                try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
                 return .retryScheduled(command.operationID)
             }
         } catch {
-            try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleMessageRedactionRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2MessageRedactionOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

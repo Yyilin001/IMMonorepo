@@ -76,7 +76,7 @@ public struct V2RevokedDeviceProjectionCleanupWorker: Sendable {
 
     @discardableResult
     public func runOnce(limit: Int) async throws -> Int {
-        precondition(limit > 0)
+        guard limit > 0 else { throw V2GatewayAuthenticationError.corruptPersistenceState }
         let nodeID = V2RevokedDeviceProjectionCleanupCursorNamespace.nodeID
         let events = try await store.events(afterCursorFor: nodeID, limit: limit)
         for event in events {
@@ -105,7 +105,8 @@ public struct V2PostgresRevokedDeviceProjectionStore: V2RevokedDeviceProjectionC
     }
 
     public func clean(userID: UserID, deviceID: DeviceID, revokedAt: Date) async throws {
-        guard let userUUID = UUID(uuidString: userID.rawValue),
+        guard v2PostgresTimestampCanEncode(revokedAt),
+              let userUUID = UUID(uuidString: userID.rawValue),
               let deviceUUID = UUID(uuidString: deviceID.rawValue)
         else { throw V2GatewayAuthenticationError.corruptPersistenceState }
         try await database.transaction { transaction in
@@ -198,7 +199,7 @@ public struct V2DeviceRevocationWorker: Sendable {
 
     @discardableResult
     public func runOnce(limit: Int) async throws -> Int {
-        precondition(limit > 0)
+        guard limit > 0 else { throw V2GatewayAuthenticationError.corruptPersistenceState }
         let events = try await store.events(afterCursorFor: nodeID, limit: limit)
         for event in events {
             await registry.revoke(deviceID: event.deviceID)
@@ -233,6 +234,13 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
         guard !nodeID.isEmpty, let sql = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
+        guard v2PostgresTimestampCanEncode(now) else {
+            // A restart preserves its durable cursor without writing a time.
+            guard try await cursorExists(nodeID: nodeID, on: sql) else {
+                throw V2GatewayAuthenticationError.corruptPersistenceState
+            }
+            return
+        }
         // `ON CONFLICT DO NOTHING` is intentional. Replacing an existing
         // cursor here could make two accidentally duplicated node IDs skip a
         // revocation which only the older process still needs to close.
@@ -251,6 +259,12 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
         guard !nodeID.isEmpty, let sql = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
+        guard v2PostgresTimestampCanEncode(now) else {
+            guard try await cursorExists(nodeID: nodeID, on: sql) else {
+                throw V2GatewayAuthenticationError.corruptPersistenceState
+            }
+            return
+        }
         try await sql.raw("""
             INSERT INTO im_v2.gateway_worker_cursors
                 (worker_name, node_id, last_event_id, updated_at)
@@ -260,7 +274,7 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
     }
 
     public func events(afterCursorFor nodeID: String, limit: Int) async throws -> [V2DeviceRevocationEvent] {
-        guard limit > 0, let sql = database as? any SQLDatabase else {
+        guard !nodeID.isEmpty, limit > 0, let sql = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
         let rows = try await sql.raw("""
@@ -288,7 +302,8 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
     }
 
     public func markProcessed(eventID: Int64, nodeID: String, now: Date) async throws {
-        guard eventID > 0, let sql = database as? any SQLDatabase else {
+        guard !nodeID.isEmpty, eventID > 0, v2PostgresTimestampCanEncode(now),
+              let sql = database as? any SQLDatabase else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
         try await sql.raw("""
@@ -298,6 +313,13 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
             SET last_event_id = GREATEST(im_v2.gateway_worker_cursors.last_event_id, EXCLUDED.last_event_id),
                 updated_at = EXCLUDED.updated_at
             """).run()
+    }
+
+    private func cursorExists(nodeID: String, on sql: any SQLDatabase) async throws -> Bool {
+        try await sql.raw("""
+            SELECT 1 FROM im_v2.gateway_worker_cursors
+            WHERE worker_name = \(bind: workerName) AND node_id = \(bind: nodeID)
+            """).first() != nil
     }
 }
 

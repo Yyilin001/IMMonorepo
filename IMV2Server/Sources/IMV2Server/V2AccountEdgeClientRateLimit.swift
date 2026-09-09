@@ -33,7 +33,7 @@ public struct V2AccountEdgeClientRateLimitPolicy: Equatable, Sendable {
         // attempt can be represented without an overflow or a second query.
         guard maximumRequests > 0,
               maximumRequests < Int(Int32.max),
-              window > 0
+              v2RateLimitDurationIsRepresentable(window)
         else {
             throw V2AccountEdgeClientRateLimitError.invalidPolicy
         }

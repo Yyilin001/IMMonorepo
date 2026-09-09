@@ -2,12 +2,14 @@ import Foundation
 
 /// A server-issued revision of one profile fact. Revisions are comparable only
 /// when they belong to the same fact scope; callers must not combine them into
-/// an arithmetic "resolved version".
+/// an arithmetic "resolved version". The persistence domain is positive Int64;
+/// RawRepresentable Codable decoding uses this same failable initializer.
 public struct V2ProfileRevision: RawRepresentable, Codable, Hashable, Comparable, Sendable {
     public let rawValue: UInt64
+    public var signedValue: Int64 { Int64(rawValue) }
 
     public init?(rawValue: UInt64) {
-        guard rawValue > 0 else { return nil }
+        guard rawValue > 0, rawValue <= UInt64(Int64.max) else { return nil }
         self.rawValue = rawValue
     }
 
@@ -102,11 +104,11 @@ public struct V2ProfileUpdateCommand: Sendable {
         avatar: V2AvatarReference?
     ) throws {
         // Reuse the established public-name validation and normalization.
-        _ = try V2PublicIdentity(userID: actorUserID, handle: .init("profile_update"), displayName: displayName, accountKind: .regular)
+        let identity = try V2PublicIdentity(userID: actorUserID, handle: .init("profile_update"), displayName: displayName, accountKind: .regular)
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.expectedRevision = expectedRevision
-        self.displayName = displayName
+        self.displayName = identity.displayName
         self.avatar = avatar
     }
 }

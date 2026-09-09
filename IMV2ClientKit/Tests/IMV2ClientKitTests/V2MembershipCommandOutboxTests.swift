@@ -123,7 +123,7 @@ private actor ScriptedMembershipTransport: V2ClientMembershipTransport {
         case .revisionConflict:
             throw V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 9)
         case .acknowledged:
-            return .init(roomID: roomID, targetUserID: targetUserID, action: action, membershipRevision: 5, roomSequence: 8, createdAt: .distantPast)
+            return try .init(roomID: roomID, targetUserID: targetUserID, action: action, membershipRevision: 5, roomSequence: 8, createdAt: .distantPast)
         }
     }
 

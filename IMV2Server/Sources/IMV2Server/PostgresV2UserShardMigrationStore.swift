@@ -22,6 +22,9 @@ public struct PostgresV2UserShardMigrationStore: V2UserShardMigrationStoring {
                 guard existing.matches(request) else { throw V2UserShardMigrationStoreError.requestConflict }
                 return try existing.record()
             }
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 INSERT INTO im_v2.user_shard_migrations
                     (migration_id, user_id, source_bucket, target_bucket, source_router_epoch, phase, created_at, updated_at)
@@ -106,6 +109,9 @@ public struct PostgresV2UserShardMigrationStore: V2UserShardMigrationStoring {
             }
             let source = shouldPersistFingerprints ? fingerprints!.source : current.sourceFingerprint
             let target = shouldPersistFingerprints ? fingerprints!.target : current.targetFingerprint
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             let verifiedAt: Date? = shouldPersistFingerprints ? now : current.verifiedAt
             try await sql.raw("""
                 UPDATE im_v2.user_shard_migrations
@@ -137,6 +143,9 @@ public struct PostgresV2UserShardMigrationStore: V2UserShardMigrationStoring {
             }
             guard current.phase == expectedPhase else { throw V2UserShardMigrationStoreError.phaseConflict }
             let next = try V2UserShardMigrationStateMachine.transition(from: current.phase, by: .fail)
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.user_shard_migrations
                 SET phase = \(bind: next.rawValue), last_error_code = \(bind: code.rawValue), updated_at = \(bind: now)
@@ -180,8 +189,10 @@ private func migrationJSON<T: Encodable>(_ value: T) throws -> String {
 extension PostgresV2UserShardMigrationStore: V2UserShardMigrationRetentionStoring {
     public func claimExpiredRetention(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2UserShardMigrationRetentionLease] {
         guard leaseDuration > 0, limit > 0 else { return [] }
+        guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows = try await sql.raw("""
@@ -197,7 +208,8 @@ extension PostgresV2UserShardMigrationStore: V2UserShardMigrationRetentionStorin
                 UPDATE im_v2.user_shard_migrations AS migration
                 SET retention_claim_token = \(bind: token),
                     retention_claim_expires_at = \(bind: expiry),
-                    retention_retry_count = migration.retention_retry_count + 1,
+                    retention_retry_count = CASE WHEN migration.retention_retry_count = 9223372036854775807
+                        THEN migration.retention_retry_count ELSE migration.retention_retry_count + 1 END,
                     updated_at = \(bind: now)
                 FROM candidates
                 WHERE migration.migration_id = candidates.migration_id
@@ -211,6 +223,9 @@ extension PostgresV2UserShardMigrationStore: V2UserShardMigrationRetentionStorin
     }
 
     public func completeRetention(_ lease: V2UserShardMigrationRetentionLease, now: Date) async throws -> Bool {
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let completed = try V2UserShardMigrationStateMachine.transition(from: .retention, by: .complete)
         return try await sql.raw("""

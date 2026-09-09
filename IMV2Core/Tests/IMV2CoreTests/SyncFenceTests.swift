@@ -2,6 +2,19 @@ import Testing
 @testable import IMV2Core
 
 struct SyncFenceTests {
+    @Test(arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func positionPersistenceBounds(generation: UInt64, sequence: UInt64) throws {
+        if generation == 0 || generation > UInt64(Int64.max) {
+            #expect(throws: V2CoreError.invalidGeneration) { _ = try SyncPosition(generation: generation, sequence: sequence) }
+        } else if sequence > UInt64(Int64.max) {
+            #expect(throws: V2RevisionValidationError.outOfRange) { _ = try SyncPosition(generation: generation, sequence: sequence) }
+        } else {
+            let position = try SyncPosition(generation: generation, sequence: sequence)
+            #expect(position.generation == generation)
+            #expect(position.sequence == sequence)
+        }
+    }
+
     @Test("opaque sync capabilities reject blank values")
     func opaqueCapabilitiesRejectBlankValues() {
         #expect(throws: V2CoreError.invalidIdentifier) { _ = try V2SyncToken(" ") }

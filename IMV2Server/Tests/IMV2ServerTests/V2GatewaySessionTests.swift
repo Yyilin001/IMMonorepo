@@ -305,7 +305,7 @@ struct V2GatewaySessionTests {
         forward.requestID = 6
         forward.protocolVersion = UInt32(protocolVersion)
         forward.forwardMessages = .init()
-        forward.forwardMessages.sourceMessageIds = (0..<10).map { "source-\($0)" }
+        forward.forwardMessages.sources = (0..<10).map { index in var source = IMV2ForwardMessageReference(); source.messageID = "source-\(index)"; return source }
         forward.forwardMessages.targetRoomIds = (0..<10).map { "target-\($0)" }
         try await send(forward)
 
@@ -316,7 +316,10 @@ struct V2GatewaySessionTests {
         appendMembers.appendGroupRoomCreationMembers.memberUserIds = (0..<64).map { "user-\($0)" }
         try await send(appendMembers)
 
-        #expect(await admission.recordedCosts() == [0, 6, 6, 5, 3])
+        var baseline = IMV2Envelope(); baseline.requestID = 8; baseline.protocolVersion = UInt32(protocolVersion)
+        baseline.getGroupRolePolicyBaseline.roomID = "00000000-0000-0000-0000-000000000A03"
+        try await send(baseline)
+        #expect(await admission.recordedCosts() == [0, 6, 6, 5, 3, 2])
     }
 
     @Test("production receive returns the same validated request used for dispatch")
@@ -425,6 +428,9 @@ struct V2GatewaySessionTests {
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
         clock.now = Date(timeIntervalSince1970: 11)
+        #expect(await session.authenticatedIdentity() == nil)
+        #expect(await session.authenticatedProtocolVersion() == nil)
+        #expect(await session.authenticatedFrameContract() == nil)
         var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(protocolVersion); request.heartbeat = .init()
         await #expect(throws: V2GatewaySessionError.sessionExpired) {
             _ = try await session.receiveAuthenticated(try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion), handler: GatewayCommandFake())
@@ -555,5 +561,53 @@ private actor PreparedGroupPageCommandFake:
             nextRoomSequence: 1,
             hasMore: false
         ))
+    }
+}
+
+extension V2GatewaySessionTests {
+    @Test("policy baseline is dispatched only within an authenticated live session")
+    func policyBaselineAuthenticationFence() async throws {
+        let version = UInt8(IMV2ProtocolVersion.current)
+        let user = try UserID("00000000-0000-0000-0000-000000000A01")
+        let device = try DeviceID("00000000-0000-0000-0000-000000000A02")
+        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2), authenticator: GatewayAuthFake(userID: user), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(), now: { .init(timeIntervalSince1970: 0) })
+        let handler = PolicyBaselineSessionHandler()
+        var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = IMV2ProtocolVersion.current
+        request.getGroupRolePolicyBaseline.roomID = "00000000-0000-0000-0000-000000000A03"
+        let frame = try V2ServerProtobufFrameCodec.encode(request, frameVersion: version)
+        await #expect(throws: V2GatewaySessionError.unsupportedCommand) { try await session.receiveAuthenticated(frame, handler: handler) }
+        #expect(await handler.identities().isEmpty)
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.supportedProtocolVersions = [UInt32(version)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = device.rawValue
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
+        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
+        auth.authenticate.accessToken = "test-token"; auth.authenticate.deviceID = device.rawValue
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(auth, frameVersion: version))
+        let responseFrame = try await session.receiveAuthenticated(frame, handler: handler)
+        #expect(responseFrame.command == .groupRolePolicyBaseline)
+        let response = try V2ServerProtobufFrameCodec.decode(responseFrame)
+        #expect(response.requestID == request.requestID && response.protocolVersion == request.protocolVersion)
+        #expect(await handler.identities() == [.init(userID: user, deviceID: device, capabilityProfile: "base")])
+        await session.revokeDevice()
+        await #expect(throws: V2GatewaySessionError.unsupportedCommand) { try await session.receiveAuthenticated(frame, handler: handler) }
+        #expect(await handler.identities().count == 1)
+    }
+}
+
+private actor PolicyBaselineSessionHandler: V2GatewayCommandHandler {
+    private var received: [V2AuthenticatedConnection] = []
+    func identities() -> [V2AuthenticatedConnection] { received }
+    func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) throws -> IMV2Envelope {
+        guard case .getGroupRolePolicyBaseline(let request)? = envelope.body else { throw V2GatewaySessionError.unsupportedCommand }
+        received.append(identity)
+        var response = IMV2Envelope()
+        response.groupRolePolicyBaseline.roomID = request.roomID
+        response.groupRolePolicyBaseline.permissionRevision = 1
+        var admin = IMV2GroupRolePolicy(); admin.role = "admin"
+        var member = IMV2GroupRolePolicy(); member.role = "member"
+        response.groupRolePolicyBaseline.policies = [admin, member]
+        return response
     }
 }

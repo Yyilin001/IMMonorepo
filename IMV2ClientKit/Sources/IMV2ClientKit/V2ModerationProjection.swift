@@ -13,6 +13,28 @@ public struct V2ClientModerationProjection: Equatable, Sendable {
     public let muteUntil: Date
     public let createdAt: Date
 
+    /// SQLite already stores the projected dates. Reconstructing a synthetic
+    /// wire payload would round large timestamps a second time and can turn
+    /// the largest legal Int64 timestamp into an overflowing Double.
+    init(sourceEventID: EventID, roomID: RoomID, roomSequence: UInt64,
+         actorUserID: UserID, targetUserID: UserID, muteUntil: Date, createdAt: Date) throws {
+        let upperBound = Double(Int64.max) / 1_000
+        guard roomSequence > 0,
+              muteUntil.timeIntervalSince1970.isFinite,
+              createdAt.timeIntervalSince1970.isFinite,
+              createdAt.timeIntervalSince1970 >= 0,
+              muteUntil.timeIntervalSince1970 <= upperBound,
+              muteUntil > createdAt
+        else { throw V2ClientProjectionError.invalidMessagePayload }
+        self.sourceEventID = sourceEventID
+        self.roomID = roomID
+        self.roomSequence = roomSequence
+        self.actorUserID = actorUserID
+        self.targetUserID = targetUserID
+        self.muteUntil = muteUntil
+        self.createdAt = createdAt
+    }
+
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String

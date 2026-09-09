@@ -30,13 +30,21 @@ public struct V2AuthenticatedSendMessage: Sendable {
 
 public enum V2SendMessageOutcome: Equatable, Sendable {
     case accepted(V2AcceptedMessage)
-    case idempotent(V2AcceptedMessage)
+    case idempotent(V2MessageAcceptanceReceipt)
     case idempotencyConflict
     case rateLimited(retryAfterSeconds: Int)
     case unavailable(FanoutAdmissionUnavailableReason)
     /// The server persisted a private activity and composer capability for
     /// this exact operation. No message, room event or fan-out plan exists.
     case denied(V2DirectMessageDenied)
+
+    public var acceptanceReceipt: V2MessageAcceptanceReceipt? {
+        switch self {
+        case .accepted(let message): message.receipt
+        case .idempotent(let receipt): receipt
+        case .idempotencyConflict, .rateLimited, .unavailable, .denied: nil
+        }
+    }
 }
 
 public struct V2DirectMessageDenied: Equatable, Sendable {
@@ -279,6 +287,10 @@ extension V2SendMessageAdmission {
     public var publishesCommittedGroupEvents: Bool { false }
 }
 
+public enum V2AcceptanceIdentifierError: Error, Equatable, Sendable {
+    case invalidTimestamp
+}
+
 public struct V2AcceptanceIDFactory: Sendable {
     private let makeIdentifiers: @Sendable (Date) throws -> V2AcceptanceIdentifiers
 
@@ -292,7 +304,7 @@ public struct V2AcceptanceIDFactory: Sendable {
     public init() {
         let generator = V2SecureProcessUUIDGenerator.shared
         makeIdentifiers = { acceptedAt in
-            let identifiers = generator.makeOrderedTriple(at: acceptedAt)
+            let identifiers = try generator.makeOrderedTriple(at: acceptedAt)
             return V2AcceptanceIdentifiers(
                 messageID: MessageID(uuid: identifiers.0),
                 eventID: EventID(uuid: identifiers.1),
@@ -379,8 +391,8 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
         ))
     }
 
-    func makeOrderedTriple(at date: Date) -> (UUID, UUID, UUID) {
-        let unixMilliseconds = orderedUnixMilliseconds(for: date)
+    func makeOrderedTriple(at date: Date) throws -> (UUID, UUID, UUID) {
+        let unixMilliseconds = try orderedUnixMilliseconds(for: date)
         let authenticationCode = nextAuthenticationCode()
         return authenticationCode.withUnsafeBytes { bytes in
             (
@@ -394,11 +406,13 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
     /// A backwards wall-clock adjustment must not send new B-tree keys back
     /// into an older range. UUID uniqueness still comes from the HMAC output;
     /// this clamp only preserves the ordered prefix within one process.
-    private func orderedUnixMilliseconds(for date: Date) -> UInt64 {
+    private func orderedUnixMilliseconds(for date: Date) throws -> UInt64 {
         let milliseconds = date.timeIntervalSince1970 * 1_000
-        precondition(milliseconds.isFinite && milliseconds >= 0)
-        let candidate = UInt64(milliseconds.rounded(.down))
-        precondition(candidate <= 0x0000_ffff_ffff_ffff, "UUIDv7 timestamp exhausted")
+        guard milliseconds >= 0,
+              let candidate = UInt64(exactly: milliseconds.rounded(.down)),
+              candidate <= 0x0000_ffff_ffff_ffff else {
+            throw V2AcceptanceIdentifierError.invalidTimestamp
+        }
         var observed = lastOrderedUnixMilliseconds.load(ordering: .relaxed)
         while observed < candidate {
             let exchanged = lastOrderedUnixMilliseconds.compareExchange(

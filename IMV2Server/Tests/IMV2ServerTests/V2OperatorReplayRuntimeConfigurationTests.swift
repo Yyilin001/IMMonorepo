@@ -15,6 +15,7 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         #expect(!configuration.accountDisableAuthenticator.isAuthorized(bearerToken: values["IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64"]))
         #expect(configuration.accountDisableOperatorPrincipal == "account-safety-primary")
         #expect(configuration.capabilityProfile == "base")
+        #expect(configuration.roomShardStorage.isEmpty)
         #expect(configuration.userShardStorage.map(\.bucket) == ["users-primary", "users-next"])
     }
 
@@ -35,6 +36,20 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64")) {
             _ = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(weakAccountDisableValues))
         }
+    }
+
+    @Test("forward replay owners are explicit and included in pool budgets")
+    func forwardOwners() throws {
+        var configured = values
+        configured["IM_V2_ROOM_SHARD_STORES_JSON"] = """
+        [{"shard_id":"room-a","database_url":"postgres://v2:password@db/im_v2"},
+         {"shard_id":"room-b","database_url":"postgres://v2:password@db-third/im_v2"}]
+        """
+        #expect(try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured)).roomShardStorage.map(\.shardID) == ["room-a", "room-b"])
+        configured["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "16"
+        #expect(throws: (any Error).self) { try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured)) }
+        configured["IM_V2_ROOM_SHARD_STORES_JSON"] = "[]"
+        #expect(throws: (any Error).self) { try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured)) }
     }
 
     private var values: [String: String] {

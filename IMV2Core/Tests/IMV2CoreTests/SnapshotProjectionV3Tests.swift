@@ -3,6 +3,40 @@ import Testing
 @testable import IMV2Core
 
 struct SnapshotProjectionV3Tests {
+    @Test(arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func sequencePersistenceBounds(sequence: UInt64) throws {
+        let key = try V2SnapshotProjectionKey(projectionKind: "message", entityKey: "m")
+        let event = try EventID("00000000-0000-0000-0000-000000000001")
+        let payload = Data("{}".utf8)
+        let wire = Data("""
+            {"schema_version":\(V2SnapshotProjectionV3Codec.schemaVersion),"items":[{"projection_kind":"message","entity_key":"m","source_event_id":"\(event.rawValue)","sequence":\(sequence),"payload":"e30="}]}
+            """.utf8)
+        if sequence == 0 || sequence > UInt64(Int64.max) {
+            #expect(throws: V2SnapshotProjectionV3Error.invalidItem) {
+                _ = try V2SnapshotProjectionItem(key: key, sourceEventID: event, sequence: sequence, payload: payload)
+            }
+            #expect(throws: V2SnapshotProjectionV3Error.invalidItem) {
+                _ = try V2SnapshotProjectionV3Codec.decode(wire)
+            }
+        } else {
+            let item = try V2SnapshotProjectionItem(key: key, sourceEventID: event, sequence: sequence, payload: payload)
+            let page = try V2SnapshotProjectionV3Page(items: [item])
+            #expect(try V2SnapshotProjectionV3Codec.decode(wire) == page)
+            let encoded = try V2SnapshotProjectionV3Codec.encode(page)
+            #expect(try V2SnapshotProjectionV3Codec.decode(encoded).items.first?.sequence == sequence)
+        }
+    }
+
+    @Test(arguments: [Int64(-1), Int64.min])
+    func negativeWireSequenceIsRejected(sequence: Int64) throws {
+        let wire = Data("""
+            {"schema_version":\(V2SnapshotProjectionV3Codec.schemaVersion),"items":[{"projection_kind":"message","entity_key":"m","source_event_id":"00000000-0000-0000-0000-000000000001","sequence":\(sequence),"payload":"e30="}]}
+            """.utf8)
+        #expect(throws: V2SnapshotProjectionV3Error.invalidPage) {
+            _ = try V2SnapshotProjectionV3Codec.decode(wire)
+        }
+    }
+
     @Test func pageRoundTripsInStableKeyOrder() throws {
         let first = try item(kind: "message", key: "0001", sequence: 4)
         let second = try item(kind: "message", key: "0002", sequence: 8)
@@ -46,7 +80,7 @@ struct SnapshotProjectionV3Tests {
                 entityKey: String(repeating: "e", count: 512)
             ),
             sourceEventID: .init("ffffffff-ffff-ffff-ffff-ffffffffffff"),
-            sequence: UInt64.max,
+            sequence: UInt64(Int64.max),
             payload: Data(repeating: 0xff, count: V2SnapshotProjectionV3Codec.maximumItemBytes)
         )
 

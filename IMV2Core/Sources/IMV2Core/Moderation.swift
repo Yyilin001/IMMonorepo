@@ -46,7 +46,7 @@ public struct V2ModerationCommand: Equatable, Sendable {
         switch action {
         case .redactMessage:
             guard targetUserID == nil, messageID != nil, muteUntil == nil,
-                  expectedMessageRevision == nil || expectedMessageRevision! > 0
+                  expectedMessageRevision.map({ $0 > 0 && $0 <= UInt64(Int64.max) }) ?? true
             else { throw V2ModerationValidationError.invalidActionShape }
         case .removeMember:
             guard let targetUserID, targetUserID != actorUserID, messageID == nil, expectedMessageRevision == nil, muteUntil == nil else { throw V2ModerationValidationError.invalidActionShape }
@@ -90,7 +90,10 @@ public enum V2ModerationAuthorization {
             throw V2ModerationAuthorizationError.notAuthorized
         }
         if action == .muteMember {
-            guard let muteUntil = command.muteUntil, muteUntil > now else { throw V2ModerationValidationError.invalidMuteExpiry }
+            guard let muteUntil = command.muteUntil,
+                  now.timeIntervalSince1970.isFinite,
+                  muteUntil.timeIntervalSince1970.isFinite,
+                  muteUntil > now else { throw V2ModerationValidationError.invalidMuteExpiry }
         }
     }
 }

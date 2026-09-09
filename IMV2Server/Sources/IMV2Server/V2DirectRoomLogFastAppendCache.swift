@@ -131,16 +131,16 @@ public actor V2DirectRoomLogFastAppendCache {
     public func value(for key: Key) -> Entry? {
         let now = clock.now
         guard let node = entries[key] else {
-            lookupMisses += 1
+            lookupMisses = saturatingCacheCounter(lookupMisses, adding: 1)
             return nil
         }
         guard node.expiresAt > now else {
             remove(node)
             expirations &+= 1
-            lookupMisses += 1
+            lookupMisses = saturatingCacheCounter(lookupMisses, adding: 1)
             return nil
         }
-        lookupHits += 1
+        lookupHits = saturatingCacheCounter(lookupHits, adding: 1)
         moveToMostRecent(node)
         return node.entry
     }
@@ -243,15 +243,15 @@ public actor V2DirectRoomLogFastAppendCache {
     /// it possible to prove that a test or rollout actually exercised the
     /// conditional SQL branch; they never participate in authorization.
     public func recordAttempt(count: Int) {
-        attemptedAppends += Int64(max(0, count))
+        attemptedAppends = saturatingCacheCounter(attemptedAppends, adding: Int64(max(0, count)))
     }
 
     public func recordCommitted(count: Int) {
-        committedAppends += Int64(max(0, count))
+        committedAppends = saturatingCacheCounter(committedAppends, adding: Int64(max(0, count)))
     }
 
     public func recordFallback(count: Int) {
-        fallbackAppends += Int64(max(0, count))
+        fallbackAppends = saturatingCacheCounter(fallbackAppends, adding: Int64(max(0, count)))
     }
 
     public func snapshot() -> Snapshot {
@@ -309,4 +309,11 @@ public actor V2DirectRoomLogFastAppendCache {
             }
         }
     }
+}
+
+/// Observability counters never allocate a durable sequence or revision.
+/// Saturation preserves monotonic metrics without interrupting message work.
+private func saturatingCacheCounter(_ current: Int64, adding count: Int64) -> Int64 {
+    let result = current.addingReportingOverflow(count)
+    return result.overflow ? .max : result.partialValue
 }

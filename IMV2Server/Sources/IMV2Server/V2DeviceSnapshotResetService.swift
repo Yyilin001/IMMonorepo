@@ -65,7 +65,7 @@ public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking 
             FROM im_v2.auth_devices
             WHERE user_id = \(bind: snapshotResetUUID(userID))
               AND device_id = \(bind: snapshotResetUUID(deviceID))
-              AND revoked_at IS NULL
+              AND revoked_at IS NULL AND session_expires_at > clock_timestamp()
             """).first() != nil
     }
 }
@@ -121,7 +121,6 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
         let userUUID = try snapshotResetUUID(command.userID)
         let deviceUUID = try snapshotResetUUID(command.deviceID)
         let currentTime = now()
-        let expiresAt = currentTime.addingTimeInterval(capabilityLifetime)
         return try await location.database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSnapshotResetError.unavailable }
             try await sql.raw("""
@@ -175,6 +174,11 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
             }
             guard cursor.state == "ready" else {
                 throw V2DeviceSnapshotResetError.resetAlreadyPending
+            }
+            // Replaying an existing assignment only reports durable state.
+            // Require a usable clock and a new deadline when creating one.
+            guard let expiresAt = v2PostgresFutureTimestamp(now: currentTime, interval: capabilityLifetime) else {
+                throw V2DeviceSnapshotResetError.unavailable
             }
             let watermark = try await sql.raw("""
                 SELECT COALESCE(next_sequence, 0) AS value

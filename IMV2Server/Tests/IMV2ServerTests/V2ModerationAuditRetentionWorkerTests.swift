@@ -1,9 +1,44 @@
 import Foundation
 @testable import IMV2Server
 import Testing
+import Synchronization
 
 @Suite("V2 moderation audit retention")
 struct V2ModerationAuditRetentionWorkerTests {
+    @Test("monotonic maintenance remains due across wall-clock corrections while retention receives wall time")
+    func maintenanceClockCorrections() async throws {
+        let store = RecordingModerationRetentionStore(deleted: 0)
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let wallClock = Mutex(base)
+        let worker = V2ModerationAuditRetentionWorker(store: store, now: { wallClock.withLock { $0 } })
+        let cadence = try V2MaintenanceCadence(intervalMilliseconds: 60_000)
+        let start = ContinuousClock.now
+        var deadline: ContinuousClock.Instant?
+        // A day forward at 59 seconds must not trigger early cleanup. A day
+        // backward at 60 seconds must not suppress the scheduled pass.
+        for (elapsed, wallOffset) in [(0, 0), (59, 86_400), (60, -86_400), (119, 172_800), (120, 86_400)] {
+            wallClock.withLock { $0 = base.addingTimeInterval(Double(wallOffset)) }
+            let instant = start.advanced(by: .seconds(elapsed))
+            if cadence.isDue(now: instant, nextScheduledAt: deadline) {
+                _ = try await worker.runOnce(limit: 3)
+                deadline = cadence.nextScheduledAt(after: instant)
+            }
+        }
+        #expect(await store.requests() == [
+            .init(now: base, limit: 3),
+            .init(now: base.addingTimeInterval(-86_400), limit: 3),
+            .init(now: base.addingTimeInterval(86_400), limit: 3)
+        ])
+    }
+
+    @Test("Invalid batch limits throw without invoking retention", arguments: [Int.min, -1, 0])
+    func invalidLimits(limit: Int) async throws {
+        let store = RecordingModerationRetentionStore(deleted: 0)
+        let worker = V2ModerationAuditRetentionWorker(store: store)
+        await #expect(throws: V2ModerationStoreError.corruptPersistenceState) { _ = try await worker.runOnce(limit: limit) }
+        #expect(await store.requests().isEmpty)
+    }
+
     @Test("worker uses its configured bounded batch size")
     func workerDelegatesBoundedRetention() async throws {
         let store = RecordingModerationRetentionStore(deleted: 2)

@@ -14,12 +14,18 @@ struct V2ClientRuntimeTests {
 
         #expect(try await runtime.start() == session)
         await activity.waitForLoops()
+        await activity.waitForPolicyLoop()
         #expect(await activity.syncCount() == 1)
         #expect(await activity.commandFlushCount() == 1)
         #expect(await connection.connectCount() == 1)
         #expect(await runtime.currentState() == .running(session))
 
         await runtime.stop()
+        #expect(await activity.loopExitCount() == 4)
+        #expect(await activity.policyLoopWasCancelled())
+        await activity.waitForRoomCatchUpCancellation()
+        await activity.waitForSubscriptionCancellation()
+        #expect(await activity.subscriptionConnectionIDs() == [session.connectionID])
 
         #expect(await runtime.currentState() == .stopped)
         #expect(await connection.disconnectCount() == 1)
@@ -192,7 +198,8 @@ struct V2ClientRuntimeTests {
             userID: try .init("00000000-0000-0000-0000-000000000811"),
             deviceID: try .init("00000000-0000-0000-0000-000000000812"),
             protocolVersion: 1,
-            capabilityProfile: "standard"
+            capabilityProfile: "standard",
+            connectionID: UUID()
         )
     }
 }
@@ -243,15 +250,39 @@ private actor BlockingRuntimeConnection: V2RealtimeSessionConnecting {
 }
 
 private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
+    private var policyStarted = false
+    private var policyCancelled = false
+    private var policyObserver: CheckedContinuation<Void, Never>?
+    func runPolicyRecoveryLoop() async throws {
+        policyStarted = true
+        policyObserver?.resume(); policyObserver = nil
+        do { try await Task.sleep(for: .seconds(3_600)) }
+        catch { policyCancelled = true; throw error }
+    }
+    func waitForPolicyLoop() async {
+        if policyStarted { return }
+        await withCheckedContinuation { policyObserver = $0 }
+    }
+    func policyLoopWasCancelled() -> Bool { policyCancelled }
+
     private let syncFailure: RuntimeFailure?
     private var synchronizations = 0
     private var commandFlushes = 0
     private var starts = 0
+    private var exits = 0
+    func loopExitCount() -> Int { exits }
     private var availabilityWaiter: CheckedContinuation<Void, Never>?
     private var heartbeatWaiter: CheckedContinuation<Void, Never>?
     private var loopsWaiter: CheckedContinuation<Void, Never>?
     private var availabilityCancelled = false
     private var heartbeatCancelled = false
+    private var roomCatchUpWaiter: CheckedContinuation<Void, Never>?
+    private var roomCancellationObserver: CheckedContinuation<Void, Never>?
+    private var roomCatchUpCancelled = false
+    private var subscriptionWaiter: CheckedContinuation<Void, Never>?
+    private var subscriptionCancellationObserver: CheckedContinuation<Void, Never>?
+    private var subscriptionCancelled = false
+    private var subscriptionIDs: [UUID?] = []
 
     init(syncFailure: RuntimeFailure? = nil) { self.syncFailure = syncFailure }
 
@@ -265,6 +296,7 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
     }
 
     func runAvailabilityLoop() async throws {
+        defer { exits += 1 }
         startedLoop()
         await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
@@ -278,6 +310,7 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
     }
 
     func runHeartbeatLoop() async throws {
+        defer { exits += 1 }
         startedLoop()
         await withTaskCancellationHandler(operation: {
             await withCheckedContinuation { continuation in
@@ -290,8 +323,59 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
         try Task.checkCancellation()
     }
 
+    func runRoomCatchUpLoop() async throws {
+        defer { exits += 1 }
+        startedLoop()
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if roomCatchUpCancelled || Task.isCancelled { continuation.resume() }
+                else { roomCatchUpWaiter = continuation }
+            }
+        }, onCancel: { Task { await self.cancelRoomCatchUp() } })
+        try Task.checkCancellation()
+    }
+
+    func runRoomSubscriptionLoop(connectionID: UUID?) async throws {
+        defer { exits += 1 }
+        subscriptionIDs.append(connectionID)
+        startedLoop()
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if subscriptionCancelled || Task.isCancelled { continuation.resume() }
+                else { subscriptionWaiter = continuation }
+            }
+        }, onCancel: { Task { await self.cancelSubscription() } })
+        try Task.checkCancellation()
+    }
+
+    func subscriptionConnectionIDs() -> [UUID?] { subscriptionIDs }
+    func waitForSubscriptionCancellation() async {
+        if subscriptionCancelled { return }
+        await withCheckedContinuation { subscriptionCancellationObserver = $0 }
+    }
+    private func cancelSubscription() {
+        subscriptionCancelled = true
+        subscriptionWaiter?.resume()
+        subscriptionWaiter = nil
+        subscriptionCancellationObserver?.resume()
+        subscriptionCancellationObserver = nil
+    }
+
+    func waitForRoomCatchUpCancellation() async {
+        if roomCatchUpCancelled { return }
+        await withCheckedContinuation { roomCancellationObserver = $0 }
+    }
+
+    private func cancelRoomCatchUp() {
+        roomCatchUpCancelled = true
+        roomCatchUpWaiter?.resume()
+        roomCatchUpWaiter = nil
+        roomCancellationObserver?.resume()
+        roomCancellationObserver = nil
+    }
+
     func waitForLoops() async {
-        guard starts < 2 else { return }
+        guard starts < 4 else { return }
         await withCheckedContinuation { loopsWaiter = $0 }
     }
 
@@ -301,7 +385,7 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
 
     private func startedLoop() {
         starts += 1
-        if starts == 2 { loopsWaiter?.resume(); loopsWaiter = nil }
+        if starts == 4 { loopsWaiter?.resume(); loopsWaiter = nil }
     }
     private func cancelAvailability() { availabilityCancelled = true; availabilityWaiter?.resume(); availabilityWaiter = nil }
     private func cancelHeartbeat() { heartbeatCancelled = true; heartbeatWaiter?.resume(); heartbeatWaiter = nil }

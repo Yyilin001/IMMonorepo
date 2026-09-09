@@ -82,7 +82,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
             deliveryMode: deliveryMode,
             initialMemberUserIDs: []
         )
-        guard stagedMemberCount >= 0 else {
+        guard stagedMemberCount >= 0, stagedMemberCount < Int.max else {
             throw V2GroupMessagingPolicyError.invalidInitialMembership
         }
         self.actorUserID = actorUserID
@@ -189,6 +189,7 @@ public struct V2GroupMessagingService: Sendable {
         title: String,
         stagedMemberCount: Int
     ) async throws -> V2CreateGroupRoomOutcome {
+        guard stagedMemberCount >= 0 else { throw V2GroupMessagingPolicyError.invalidInitialMembership }
         guard stagedMemberCount < Int.max else { return .memberLimitReached }
         let memberCount = stagedMemberCount + 1
         guard memberCount <= capacityProfile.limits.maxEligibleMembers,

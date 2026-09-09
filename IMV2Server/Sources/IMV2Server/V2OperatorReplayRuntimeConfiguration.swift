@@ -25,6 +25,7 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     public let accountDisableAuthenticator: V2OperatorReplayBearerAuthenticator
     public let accountDisableOperatorPrincipal: String
     public let userShardStorage: [V2UserShardStorageConfiguration]
+    public let roomShardStorage: [V2RoomShardStorageConfiguration]
     public let capabilityProfile: String
 
     public init(environment: any V2RuntimeEnvironment) throws {
@@ -60,10 +61,16 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )
+        // Existing operators may omit this registry; forward replay then has
+        // no configured owner and never falls back to the control database.
+        if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
+            roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
+        } else { roomShardStorage = [] }
         try databasePolicy.validate(
             primaryDatabaseURL: databaseURL,
             userShardStorage: userShardStorage
         )
+        try databasePolicy.validate(databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL))
     }
 
     private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {

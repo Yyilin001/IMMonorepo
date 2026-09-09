@@ -101,7 +101,7 @@ private actor ScriptedMuteTransport: V2ClientMemberMuteTransport {
         case .forbidden:
             throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
         case .accepted:
-            return .init(roomID: roomID, targetUserID: targetUserID, muteUntil: muteUntil, roomSequence: 9, createdAt: .distantPast)
+            return try .init(roomID: roomID, targetUserID: targetUserID, muteUntil: muteUntil, roomSequence: 9, createdAt: .distantPast)
         }
     }
 

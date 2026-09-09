@@ -1,6 +1,6 @@
 # V2 ADR 登记册
 
-最后审阅：2026-08-27
+最后审阅：2026-09-03
 维护者：V2 架构负责人
 
 本登记册对应架构规范第 11 节要求的初始 ADR 集合。`已接受`仅表示设计
@@ -23,8 +23,9 @@
 | 移动前后台与 Push wake | [ADR-008](00-foundation/ADR-008-mobile-lifecycle-and-push.md) | 待批准 | durable wake/预算、APNs provider、加密端点与 iOS 明确开关已实现；资格/活动策略与真实 APNs 发布证据待定 |
 | Auth、设备撤销、本地存储、媒体授权、日志脱敏 | [ADR-009](00-foundation/ADR-009-auth-local-storage-and-redaction.md) | 部分待批准 | auth/keychain 已实现；媒体授权待 ADR-002 |
 | 容量、fenced admission、Push 预算、PITR/DR | [ADR-010](09-capacity/ADR-010-capacity-and-disaster-recovery.md) | 待批准 | admission lease 基元存在；目标、演练和报告缺失 |
-| Passkey 优先、密码兜底与设备绑定账户断言 | [ADR-011](00-foundation/ADR-011-account-factor-policy.md) | 已接受 | 客户端 AuthenticationServices / HTTP 适配与 bcrypt fallback 已实现；生产 WebAuthn RP verifier 与一次性挑战存储待接入 |
+| Passkey 优先、密码兜底与设备绑定账户断言 | [ADR-011](00-foundation/ADR-011-account-factor-policy.md) | 已接受 | 客户端 AuthenticationServices / HTTP 适配与 Argon2id fallback 与有界密码工作池已实现；生产 WebAuthn RP verifier 与一次性挑战存储待接入 |
 | 公开身份、联系人发现与目录边界 | [ADR-012](00-foundation/ADR-012-public-identity-and-discovery.md) | 已接受并完成当前首发范围 | 独立公开 `@handle`、认证精确查询、账号级限流、注册原子 profile 创建和本人显示名修改已经落地；有界群成员目录返回公开资料并在 App 展示。direct room 创建会向双方写入仅含对端公开资料的同步基线，snapshot reset 由 active direct pair 重建该有界投影；显示名修改经独立 durable outbox 按接收者预算增量投递，使用 checkpoint、幂等键和迁移 shadow forwarding。剩余门槛是真机多设备/离线 E2E、删除与 handle 改名策略，以及资料传播容量阈值；群成员资料仍按需读取，不做 roster fan-out。 |
+| 群邀请链接、二维码与入群审批 | [ADR-019](00-foundation/ADR-019-group-invitation-and-approval.md) | 已接受并完成仓库内实现 | 令牌明文不落库、有效期/次数/撤销、待审批分页、两阶段可恢复批准、复合群外键、HTTPS 客户端与 iOS QR/深链已实现；真实双端、滥用与密钥轮换演练待闭环 |
 
 额外 ADR：
 

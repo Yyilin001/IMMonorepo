@@ -16,8 +16,10 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2OutboxLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
+        guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -36,7 +38,7 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
                 UPDATE im_v2.room_outbox AS outbox
                 SET claim_token = \(bind: token),
                     lease_expires_at = \(bind: expiry),
-                    retry_count = outbox.retry_count + 1
+                    retry_count = CASE WHEN outbox.retry_count = 9223372036854775807 THEN outbox.retry_count ELSE outbox.retry_count + 1 END
                 FROM candidates
                 WHERE outbox.source_event_id = candidates.source_event_id
                 RETURNING outbox.source_event_id, outbox.plan_id, outbox.retry_count
@@ -100,9 +102,22 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
                       AND outbox.state = 'pending'
                       AND outbox.claim_token = input.claim_token
                     RETURNING outbox.source_event_id
+                ), already_terminal AS MATERIALIZED (
+                    -- Zero-audience settlement (or a completed delivery race)
+                    -- can finish the source before relay acknowledgement.
+                    -- Accept only durable terminal evidence; pending rows
+                    -- still require the exact current claim token above.
+                    SELECT outbox.source_event_id
+                    FROM input
+                    JOIN im_v2.room_outbox AS outbox USING (source_event_id)
+                    JOIN im_v2.fanout_plans AS plan
+                      ON plan.source_event_id = outbox.source_event_id
+                     AND plan.plan_id = outbox.plan_id
+                    WHERE outbox.state = 'terminal' AND plan.state = 'terminal'
                 )
                 SELECT (SELECT COUNT(*)::bigint FROM input) AS input_count,
-                       (SELECT COUNT(*)::bigint FROM published) AS published_count
+                       (SELECT COUNT(*)::bigint FROM published)
+                         + (SELECT COUNT(*)::bigint FROM already_terminal) AS published_count
                 """).first(decoding: OutboxBatchPublishMutationRow.self),
                   mutation.inputCount == Int64(leases.count),
                   mutation.publishedCount == Int64(leases.count)
@@ -133,6 +148,9 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
         let eventID = try eventUUID(lease.trigger.sourceEventID)
         switch disposition {
         case .retry(let retryAt):
+            guard v2PostgresTimestampCanEncode(retryAt) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.room_outbox
                 SET claim_token = NULL, lease_expires_at = NULL,
@@ -142,6 +160,9 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
                   AND state = 'pending' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.room_outbox
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,

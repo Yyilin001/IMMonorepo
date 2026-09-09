@@ -27,6 +27,7 @@ public enum V2GatewaySessionError: Error, Equatable, Sendable {
     case unsupportedCommand
     case sessionExpired
     case authenticatedConnectionLimit
+    case invalidServerClock
 }
 
 /// Domain router boundary. It receives only a previously authenticated identity
@@ -90,11 +91,13 @@ struct V2GatewaySessionExchange: Sendable {
     let request: IMV2Envelope
     let responseEnvelope: IMV2Envelope
     let response: V2Frame
+    var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
 }
 
 private struct V2GatewaySessionResponse: Sendable {
     let envelope: IMV2Envelope
     let frame: V2Frame
+    var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
 }
 
 /// Owns one verified V2 connection. The socket layer supplies/consumes frames;
@@ -173,7 +176,8 @@ public actor V2GatewaySession {
         return .init(
             request: envelope,
             responseEnvelope: response.envelope,
-            response: response.frame
+            response: response.frame,
+            terminalAuthenticationError: response.terminalAuthenticationError
         )
     }
 
@@ -193,6 +197,7 @@ public actor V2GatewaySession {
             guard !versions.isEmpty else { throw V2GatewaySessionError.invalidClientHello }
             let profiles = Set(hello.supportedCapabilityProfiles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
             guard profiles.contains(capabilityProfile) else { throw V2GatewaySessionError.unsupportedCapabilityProfile }
+            let clock = try currentServerTime()
             if !hello.deviceID.isEmpty {
                 guard let deviceID = try? DeviceID(hello.deviceID) else {
                     throw V2GatewaySessionError.invalidClientHello
@@ -212,7 +217,7 @@ public actor V2GatewaySession {
             response.serverHello = .init()
             response.serverHello.selectedProtocolVersion = UInt32(selected)
             response.serverHello.selectedCapabilityProfile = capabilityProfile
-            response.serverHello.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)
+            response.serverHello.serverTimeMs = clock.milliseconds
             response.serverHello.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
             return try .init(
                 envelope: response,
@@ -220,19 +225,43 @@ public actor V2GatewaySession {
             )
 
         case .authenticate(let request):
+            // Reject an unusable clock before reserving handshake state or
+            // starting the asynchronous adapter operation.
+            _ = try currentServerTime()
             try state.receiveAuthenticate(frame)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
             guard helloDeviceID.map({ $0 == deviceID }) ?? true else {
                 throw V2GatewaySessionError.invalidAuthenticatePayload
             }
-            let authentication = try await authenticator.authenticateSession(
-                accessToken: request.accessToken,
-                deviceID: deviceID
-            )
+            let authentication: V2GatewayAuthentication
+            do {
+                authentication = try await authenticator.authenticateSession(
+                    accessToken: request.accessToken,
+                    deviceID: deviceID
+                )
+            } catch V2GatewayAuthenticationError.unauthenticated {
+                // A bare EOF looks like a retryable network failure to the
+                // client. Flush a correlated rejection before closing. Only
+                // a conclusive credential rejection takes this path; database
+                // failures must never tell the client to delete credentials.
+                state.close()
+                var response = IMV2Envelope()
+                response.requestID = envelope.requestID
+                response.protocolVersion = UInt32(frame.version)
+                response.error = .init()
+                response.error.code = "UNAUTHENTICATED"
+                response.error.retryable = false
+                return try .init(
+                    envelope: response,
+                    frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: frame.version),
+                    terminalAuthenticationError: .unauthenticated
+                )
+            }
             let userID = authentication.userID
             let expiresAt = authentication.expiresAt
-            guard expiresAt.map({ $0 > now() }) ?? true else { throw V2GatewaySessionError.sessionExpired }
+            let clock = try currentServerTime()
+            guard expiresAt.map({ $0 > clock.date }) ?? true else { throw V2GatewaySessionError.sessionExpired }
             try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile))
             authenticatedSessionExpiresAt = expiresAt
             guard case .authenticated(let version, _) = state.phase else { throw V2GatewaySessionError.unsupportedCommand }
@@ -255,21 +284,26 @@ public actor V2GatewaySession {
     }
 
     public func authenticatedIdentity() -> V2AuthenticatedConnection? {
-        guard case .authenticated(_, let identity) = state.phase else { return nil }
-        return identity
+        currentAuthenticatedConnection()?.identity
     }
 
     public func authenticatedProtocolVersion() -> UInt8? {
-        guard case .authenticated(let version, _) = state.phase else { return nil }
-        return version
+        currentAuthenticatedConnection()?.version
     }
 
     func authenticatedFrameContract() -> V2AuthenticatedGatewayFrameContract? {
-        guard case .authenticated(let version, _) = state.phase else { return nil }
+        guard let connection = currentAuthenticatedConnection() else { return nil }
         return .init(
-            protocolVersion: version,
+            protocolVersion: connection.version,
             compression: negotiatedFrameCompression
         )
+    }
+
+    private func currentAuthenticatedConnection() -> (version: UInt8, identity: V2AuthenticatedConnection)? {
+        guard case .authenticated(let version, let identity) = state.phase,
+              let clock = try? currentServerTime(),
+              authenticatedSessionExpiresAt.map({ $0 > clock.date }) ?? true else { return nil }
+        return (version, identity)
     }
 
     public func receiveAuthenticated(_ frame: V2Frame, handler: any V2GatewayCommandHandler) async throws -> V2Frame {
@@ -290,7 +324,8 @@ public actor V2GatewaySession {
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
         }
-        guard authenticatedSessionExpiresAt.map({ $0 > now() }) ?? true else {
+        let clock = try currentServerTime()
+        guard authenticatedSessionExpiresAt.map({ $0 > clock.date }) ?? true else {
             state.close()
             throw V2GatewaySessionError.sessionExpired
         }
@@ -301,7 +336,7 @@ public actor V2GatewaySession {
             if !(await commandAdmission.admit(
                 identity: identity,
                 cost: commandAdmissionCost(for: envelope),
-                now: now()
+                now: clock.date
             )) {
                 response = IMV2Envelope()
                 response.error = .init()
@@ -311,7 +346,7 @@ public actor V2GatewaySession {
             } else if case .heartbeat = envelope.body {
                 response = IMV2Envelope()
                 response.heartbeatAck = .init()
-                response.heartbeatAck.serverTimeMs = Int64(now().timeIntervalSince1970 * 1_000)
+                response.heartbeatAck.serverTimeMs = try currentServerTime().milliseconds
             } else if case .groupEventPull(let request) = envelope.body,
                       version >= 21,
                       let preparedGroupEventPageCache,
@@ -386,16 +421,26 @@ public actor V2GatewaySession {
         }
     }
 
+    private func currentServerTime() throws -> (date: Date, milliseconds: Int64) {
+        let date = now()
+        guard let milliseconds = Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)) else {
+            throw V2GatewaySessionError.invalidServerClock
+        }
+        return (date, milliseconds)
+    }
+
     private func commandAdmissionCost(for envelope: IMV2Envelope) -> Int {
         switch envelope.body {
         case .heartbeat:
             // Liveness cannot be starved by a client's own foreground work.
             return 0
         case .forwardMessages(let request):
-            let combinations = request.sourceMessageIds.count * request.targetRoomIds.count
+            let combinations = request.sources.count * request.targetRoomIds.count
             return min(64, max(1, 1 + combinations / 25))
         case .appendGroupRoomCreationMembers(let request):
             return min(32, max(1, 1 + request.memberUserIds.count / 32))
+        case .getGroupRolePolicyBaseline:
+            return 2
         case .listRoomMembers(let request):
             return min(8, max(1, 1 + Int(request.pageSize) / 100))
         case .groupEventPull(let request):

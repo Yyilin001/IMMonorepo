@@ -21,11 +21,15 @@ final class V2ConversationSearchStore {
     private let progressReader: (any V2ConversationMessageSearchProgressReading)?
     private let scope: V2MessageSearchScope
     private var generation = 0
+    private var paginationOperation: UUID?
+    var isLoadingMore: Bool { paginationOperation != nil }
+    private var loadedRequest: V2MessageSearchRequest?
     private var cursor: V2MessageSearchCursor?
 
     var query = ""
     var contentFilter: V2MessageSearchContentFilter = .all
     private(set) var senderFilter: UserID?
+    private(set) var senderFilterDisplayName = "选定成员"
     private(set) var hits: [V2MessageSearchHit] = []
     private(set) var state: State = .idle
     private(set) var canLoadMore = false
@@ -40,7 +44,10 @@ final class V2ConversationSearchStore {
     func search() async {
         generation &+= 1
         let requestGeneration = generation
+        paginationOperation = nil
+        loadedRequest = nil
         cursor = nil
+        canLoadMore = false
         hits = []
         isCatchingUp = false
         guard !query.isEmpty || contentFilter != .all else {
@@ -49,65 +56,132 @@ final class V2ConversationSearchStore {
             return
         }
         state = .loading
+        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter)
         do {
             try await Task.sleep(for: .milliseconds(200))
             try Task.checkCancellation()
-            let page = try await searcher.searchMessages(.init(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter))
+            let page = try await searcher.searchMessages(request)
             try Task.checkCancellation()
-            guard requestGeneration == generation else { return }
-            hits = page.hits
-            cursor = page.nextCursor
-            canLoadMore = page.nextCursor != nil
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            var catchingUp = false
             if let progressReader {
                 let progress = try? await progressReader.messageSearchIndexProgress()
-                isCatchingUp = progress?.isCatchingUp ?? false
+                try Task.checkCancellation()
+                guard isCurrent(request, generation: requestGeneration) else { return }
+                catchingUp = progress?.isCatchingUp ?? false
             }
+            var seen = Set<MessageID>()
+            hits = page.hits.filter { seen.insert($0.messageID).inserted }
+            cursor = page.nextCursor
+            canLoadMore = page.nextCursor != nil
+            isCatchingUp = catchingUp
+            loadedRequest = request
             state = .loaded
         } catch is CancellationError {
             return
         } catch V2MessageSearchError.indexUnavailable(.building) {
-            guard requestGeneration == generation else { return }
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            canLoadMore = false
             state = .indexing
         } catch {
-            guard requestGeneration == generation else { return }
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            canLoadMore = false
             state = .failed
         }
     }
 
     func loadMore() async {
-        guard let cursor, state == .loaded else { return }
+        guard let cursor, let loadedRequest, state == .loaded, paginationOperation == nil,
+              isCurrent(loadedRequest, generation: generation) else { return }
+        let operation = UUID()
+        paginationOperation = operation
+        defer { if paginationOperation == operation { paginationOperation = nil } }
         let requestGeneration = generation
+        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor)
         do {
-            let page = try await searcher.searchMessages(
-                .init(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor)
-            )
+            let page = try await searcher.searchMessages(request)
             try Task.checkCancellation()
-            guard requestGeneration == generation else { return }
-            hits += page.hits
-            self.cursor = page.nextCursor
-            canLoadMore = page.nextCursor != nil
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            guard page.nextCursor != cursor else {
+                // Deduplicating hits cannot make a stalled continuation
+                // progress. Stop before committing this inconsistent page.
+                self.cursor = nil
+                canLoadMore = false
+                state = .failed
+                return
+            }
+            var catchingUp = false
             if let progressReader {
                 let progress = try? await progressReader.messageSearchIndexProgress()
-                isCatchingUp = progress?.isCatchingUp ?? false
+                try Task.checkCancellation()
+                guard isCurrent(request, generation: requestGeneration) else { return }
+                catchingUp = progress?.isCatchingUp ?? false
             }
+            var seen = Set(hits.map(\.messageID))
+            hits.append(contentsOf: page.hits.filter { seen.insert($0.messageID).inserted })
+            self.cursor = page.nextCursor
+            canLoadMore = page.nextCursor != nil
+            isCatchingUp = catchingUp
         } catch is CancellationError {
             return
         } catch V2MessageSearchError.indexUnavailable(.building) {
-            guard requestGeneration == generation else { return }
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            canLoadMore = false
             state = .indexing
         } catch {
-            guard requestGeneration == generation else { return }
+            guard isCurrent(request, generation: requestGeneration) else { return }
+            canLoadMore = false
             state = .failed
         }
+    }
+
+    private func isCurrent(_ request: V2MessageSearchRequest, generation: Int) -> Bool {
+        generation == self.generation && query == request.query && contentFilter == request.contentFilter && senderFilter == request.senderUserID
+    }
+
+    /// The view owns this observation task. The initial ready value matters:
+    /// rebuilding may finish between a failed query and stream registration.
+    func observeIndexState() async {
+        guard let progressReader else { return }
+        var previous: V2MessageSearchIndexSnapshot?
+        do {
+            for try await snapshot in await progressReader.messageSearchIndexUpdates() {
+                guard !Task.isCancelled else { return }
+                guard snapshot != previous else { continue }
+                previous = snapshot
+                guard !query.isEmpty || contentFilter != .all else { continue }
+                switch snapshot.state {
+                case .ready:
+                    await search()
+                case .building, .failed:
+                    generation &+= 1
+                    paginationOperation = nil
+                    loadedRequest = nil
+                    cursor = nil
+                    canLoadMore = false
+                    state = snapshot.state == .building ? .indexing : .failed
+                }
+            }
+        } catch is CancellationError { return }
+        catch { if !Task.isCancelled { state = .failed } }
+    }
+
+    func refreshSenderDisplayName() async {
+        guard let userID = senderFilter else { return }
+        let name = try? await searcher.searchSenderDisplayName(userID: userID)
+        guard !Task.isCancelled, senderFilter == userID else { return }
+        senderFilterDisplayName = name ?? "选定成员"
     }
 
     func filterToSender(_ userID: UserID) {
         guard senderFilter != userID else { return }
         senderFilter = userID
+        senderFilterDisplayName = "选定成员"
     }
 
     func clearSenderFilter() {
         guard senderFilter != nil else { return }
         senderFilter = nil
+        senderFilterDisplayName = "选定成员"
     }
 }

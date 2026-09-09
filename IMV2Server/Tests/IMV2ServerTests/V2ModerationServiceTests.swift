@@ -50,9 +50,9 @@ private actor RecordingModerationStore: V2ModerationStore {
 
     func command() -> V2ModerationCommand? { received }
 
-    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) -> V2ModerationOutcome {
+    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
         received = command
-        return .applied(.init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, muteUntil: command.muteUntil, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, muteUntil: command.muteUntil, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
     }
 }
 

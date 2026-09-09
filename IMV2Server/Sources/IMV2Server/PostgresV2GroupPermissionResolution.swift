@@ -3,9 +3,9 @@ import IMV2Core
 import SQLKit
 
 /// Resolves a group's effective role policy without conflating an older group
-/// with no policy rows and a deliberate empty policy. The operation ledger is
-/// the durable marker for the latter case because the materialized permission
-/// table intentionally has no rows for an explicit deny-all policy.
+/// with no policy rows and a deliberate empty policy. The current policy marker
+/// survives operation-receipt cleanup; the materialized permission table
+/// intentionally has no rows for an explicit deny-all policy.
 func v2ResolvedGroupPermissions(
     roomID: UUID,
     role: V2RoomMembershipRole,
@@ -21,7 +21,7 @@ func v2ResolvedGroupPermissions(
     let permissions = Set(rows.compactMap { V2GroupPermission(rawValue: $0.permission) })
     guard permissions.isEmpty else { return permissions }
 
-    let hasExplicitPolicy = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.group_permission_operations WHERE room_id = \(bind: roomID) AND role = \(bind: role.rawValue)) AS value").first(decoding: V2GroupPermissionPolicyMarker.self)?.value ?? false
+    let hasExplicitPolicy = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.group_role_policies WHERE room_id = \(bind: roomID) AND role = \(bind: role.rawValue)) AS value").first(decoding: V2GroupPermissionPolicyMarker.self)?.value ?? false
     return hasExplicitPolicy ? [] : nil
 }
 

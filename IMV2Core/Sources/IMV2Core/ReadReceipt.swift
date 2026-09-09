@@ -40,7 +40,8 @@ public struct V2DirectReadReceiptProjection: Equatable, Sendable {
     public let recordedAt: Date
     public let isVisible: Bool
 
-    public init(roomID: RoomID, readerUserID: UserID, readThroughRoomSequence: UInt64, recordedAt: Date, isVisible: Bool) {
+    public init(roomID: RoomID, readerUserID: UserID, readThroughRoomSequence: UInt64, recordedAt: Date, isVisible: Bool) throws {
+        guard readThroughRoomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.readerUserID = readerUserID
         self.readThroughRoomSequence = readThroughRoomSequence
@@ -89,7 +90,9 @@ public struct V2RecordReadReceiptCommand: Equatable, Sendable {
     public let readThroughRoomSequence: UInt64
 
     public init(roomID: RoomID, actorUserID: UserID, operationID: ReadReceiptOperationID, readThroughRoomSequence: UInt64) throws {
-        guard readThroughRoomSequence > 0 else { throw V2ReadReceiptValidationError.invalidRoomSequence }
+        guard readThroughRoomSequence > 0, readThroughRoomSequence <= UInt64(Int64.max) else {
+            throw V2ReadReceiptValidationError.invalidRoomSequence
+        }
         self.roomID = roomID; self.actorUserID = actorUserID; self.operationID = operationID
         self.readThroughRoomSequence = readThroughRoomSequence
     }
@@ -101,7 +104,8 @@ public struct V2ReadReceipt: Equatable, Sendable {
     public let readThroughRoomSequence: UInt64
     public let recordedAt: Date
 
-    public init(roomID: RoomID, userID: UserID, readThroughRoomSequence: UInt64, recordedAt: Date) {
+    public init(roomID: RoomID, userID: UserID, readThroughRoomSequence: UInt64, recordedAt: Date) throws {
+        guard readThroughRoomSequence > 0, readThroughRoomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID; self.userID = userID
         self.readThroughRoomSequence = readThroughRoomSequence; self.recordedAt = recordedAt
     }

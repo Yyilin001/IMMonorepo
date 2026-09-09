@@ -92,6 +92,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     /// preserve the actor boundary while keeping each durable queue in its
     /// own source file.
     let databasePool: DatabasePool
+    let projectionChangeHub = V2ProjectionChangeHub()
     /// Search is intentionally a separately-writable derived database. This
     /// prevents FTS maintenance from competing with the authoritative sync
     /// projection writer in `databasePool`.
@@ -112,22 +113,43 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             db.add(function: Self.contactSearchBigramsFunction)
         }
         databasePool = try DatabasePool(path: databaseURL.path, configuration: configuration)
-        try databasePool.write { db in
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
+        messageSearchDatabaseURL = V2LocalDatabaseArtifacts(primary: databaseURL).search
+        var openedSearchPool: DatabasePool?
+        do {
+            try databasePool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
+            try Self.migrator.migrate(databasePool)
+            let searchPool = try DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration)
+            openedSearchPool = searchPool
+            try searchPool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
+            try Self.messageSearchMigrator.migrate(searchPool)
+            try databasePool.write { db in
+                try Self.establishInstallationBinding(installationBinding, userID: userID, db: db)
+            }
+            try Self.applyBackupExclusion(databaseURL: databaseURL)
+            try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
+            messageSearchDatabasePool = searchPool
+            let hub = projectionChangeHub
+            try databasePool.write { db in
+                db.add(transactionObserver: V2ProjectionTransactionObserver(hub: hub), extent: .databaseLifetime)
+            }
+        } catch {
+            // Bootstrap may erase an untrusted installation after this throws.
+            // Explicitly close both handles before allowing that fallback.
+            try openedSearchPool?.close()
+            try databasePool.close()
+            throw error
         }
-        try Self.migrator.migrate(databasePool)
+    }
 
-        messageSearchDatabaseURL = Self.messageSearchDatabaseURL(for: databaseURL)
-        messageSearchDatabasePool = try DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration)
-        try messageSearchDatabasePool.write { db in
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
-        }
-        try Self.messageSearchMigrator.migrate(messageSearchDatabasePool)
-        try databasePool.write { db in
-            try Self.establishInstallationBinding(installationBinding, userID: userID, db: db)
-        }
-        try Self.applyBackupExclusion(databaseURL: databaseURL)
-        try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
+    /// Actor-isolated and off MainActor. GRDB close drains current accesses and
+    /// rejects future accesses, including late work retaining this store.
+    /// An error must prevent any caller from unlinking the database files.
+    deinit { projectionChangeHub.finish() }
+
+    public func close() throws {
+        try databasePool.close()
+        projectionChangeHub.finish()
+        try messageSearchDatabasePool.close()
     }
 
     /// Reasserts and verifies the device-only backup policy after database
@@ -164,19 +186,27 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return V2CharacterGramTokenizer().tokenize(value).bigrams.joined(separator: " ")
     }
 
-    private static func messageSearchDatabaseURL(for primaryDatabaseURL: URL) -> URL {
-        let directory = primaryDatabaseURL.deletingLastPathComponent()
-        // Production's V2.sqlite gets the stable, human-readable companion
-        // name requested by the storage design. Tests and alternate stores
-        // retain a per-primary database to prevent cross-account leakage.
-        if primaryDatabaseURL.lastPathComponent == "V2.sqlite" {
-            return directory.appending(path: "V2Search.sqlite")
+    public func boundAccountID() throws -> UserID? {
+        try databasePool.read { db in
+            try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1").map(UserID.init)
         }
-        return directory.appending(path: primaryDatabaseURL.deletingPathExtension().lastPathComponent + ".search.sqlite")
     }
 
     public func cursor() throws -> V2LocalSyncCursor? {
         try databasePool.read { db in try Self.readCursor(db) }
+    }
+
+    /// Persists recovery intent without erasing the live bank or any outbox.
+    public func requestSnapshotRebuild() throws {
+        try databasePool.write { db in
+            try db.execute(sql: "INSERT OR IGNORE INTO v2_sync_rebuild_requests (singleton) VALUES (1)")
+        }
+    }
+
+    public func requiresSnapshotRebuild() throws -> Bool {
+        try databasePool.read { db in
+            try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_sync_rebuild_requests)") == true
+        }
     }
 
     public func discardSyncCapabilities(generation: UInt64) throws {
@@ -212,6 +242,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     public func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) throws -> [RoomID] {
+        try roomLogRoomIDs(after: roomID, limit: limit, descending: false)
+    }
+
+    public func lastKnownRoomLogRoomID() throws -> RoomID? {
+        try roomLogRoomIDs(after: nil, limit: 1, descending: true).first
+    }
+
+    private func roomLogRoomIDs(after roomID: RoomID?, limit: Int, descending: Bool) throws -> [RoomID] {
         precondition(limit > 0 && limit <= 10_001)
         return try databasePool.read { db in
             let rawRoomIDs = try String.fetchAll(
@@ -235,7 +273,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     SELECT room_id
                     FROM room_log_rooms
                     WHERE (? IS NULL OR room_id > ?)
-                    ORDER BY room_id
+                    ORDER BY room_id \(descending ? "DESC" : "ASC")
                     LIMIT ?
                     """,
                 arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID?.rawValue, roomID?.rawValue, limit]
@@ -336,6 +374,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     public func markRoomEventUnauthorized(roomID: RoomID) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
+            try db.execute(sql: "DELETE FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [roomID.rawValue])
+            try db.execute(sql: "DELETE FROM v2_group_role_policy_baselines WHERE room_id = ?", arguments: [roomID.rawValue])
             try db.execute(
                 sql: "UPDATE v2_room_profile_projections SET is_group_event_authorized = 0 WHERE room_id = ?",
                 arguments: [roomID.rawValue]
@@ -357,6 +397,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     public func applyGroupEventPage(_ page: V2ClientGroupEventPage) throws -> UInt64 {
+        try applyGroupEventPageReportingChanges(page).appliedThrough
+    }
+
+    public func applyGroupEventPageReportingChanges(_ page: V2ClientGroupEventPage) throws -> V2GroupEventPageCommit {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
             let current: Int64 = try Row.fetchOne(
@@ -367,8 +411,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let cursor = try Self.storageUnsigned(current)
             guard page.nextRoomSequence >= cursor,
                   zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
-                  (page.events.last?.roomSequence ?? cursor) == page.nextRoomSequence
+                  (page.events.last?.roomSequence ?? cursor) <= page.nextRoomSequence,
+                  !page.hasMore || page.nextRoomSequence > cursor
             else { throw V2ClientSyncError.invalidRecordOrdering }
+            var insertedEvents = 0
             for event in page.events {
                 if event.roomSequence <= cursor {
                     guard let existing = try Row.fetchOne(
@@ -384,18 +430,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     }
                     continue
                 }
-                let record = V2ClientSyncRecord(sequence: event.roomSequence, sourceEventID: event.sourceEventID, projectionKind: event.projectionKind, payload: event.payload)
-                try Self.applyRoomEventProjection(record, db: db)
+                let record = try V2ClientSyncRecord(sequence: event.roomSequence, sourceEventID: event.sourceEventID, projectionKind: event.projectionKind, payload: event.payload)
+                try Self.applyRoomEventProjection(record, roomID: page.roomID, db: db)
                 try db.execute(
                     sql: "INSERT INTO v2_group_events (room_id, room_sequence, source_event_id, projection_kind, payload) VALUES (?, ?, ?, ?, ?)",
                     arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence), event.sourceEventID.rawValue, event.projectionKind, event.payload]
                 )
+                insertedEvents += 1
             }
             try db.execute(
                 sql: "INSERT INTO v2_group_event_cursors (room_id, applied_room_sequence) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET applied_room_sequence = excluded.applied_room_sequence",
                 arguments: [page.roomID.rawValue, try Self.storageInteger(page.nextRoomSequence)]
             )
-            return page.nextRoomSequence
+            return try .init(appliedThrough: page.nextRoomSequence, insertedEventCount: insertedEvents)
         }
     }
 
@@ -403,7 +450,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
             guard zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
-                  (page.events.last?.roomSequence ?? page.nextRoomSequence) == page.nextRoomSequence
+                  (page.events.last?.roomSequence ?? page.nextRoomSequence) <= page.nextRoomSequence
             else { throw V2ClientSyncError.invalidRecordOrdering }
             for event in page.events {
                 try Self.applyRoomEventProjection(
@@ -413,6 +460,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                         projectionKind: event.projectionKind,
                         payload: event.payload
                     ),
+                    roomID: page.roomID,
                     db: db
                 )
             }
@@ -426,6 +474,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     public func apply(_ batch: V2ClientSyncBatch) throws -> V2LocalSyncCursor {
         try databasePool.write { db in
             try Self.validatePersistable(batch)
+            guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_sync_rebuild_requests)") == false else { throw V2ClientSyncError.snapshotRebuildRequired }
             var cursor = try Self.readCursor(db) ?? .init(
                 state: .ready,
                 generation: batch.generation,
@@ -449,8 +498,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 if record.projectionKind == "message" {
                     try Self.applyMessage(record, db: db)
                 } else if record.projectionKind == "message_reaction" {
-                    let reaction = try V2ClientMessageReaction(record: record)
-                    try Self.persist(reaction, action: try reaction.action(record: record), db: db)
+                    try Self.applyReaction(record, db: db)
                 } else if record.projectionKind == "moderation" {
                     try Self.applyModeration(record, db: db)
                 } else if record.projectionKind == "relationship" {
@@ -554,7 +602,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 pendingReset: nil
             )
             let nextGeneration = previous.generation.addingReportingOverflow(1)
-            guard !nextGeneration.overflow, nextGeneration.partialValue == reset.generation else {
+            let rebuilding = try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_sync_rebuild_requests)") == true
+            guard !nextGeneration.overflow,
+                  nextGeneration.partialValue == reset.generation || (rebuilding && reset.generation > previous.generation) else {
                 throw V2ClientSyncError.generationMismatch
             }
             try db.execute(
@@ -706,7 +756,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     db,
                     sql: "SELECT next_page_index FROM v2_snapshot_import WHERE snapshot_id = ?",
                     arguments: [manifest.reset.snapshotID.rawValue]
-                  )?["next_page_index"]
+                  )?["next_page_index"],
+                  (0 ... manifest.pageCount).contains(index)
             else { throw V2ClientSyncError.snapshotMismatch }
             return index
         }
@@ -736,7 +787,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let lastEntity: String? = state["last_entity_key"]
             let appliedItems: Int64 = state["applied_items"]
             let appliedBytes: Int64 = state["applied_bytes"]
-            guard page.index == expectedIndex,
+            guard expectedIndex >= 0, appliedItems >= 0, appliedBytes >= 0,
+                  page.index == expectedIndex,
                   page.index < manifest.pageCount,
                   V2SnapshotV3Digest.page(page.payload) == page.digest
             else { throw V2ClientSyncError.snapshotMismatch }
@@ -836,8 +888,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   ),
                   (state["next_page_index"] as Int) == manifest.pageCount,
                   (state["rolling_digest"] as String) == manifest.rootDigest,
-                  UInt64(state["applied_items"] as Int64) == manifest.totalItems,
-                  UInt64(state["applied_bytes"] as Int64) == manifest.totalBytes
+                  UInt64(exactly: state["applied_items"] as Int64) == manifest.totalItems,
+                  UInt64(exactly: state["applied_bytes"] as Int64) == manifest.totalBytes
             else { throw V2ClientSyncError.snapshotMismatch }
 
             // Every data-proportional copy, filter, derived-table rebuild and
@@ -890,6 +942,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 pendingAcknowledgementSequence: nil,
                 pendingReset: nil
             ), db: db)
+            try db.execute(sql: "DELETE FROM v2_sync_rebuild_requests")
             try db.execute(sql: "DELETE FROM v2_snapshot_import WHERE snapshot_id = ?", arguments: [manifest.reset.snapshotID.rawValue])
             try db.execute(sql: "DELETE FROM v2_reset_rollback WHERE singleton = 1")
         }
@@ -913,8 +966,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                   ),
                   (state["next_page_index"] as Int) == manifest.pageCount,
                   (state["rolling_digest"] as String) == manifest.rootDigest,
-                  UInt64(state["applied_items"] as Int64) == manifest.totalItems,
-                  UInt64(state["applied_bytes"] as Int64) == manifest.totalBytes
+                  UInt64(exactly: state["applied_items"] as Int64) == manifest.totalItems,
+                  UInt64(exactly: state["applied_bytes"] as Int64) == manifest.totalBytes
             else { throw V2ClientSyncError.snapshotMismatch }
             if state["activation_prepared"] as Bool { return }
 
@@ -959,7 +1012,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static let snapshotProjectionTables = [
         "v2_message_projections",
         "v2_message_tombstones",
+        "v2_message_effects",
         "v2_message_reactions",
+        "v2_reaction_versions",
+        "v2_reaction_effects",
         "v2_moderation_projections",
         "v2_room_control_projections",
         "v2_room_profile_projections",
@@ -977,8 +1033,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_timeline_activity_projections",
         "v2_direct_sending_capabilities",
         "v2_group_pinned_messages",
+        "v2_pin_effects",
         "v2_group_announcements",
-        "v2_group_role_permissions",
+        "v2_announcement_effects",
+        "v2_group_role_policies",
+        "v2_group_role_policy_baselines",
+        "v2_role_policy_effects",
         "v2_group_member_roles",
         "v2_group_permission_revisions",
     ]
@@ -1015,9 +1075,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let shadowModeration = snapshotShadowTable(for: "v2_moderation_projections")
         let shadowRoomControl = snapshotShadowTable(for: "v2_room_control_projections")
         let shadowTimeline = snapshotShadowTable(for: "v2_timeline_activity_projections")
-        let shadowPinned = snapshotShadowTable(for: "v2_group_pinned_messages")
         let shadowAnnouncements = snapshotShadowTable(for: "v2_group_announcements")
-        let shadowRolePermissions = snapshotShadowTable(for: "v2_group_role_permissions")
+        let shadowRolePolicies = snapshotShadowTable(for: "v2_group_role_policies")
         let shadowMemberRoles = snapshotShadowTable(for: "v2_group_member_roles")
         let shadowPermissionRevisions = snapshotShadowTable(for: "v2_group_permission_revisions")
         let hybridMode = V2GroupDeliveryMode.largeGroupHybrid.rawValue
@@ -1055,13 +1114,66 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             JOIN \(shadowMessages) AS message ON message.message_id = tombstone.message_id
             ON CONFLICT DO NOTHING
             """)
+        try preserveMessageEffectsInSnapshot(db: db)
         try copyRoomRows(table: "v2_message_reactions", shadow: shadowReactions)
+        try copyRoomRows(table: "v2_reaction_versions", shadow: snapshotShadowTable(for: "v2_reaction_versions"))
+        try preserveReactionEffectsInSnapshot(db: db)
         try copyRoomRows(table: "v2_moderation_projections", shadow: shadowModeration)
         try copyRoomRows(table: "v2_room_control_projections", shadow: shadowRoomControl)
         try copyRoomRows(table: "v2_timeline_activity_projections", shadow: shadowTimeline)
-        try copyRoomRows(table: "v2_group_pinned_messages", shadow: shadowPinned)
+        try preservePinnedMessagesInSnapshot(db: db)
         try copyRoomRows(table: "v2_group_announcements", shadow: shadowAnnouncements)
-        try copyRoomRows(table: "v2_group_role_permissions", shadow: shadowRolePermissions)
+        try db.execute(sql: """
+            INSERT INTO \(snapshotShadowTable(for: "v2_announcement_effects"))
+            SELECT effect.* FROM v2_announcement_effects AS effect
+            JOIN \(shadowAnnouncements) AS state ON state.room_id = effect.room_id
+            WHERE effect.revision <= state.revision
+              AND (effect.revision < state.revision OR
+                   (effect.source_event_id = state.source_event_id AND effect.canonical_digest = state.canonical_digest))
+            ON CONFLICT DO NOTHING
+            """)
+        let shadowPolicyBaselines = snapshotShadowTable(for: "v2_group_role_policy_baselines")
+        try db.execute(sql: """
+            INSERT INTO \(shadowPolicyBaselines)
+            SELECT baseline.* FROM v2_group_role_policy_baselines AS baseline
+            JOIN v2_room_profile_projections AS live ON live.room_id = baseline.room_id
+            JOIN \(shadowRooms) AS incoming ON incoming.room_id = baseline.room_id
+            WHERE live.is_group_event_authorized = 1 AND incoming.is_group_event_authorized = 1
+              AND live.membership_revision = incoming.membership_revision AND live.source_event_id = incoming.source_event_id
+              AND baseline.membership_revision <= incoming.membership_revision
+            ON CONFLICT DO NOTHING
+            """)
+        if try Bool.fetchOne(db, sql: """
+            SELECT EXISTS (
+                SELECT 1 FROM \(shadowRolePolicies) AS policy JOIN \(shadowPolicyBaselines) AS baseline ON baseline.room_id = policy.room_id
+                WHERE policy.revision = baseline.permission_revision AND policy.permissions <>
+                    CASE policy.role WHEN 'admin' THEN baseline.admin_permissions ELSE baseline.member_permissions END
+            )
+            """) == true { throw V2ClientProjectionError.invalidMessagePayload }
+        try preserveRolePoliciesInSnapshot(db: db)
+        let shadowPolicyEffects = snapshotShadowTable(for: "v2_role_policy_effects")
+        if try Bool.fetchOne(db, sql: """
+            SELECT EXISTS (
+                SELECT 1 FROM v2_role_policy_effects AS live
+                LEFT JOIN \(shadowRolePolicies) AS state ON state.room_id = live.room_id AND state.role = live.role
+                LEFT JOIN \(shadowPolicyBaselines) AS baseline ON baseline.room_id = live.room_id
+                JOIN \(shadowPolicyEffects) AS incoming ON incoming.source_event_id = live.source_event_id AND incoming.room_id = live.room_id
+                WHERE live.revision <= MAX(COALESCE(state.revision, 0), COALESCE(baseline.permission_revision, 0)) AND (
+                    live.role <> incoming.role OR live.revision <> incoming.revision OR live.canonical_digest <> incoming.canonical_digest
+                    OR (live.room_sequence IS NOT NULL AND incoming.room_sequence IS NOT NULL AND live.room_sequence <> incoming.room_sequence)
+                )
+            )
+            """) == true { throw V2ClientProjectionError.invalidMessagePayload }
+        try db.execute(sql: """
+            INSERT INTO \(shadowPolicyEffects)
+            SELECT effect.* FROM v2_role_policy_effects AS effect
+            LEFT JOIN \(shadowRolePolicies) AS state ON state.room_id = effect.room_id AND state.role = effect.role
+            LEFT JOIN \(shadowPolicyBaselines) AS baseline ON baseline.room_id = effect.room_id
+            WHERE effect.revision <= MAX(COALESCE(state.revision, 0), COALESCE(baseline.permission_revision, 0))
+              AND (effect.revision <= COALESCE(baseline.permission_revision, 0) OR effect.revision < state.revision OR
+                   (effect.source_event_id = state.source_event_id AND effect.canonical_digest = state.canonical_digest))
+            ON CONFLICT(source_event_id, room_id) DO UPDATE SET room_sequence = COALESCE(\(shadowPolicyEffects).room_sequence, excluded.room_sequence)
+            """)
         try copyRoomRows(table: "v2_group_member_roles", shadow: shadowMemberRoles)
         try copyRoomRows(table: "v2_group_permission_revisions", shadow: shadowPermissionRevisions)
 
@@ -1111,6 +1223,20 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             """, arguments: [hybridMode])
     }
 
+    private static func preserveMessageEffectsInSnapshot(db: Database) throws {
+        // Keep only receipts represented by the new authoritative baseline.
+        // Future effects must replay if this reset installs an older revision;
+        // removed rooms must not retain claims that suppress a later rebuild.
+        try db.execute(sql: """
+            INSERT INTO \(snapshotShadowTable(for: "v2_message_effects"))
+            SELECT effect.* FROM v2_message_effects AS effect
+            JOIN \(snapshotShadowTable(for: "v2_message_projections")) AS message ON message.message_id = effect.entity_key
+              AND message.room_id = effect.room_id
+              AND message.message_revision >= effect.message_revision
+            ON CONFLICT DO NOTHING
+            """)
+    }
+
     private static func snapshotShadowTable(for table: String) -> String {
         "v2_snapshot_shadow_" + table.dropFirst("v2_".count)
     }
@@ -1119,27 +1245,31 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_snapshot_retired_" + table.dropFirst("v2_".count)
     }
 
+    private static func createSnapshotShadowTable(for table: String, db: Database) throws {
+        guard let row = try Row.fetchOne(
+            db,
+            sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            arguments: [table]
+        ), let createSQL: String = row["sql"] else {
+            throw V2ClientSyncError.snapshotProjectionConflict
+        }
+        let plainPrefix = "CREATE TABLE \(table)"
+        let quotedPrefix = "CREATE TABLE \"\(table)\""
+        let prefix: String
+        if createSQL.hasPrefix(plainPrefix) {
+            prefix = plainPrefix
+        } else if createSQL.hasPrefix(quotedPrefix) {
+            prefix = quotedPrefix
+        } else {
+            throw V2ClientSyncError.snapshotProjectionConflict
+        }
+        let shadowSQL = "CREATE TABLE \(snapshotShadowTable(for: table))" + createSQL.dropFirst(prefix.count)
+        try db.execute(sql: shadowSQL)
+    }
+
     private static func createSnapshotShadowTables(db: Database) throws {
         for table in snapshotOrdinaryBankTables {
-            guard let row = try Row.fetchOne(
-                db,
-                sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-                arguments: [table]
-            ), let createSQL: String = row["sql"] else {
-                throw V2ClientSyncError.snapshotProjectionConflict
-            }
-            let plainPrefix = "CREATE TABLE \(table)"
-            let quotedPrefix = "CREATE TABLE \"\(table)\""
-            let prefix: String
-            if createSQL.hasPrefix(plainPrefix) {
-                prefix = plainPrefix
-            } else if createSQL.hasPrefix(quotedPrefix) {
-                prefix = quotedPrefix
-            } else {
-                throw V2ClientSyncError.snapshotProjectionConflict
-            }
-            let shadowSQL = "CREATE TABLE \(snapshotShadowTable(for: table))" + createSQL.dropFirst(prefix.count)
-            try db.execute(sql: shadowSQL)
+            try createSnapshotShadowTable(for: table, db: db)
         }
         try db.execute(sql: """
             CREATE VIRTUAL TABLE \(snapshotShadowTable(for: "v2_contact_profile_search")) USING fts5(
@@ -1221,6 +1351,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             sql: "SELECT index_version, generation FROM v2_message_search_state WHERE singleton = 1"
         ) else { throw V2ClientSyncError.snapshotProjectionConflict }
         let generation: Int64 = row["generation"]
+        guard generation > 0 else { throw V2ClientProjectionError.invalidMessagePayload }
         guard generation < Int64.max else { throw V2ClientSyncError.storageRangeExceeded }
         try db.execute(
             sql: "INSERT INTO \(state) (singleton, index_version, state, generation) VALUES (1, ?, 'building', ?)",
@@ -1321,14 +1452,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         } catch {
             throw V2ClientSyncError.snapshotProjectionConflict
         }
-        guard try snapshotEntityKey(kind: item.key.projectionKind, sourceEventID: item.sourceEventID, object: object) == item.key.entityKey else {
-            throw V2ClientSyncError.snapshotProjectionConflict
+        let payloadKey = try snapshotEntityKey(kind: item.key.projectionKind, sourceEventID: item.sourceEventID, object: object)
+        if payloadKey != item.key.entityKey {
+            guard item.key.projectionKind == "group_capability",
+                  let expected = canonicalGroupCapabilitySnapshotKey(payloadKey),
+                  expected == canonicalGroupCapabilitySnapshotKey(item.key.entityKey)
+            else { throw V2ClientSyncError.snapshotProjectionConflict }
         }
         let eventType = object["event_type"] as? String
         let recordKind = item.key.projectionKind == "room" && eventType == "membership_changed"
             ? "membership"
             : item.key.projectionKind
-        let record = V2ClientSyncRecord(
+        let record = try V2ClientSyncRecord(
             sequence: item.sequence,
             sourceEventID: item.sourceEventID,
             projectionKind: recordKind,
@@ -1337,13 +1472,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         switch item.key.projectionKind {
         case "message": try applySnapshotMessage(record, entityKey: item.key.entityKey, db: db)
         case "message_reaction":
-            let reaction = try V2ClientMessageReaction(record: record)
-            try persist(
-                reaction,
-                action: try reaction.action(record: record),
-                target: .snapshotShadow,
-                db: db
-            )
+            try applyReaction(record, target: .snapshotShadow, db: db)
         case "moderation": try applyModeration(record, target: .snapshotShadow, db: db)
         case "relationship": try applyRelationship(record, target: .snapshotShadow, db: db)
         case "user_block": try applyUserBlock(record, target: .snapshotShadow, db: db)
@@ -1429,6 +1558,26 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             )
             return
         }
+    }
+
+    /// PostgreSQL and Foundation may spell the same UUID differently. Only
+    /// identity segments are normalized; kind and role names remain exact.
+    private static func canonicalGroupCapabilitySnapshotKey(_ value: String) -> String? {
+        var parts = value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let identityIndices: [Int]
+        switch parts.first {
+        case "announcement" where parts.count == 2: identityIndices = [1]
+        case "permissions" where parts.count == 3: identityIndices = [1]
+        case "pin", "member-role":
+            guard parts.count == 3 else { return nil }
+            identityIndices = [1, 2]
+        default: return nil
+        }
+        for index in identityIndices {
+            guard let id = UUID(uuidString: parts[index]) else { return nil }
+            parts[index] = id.uuidString
+        }
+        return parts.joined(separator: ":")
     }
 
     private static func snapshotEntityKey(
@@ -1530,131 +1679,143 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Reads a bounded, unified timeline window and every decoration needed to
-    /// render it from one SQLite snapshot.  Fetching `limit + 1` candidates
-    /// from each projection table is sufficient to identify the next keyset
-    /// cursor without scanning the rest of either room history.
+    /// Reads one bounded page, including decorations, from a single snapshot.
     public func conversationTimelinePage(
         in roomID: RoomID,
         before cursor: V2ClientTimelineCursor? = nil,
         limit: Int
     ) throws -> V2ClientConversationTimelinePage {
-        guard (1 ... 10_000).contains(limit) else {
+        guard (1 ... 10_000).contains(limit) else { throw V2ClientProjectionError.invalidMessagePayload }
+        return try databasePool.read { db in
+            let candidates = try Self.timelineCandidates(db: db, roomID: roomID, cursor: cursor, newer: false, limit: limit + 1)
+            return try Self.timelinePage(db: db, roomID: roomID, selected: Array(candidates.prefix(limit).reversed()), hasOlder: candidates.count > limit)
+        }
+    }
+
+    /// Message ID lookup plus two index seeks: cost and retained payload do
+    /// not grow with the target's depth in room history. No OFFSET or scan of
+    /// all prior pages. Account, target and decorations share one read snapshot.
+    public func conversationTimelineWindow(
+        in roomID: RoomID,
+        for userID: UserID,
+        around messageID: MessageID,
+        before: Int,
+        after: Int
+    ) throws -> V2ClientTimelineLocation {
+        guard (0..<800).contains(before), (0..<800).contains(after), before + after + 1 <= 800 else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
-        let cursorSequence = try cursor.map { try Self.storageInteger($0.timelineSequence) }
-        let fetchLimit = limit + 1
         return try databasePool.read { db in
-            let messageRows: [Row]
-            let activityRows: [Row]
-            if let cursor, let cursorSequence {
-                messageRows = try Row.fetchAll(
-                    db,
-                    sql: """
-                    SELECT * FROM v2_message_projections
-                    WHERE room_id = ?
-                      AND (timeline_sequence < ? OR (timeline_sequence = ? AND message_id < ?))
-                    ORDER BY timeline_sequence DESC, message_id DESC
-                    LIMIT ?
-                    """,
-                    arguments: [roomID.rawValue, cursorSequence, cursorSequence, cursor.itemID, fetchLimit]
+            guard let storedUser = try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1"),
+                  storedUser == userID.rawValue || (userID.uuidValue != nil && UUID(uuidString: storedUser) == userID.uuidValue),
+                  let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id = ? AND room_id = ?", arguments: [messageID.rawValue, roomID.rawValue])
+            else { return .unavailable }
+            let revoked = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS (
+                    SELECT 1 FROM v2_room_profile_projections WHERE room_id = ? AND is_group_event_authorized = 0
+                    UNION ALL
+                    SELECT 1 FROM v2_room_event_authorizations WHERE room_id = ? AND is_authorized = 0
                 )
-                activityRows = try Row.fetchAll(
-                    db,
-                    sql: """
-                    SELECT source_event_id, room_id, timeline_sequence, event_type, server_created_at
-                    FROM v2_timeline_activity_projections
-                    WHERE room_id = ?
-                      AND (timeline_sequence < ? OR (timeline_sequence = ? AND source_event_id < ?))
-                    ORDER BY timeline_sequence DESC, source_event_id DESC
-                    LIMIT ?
-                    """,
-                    arguments: [roomID.rawValue, cursorSequence, cursorSequence, cursor.itemID, fetchLimit]
-                )
-            } else {
-                messageRows = try Row.fetchAll(
-                    db,
-                    sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY timeline_sequence DESC, message_id DESC LIMIT ?",
-                    arguments: [roomID.rawValue, fetchLimit]
-                )
-                activityRows = try Row.fetchAll(
-                    db,
-                    sql: "SELECT source_event_id, room_id, timeline_sequence, event_type, server_created_at FROM v2_timeline_activity_projections WHERE room_id = ? ORDER BY timeline_sequence DESC, source_event_id DESC LIMIT ?",
-                    arguments: [roomID.rawValue, fetchLimit]
-                )
-            }
-
-            let messageCandidates = try messageRows.map(Self.decodeMessageProjection).map(TimelinePageCandidate.message)
-            let activityCandidates = try activityRows.map(Self.decodeTimelineActivity).map(TimelinePageCandidate.activity)
-            let candidates = (messageCandidates + activityCandidates).sorted(by: TimelinePageCandidate.newerFirst)
-            let selected = Array(candidates.prefix(limit)).sorted(by: TimelinePageCandidate.olderFirst)
-            let hasOlder = candidates.count > limit
-            let messages = selected.compactMap(\.message)
-            let activities = selected.compactMap(\.activity)
-            let messageIDs = messages.map(\.messageID)
-
-            let reactions: [V2ClientMessageReaction]
-            let pinnedMessageIDs: Set<MessageID>
-            let favoritedMessageIDs: Set<MessageID>
-            if messageIDs.isEmpty {
-                reactions = []
-                pinnedMessageIDs = []
-                favoritedMessageIDs = []
-            } else {
-                let placeholders = Array(repeating: "?", count: messageIDs.count).joined(separator: ", ")
-                let messageArguments = StatementArguments(messageIDs.map(\.rawValue))
-                reactions = try Row.fetchAll(
-                    db,
-                    sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE message_id IN (\(placeholders)) ORDER BY message_id, reaction, actor_user_id",
-                    arguments: messageArguments
-                ).map { row in
-                    try .init(
-                        roomID: .init(row["room_id"] as String),
-                        messageID: .init(row["message_id"] as String),
-                        actorUserID: .init(row["actor_user_id"] as String),
-                        reaction: row["reaction"]
-                    )
-                }
-                pinnedMessageIDs = try Set(String.fetchAll(
-                    db,
-                    sql: "SELECT message_id FROM v2_group_pinned_messages WHERE is_pinned = 1 AND message_id IN (\(placeholders))",
-                    arguments: messageArguments
-                ).map(MessageID.init))
-                favoritedMessageIDs = try Set(String.fetchAll(
-                    db,
-                    sql: "SELECT message_id FROM v2_message_favorites WHERE is_favorited = 1 AND message_id IN (\(placeholders))",
-                    arguments: messageArguments
-                ).map(MessageID.init))
-            }
-
-            let directReadReceipt: V2DirectReadReceiptProjection?
-            if let row = try Row.fetchOne(
-                db,
-                sql: "SELECT room_id, reader_user_id, read_through_room_sequence, recorded_at FROM v2_direct_read_receipt_projections WHERE room_id = ?",
-                arguments: [roomID.rawValue]
-            ) {
-                directReadReceipt = try .init(
-                    roomID: .init(row["room_id"] as String),
-                    readerUserID: .init(row["reader_user_id"] as String),
-                    readThroughRoomSequence: Self.storageUnsigned(row["read_through_room_sequence"] as Int64),
-                    recordedAt: Date(timeIntervalSince1970: row["recorded_at"] as Double),
-                    isVisible: true
-                )
-            } else {
-                directReadReceipt = nil
-            }
-
-            let olderCursor = hasOlder ? selected.first.map(\.cursor) : nil
-            return .init(
-                messages: messages,
-                activities: activities,
-                reactions: reactions,
-                pinnedMessageIDs: pinnedMessageIDs,
-                favoritedMessageIDs: favoritedMessageIDs,
-                directReadReceipt: directReadReceipt,
-                olderCursor: olderCursor
-            )
+                """, arguments: [roomID.rawValue, roomID.rawValue]) ?? false
+            guard !revoked else { return .unavailable }
+            let target = try Self.decodeMessageProjection(row)
+            guard !target.isWithdrawn else { return .withdrawn }
+            let anchor = TimelinePageCandidate.message(target)
+            let older = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: false, limit: before + 1)
+            let newer = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: true, limit: after + 1)
+            let selected = Array(older.prefix(before).reversed()) + [anchor] + Array(newer.prefix(after))
+            let page = try Self.timelinePage(db: db, roomID: roomID, selected: selected, hasOlder: older.count > before)
+            return .found(.init(page: page, newerBoundary: newer.count > after ? newer[after].cursor : nil))
         }
+    }
+
+    private static func timelineCandidates(db: Database, roomID: RoomID, cursor: V2ClientTimelineCursor?, newer: Bool, limit: Int) throws -> [TimelinePageCandidate] {
+        let order = newer ? "ASC" : "DESC"
+        func rows(table: String, id: String, kind: V2ClientTimelineItemKind, columns: String) throws -> [Row] {
+            var predicate = ""
+            var arguments: StatementArguments = [roomID.rawValue]
+            if let cursor {
+                // Kind is the final tie breaker when a message and a private
+                // activity happen to share both their sequence and opaque ID.
+                let inclusive = newer ? kind.rawValue > cursor.kind.rawValue : kind.rawValue < cursor.kind.rawValue
+                let comparison = (newer ? ">" : "<") + (inclusive ? "=" : "")
+                predicate = " AND (timeline_sequence, \(id)) \(comparison) (?, ?)"
+                arguments += [try storageInteger(cursor.timelineSequence), cursor.itemID]
+            }
+            arguments += [limit]
+            return try Row.fetchAll(db, sql: "SELECT \(columns) FROM \(table) WHERE room_id = ?\(predicate) ORDER BY timeline_sequence \(order), \(id) \(order) LIMIT ?", arguments: arguments)
+        }
+        let messages = try rows(table: "v2_message_projections", id: "message_id", kind: .message, columns: "*").map(decodeMessageProjection).map(TimelinePageCandidate.message)
+        let activities = try rows(table: "v2_timeline_activity_projections", id: "source_event_id", kind: .activity, columns: "source_event_id, room_id, timeline_sequence, event_type, server_created_at").map(decodeTimelineActivity).map(TimelinePageCandidate.activity)
+        return Array((messages + activities).sorted(by: newer ? TimelinePageCandidate.olderFirst : TimelinePageCandidate.newerFirst).prefix(limit))
+    }
+
+    private static func timelinePage(db: Database, roomID: RoomID, selected: [TimelinePageCandidate], hasOlder: Bool) throws -> V2ClientConversationTimelinePage {
+        let messages = selected.compactMap(\.message)
+        let activities = selected.compactMap(\.activity)
+        let messageIDs = messages.map(\.messageID)
+
+        let reactions: [V2ClientMessageReaction]
+        let pinnedMessageIDs: Set<MessageID>
+        let favoritedMessageIDs: Set<MessageID>
+        if messageIDs.isEmpty {
+            reactions = []
+            pinnedMessageIDs = []
+            favoritedMessageIDs = []
+        } else {
+            let placeholders = Array(repeating: "?", count: messageIDs.count).joined(separator: ", ")
+            let messageArguments = StatementArguments(messageIDs.map(\.rawValue))
+            reactions = try Row.fetchAll(
+                db,
+                sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE message_id IN (\(placeholders)) ORDER BY message_id, reaction, actor_user_id",
+                arguments: messageArguments
+            ).map { row in
+                try .init(
+                    roomID: .init(row["room_id"] as String),
+                    messageID: .init(row["message_id"] as String),
+                    actorUserID: .init(row["actor_user_id"] as String),
+                    reaction: row["reaction"]
+                )
+            }
+            pinnedMessageIDs = try Set(String.fetchAll(
+                db,
+                sql: "SELECT message_id FROM v2_group_pinned_messages WHERE room_id = ? AND is_pinned = 1 AND message_id IN (\(placeholders))",
+                arguments: StatementArguments([roomID.rawValue]) + messageArguments
+            ).map(MessageID.init))
+            favoritedMessageIDs = try Set(String.fetchAll(
+                db,
+                sql: "SELECT message_id FROM v2_message_favorites WHERE is_favorited = 1 AND message_id IN (\(placeholders))",
+                arguments: messageArguments
+            ).map(MessageID.init))
+        }
+
+        let directReadReceipt: V2DirectReadReceiptProjection?
+        if let row = try Row.fetchOne(
+            db,
+            sql: "SELECT room_id, reader_user_id, read_through_room_sequence, recorded_at FROM v2_direct_read_receipt_projections WHERE room_id = ?",
+            arguments: [roomID.rawValue]
+        ) {
+            directReadReceipt = try .init(
+                roomID: .init(row["room_id"] as String),
+                readerUserID: .init(row["reader_user_id"] as String),
+                readThroughRoomSequence: Self.storageUnsigned(row["read_through_room_sequence"] as Int64),
+                recordedAt: Date(timeIntervalSince1970: row["recorded_at"] as Double),
+                isVisible: true
+            )
+        } else {
+            directReadReceipt = nil
+        }
+
+        let olderCursor = hasOlder ? selected.first.map(\.cursor) : nil
+        return .init(
+            messages: messages,
+            activities: activities,
+            reactions: reactions,
+            pinnedMessageIDs: pinnedMessageIDs,
+            favoritedMessageIDs: favoritedMessageIDs,
+            directReadReceipt: directReadReceipt,
+            olderCursor: olderCursor
+        )
     }
 
     public func timelineActivities(in roomID: RoomID) throws -> [V2ClientTimelineActivityProjection] {
@@ -1816,27 +1977,264 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    public func groupRolePolicies(roomID: RoomID) throws -> [V2ClientGroupRolePolicy] {
-        try databasePool.read { db in
-            let rows = try Row.fetchAll(
-                db,
-                sql: "SELECT role, permission FROM v2_group_role_permissions WHERE room_id = ? ORDER BY role, permission",
-                arguments: [roomID.rawValue]
-            )
-            let permissionsByRole = Dictionary(grouping: rows, by: { $0["role"] as String })
-                .mapValues { rows in Set(rows.compactMap { V2GroupPermission(rawValue: $0["permission"] as String) }) }
-            let revision = try Self.storageUnsigned(
-                (try Int64.fetchOne(db, sql: "SELECT revision FROM v2_group_permission_revisions WHERE room_id = ?", arguments: [roomID.rawValue])) ?? 1
-            )
-            return [.admin, .member].map { role in
-                .init(
-                    roomID: roomID,
-                    role: role,
-                    permissions: permissionsByRole[role.rawValue] ?? V2GroupPermissionDefaults.permissions(for: role),
-                    revision: revision
-                )
-            }
+    /// Records a retryable intent without modifying messages, cursors or outbox.
+    public func requestRolePolicyBaseline(roomID: RoomID) throws -> V2RolePolicyRecoveryRequest {
+        try databasePool.write { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            return try Self.enqueueRolePolicyRecovery(roomID: roomID, db: db)
         }
+    }
+
+    /// Bounded discovery for the recovery runner. Already queued, current
+    /// requests are excluded so subsequent pages can reach the other rooms.
+    public func enqueueMissingRolePolicyBaselines(limit: Int = 32) throws -> Int {
+        guard (1 ... 100).contains(limit) else { throw V2RolePolicyRecoveryError.invalidLimit }
+        return try databasePool.write { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            guard try Self.boundRolePolicyRecoveryAccount(db: db) != nil else { throw V2RolePolicyRecoveryError.accountUnavailable }
+            try db.execute(sql: """
+                DELETE FROM v2_role_policy_recovery_requests WHERE room_id IN (
+                    SELECT request.room_id FROM v2_role_policy_recovery_requests AS request
+                    LEFT JOIN v2_room_profile_projections AS room ON room.room_id = request.room_id AND room.is_group_event_authorized = 1
+                    WHERE room.room_id IS NULL ORDER BY request.room_id LIMIT ?
+                )
+                """, arguments: [limit])
+            let rooms = try String.fetchAll(db, sql: """
+                SELECT room.room_id FROM v2_room_profile_projections AS room
+                LEFT JOIN v2_group_role_policy_baselines AS baseline ON baseline.room_id = room.room_id
+                LEFT JOIN v2_role_policy_recovery_requests AS request ON request.room_id = room.room_id
+                JOIN v2_local_installation AS account ON account.singleton = 1
+                WHERE room.is_group_event_authorized = 1
+                  AND ((baseline.room_id IS NULL AND request.room_id IS NULL) OR request.membership_revision <> room.membership_revision
+                       OR request.membership_source_event_id <> room.source_event_id
+                       OR request.generation <> COALESCE((SELECT generation FROM v2_sync_cursor WHERE singleton = 1), 1)
+                       OR request.installation_binding <> account.binding OR request.user_id <> account.user_id)
+                ORDER BY room.room_id LIMIT ?
+                """, arguments: [limit])
+            for room in rooms { _ = try Self.enqueueRolePolicyRecovery(roomID: .init(room), db: db) }
+            return rooms.count
+        }
+    }
+
+    public func pendingRolePolicyBaselineRequests(limit: Int = 32) throws -> [V2RolePolicyRecoveryRequest] {
+        guard (1 ... 100).contains(limit) else { throw V2RolePolicyRecoveryError.invalidLimit }
+        return try databasePool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM v2_role_policy_recovery_requests ORDER BY room_id LIMIT ?", arguments: [limit]).map(Self.decodeRolePolicyRecoveryRequest)
+        }
+    }
+
+    public func dueRolePolicyBaselineRequests(at date: Date, limit: Int = 32) throws -> [V2RolePolicyRecoveryRequest] {
+        guard (1 ... 100).contains(limit), date.timeIntervalSince1970.isFinite else { throw V2RolePolicyRecoveryError.invalidLimit }
+        return try databasePool.read { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            return try Row.fetchAll(db, sql: "SELECT * FROM v2_role_policy_recovery_requests WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at, room_id LIMIT ?", arguments: [date.timeIntervalSince1970, limit]).map(Self.decodeRolePolicyRecoveryRequest)
+        }
+    }
+
+    public func resumeRolePolicyBaseline(roomID: RoomID) throws -> V2RolePolicyRecoveryRequest {
+        try databasePool.write { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            try db.execute(sql: "DELETE FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [roomID.rawValue])
+            return try Self.enqueueRolePolicyRecovery(roomID: roomID, db: db)
+        }
+    }
+
+    @discardableResult
+    public func recordRolePolicyRecoveryFailure(_ disposition: V2RolePolicyRecoveryDisposition, for request: V2RolePolicyRecoveryRequest) throws -> Bool {
+        try Task.checkCancellation()
+        return try databasePool.write { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            guard try Self.matchesRolePolicyRecoveryRequest(request, db: db) else { return false }
+            switch disposition {
+            case .unauthorized:
+                try db.execute(sql: "UPDATE v2_room_profile_projections SET is_group_event_authorized = 0 WHERE room_id = ?", arguments: [request.roomID.rawValue])
+                try db.execute(sql: "DELETE FROM v2_group_role_policy_baselines WHERE room_id = ?", arguments: [request.roomID.rawValue])
+                try db.execute(sql: "DELETE FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [request.roomID.rawValue])
+            case .pause:
+                try db.execute(sql: "UPDATE v2_role_policy_recovery_requests SET state = 'paused', attempt_count = MIN(attempt_count + 1, 2147483647) WHERE room_id = ?", arguments: [request.roomID.rawValue])
+            case .retry(let date):
+                guard date.timeIntervalSince1970.isFinite else { throw V2RolePolicyRecoveryError.invalidBaseline }
+                try db.execute(sql: "UPDATE v2_role_policy_recovery_requests SET next_attempt_at = ?, attempt_count = MIN(attempt_count + 1, 2147483647) WHERE room_id = ?", arguments: [date.timeIntervalSince1970, request.roomID.rawValue])
+            }
+            return true
+        }
+    }
+
+    /// False means the request was superseded or its local fences changed.
+    /// No state is then changed; a runner can discover a fresh request.
+    @discardableResult
+    public func completeRolePolicyBaseline(_ baseline: V2GroupRolePolicyBaseline, for request: V2RolePolicyRecoveryRequest) throws -> Bool {
+        try Task.checkCancellation()
+        return try databasePool.write { db in
+            try Self.requireRolePolicyRecoveryReady(db: db)
+            guard try Self.matchesRolePolicyRecoveryRequest(request, db: db) else { return false }
+            guard baseline.roomID == request.roomID, baseline.membershipRevision >= UInt64(request.membershipRevision) else { throw V2RolePolicyRecoveryError.invalidBaseline }
+            let admin = try Self.encodeRolePolicyPermissions(baseline.adminPermissions)
+            let member = try Self.encodeRolePolicyPermissions(baseline.memberPermissions)
+            let revision = Int64(baseline.permissionRevision)
+            let previous = try Row.fetchOne(db, sql: "SELECT * FROM v2_group_role_policy_baselines WHERE room_id = ?", arguments: [request.roomID.rawValue])
+            if let previous, (previous["permission_revision"] as Int64) == revision {
+                guard (previous["admin_permissions"] as Data) == admin, (previous["member_permissions"] as Data) == member else { throw V2RolePolicyRecoveryError.invalidBaseline }
+            }
+            let previousRevision = (previous?["permission_revision"] as Int64?) ?? 0
+            guard previousRevision <= revision else { return false }
+            var replaceObservation = true
+            if let previous, replaceObservation {
+                let previousMembership: Int64 = previous["membership_revision"]
+                let previousSequence: Int64 = previous["room_sequence"]
+                let membership = Int64(baseline.membershipRevision)
+                let sequence = Int64(baseline.roomSequence)
+                if previousRevision == revision, membership <= previousMembership, sequence <= previousSequence {
+                    replaceObservation = false
+                } else {
+                    guard membership >= previousMembership, sequence >= previousSequence else { throw V2RolePolicyRecoveryError.invalidBaseline }
+                }
+            }
+            if replaceObservation {
+                for (role, permissions) in [("admin", admin), ("member", member)] {
+                    if let observed = try Data.fetchOne(db, sql: "SELECT permissions FROM v2_group_role_policies WHERE room_id = ? AND role = ? AND revision = ?", arguments: [request.roomID.rawValue, role, revision]), observed != permissions {
+                        throw V2RolePolicyRecoveryError.invalidBaseline
+                    }
+                }
+                try db.execute(sql: """
+                    INSERT INTO v2_group_role_policy_baselines (room_id, permission_revision, membership_revision, room_sequence, admin_permissions, member_permissions)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(room_id) DO UPDATE SET permission_revision = excluded.permission_revision,
+                        membership_revision = excluded.membership_revision,
+                        room_sequence = excluded.room_sequence,
+                        admin_permissions = excluded.admin_permissions, member_permissions = excluded.member_permissions
+                    """, arguments: [request.roomID.rawValue, revision, Int64(baseline.membershipRevision), Int64(baseline.roomSequence), admin, member])
+            }
+            try db.execute(sql: "INSERT INTO v2_group_permission_revisions (room_id, revision) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET revision = MAX(v2_group_permission_revisions.revision, excluded.revision)", arguments: [request.roomID.rawValue, revision])
+            try db.execute(sql: "DELETE FROM v2_role_policy_recovery_requests WHERE room_id = ? AND request_id = ?", arguments: [request.roomID.rawValue, request.requestID.uuidString])
+            return true
+        }
+    }
+
+    private static func matchesRolePolicyRecoveryRequest(_ request: V2RolePolicyRecoveryRequest, db: Database) throws -> Bool {
+        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [request.roomID.rawValue]),
+                  try Self.decodeRolePolicyRecoveryRequest(row) == request,
+                  let account = try Self.boundRolePolicyRecoveryAccount(db: db),
+                  account.binding == request.installationBinding, account.user == request.userID,
+                  let room = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_profile_projections WHERE room_id = ? AND is_group_event_authorized = 1", arguments: [request.roomID.rawValue]),
+                  (room["membership_revision"] as Int64) == request.membershipRevision,
+                  (room["source_event_id"] as String) == request.membershipSourceEventID,
+                  (try Self.readCursor(db)?.generation ?? 1) == UInt64(request.generation)
+            else { return false }
+        return true
+    }
+
+    private static func requireRolePolicyRecoveryReady(db: Database) throws {
+        try requireProjectionWritesUnfenced(db: db)
+        if let cursor = try readCursor(db), cursor.state != .ready { throw V2ClientSyncError.resetPending }
+    }
+
+    private static func boundRolePolicyRecoveryAccount(db: Database) throws -> (binding: String, user: UserID)? {
+        guard let row = try Row.fetchOne(db, sql: "SELECT binding, user_id FROM v2_local_installation WHERE singleton = 1"),
+              let user: String = row["user_id"] else { return nil }
+        return (row["binding"], try UserID(user))
+    }
+
+    private static func enqueueRolePolicyRecovery(roomID: RoomID, db: Database) throws -> V2RolePolicyRecoveryRequest {
+        guard let account = try boundRolePolicyRecoveryAccount(db: db) else { throw V2RolePolicyRecoveryError.accountUnavailable }
+        guard let room = try Row.fetchOne(db, sql: "SELECT membership_revision, source_event_id FROM v2_room_profile_projections WHERE room_id = ? AND is_group_event_authorized = 1", arguments: [roomID.rawValue]) else { throw V2RolePolicyRecoveryError.roomUnauthorized }
+        let generation = try storageInteger(readCursor(db)?.generation ?? 1)
+        let membership: Int64 = room["membership_revision"]
+        let source: String = room["source_event_id"]
+        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [roomID.rawValue]) {
+            let previous = try decodeRolePolicyRecoveryRequest(row)
+            if previous.installationBinding == account.binding, previous.userID == account.user,
+               previous.membershipRevision == membership, previous.membershipSourceEventID == source, previous.generation == generation { return previous }
+        }
+        let request = V2RolePolicyRecoveryRequest(roomID: roomID, requestID: UUID(), installationBinding: account.binding, userID: account.user, membershipRevision: membership, membershipSourceEventID: source, generation: generation, attemptCount: 0)
+        try db.execute(sql: """
+            INSERT INTO v2_role_policy_recovery_requests (room_id, request_id, installation_binding, user_id, membership_revision, membership_source_event_id, generation)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET request_id = excluded.request_id, installation_binding = excluded.installation_binding,
+                user_id = excluded.user_id, membership_revision = excluded.membership_revision,
+                membership_source_event_id = excluded.membership_source_event_id, generation = excluded.generation, attempt_count = 0, next_attempt_at = 0, state = 'pending'
+            """, arguments: [roomID.rawValue, request.requestID.uuidString, account.binding, account.user.rawValue, membership, source, generation])
+        return request
+    }
+
+    private static func decodeRolePolicyRecoveryRequest(_ row: Row) throws -> V2RolePolicyRecoveryRequest {
+        let attemptValue: DatabaseValue = row["attempt_count"]
+        let membershipValue: DatabaseValue = row["membership_revision"]
+        let generationValue: DatabaseValue = row["generation"]
+        guard case .int64(let attemptCount) = attemptValue.storage,
+              case .int64(let membershipRevision) = membershipValue.storage,
+              case .int64(let generation) = generationValue.storage,
+              membershipRevision > 0, generation > 0,
+              (0...Int64(Int32.max)).contains(attemptCount),
+              let id = UUID(uuidString: row["request_id"] as String) else { throw V2ClientProjectionError.invalidMessagePayload }
+        return try .init(roomID: .init(row["room_id"] as String), requestID: id, installationBinding: row["installation_binding"], userID: .init(row["user_id"] as String), membershipRevision: membershipRevision, membershipSourceEventID: row["membership_source_event_id"], generation: generation, attemptCount: Int(attemptCount))
+    }
+
+    private static func encodeRolePolicyPermissions(_ permissions: Set<V2GroupPermission>) throws -> Data {
+        try JSONEncoder().encode(permissions.map(\.rawValue).sorted())
+    }
+
+    /// Missing roles remain unknown until an event or a complete owner
+    /// observation establishes their value. Baselines do not invent events.
+    public func groupRolePolicies(roomID: RoomID) throws -> [V2ClientGroupRolePolicy] {
+        try databasePool.read { try Self.readGroupRolePolicies(roomID: roomID, db: $0) }
+    }
+
+    public func groupRolePolicyState(roomID: RoomID) throws -> V2ClientGroupRolePolicyState {
+        try databasePool.read { db in
+            guard try Self.boundRolePolicyRecoveryAccount(db: db) != nil,
+                  try Bool.fetchOne(db, sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) == true
+            else { return .init(policies: [], recovery: .unavailable) }
+            let policies = try Self.readGroupRolePolicies(roomID: roomID, db: db)
+            if let cursor = try Self.readCursor(db), cursor.state != .ready {
+                return .init(policies: policies, recovery: .waitingForSynchronization)
+            }
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_role_policy_recovery_requests WHERE room_id = ?", arguments: [roomID.rawValue]) {
+                let request = try Self.decodeRolePolicyRecoveryRequest(row)
+                guard try Self.matchesRolePolicyRecoveryRequest(request, db: db) else { return .init(policies: policies, recovery: .needed) }
+                switch row["state"] as String {
+                case "paused": return .init(policies: policies, recovery: .paused)
+                case "pending": return .init(policies: policies, recovery: .pending(nextAttemptAt: .init(timeIntervalSince1970: row["next_attempt_at"] as Double)))
+                default: throw V2ClientProjectionError.invalidMessagePayload
+                }
+            }
+            let hasBaseline = try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_group_role_policy_baselines WHERE room_id = ?)", arguments: [roomID.rawValue]) == true
+            return .init(policies: policies, recovery: hasBaseline ? .ready : .needed)
+        }
+    }
+
+    private static func readGroupRolePolicies(roomID: RoomID, db: Database) throws -> [V2ClientGroupRolePolicy] {
+        if try Bool.fetchOne(db, sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) == false { return [] }
+        let rows = try Row.fetchAll(db, sql: "SELECT * FROM v2_group_role_policies WHERE room_id = ? ORDER BY role", arguments: [roomID.rawValue])
+        let baseline = try Row.fetchOne(db, sql: "SELECT * FROM v2_group_role_policy_baselines WHERE room_id = ?", arguments: [roomID.rawValue])
+        func positiveRevision(_ row: Row, column: String) throws -> Int64 {
+            let value: DatabaseValue = row[column]
+            guard case .int64(let revision) = value.storage, revision > 0
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return revision
+        }
+        let storedBaselineRevision = try baseline.map { try positiveRevision($0, column: "permission_revision") }
+        let revisionRow = try Row.fetchOne(db, sql: "SELECT revision FROM v2_group_permission_revisions WHERE room_id = ?", arguments: [roomID.rawValue])
+        let storedRevision = try revisionRow.map { try positiveRevision($0, column: "revision") }
+        for row in rows { _ = try positiveRevision(row, column: "revision") }
+        let baselineRevision = storedBaselineRevision ?? 0
+        let revision = try Self.storageUnsigned(max(storedRevision ?? 1, baselineRevision))
+        var observed = Dictionary(uniqueKeysWithValues: rows.map { ($0["role"] as String, $0) })
+        var result: [V2ClientGroupRolePolicy] = []
+        for role in [V2RoomMembershipRole.admin, .member] {
+            let row = observed.removeValue(forKey: role.rawValue)
+            let data: Data
+            if let baseline, (try row.map { try positiveRevision($0, column: "revision") } ?? 0) <= baselineRevision {
+                data = baseline[role == .admin ? "admin_permissions" : "member_permissions"]
+            } else if let row { data = row["permissions"] }
+            else { continue }
+            let names = try JSONDecoder().decode([String].self, from: data)
+            let permissions = Set(names.compactMap(V2GroupPermission.init(rawValue:)))
+            guard permissions.count == names.count else { throw V2ClientProjectionError.invalidMessagePayload }
+            result.append(.init(roomID: roomID, role: role, permissions: permissions, revision: revision))
+        }
+        guard observed.isEmpty else { throw V2ClientProjectionError.invalidMessagePayload }
+        return result
     }
 
     /// Rebuilds the derived character index in bounded transactions. The
@@ -1893,80 +2291,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             let pageRows = Array(rows.prefix(limit))
             guard !pageRows.isEmpty else { return .init(entries: [], nextCursor: nil) }
 
-            let roomIDs = try pageRows.map { try RoomID($0["room_id"] as String) }
-            let placeholders = Array(repeating: "?", count: roomIDs.count).joined(separator: ",")
-            let roomArguments = StatementArguments(roomIDs.map(\.rawValue))
-
-            let messageRows = try Row.fetchAll(
-                db,
-                sql: """
-                SELECT message.*
-                FROM v2_conversation_summaries AS summary
-                INNER JOIN v2_message_projections AS message ON message.message_id = summary.message_id
-                WHERE summary.room_id IN (\(placeholders))
-                """,
-                arguments: roomArguments
-            )
-            let messages = try Dictionary(uniqueKeysWithValues: messageRows.map { row -> (RoomID, V2ClientMessageProjection) in
-                let message = try Self.decodeMessageProjection(row)
-                return (message.roomID, message)
-            })
-            let profiles = try Dictionary(uniqueKeysWithValues: Row.fetchAll(
-                db,
-                sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))",
-                arguments: roomArguments
-            ).map { row -> (RoomID, V2ClientRoomProfileProjection) in
-                let profile = try Self.decodeRoomProfileProjection(row)
-                return (profile.roomID, profile)
-            })
-
-            var directIdentities = try Dictionary(uniqueKeysWithValues: Row.fetchAll(
-                db,
-                sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_identities WHERE room_id IN (\(placeholders))",
-                arguments: roomArguments
-            ).map { row -> (RoomID, V2ClientDirectRoomIdentity) in
-                let identity = try Self.decodeDirectRoomIdentity(row)
-                return (identity.roomID, identity)
-            })
-            for row in try Row.fetchAll(
-                db,
-                sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_profile_projections WHERE room_id IN (\(placeholders))",
-                arguments: roomArguments
-            ) {
-                let identity = try Self.decodeDirectRoomIdentity(row)
-                directIdentities[identity.roomID] = identity
-            }
-
-            let directUserIDs = Array(Set(directIdentities.values.map(\.publicIdentity.userID))).sorted()
-            var profileViews: [UserID: V2ProfileView] = [:]
-            if !directUserIDs.isEmpty {
-                let userPlaceholders = Array(repeating: "?", count: directUserIDs.count).joined(separator: ",")
-                for row in try Row.fetchAll(
-                    db,
-                    sql: "SELECT user_id, public_handle, display_name, account_kind, avatar_media_id, state, revision, visibility_revision FROM v2_profile_views WHERE user_id IN (\(userPlaceholders))",
-                    arguments: StatementArguments(directUserIDs.map(\.rawValue))
-                ) {
-                    let profile = try Self.decodeProfileView(row)
-                    profileViews[profile.userID] = profile
-                }
-            }
-
-            let entries = try pageRows.map { row -> V2ClientConversationListEntry in
-                let roomID = try RoomID(row["room_id"] as String)
-                let directIdentity = directIdentities[roomID]
-                let muteUntil: Double = row["mute_until"]
-                return .init(
-                    roomID: roomID,
-                    lastMessage: messages[roomID],
-                    roomProfile: profiles[roomID],
-                    directIdentity: directIdentity,
-                    directProfileView: directIdentity.flatMap { profileViews[$0.publicIdentity.userID] },
-                    lastActivity: Date(timeIntervalSince1970: row["last_activity"] as Double),
-                    isPinned: row["is_pinned"],
-                    isArchived: row["is_archived"],
-                    muteUntil: muteUntil == 0 ? nil : Date(timeIntervalSince1970: muteUntil)
-                )
-            }
+            let entries = try Self.conversationListEntries(pageRows, db: db)
             let nextCursor: V2ClientConversationListCursor? = rows.count > limit ? try pageRows.last.map { row in
                 try .init(
                     isPinned: row["is_pinned"],
@@ -2013,37 +2338,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         includeTotalCount: Bool = false
     ) throws -> V2ClientRelationshipPage {
         guard (1 ... 100).contains(limit) else { throw V2ClientProjectionError.invalidMessagePayload }
-        let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard trimmedQuery.utf8.count <= 100 else { throw V2ClientProjectionError.invalidMessagePayload }
-        let searchTokens = V2CharacterGramTokenizer().tokenize(trimmedQuery)
-        guard trimmedQuery.isEmpty || !searchTokens.unigrams.isEmpty else {
-            throw V2ClientProjectionError.invalidMessagePayload
-        }
-
-        var clauses: [String] = []
-        var arguments: StatementArguments = []
-        switch scope {
-        case .accepted:
-            clauses.append("relationship.state = ?")
-            arguments += [V2RelationshipState.accepted.rawValue]
-        case .incomingRequests(let currentUserID):
-            clauses.append("relationship.state = ? AND relationship.requested_by_user_id <> ?")
-            arguments += [V2RelationshipState.pending.rawValue, currentUserID.rawValue]
-        case .outgoingRequests(let currentUserID):
-            clauses.append("relationship.state = ? AND relationship.requested_by_user_id = ?")
-            arguments += [V2RelationshipState.pending.rawValue, currentUserID.rawValue]
-        }
-        if !trimmedQuery.isEmpty {
-            let match: String
-            if searchTokens.characterCount == 1 {
-                match = "display_unigrams : \(searchTokens.unigrams[0]) OR handle_unigrams : \(searchTokens.unigrams[0])"
-            } else {
-                let phrase = "\"\(searchTokens.bigrams.joined(separator: " "))\""
-                match = "display_bigrams : \(phrase) OR handle_bigrams : \(phrase)"
-            }
-            clauses.append("v2_contact_profile_search MATCH ?")
-            arguments += [match]
-        }
+        let selection = try Self.relationshipListSelection(scope: scope, matching: query)
+        var clauses = selection.clauses
+        var arguments = selection.arguments
         let countClauses = includeTotalCount ? clauses : []
         let countArguments = includeTotalCount ? arguments : []
         if let cursor {
@@ -2051,9 +2348,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             arguments += [cursor.updatedAt.timeIntervalSince1970, cursor.updatedAt.timeIntervalSince1970, cursor.targetUserID.rawValue]
         }
         let whereClause = clauses.joined(separator: " AND ")
-        let searchJoin = trimmedQuery.isEmpty
-            ? ""
-            : "JOIN v2_profile_views AS profile ON profile.user_id = relationship.target_user_id JOIN v2_contact_profile_search ON v2_contact_profile_search.rowid = profile.rowid"
+        let searchJoin = selection.searchJoin
         return try databasePool.read { db in
             var pageArguments = arguments
             pageArguments += [limit + 1]
@@ -2329,6 +2624,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return result
     }
 
+    static func commandStorageUnsigned(_ value: Int64) throws -> UInt64 {
+        guard let result = UInt64(exactly: value) else { throw V2ClientCommandError.commandConflict }
+        return result
+    }
+
+    private static func projectionStorageUnsigned(_ value: Int64) throws -> UInt64 {
+        guard let result = UInt64(exactly: value) else { throw V2ClientProjectionError.invalidMessagePayload }
+        return result
+    }
+
     private static func validatePersistable(_ batch: V2ClientSyncBatch) throws {
         _ = try storageInteger(batch.generation)
         for record in batch.records {
@@ -2398,12 +2703,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     private static func readCursor(_ db: Database) throws -> V2LocalSyncCursor? {
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_sync_cursor WHERE singleton = 1") else { return nil }
         let state = try V2LocalSyncCursor.State(rawValue: row["state"] as String).unwrap(or: V2ClientSyncError.generationMismatch)
-        let generation = UInt64(row["generation"] as Int64)
-        let applied = UInt64(row["applied_sequence"] as Int64)
-        let acknowledged = UInt64(row["server_acknowledged_sequence"] as Int64)
+        let generation = try storedCursorSequence(row["generation"])
+        let applied = try storedCursorSequence(row["applied_sequence"])
+        let acknowledged = try storedCursorSequence(row["server_acknowledged_sequence"])
         let token = try (row["sync_token"] as String?).map(V2SyncToken.init)
         let pendingReceipt = try (row["pending_ack_receipt"] as String?).map(V2SyncReceipt.init)
-        let pendingSequence = (row["pending_ack_sequence"] as Int64?).map(UInt64.init)
+        let pendingValue: DatabaseValue = row["pending_ack_sequence"]
+        let pendingSequence = try pendingValue.isNull ? nil : storedCursorSequence(pendingValue)
         if state == .ready {
             return try .init(
                 state: state,
@@ -2417,7 +2723,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             )
         }
         guard let snapshotRaw: String = row["pending_snapshot_id"],
-              let base: Int64 = row["pending_base_sequence"],
+              !(row["pending_base_sequence"] as DatabaseValue).isNull,
               let expires: Double = row["pending_expires_at"]
         else { throw V2ClientSyncError.resetFenceMismatch }
         return try .init(
@@ -2428,8 +2734,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             syncToken: token,
             pendingAcknowledgementReceipt: nil,
             pendingAcknowledgementSequence: nil,
-            pendingReset: .init(snapshotID: .init(snapshotRaw), generation: generation, baseSequence: UInt64(base), expiresAt: Date(timeIntervalSince1970: expires))
+            pendingReset: .init(snapshotID: .init(snapshotRaw), generation: generation, baseSequence: try storedCursorSequence(row["pending_base_sequence"]), expiresAt: Date(timeIntervalSince1970: expires))
         )
+    }
+
+    private static func storedCursorSequence(_ value: DatabaseValue) throws -> UInt64 {
+        guard case .int64(let stored) = value.storage else { throw V2ClientSyncError.storageRangeExceeded }
+        return try storageUnsigned(stored)
     }
 
     private static func writeCursor(_ cursor: V2LocalSyncCursor, db: Database) throws {
@@ -2453,7 +2764,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     private static func decodeEvent(_ row: Row) throws -> V2ClientSyncRecord {
-        try .init(sequence: UInt64(row["sequence"] as Int64), sourceEventID: .init(row["source_event_id"] as String), projectionKind: row["projection_kind"], payload: row["payload"])
+        try .init(sequence: storageUnsigned(row["sequence"] as Int64), sourceEventID: .init(row["source_event_id"] as String), projectionKind: row["projection_kind"], payload: row["payload"])
     }
 
     private static func decodeConversationState(_ row: Row) throws -> V2ClientConversationState {
@@ -2467,7 +2778,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         )
     }
 
-    private static func decodeProfileView(_ row: Row) throws -> V2ProfileView {
+    static func decodeProfileView(_ row: Row) throws -> V2ProfileView {
         let userID = try UserID(row["user_id"] as String)
         guard let state = V2ProfileState(rawValue: row["state"] as String),
               let revision = V2ProfileRevision(rawValue: try storageUnsigned(row["revision"] as Int64)),
@@ -2499,7 +2810,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         )
     }
 
-    private static func decodeRelationshipProjection(_ row: Row) throws -> V2ClientRelationshipProjection {
+    static func decodeRelationshipProjection(_ row: Row) throws -> V2ClientRelationshipProjection {
         guard let state = V2RelationshipState(rawValue: row["state"] as String) else { throw V2ClientSocialProjectionError.invalidPayload }
         let requestedBy = try (row["requested_by_user_id"] as String?).map(UserID.init)
         guard (state == .pending) == (requestedBy != nil) else { throw V2ClientSocialProjectionError.invalidPayload }
@@ -2510,33 +2821,46 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try .init(targetUserID: .init(row["target_user_id"] as String), isBlocked: row["is_blocked"], updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double))
     }
 
-    private static func applyMessage(_ record: V2ClientSyncRecord, db: Database) throws {
-        struct Header: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
-        let header: Header
-        do { header = try JSONDecoder().decode(Header.self, from: record.payload) }
-        catch { throw V2ClientProjectionError.invalidMessagePayload }
-        switch header.eventType {
-        case "message.accepted": try persist(V2ClientMessageProjection(record: record), db: db)
-        case "message.edited": try persist(V2ClientMessageEditProjection(record: record), db: db)
-        case "message.withdrawn", "message.redacted":
-            // A moderator redaction is the same client-visible tombstone
-            // shape as an author withdrawal. The server intentionally keeps
-            // the audit reason out of this projection, but the message must
-            // still become terminal before the sync cursor advances.
-            try persist(V2ClientMessageTombstone(record: record), db: db)
-        default: throw V2ClientProjectionError.invalidMessagePayload
+    private static func applyMessage(_ record: V2ClientSyncRecord, expectedRoomID: RoomID? = nil, expectedRoomSequence: UInt64? = nil, db: Database) throws {
+        let effect = try V2LocalMessageEffect(record: record)
+        if let expectedRoomID, effect.roomID != expectedRoomID { throw V2ClientProjectionError.invalidMessagePayload }
+        if let expectedRoomSequence, case .edited(let edit) = effect,
+           case .complete(let replacement) = edit.content, replacement.mutationRoomSequence != expectedRoomSequence {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        guard try claimMessageEffect(effect, sourceEventID: record.sourceEventID, db: db) else { return }
+        switch effect {
+        case .accepted(let value): try persist(value, db: db)
+        case .edited(let value): try persist(value, db: db)
+        case .withdrawn(let value), .redacted(let value): try persist(value, db: db)
         }
     }
 
-    private static func applyRoomEventProjection(_ record: V2ClientSyncRecord, db: Database) throws {
+    /// The account-bound database is the effect's account scope. This claim,
+    /// projection mutation, FTS job and consuming feed cursor share one write
+    /// transaction. Failed application cannot leave a committed claim behind.
+    private static func claimMessageEffect(_ effect: V2LocalMessageEffect, sourceEventID: EventID, db: Database) throws -> Bool {
+        let digest = try effect.digest()
+        let revision = try storageInteger(effect.revision)
+        if let row = try Row.fetchOne(db, sql: "SELECT room_id, message_revision, canonical_digest FROM v2_message_effects WHERE source_event_id = ? AND projection_kind = 'message' AND entity_key = ?", arguments: [sourceEventID.rawValue, effect.messageID.rawValue]) {
+            guard (row["room_id"] as String) == effect.roomID.rawValue,
+                  (row["message_revision"] as Int64) == revision,
+                  (row["canonical_digest"] as Data) == digest
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return false
+        }
+        try db.execute(sql: "INSERT INTO v2_message_effects (source_event_id, projection_kind, entity_key, room_id, message_revision, canonical_digest) VALUES (?, 'message', ?, ?, ?, ?)", arguments: [sourceEventID.rawValue, effect.messageID.rawValue, effect.roomID.rawValue, revision, digest])
+        return true
+    }
+
+    private static func applyRoomEventProjection(_ record: V2ClientSyncRecord, roomID: RoomID, db: Database) throws {
         switch record.projectionKind {
-        case "message": try applyMessage(record, db: db)
+        case "message": try applyMessage(record, expectedRoomID: roomID, expectedRoomSequence: record.sequence, db: db)
         case "message_reaction":
-            let reaction = try V2ClientMessageReaction(record: record)
-            try persist(reaction, action: try reaction.action(record: record), db: db)
+            try applyReaction(record, expectedRoomSequence: record.sequence, db: db)
         case "moderation": try applyModeration(record, db: db)
         case "room", "membership": try applyMembershipAwareRoomProjection(record, db: db)
-        case "group_capability": try applyGroupCapability(record, db: db)
+        case "group_capability": try applyGroupCapability(record, expectedRoomSequence: record.sequence, expectedRoomID: roomID, db: db)
         case "timeline_activity": try persist(V2ClientTimelineActivityProjection(record: record), db: db)
         default: throw V2ClientProjectionError.invalidMessagePayload
         }
@@ -2558,7 +2882,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let header: MembershipHeader
         do { header = try JSONDecoder().decode(MembershipHeader.self, from: record.payload) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
-        _ = try RoomID(header.roomID); _ = try UserID(header.targetUserID)
+        let roomID = try RoomID(header.roomID); let targetUserID = try UserID(header.targetUserID)
         guard header.action == "add" || header.action == "remove" else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
@@ -2566,15 +2890,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             db,
             sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1"
         )?["user_id"]
-        if header.action == "remove", currentUserID == header.targetUserID {
-            try purgeRoomProjection(roomID: header.roomID, db: db)
+        if header.action == "remove", currentUserID == targetUserID.rawValue {
+            try purgeRoomProjection(roomID: roomID.rawValue, db: db)
             return
         }
         try persist(V2ClientRoomProfileProjection(record: record), db: db)
         if header.action == "remove" {
             try db.execute(
                 sql: "DELETE FROM v2_group_member_roles WHERE room_id = ? AND user_id = ?",
-                arguments: [header.roomID, header.targetUserID]
+                arguments: [roomID.rawValue, targetUserID.rawValue]
             )
         }
     }
@@ -2589,10 +2913,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try enqueueMessageSearchDeletionJob(messageID: messageID, db: db)
         }
         for table in [
-            "v2_message_reactions", "v2_message_tombstones", "v2_message_projections",
+            "v2_message_reactions", "v2_reaction_versions", "v2_reaction_effects", "v2_message_effects", "v2_message_tombstones", "v2_message_projections",
             "v2_moderation_projections", "v2_room_control_projections", "v2_room_profile_projections",
             "v2_conversation_states", "v2_message_favorites", "v2_timeline_activity_projections",
-            "v2_group_pinned_messages", "v2_group_announcements", "v2_group_role_permissions",
+            "v2_group_pinned_messages", "v2_pin_effects", "v2_group_announcements", "v2_announcement_effects", "v2_group_role_policies", "v2_role_policy_effects", "v2_group_role_policy_baselines", "v2_role_policy_recovery_requests",
             "v2_group_member_roles", "v2_group_permission_revisions", "v2_group_events",
             "v2_group_event_cursors", "v2_conversation_summaries", "v2_conversation_list_entries",
         ] {
@@ -2600,34 +2924,419 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    private static func applyGroupCapability(
-        _ record: V2ClientSyncRecord,
+    private static func pinShouldReplace(
+        _ current: Row, source: String?, sequence: Int64?, digest: Data?,
+        isPinned: Bool, updatedAt: Double, allowUnknownReplacement: Bool
+    ) throws -> Bool {
+        let oldSource: String? = current["source_event_id"]
+        let oldSequence: Int64? = current["room_sequence"]
+        if let source, source == oldSource {
+            guard (current["canonical_digest"] as Data?) == digest,
+                  (current["is_pinned"] as Bool) == isPinned,
+                  (current["updated_at"] as Double) == updatedAt,
+                  sequence == nil || oldSequence == nil || sequence == oldSequence
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return oldSequence == nil && sequence != nil
+        }
+        switch (oldSequence, sequence) {
+        case let (.some(old), .some(new)):
+            guard old != new else { throw V2ClientProjectionError.invalidMessagePayload }
+            return new > old
+        case (.some, .none): return false
+        case (.none, .some): return true
+        case (.none, .none): return allowUnknownReplacement
+        }
+    }
+
+    private static func applyPinnedMessage(
+        _ effect: V2LocalPinnedMessageEffect,
+        target: ProjectionTableTarget = .live,
+        preserveUnknownValue: Bool = false,
+        db: Database
+    ) throws {
+        let receipts = target.table("v2_pin_effects")
+        let pins = target.table("v2_group_pinned_messages")
+        var sequence = effect.roomSequence
+        let receipt = try Row.fetchOne(db, sql: "SELECT * FROM \(receipts) WHERE source_event_id = ? AND room_id = ?", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue])
+        if let receipt {
+            let oldSequence: Int64? = receipt["room_sequence"]
+            guard (receipt["message_id"] as String) == effect.messageID.rawValue,
+                  (receipt["canonical_digest"] as Data) == effect.digest,
+                  oldSequence == nil || sequence == nil || oldSequence == sequence
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            sequence = sequence ?? oldSequence
+            if oldSequence == nil, let sequence {
+                try db.execute(sql: "UPDATE \(receipts) SET room_sequence = ? WHERE source_event_id = ? AND room_id = ?", arguments: [sequence, effect.sourceEventID.rawValue, effect.roomID.rawValue])
+            }
+        } else {
+            try db.execute(sql: "INSERT INTO \(receipts) (source_event_id, room_id, message_id, room_sequence, canonical_digest) VALUES (?, ?, ?, ?, ?)", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue, effect.messageID.rawValue, sequence, effect.digest])
+        }
+        let updatedAt = Double(effect.updatedAtMilliseconds) / 1_000
+        if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(pins) WHERE room_id = ? AND message_id = ?", arguments: [effect.roomID.rawValue, effect.messageID.rawValue]) {
+            if preserveUnknownValue, sequence == nil,
+               (current["is_pinned"] as Bool) != effect.isPinned || (current["updated_at"] as Double) != updatedAt {
+                return
+            }
+            // A duplicate whose missing source order has now been supplied
+            // must be reconsidered: its first unversioned observation might
+            // have been ignored while another object state was current.
+            guard try pinShouldReplace(current, source: effect.sourceEventID.rawValue,
+                sequence: sequence, digest: effect.digest, isPinned: effect.isPinned,
+                updatedAt: updatedAt, allowUnknownReplacement: receipt == nil)
+            else { return }
+        }
+        try db.execute(sql: """
+            INSERT INTO \(pins) (room_id, message_id, is_pinned, room_sequence, updated_at, source_event_id, canonical_digest)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id, message_id) DO UPDATE SET is_pinned = excluded.is_pinned,
+                room_sequence = excluded.room_sequence, updated_at = excluded.updated_at,
+                source_event_id = excluded.source_event_id, canonical_digest = excluded.canonical_digest
+            """, arguments: [effect.roomID.rawValue, effect.messageID.rawValue, effect.isPinned, sequence, updatedAt, effect.sourceEventID.rawValue, effect.digest])
+    }
+
+    private static func migratePinnedMessageEffects(db: Database) throws {
+        if try !db.columns(in: "v2_group_pinned_messages").contains(where: { $0.name == "source_event_id" }) {
+            try db.execute(sql: "ALTER TABLE v2_group_pinned_messages RENAME TO v2_legacy_pinned_messages")
+            try db.execute(sql: pinnedMessageProjectionSchemaSQL)
+            let rows = try Row.fetchCursor(db, sql: "SELECT * FROM v2_legacy_pinned_messages")
+            while let row = try rows.next() {
+                guard let room = UUID(uuidString: row["room_id"] as String), let message = UUID(uuidString: row["message_id"] as String) else { throw V2ClientProjectionError.invalidMessagePayload }
+                if let existing = try Row.fetchOne(db, sql: "SELECT * FROM v2_group_pinned_messages WHERE room_id = ? AND message_id = ?", arguments: [room.uuidString, message.uuidString]) {
+                    guard (existing["is_pinned"] as Bool) == (row["is_pinned"] as Bool), (existing["updated_at"] as Double) == (row["updated_at"] as Double) else { throw V2ClientProjectionError.invalidMessagePayload }
+                } else {
+                    // The old column may contain a personal cursor. Preserve
+                    // the observed value but never promote that number to proof.
+                    try db.execute(sql: "INSERT INTO v2_group_pinned_messages (room_id, message_id, is_pinned, updated_at) VALUES (?, ?, ?, ?)", arguments: [room.uuidString, message.uuidString, row["is_pinned"] as Bool, row["updated_at"] as Double])
+                }
+            }
+            try db.execute(sql: "DROP TABLE v2_legacy_pinned_messages")
+            try db.execute(sql: "CREATE INDEX v2_group_pinned_messages_room_idx ON v2_group_pinned_messages (room_id, is_pinned DESC, updated_at DESC)")
+        }
+        if try !db.tableExists("v2_pin_effects") { try db.execute(sql: pinnedMessageEffectsSchemaSQL) }
+        for table in ["v2_sync_events", "v2_group_events"] {
+            let columns = table == "v2_group_events" ? "room_sequence AS source_sequence, room_id AS source_room" : "NULL AS source_sequence, NULL AS source_room"
+            let rows = try Row.fetchCursor(db, sql: "SELECT source_event_id, payload, \(columns) FROM \(table) WHERE projection_kind = 'group_capability'")
+            while let row = try rows.next() {
+                let payload: Data = row["payload"]
+                guard try V2ClientGroupCapabilityProjection.header(payload).eventType == "message.pinned_changed" else { continue }
+                let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: try .init(row["source_event_id"] as String), projectionKind: "group_capability", payload: payload)
+                let sequence: Int64? = row["source_sequence"]
+                let room: String? = row["source_room"]
+                let effect = try V2LocalPinnedMessageEffect(record: record, expectedRoomSequence: sequence.map(storageUnsigned), expectedRoomID: room.map(RoomID.init))
+                // Retained logs must not resurrect a removed room or a pin
+                // projection that no longer exists after authorization purge.
+                guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_group_pinned_messages WHERE room_id = ? AND message_id = ?)", arguments: [effect.roomID.rawValue, effect.messageID.rawValue]) == true else { continue }
+                try applyPinnedMessage(effect, preserveUnknownValue: true, db: db)
+            }
+        }
+        if try db.tableExists(snapshotShadowTable(for: "v2_message_projections")) {
+            try dropSnapshotShadowTables(db: db)
+            try db.execute(sql: "DELETE FROM v2_snapshot_import")
+        }
+    }
+
+    private static func preservePinnedMessagesInSnapshot(db: Database) throws {
+        let pins = snapshotShadowTable(for: "v2_group_pinned_messages")
+        let rooms = snapshotShadowTable(for: "v2_room_profile_projections")
+        let receipts = snapshotShadowTable(for: "v2_pin_effects")
+        let rows = try Row.fetchCursor(db, sql: """
+            SELECT live.* FROM v2_group_pinned_messages AS live
+            JOIN \(rooms) AS room ON room.room_id = live.room_id
+            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+        while let live = try rows.next() {
+            let room: String = live["room_id"], message: String = live["message_id"]
+            if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(pins) WHERE room_id = ? AND message_id = ?", arguments: [room, message]) {
+                guard try pinShouldReplace(current, source: live["source_event_id"], sequence: live["room_sequence"], digest: live["canonical_digest"], isPinned: live["is_pinned"], updatedAt: live["updated_at"], allowUnknownReplacement: false) else { continue }
+            }
+            try db.execute(sql: """
+                INSERT INTO \(pins) (room_id, message_id, is_pinned, room_sequence, updated_at, source_event_id, canonical_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(room_id, message_id) DO UPDATE SET is_pinned = excluded.is_pinned,
+                    room_sequence = excluded.room_sequence, updated_at = excluded.updated_at,
+                    source_event_id = excluded.source_event_id, canonical_digest = excluded.canonical_digest
+                """, arguments: [room, message, live["is_pinned"] as Bool, live["room_sequence"] as Int64?, live["updated_at"] as Double, live["source_event_id"] as String?, live["canonical_digest"] as Data?])
+        }
+        // Only keep receipts covered by retained state. Removed rooms/items do
+        // not carry independent historical proof into a new snapshot bank.
+        let covered = "(live.source_event_id = state.source_event_id OR (live.room_sequence IS NOT NULL AND state.room_sequence IS NOT NULL AND live.room_sequence <= state.room_sequence))"
+        if try Bool.fetchOne(db, sql: """
+            SELECT EXISTS (
+                SELECT 1 FROM v2_pin_effects AS live
+                JOIN \(receipts) AS incoming ON incoming.source_event_id = live.source_event_id AND incoming.room_id = live.room_id
+                WHERE (live.message_id <> incoming.message_id OR live.canonical_digest <> incoming.canonical_digest
+                    OR (live.room_sequence IS NOT NULL AND incoming.room_sequence IS NOT NULL AND live.room_sequence <> incoming.room_sequence))
+            )
+            """) == true { throw V2ClientProjectionError.invalidMessagePayload }
+        try db.execute(sql: """
+            INSERT INTO \(receipts)
+            SELECT live.* FROM v2_pin_effects AS live
+            JOIN \(pins) AS state ON state.room_id = live.room_id AND state.message_id = live.message_id
+            WHERE \(covered)
+            ON CONFLICT(source_event_id, room_id) DO UPDATE SET room_sequence = COALESCE(\(receipts).room_sequence, excluded.room_sequence)
+            """)
+        try db.execute(sql: """
+            UPDATE \(pins) SET room_sequence = (
+                SELECT effect.room_sequence FROM \(receipts) AS effect
+                WHERE effect.source_event_id = \(pins).source_event_id AND effect.room_id = \(pins).room_id
+            ) WHERE room_sequence IS NULL AND source_event_id IS NOT NULL
+            """)
+    }
+
+    private static func applyAnnouncement(
+        _ effect: V2LocalAnnouncementEffect,
         target: ProjectionTableTarget = .live,
         db: Database
     ) throws {
-        let pinnedMessages = target.table("v2_group_pinned_messages")
+        let receipts = target.table("v2_announcement_effects")
         let announcements = target.table("v2_group_announcements")
-        let rolePermissions = target.table("v2_group_role_permissions")
-        let permissionRevisions = target.table("v2_group_permission_revisions")
+        if let receipt = try Row.fetchOne(db, sql: "SELECT * FROM \(receipts) WHERE source_event_id = ? AND room_id = ?", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue]) {
+            let sequence: Int64? = receipt["room_sequence"]
+            guard (receipt["revision"] as Int64) == effect.revision,
+                  (receipt["canonical_digest"] as Data) == effect.digest,
+                  sequence == nil || effect.roomSequence == nil || sequence == effect.roomSequence
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            // Retain subsequently supplied source metadata without weakening
+            // the claim if the same legacy fact arrives without it again.
+            if sequence == nil, let sequence = effect.roomSequence {
+                try db.execute(sql: "UPDATE \(receipts) SET room_sequence = ? WHERE source_event_id = ? AND room_id = ?", arguments: [sequence, effect.sourceEventID.rawValue, effect.roomID.rawValue])
+                try db.execute(sql: "UPDATE \(announcements) SET room_sequence = ? WHERE room_id = ? AND source_event_id = ? AND room_sequence IS NULL", arguments: [sequence, effect.roomID.rawValue, effect.sourceEventID.rawValue])
+            }
+            return
+        }
+        try db.execute(sql: "INSERT INTO \(receipts) (source_event_id, room_id, revision, room_sequence, canonical_digest) VALUES (?, ?, ?, ?, ?)", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue, effect.revision, effect.roomSequence, effect.digest])
+        var sequence = effect.roomSequence
+        if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(announcements) WHERE room_id = ?", arguments: [effect.roomID.rawValue]) {
+            let revision: Int64 = current["revision"]
+            if revision > effect.revision { return }
+            if revision == effect.revision {
+                let source: String? = current["source_event_id"]
+                let currentSequence: Int64? = current["room_sequence"]
+                guard (current["body"] as String) == effect.body,
+                      (current["updated_at"] as Double) == Double(effect.updatedAtMilliseconds) / 1_000,
+                      source == nil || (source == effect.sourceEventID.rawValue && (current["canonical_digest"] as Data?) == effect.digest),
+                      currentSequence == nil || sequence == nil || currentSequence == sequence
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+                sequence = sequence ?? currentSequence
+            }
+        }
+        try db.execute(sql: """
+            INSERT INTO \(announcements) (room_id, body, revision, room_sequence, updated_at, source_event_id, canonical_digest)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET body = excluded.body, revision = excluded.revision,
+                room_sequence = excluded.room_sequence, updated_at = excluded.updated_at,
+                source_event_id = excluded.source_event_id, canonical_digest = excluded.canonical_digest
+            """, arguments: [effect.roomID.rawValue, effect.body, effect.revision, sequence, Double(effect.updatedAtMilliseconds) / 1_000, effect.sourceEventID.rawValue, effect.digest])
+    }
+
+    private static func migrateAnnouncementEffects(db: Database) throws {
+        if try !db.columns(in: "v2_group_announcements").contains(where: { $0.name == "source_event_id" }) {
+            try db.execute(sql: "ALTER TABLE v2_group_announcements RENAME TO v2_legacy_announcements")
+            try db.execute(sql: announcementProjectionSchemaSQL)
+            let rows = try Row.fetchCursor(db, sql: "SELECT * FROM v2_legacy_announcements ORDER BY revision")
+            while let row = try rows.next() {
+                let room = try RoomID(row["room_id"] as String)
+                let revision: Int64 = row["revision"]
+                if let current = try Row.fetchOne(db, sql: "SELECT * FROM v2_group_announcements WHERE room_id = ? AND revision = ?", arguments: [room.rawValue, revision]) {
+                    guard (current["body"] as String) == (row["body"] as String), (current["updated_at"] as Double) == (row["updated_at"] as Double) else { throw V2ClientProjectionError.invalidMessagePayload }
+                }
+                // Old room_sequence may be a personal cursor. Visible revision
+                // and value survive, but the missing source proof stays NULL.
+                try db.execute(sql: """
+                    INSERT INTO v2_group_announcements (room_id, body, revision, room_sequence, updated_at)
+                    VALUES (?, ?, ?, NULL, ?)
+                    ON CONFLICT(room_id) DO UPDATE SET body = excluded.body, revision = excluded.revision, updated_at = excluded.updated_at
+                    """, arguments: [room.rawValue, row["body"] as String, revision, row["updated_at"] as Double])
+            }
+            try db.execute(sql: "DROP TABLE v2_legacy_announcements")
+        }
+        if try !db.tableExists("v2_announcement_effects") { try db.execute(sql: announcementEffectsSchemaSQL) }
+        for table in ["v2_sync_events", "v2_group_events"] {
+            let sourceColumns = table == "v2_group_events" ? "room_sequence AS source_sequence, room_id AS source_room" : "NULL AS source_sequence, NULL AS source_room"
+            let rows = try Row.fetchCursor(db, sql: "SELECT source_event_id, payload, \(sourceColumns) FROM \(table) WHERE projection_kind = 'group_capability'")
+            while let row = try rows.next() {
+                let payload: Data = row["payload"]
+                guard try V2ClientGroupCapabilityProjection.header(payload).eventType == "group.announcement_changed" else { continue }
+                let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: try .init(row["source_event_id"] as String), projectionKind: "group_capability", payload: payload)
+                let sequence: Int64? = row["source_sequence"]
+                let room: String? = row["source_room"]
+                let effect = try V2LocalAnnouncementEffect(record: record, expectedRoomSequence: sequence.map(storageUnsigned), expectedRoomID: room.map(RoomID.init))
+                // Personal logs can outlive a revoked room's visible state.
+                // Backfill proof only for surviving announcements, never
+                // resurrect a projection removed by membership authorization.
+                guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_group_announcements WHERE room_id = ?)", arguments: [effect.roomID.rawValue]) == true else { continue }
+                try applyAnnouncement(effect, db: db)
+            }
+        }
+        if try db.tableExists(snapshotShadowTable(for: "v2_group_announcements")) {
+            // The old shadow has no source proof. Resume the durable reset by
+            // reimporting its immutable artifact; live rows/outboxes stay put.
+            try dropSnapshotShadowTables(db: db)
+            try db.execute(sql: "DELETE FROM v2_snapshot_import")
+        }
+    }
+
+    private static func preserveRolePoliciesInSnapshot(db: Database) throws {
+        let policies = snapshotShadowTable(for: "v2_group_role_policies")
+        let rooms = snapshotShadowTable(for: "v2_room_profile_projections")
+        let revisions = snapshotShadowTable(for: "v2_group_permission_revisions")
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT live.* FROM v2_group_role_policies AS live JOIN \(rooms) AS room ON room.room_id = live.room_id
+            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+        for live in rows {
+            let room: String = live["room_id"]
+            let role: String = live["role"]
+            let revision: Int64 = live["revision"]
+            var sequence: Int64? = live["room_sequence"]
+            var source: String? = live["source_event_id"]
+            var digest: Data? = live["canonical_digest"]
+            if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(policies) WHERE room_id = ? AND role = ?", arguments: [room, role]) {
+                let currentRevision: Int64 = current["revision"]
+                if currentRevision > revision { continue }
+                if currentRevision == revision {
+                    let currentSource: String? = current["source_event_id"]
+                    let currentSequence: Int64? = current["room_sequence"]
+                    guard (current["permissions"] as Data) == (live["permissions"] as Data),
+                          currentSource == nil || source == nil || (currentSource == source && (current["canonical_digest"] as Data?) == digest),
+                          sequence == nil || currentSequence == nil || sequence == currentSequence
+                    else { throw V2ClientProjectionError.invalidMessagePayload }
+                    source = source ?? currentSource
+                    digest = digest ?? current["canonical_digest"]
+                    sequence = sequence ?? currentSequence
+                }
+            }
+            try db.execute(sql: """
+                INSERT INTO \(policies) (room_id, role, permissions, revision, room_sequence, source_event_id, canonical_digest)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(room_id, role) DO UPDATE SET permissions = excluded.permissions, revision = excluded.revision,
+                    room_sequence = excluded.room_sequence, source_event_id = excluded.source_event_id, canonical_digest = excluded.canonical_digest
+                """, arguments: [room, role, live["permissions"] as Data, revision, sequence, source, digest])
+        }
+        // A role's independent ordering never lowers the global revision used
+        // by commands, including when the other role is not locally known.
+        try db.execute(sql: """
+            INSERT INTO \(revisions) (room_id, revision)
+            SELECT live.room_id, live.revision FROM v2_group_permission_revisions AS live
+            JOIN \(rooms) AS room ON room.room_id = live.room_id
+            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            ON CONFLICT(room_id) DO UPDATE SET revision = MAX(\(revisions).revision, excluded.revision)
+            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+    }
+
+    private static func applyRolePolicy(
+        _ effect: V2LocalRolePolicyEffect,
+        target: ProjectionTableTarget = .live,
+        db: Database
+    ) throws {
+        let receipts = target.table("v2_role_policy_effects")
+        let policies = target.table("v2_group_role_policies")
+        let revisions = target.table("v2_group_permission_revisions")
+        if let receipt = try Row.fetchOne(db, sql: "SELECT * FROM \(receipts) WHERE source_event_id = ? AND room_id = ?", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue]) {
+            let sequence: Int64? = receipt["room_sequence"]
+            guard (receipt["role"] as String) == effect.role.rawValue,
+                  (receipt["revision"] as Int64) == effect.revision,
+                  (receipt["canonical_digest"] as Data) == effect.digest,
+                  sequence == nil || effect.roomSequence == nil || sequence == effect.roomSequence
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            if sequence == nil, let sequence = effect.roomSequence {
+                try db.execute(sql: "UPDATE \(receipts) SET room_sequence = ? WHERE source_event_id = ? AND room_id = ?", arguments: [sequence, effect.sourceEventID.rawValue, effect.roomID.rawValue])
+                try db.execute(sql: "UPDATE \(policies) SET room_sequence = ? WHERE room_id = ? AND source_event_id = ? AND room_sequence IS NULL", arguments: [sequence, effect.roomID.rawValue, effect.sourceEventID.rawValue])
+            }
+            return
+        }
+        try db.execute(sql: "INSERT INTO \(receipts) (source_event_id, room_id, role, revision, room_sequence, canonical_digest) VALUES (?, ?, ?, ?, ?, ?)", arguments: [effect.sourceEventID.rawValue, effect.roomID.rawValue, effect.role.rawValue, effect.revision, effect.roomSequence, effect.digest])
+        if let baseline = try Row.fetchOne(db, sql: "SELECT * FROM \(target.table("v2_group_role_policy_baselines")) WHERE room_id = ?", arguments: [effect.roomID.rawValue]), (baseline["permission_revision"] as Int64) >= effect.revision {
+            if (baseline["permission_revision"] as Int64) == effect.revision {
+                let column = effect.role == .admin ? "admin_permissions" : "member_permissions"
+                guard (baseline[column] as Data) == effect.encodedPermissions else { throw V2ClientProjectionError.invalidMessagePayload }
+            }
+            return
+        }
+        var sequence = effect.roomSequence
+        if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(policies) WHERE room_id = ? AND role = ?", arguments: [effect.roomID.rawValue, effect.role.rawValue]) {
+            let revision: Int64 = current["revision"]
+            if revision > effect.revision { return }
+            if revision == effect.revision {
+                let source: String? = current["source_event_id"]
+                let currentSequence: Int64? = current["room_sequence"]
+                guard (current["permissions"] as Data) == effect.encodedPermissions,
+                      source == nil || (source == effect.sourceEventID.rawValue && (current["canonical_digest"] as Data?) == effect.digest),
+                      currentSequence == nil || sequence == nil || currentSequence == sequence
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+                sequence = sequence ?? currentSequence
+            }
+        }
+        try db.execute(sql: """
+            INSERT INTO \(policies) (room_id, role, permissions, revision, room_sequence, source_event_id, canonical_digest)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id, role) DO UPDATE SET permissions = excluded.permissions, revision = excluded.revision,
+                room_sequence = excluded.room_sequence, source_event_id = excluded.source_event_id, canonical_digest = excluded.canonical_digest
+            """, arguments: [effect.roomID.rawValue, effect.role.rawValue, effect.encodedPermissions, effect.revision, sequence, effect.sourceEventID.rawValue, effect.digest])
+        try db.execute(sql: "INSERT INTO \(revisions) (room_id, revision) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET revision = MAX(\(revisions).revision, excluded.revision)", arguments: [effect.roomID.rawValue, effect.revision])
+    }
+
+    private static func migrateRolePolicyEffects(db: Database) throws {
+        if try !db.tableExists("v2_group_role_policies") { try db.execute(sql: rolePolicyProjectionSchemaSQL) }
+        if try !db.tableExists("v2_role_policy_effects") { try db.execute(sql: rolePolicyEffectsSchemaSQL) }
+        if try db.tableExists("v2_group_role_permissions") {
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM v2_group_role_permissions ORDER BY room_id, role, permission")
+            let byRoom = Dictionary(grouping: rows, by: { $0["room_id"] as String })
+            for (rawRoom, roomRows) in byRoom {
+                guard UUID(uuidString: rawRoom) != nil else { throw V2ClientProjectionError.invalidMessagePayload }
+                let room = try RoomID(rawRoom)
+                for (role, roleRows) in Dictionary(grouping: roomRows, by: { $0["role"] as String }) {
+                    guard let parsedRole = V2RoomMembershipRole(rawValue: role), parsedRole != .owner,
+                          let first = roleRows.first else { throw V2ClientProjectionError.invalidMessagePayload }
+                    let revision: Int64 = first["revision"]
+                    let permissions = roleRows.compactMap { V2GroupPermission(rawValue: $0["permission"] as String) }
+                    guard revision > 0, Set(permissions).count == roleRows.count,
+                          roleRows.allSatisfy({ ($0["revision"] as Int64) == revision }) else { throw V2ClientProjectionError.invalidMessagePayload }
+                    let encoded = try JSONEncoder().encode(permissions.map(\.rawValue).sorted())
+                    if let current = try Row.fetchOne(db, sql: "SELECT revision, permissions FROM v2_group_role_policies WHERE room_id = ? AND role = ?", arguments: [room.rawValue, role]) {
+                        let currentRevision: Int64 = current["revision"]
+                        if currentRevision > revision { continue }
+                        if currentRevision == revision, (current["permissions"] as Data) != encoded { throw V2ClientProjectionError.invalidMessagePayload }
+                    }
+                    // Preserve an observed nonempty value, but never assign its
+                    // personal cursor as source sequence or invent an event ID.
+                    try db.execute(sql: "INSERT INTO v2_group_role_policies (room_id, role, permissions, revision) VALUES (?, ?, ?, ?) ON CONFLICT(room_id, role) DO UPDATE SET permissions = excluded.permissions, revision = excluded.revision", arguments: [room.rawValue, role, encoded, revision])
+                }
+            }
+            try db.execute(sql: "DROP TABLE v2_group_role_permissions")
+        }
+        // Empty legacy roles have no rows. Neither a room-wide revision nor
+        // absence of a retained event proves that the role uses defaults.
+        // They stay absent until a source fact or a complete baseline arrives.
+        let revisions = try Row.fetchAll(db, sql: "SELECT room_id, revision FROM v2_group_permission_revisions")
+        try db.execute(sql: "DELETE FROM v2_group_permission_revisions")
+        for row in revisions {
+            let room = try RoomID(row["room_id"] as String)
+            try db.execute(sql: "INSERT INTO v2_group_permission_revisions (room_id, revision) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET revision = MAX(v2_group_permission_revisions.revision, excluded.revision)", arguments: [room.rawValue, row["revision"] as Int64])
+        }
+        if try db.tableExists(snapshotShadowTable(for: "v2_message_projections")) {
+            try dropSnapshotShadowTables(db: db)
+            try db.execute(sql: "DELETE FROM v2_snapshot_import")
+        }
+        try db.execute(sql: "DROP TABLE IF EXISTS \(snapshotShadowTable(for: "v2_group_role_permissions"))")
+    }
+
+    private static func applyGroupCapability(
+        _ record: V2ClientSyncRecord,
+        target: ProjectionTableTarget = .live,
+        expectedRoomSequence: UInt64? = nil,
+        expectedRoomID: RoomID? = nil,
+        db: Database
+    ) throws {
         let memberRoles = target.table("v2_group_member_roles")
         let header = try V2ClientGroupCapabilityProjection.header(record.payload)
         switch header.eventType {
         case "message.pinned_changed":
-            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Pin.self, from: record.payload)
-            _ = try RoomID(value.roomID); _ = try MessageID(value.messageID)
-            try db.execute(sql: "INSERT INTO \(pinnedMessages) (room_id, message_id, is_pinned, room_sequence, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, message_id) DO UPDATE SET is_pinned = excluded.is_pinned, room_sequence = excluded.room_sequence, updated_at = excluded.updated_at", arguments: [value.roomID, value.messageID, value.isPinned, try storageInteger(record.sequence), Double(value.serverCreatedAtMilliseconds) / 1_000])
+            try applyPinnedMessage(V2LocalPinnedMessageEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.announcement_changed":
-            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Announcement.self, from: record.payload)
-            _ = try RoomID(value.roomID)
-            try db.execute(sql: "INSERT INTO \(announcements) (room_id, body, revision, room_sequence, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET body = excluded.body, revision = excluded.revision, room_sequence = excluded.room_sequence, updated_at = excluded.updated_at WHERE excluded.revision >= \(announcements).revision", arguments: [value.roomID, value.body, try storageInteger(value.revision), try storageInteger(record.sequence), Double(value.serverCreatedAtMilliseconds) / 1_000])
+            try applyAnnouncement(V2LocalAnnouncementEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.role_permissions_changed":
-            let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.Permissions.self, from: record.payload)
-            guard let role = V2RoomMembershipRole(rawValue: value.role), role != .owner, Set(value.permissions).count == value.permissions.count else { throw V2ClientProjectionError.invalidMessagePayload }
-            let permissions = value.permissions.compactMap(V2GroupPermission.init(rawValue:))
-            guard permissions.count == value.permissions.count else { throw V2ClientProjectionError.invalidMessagePayload }
-            try db.execute(sql: "DELETE FROM \(rolePermissions) WHERE room_id = ? AND role = ?", arguments: [value.roomID, value.role])
-            for permission in permissions { try db.execute(sql: "INSERT INTO \(rolePermissions) (room_id, role, permission, revision, room_sequence) VALUES (?, ?, ?, ?, ?)", arguments: [value.roomID, value.role, permission.rawValue, try storageInteger(value.revision), try storageInteger(record.sequence)]) }
-            try db.execute(sql: "INSERT INTO \(permissionRevisions) (room_id, revision) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET revision = MAX(\(permissionRevisions).revision, excluded.revision)", arguments: [value.roomID, try storageInteger(value.revision)])
+            try applyRolePolicy(V2LocalRolePolicyEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.member_role_changed":
             let value = try JSONDecoder().decode(V2ClientGroupCapabilityProjection.MemberRole.self, from: record.payload)
             _ = try RoomID(value.roomID); _ = try UserID(value.targetUserID)
@@ -2727,6 +3436,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let tombstones = target.table("v2_message_tombstones")
         if let existing = try Row.fetchOne(db, sql: "SELECT * FROM \(messages) WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
             let decoded = try decodeMessageProjection(existing)
+            if projection.messageRevision < decoded.messageRevision {
+                guard decoded.hasSameAcceptance(as: projection) else { throw V2ClientProjectionError.invalidMessagePayload }
+                return
+            }
             guard decoded.sourceEventID == projection.sourceEventID, decoded.messageID == projection.messageID,
                   decoded.roomID == projection.roomID, decoded.roomSequence == projection.roomSequence, decoded.timelineSequence == projection.timelineSequence,
                   decoded.messageRevision == projection.messageRevision, decoded.senderUserID == projection.senderUserID,
@@ -3029,10 +3742,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             sql: "DELETE FROM v2_message_reactions WHERE message_id = ?",
             arguments: [tombstone.messageID.rawValue]
         )
-        if let projection = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_projections WHERE message_id = ?", arguments: [tombstone.messageID.rawValue]) {
+        if let projection = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id = ?", arguments: [tombstone.messageID.rawValue]) {
             let roomID: String = projection["room_id"]
             let revision: Int64 = projection["message_revision"]
-            guard roomID == tombstone.roomID.rawValue, revision < tombstoneRevision else { throw V2ClientProjectionError.invalidMessagePayload }
+            guard roomID == tombstone.roomID.rawValue, revision <= tombstoneRevision else { throw V2ClientProjectionError.invalidMessagePayload }
+            if revision == tombstoneRevision {
+                // Snapshot activation may have installed this terminal value
+                // without the source-event effect claim. Validate materialized
+                // content, then consume the late event without another FTS job.
+                let current = try decodeMessageProjection(projection)
+                guard current.isWithdrawn, current.text == "[removed]",
+                      current.media.isEmpty, current.mediaPresentations.isEmpty,
+                      current.mentions.isEmpty, current.entities.isEmpty,
+                      current.forwardedFrom == nil
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+                if current.replyTo != nil {
+                    try db.execute(sql: "UPDATE v2_message_projections SET reply_to_message_id = NULL WHERE message_id = ?", arguments: [tombstone.messageID.rawValue])
+                }
+                return
+            }
             try redactLocalMessageProjection(messageID: tombstone.messageID, revision: try storageInteger(tombstone.messageRevision), db: db)
             try enqueueMessageSearchIndexJob(messageID: tombstone.messageID, db: db)
         }
@@ -3055,51 +3783,127 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             SET message_revision = ?, is_withdrawn = 1, text_body = '[removed]',
                 media_ids = '[]', media_presentations = '[]',
                 mention_targets = '[]', entities = '[]',
-                forwarded_from_message_id = NULL, forwarded_from_user_id = NULL
+                reply_to_message_id = NULL, forwarded_from_message_id = NULL, forwarded_from_user_id = NULL
             WHERE message_id = ?
             """,
             arguments: [revision, messageID.rawValue]
         )
     }
 
+    private static func persistReplacement(_ replacement: V2ClientMessageReplacement, db: Database) throws {
+        let value = replacement.projection
+        let incoming = try storageInteger(value.messageRevision)
+        if let stone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [value.messageID.rawValue]) {
+            guard (stone["room_id"] as String) == value.roomID.rawValue, incoming < (stone["message_revision"] as Int64)
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id = ?", arguments: [value.messageID.rawValue]) else {
+            try persist(value, db: db)
+            return
+        }
+        let current = try decodeMessageProjection(row)
+        guard current.hasSameAcceptance(as: value) else { throw V2ClientProjectionError.invalidMessagePayload }
+        if current.messageRevision > value.messageRevision { return }
+        guard !current.isWithdrawn else { throw V2ClientProjectionError.invalidMessagePayload }
+        if current.messageRevision == value.messageRevision {
+            guard current == value else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, text_body = ?, media_ids = ?, media_presentations = ?, mention_targets = ?, entities = ?, reply_to_message_id = ?, forwarded_from_message_id = ?, forwarded_from_user_id = ? WHERE message_id = ?",
+            arguments: [incoming, value.text, try encodeMedia(value.media), try encodeMediaPresentations(value.mediaPresentations), try encodeMentions(value.mentions), try encodeEntities(value.entities, text: value.text), value.replyTo?.messageID.rawValue, value.forwardedFrom?.messageID.rawValue, value.forwardedFrom?.senderUserID.rawValue, value.messageID.rawValue])
+        try enqueueMessageSearchIndexJob(messageID: value.messageID, db: db)
+    }
+
     private static func persist(_ edit: V2ClientMessageEditProjection, db: Database) throws {
-        guard let row = try Row.fetchOne(db, sql: "SELECT room_id, message_revision, is_withdrawn FROM v2_message_projections WHERE message_id = ?", arguments: [edit.messageID.rawValue]) else {
+        if case .complete(let replacement) = edit.content {
+            try persistReplacement(replacement, db: db)
+            return
+        }
+        let incoming = try storageInteger(edit.messageRevision)
+        if let tombstone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [edit.messageID.rawValue]) {
+            guard (tombstone["room_id"] as String) == edit.roomID.rawValue,
+                  incoming < (tombstone["message_revision"] as Int64)
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        guard let row = try Row.fetchOne(db, sql: "SELECT room_id, message_revision, is_withdrawn, text_body, entities FROM v2_message_projections WHERE message_id = ?", arguments: [edit.messageID.rawValue]) else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
         let roomID: String = row["room_id"]
         let revision: Int64 = row["message_revision"]
         let isWithdrawn: Bool = row["is_withdrawn"]
-        guard roomID == edit.roomID.rawValue, !isWithdrawn,
-              revision < Int64.max,
-              edit.messageRevision == UInt64(revision + 1)
-        else { throw V2ClientProjectionError.invalidMessagePayload }
-        try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, entities = '[]', message_revision = ? WHERE message_id = ?", arguments: [edit.text, try storageInteger(edit.messageRevision), edit.messageID.rawValue])
+        guard roomID == edit.roomID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
+        // A newer applied revision or an authoritative snapshot already
+        // contains this historical effect. Never restore older text.
+        if incoming < revision { return }
+        guard !isWithdrawn else { throw V2ClientProjectionError.invalidMessagePayload }
+        if incoming == revision {
+            guard (row["text_body"] as String) == edit.text,
+                  (row["entities"] as String) == "[]"
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        guard revision < Int64.max, incoming == revision + 1 else { throw V2ClientProjectionError.invalidMessagePayload }
+        try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, entities = '[]', message_revision = ? WHERE message_id = ?", arguments: [edit.text, incoming, edit.messageID.rawValue])
         try enqueueMessageSearchIndexJob(messageID: edit.messageID, db: db)
     }
 
-    private static func persist(
-        _ reaction: V2ClientMessageReaction,
-        action: V2MessageReactionAction,
-        target: ProjectionTableTarget = .live,
-        db: Database
-    ) throws {
+    private static func applyReaction(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, expectedRoomSequence: UInt64? = nil, db: Database) throws {
+        let effect = try V2LocalReactionEffect(record: record)
+        if let expectedRoomSequence, UInt64(effect.roomSequence) != expectedRoomSequence { throw V2ClientProjectionError.invalidMessagePayload }
+        let reaction = effect.reaction
+        let receipts = target.table("v2_reaction_effects"), versions = target.table("v2_reaction_versions")
+        let key: StatementArguments = [reaction.messageID.rawValue, reaction.actorUserID.rawValue, reaction.reaction]
+        if let row = try Row.fetchOne(db, sql: "SELECT room_id, canonical_digest FROM \(receipts) WHERE source_event_id = ? AND message_id = ? AND actor_user_id = ? AND reaction = ?", arguments: [effect.sourceEventID.rawValue, reaction.messageID.rawValue, reaction.actorUserID.rawValue, reaction.reaction]) {
+            guard (row["room_id"] as String) == reaction.roomID.rawValue, (row["canonical_digest"] as Data) == effect.digest else { throw V2ClientProjectionError.invalidMessagePayload }
+            return
+        }
+        try db.execute(sql: "INSERT INTO \(receipts) VALUES (?, ?, ?, ?, ?, ?, ?)", arguments: [effect.sourceEventID.rawValue, reaction.messageID.rawValue, reaction.roomID.rawValue, reaction.actorUserID.rawValue, reaction.reaction, effect.roomSequence, effect.digest])
+        if let row = try Row.fetchOne(db, sql: "SELECT room_id, room_sequence, source_event_id, canonical_digest FROM \(versions) WHERE message_id = ? AND actor_user_id = ? AND reaction = ?", arguments: key) {
+            guard (row["room_id"] as String) == reaction.roomID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
+            let current: Int64 = row["room_sequence"]
+            if current > effect.roomSequence { return }
+            if current == effect.roomSequence {
+                guard (row["source_event_id"] as String) == effect.sourceEventID.rawValue, (row["canonical_digest"] as Data) == effect.digest else { throw V2ClientProjectionError.invalidMessagePayload }
+                return
+            }
+        }
+        try db.execute(sql: """
+            INSERT INTO \(versions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id, actor_user_id, reaction) DO UPDATE SET room_sequence = excluded.room_sequence,
+                source_event_id = excluded.source_event_id, action = excluded.action, canonical_digest = excluded.canonical_digest
+            """, arguments: [reaction.messageID.rawValue, reaction.roomID.rawValue, reaction.actorUserID.rawValue, reaction.reaction, effect.roomSequence, effect.sourceEventID.rawValue, effect.action.rawValue, effect.digest])
+        let withdrawn = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM \(target.table("v2_message_tombstones")) WHERE message_id = ?) OR EXISTS(SELECT 1 FROM \(target.table("v2_message_projections")) WHERE message_id = ? AND is_withdrawn = 1)", arguments: [reaction.messageID.rawValue, reaction.messageID.rawValue]) == true
         let table = target.table("v2_message_reactions")
-        if action == .add {
+        if effect.action == .add && !withdrawn {
             try db.execute(sql: "INSERT INTO \(table) (message_id, room_id, actor_user_id, reaction) VALUES (?, ?, ?, ?) ON CONFLICT(message_id, actor_user_id, reaction) DO NOTHING", arguments: [reaction.messageID.rawValue, reaction.roomID.rawValue, reaction.actorUserID.rawValue, reaction.reaction])
         } else {
-            try db.execute(sql: "DELETE FROM \(table) WHERE message_id = ? AND room_id = ? AND actor_user_id = ? AND reaction = ?", arguments: [reaction.messageID.rawValue, reaction.roomID.rawValue, reaction.actorUserID.rawValue, reaction.reaction])
+            try db.execute(sql: "DELETE FROM \(table) WHERE message_id = ? AND actor_user_id = ? AND reaction = ?", arguments: key)
         }
     }
 
-    private static func decodeMessageProjection(_ row: Row) throws -> V2ClientMessageProjection {
+    private static func preserveReactionEffectsInSnapshot(db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO \(snapshotShadowTable(for: "v2_reaction_effects"))
+            SELECT effect.* FROM v2_reaction_effects AS effect
+            JOIN \(snapshotShadowTable(for: "v2_reaction_versions")) AS state
+              ON state.message_id = effect.message_id AND state.room_id = effect.room_id
+             AND state.actor_user_id = effect.actor_user_id AND state.reaction = effect.reaction
+             AND state.room_sequence >= effect.room_sequence
+            ON CONFLICT DO NOTHING
+            """)
+    }
+
+    static func decodeMessageProjection(_ row: Row) throws -> V2ClientMessageProjection {
         let sourceEventID = try EventID(row["source_event_id"] as String)
         let messageID = try MessageID(row["message_id"] as String)
         let roomID = try RoomID(row["room_id"] as String)
         let senderUserID = try UserID(row["sender_user_id"] as String)
         let text: String = row["text_body"]
-        let roomSequence = UInt64(row["room_sequence"] as Int64)
-        let timelineSequence = UInt64(row["timeline_sequence"] as Int64)
-        let messageRevision = UInt64(row["message_revision"] as Int64)
+        let roomSequence = try projectionStorageUnsigned(row["room_sequence"] as Int64)
+        let timelineSequence = try projectionStorageUnsigned(row["timeline_sequence"] as Int64)
+        let messageRevision = try projectionStorageUnsigned(row["message_revision"] as Int64)
         let media = try decodeMedia(row["media_ids"])
         let mediaPresentations = try decodeMediaPresentations(row["media_presentations"])
         let mentions = try decodeMentions(row["mention_targets"])
@@ -3143,24 +3947,24 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return try .init(
             sourceEventID: .init(row["source_event_id"] as String),
             roomID: .init(row["room_id"] as String),
-            timelineSequence: UInt64(row["timeline_sequence"] as Int64),
+            timelineSequence: projectionStorageUnsigned(row["timeline_sequence"] as Int64),
             kind: kind,
             createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double)
         )
     }
 
     private static func decodeModerationProjection(_ row: Row) throws -> V2ClientModerationProjection {
-        let payload: [String: Any] = [
-            "event_type": "member.muted",
-            "room_id": row["room_id"] as String,
-            "room_sequence": UInt64(row["room_sequence"] as Int64),
-            "actor_user_id": row["actor_user_id"] as String,
-            "target_user_id": row["target_user_id"] as String,
-            "mute_until_ms": Int64((row["mute_until"] as Double) * 1_000),
-            "server_created_at_ms": Int64((row["server_created_at"] as Double) * 1_000)
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        return try .init(record: .init(sequence: 1, sourceEventID: try .init(row["source_event_id"] as String), projectionKind: "moderation", payload: data))
+        guard let sequence = UInt64(exactly: row["room_sequence"] as Int64) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return try .init(
+            sourceEventID: .init(row["source_event_id"] as String),
+            roomID: .init(row["room_id"] as String), roomSequence: sequence,
+            actorUserID: .init(row["actor_user_id"] as String),
+            targetUserID: .init(row["target_user_id"] as String),
+            muteUntil: Date(timeIntervalSince1970: row["mute_until"] as Double),
+            createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double)
+        )
     }
 
     static func requirePendingCommand(_ clientMessageID: ClientMessageID, db: Database) throws {
@@ -3204,7 +4008,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             throw V2ClientCommandError.commandConflict
         }
         let acceptedRaw: String? = row["accepted_message_id"]
-        let acceptedRoomSequence = (row["accepted_room_sequence"] as Int64?).map(UInt64.init)
+        let acceptedRoomSequence = try (row["accepted_room_sequence"] as Int64?).map(commandStorageUnsigned)
         return try .init(
             roomID: .init(row["room_id"] as String),
             clientMessageID: .init(row["client_message_id"] as String),
@@ -3214,8 +4018,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             entities: try decodeEntities(row["entities"], text: row["text"]),
             replyTo: try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) },
             state: state,
-            attemptCount: Int(row["attempt_count"] as Int64),
-            nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double),
+            attemptCount: try commandAttemptCount(row),
+            nextAttemptAt: try commandRetryDate(row),
             acceptedMessageID: try acceptedRaw.map(MessageID.init),
             acceptedRoomSequence: acceptedRoomSequence,
             terminalCode: row["terminal_code"]
@@ -3320,18 +4124,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let state = V2PendingMembershipCommand.State(rawValue: row["state"] as String),
               let action = V2RoomMembershipAction(rawValue: row["action"] as String)
         else { throw V2ClientCommandError.commandConflict }
-        let revision = (row["resulting_membership_revision"] as Int64?).map(UInt64.init)
-        let roomSequence = (row["resulting_room_sequence"] as Int64?).map(UInt64.init)
-        let terminalCurrentRevision = (row["terminal_current_revision"] as Int64?).map(UInt64.init)
+        let revision = try (row["resulting_membership_revision"] as Int64?).map(commandStorageUnsigned)
+        let roomSequence = try (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned)
+        let terminalCurrentRevision = try (row["terminal_current_revision"] as Int64?).map(commandStorageUnsigned)
         return try .init(
             roomID: .init(row["room_id"] as String),
             operationID: .init(row["operation_id"] as String),
             targetUserID: .init(row["target_user_id"] as String),
             action: action,
-            expectedMembershipRevision: UInt64(row["expected_membership_revision"] as Int64),
+            expectedMembershipRevision: try commandStorageUnsigned(row["expected_membership_revision"] as Int64),
             state: state,
-            attemptCount: Int(row["attempt_count"] as Int64),
-            nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double),
+            attemptCount: try commandAttemptCount(row),
+            nextAttemptAt: try commandRetryDate(row),
             resultingMembershipRevision: revision,
             resultingRoomSequence: roomSequence,
             terminalCode: row["terminal_code"],
@@ -3343,11 +4147,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let state = V2PendingMessageWithdrawal.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         return try .init(
             roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String),
-            expectedMessageRevision: UInt64(row["expected_message_revision"] as Int64), state: state,
-            attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double),
-            resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(UInt64.init),
-            resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init),
-            terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(UInt64.init)
+            expectedMessageRevision: try commandStorageUnsigned(row["expected_message_revision"] as Int64), state: state,
+            attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row),
+            resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(commandStorageUnsigned),
+            resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned),
+            terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(commandStorageUnsigned)
         )
     }
 
@@ -3359,21 +4163,21 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             messageID: .init(row["message_id"] as String),
             reasonCode: .init(row["reason_code"] as String),
             state: state,
-            attemptCount: Int(row["attempt_count"] as Int64),
-            nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double),
-            resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(UInt64.init),
-            resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init),
+            attemptCount: try commandAttemptCount(row),
+            nextAttemptAt: try commandRetryDate(row),
+            resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(commandStorageUnsigned),
+            resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned),
             terminalCode: row["terminal_code"]
         )
     }
-    static func decodePendingMemberMute(_ row: Row) throws -> V2PendingMemberMute { guard let state = V2PendingMemberMute.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), muteUntil: Date(timeIntervalSince1970: row["mute_until"] as Double), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"]) }
-    static func decodePendingModeratedMemberRemoval(_ row: Row) throws -> V2PendingModeratedMemberRemoval { guard let state = V2PendingModeratedMemberRemoval.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingMembershipRevision: (row["resulting_membership_revision"] as Int64?).map(UInt64.init), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"]) }
+    static func decodePendingMemberMute(_ row: Row) throws -> V2PendingMemberMute { guard let state = V2PendingMemberMute.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), muteUntil: Date(timeIntervalSince1970: row["mute_until"] as Double), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned), terminalCode: row["terminal_code"]) }
+    static func decodePendingModeratedMemberRemoval(_ row: Row) throws -> V2PendingModeratedMemberRemoval { guard let state = V2PendingModeratedMemberRemoval.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingMembershipRevision: (row["resulting_membership_revision"] as Int64?).map(commandStorageUnsigned), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned), terminalCode: row["terminal_code"]) }
 
     static func decodeRoomControlProjection(_ row: Row) throws -> V2ClientRoomControlProjection {
         let sourceEventID: EventID = try .init(row["source_event_id"] as String)
         let roomID: RoomID = try .init(row["room_id"] as String)
         let actorUserID: UserID = try .init(row["actor_user_id"] as String)
-        let sequence = UInt64(row["room_sequence"] as Int64)
+        let sequence = try projectionStorageUnsigned(row["room_sequence"] as Int64)
         guard sequence > 0 else { throw V2ClientProjectionError.invalidMessagePayload }
         return try .init(sourceEventID: sourceEventID, roomID: roomID, roomSequence: sequence, actorUserID: actorUserID, isFrozen: row["is_frozen"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
     }
@@ -3412,16 +4216,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     static func decodePendingMessageReaction(_ row: Row) throws -> V2PendingMessageReaction {
         guard let state = V2PendingMessageReaction.State(rawValue: row["state"] as String), let action = V2MessageReactionAction(rawValue: row["action"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), reaction: row["reaction"], action: action, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"])
+        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), reaction: row["reaction"], action: action, state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned), terminalCode: row["terminal_code"])
     }
     static func decodePendingConversationState(_ row: Row) throws -> V2PendingConversationStateCommand {
         guard let state = V2PendingConversationStateCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         let muteUntil = (row["mute_until"] as Double) == 0 ? nil : Date(timeIntervalSince1970: row["mute_until"] as Double)
-        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: muteUntil), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: muteUntil), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
     }
     static func decodePendingMessageFavorite(_ row: Row) throws -> V2PendingMessageFavoriteCommand {
         guard let state = V2PendingMessageFavoriteCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), messageID: .init(row["message_id"] as String), isFavorited: row["is_favorited"]), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), messageID: .init(row["message_id"] as String), isFavorited: row["is_favorited"]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
     }
     static func decodePendingGroupCapability(_ row: Row) throws -> V2PendingGroupCapabilityCommand {
         guard let kind = V2PendingGroupCapabilityCommand.Kind(rawValue: row["kind"] as String), let state = V2PendingGroupCapabilityCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
@@ -3429,46 +4233,97 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let rawPermissions = try JSONDecoder().decode([String].self, from: Data((row["permissions"] as String).utf8))
         let permissions = Set(rawPermissions.compactMap(V2GroupPermission.init(rawValue:)))
         guard permissions.count == rawPermissions.count else { throw V2ClientCommandError.commandConflict }
-        return try .init(kind: kind, operationID: row["operation_id"], roomID: .init(row["room_id"] as String), messageID: try (row["message_id"] as String?).map(MessageID.init), isPinned: row["is_pinned"], body: row["body"], role: role, permissions: permissions, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), expectedRevision: try storageUnsigned(row["expected_revision"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(kind: kind, operationID: row["operation_id"], roomID: .init(row["room_id"] as String), messageID: try (row["message_id"] as String?).map(MessageID.init), isPinned: row["is_pinned"], body: row["body"], role: role, permissions: permissions, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), expectedRevision: try storageUnsigned(row["expected_revision"] as Int64), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
     }
-    static func decodePendingForwardMessages(_ row: Row) throws -> V2PendingForwardMessagesCommand { guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init); let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)).map(RoomID.init); return try .init(command: .init(operationID: .init(row["operation_id"] as String), sourceMessageIDs: sources, targetRoomIDs: targets), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"]) }
+    static func decodeForwardSourceReferences(_ row: Row) throws -> [V2ForwardMessageReference] {
+        guard let json: String = row["source_references"] else { throw V2ClientCommandError.commandConflict }
+        let sources = try JSONDecoder().decode([V2ForwardMessageReference].self, from: Data(json.utf8))
+        let ids = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
+        guard !sources.isEmpty, sources.map({ $0.messageID.rawValue }) == ids,
+              Set(sources.map(\.messageID)).count == sources.count
+        else { throw V2ClientCommandError.commandConflict }
+        return sources
+    }
+    static func decodePendingForwardMessages(_ row: Row) throws -> V2PendingForwardMessagesCommand {
+        guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
+        let sources = try decodeForwardSourceReferences(row)
+        let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)).map(RoomID.init)
+        return try .init(command: .init(operationID: .init(row["operation_id"] as String), sources: sources, targetRoomIDs: targets), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
+    }
     static func decodeForwardMessagesPlan(_ row: Row) throws -> V2ForwardMessagesPlan {
         guard let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
         let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8))
+        let progress = try validatedForwardChunkProgress(row, sourceCount: sources.count, targetCount: targets.count)
         guard !targets.isEmpty, sources.count <= Int.max / targets.count else { throw V2ClientCommandError.commandConflict }
         let total = sources.count * targets.count
-        return .init(operationID: try .init(row["plan_id"] as String), sourceMessageCount: sources.count, targetRoomCount: targets.count, totalForwardCount: total, succeededCount: Int(row["succeeded_count"] as Int64), failedCount: Int(row["failed_count"] as Int64), state: state)
+        let succeededValue: DatabaseValue = row["succeeded_count"]
+        let failedValue: DatabaseValue = row["failed_count"]
+        guard case .int64(let storedSucceeded) = succeededValue.storage,
+              case .int64(let storedFailed) = failedValue.storage,
+              let succeeded = Int(exactly: storedSucceeded), let failed = Int(exactly: storedFailed),
+              succeeded >= 0, failed >= 0, succeeded <= total, failed <= total - succeeded
+        else { throw V2ClientCommandError.commandConflict }
+        let completedResults: Int
+        if progress.index == progress.total {
+            completedResults = total
+        } else {
+            let index = Int(progress.index)
+            let pageSize = V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+            let sourceStart = (index / targets.count) * pageSize
+            let chunkSize = min(pageSize, sources.count - sourceStart)
+            completedResults = sourceStart * targets.count + (index % targets.count) * chunkSize
+        }
+        guard succeeded + failed == completedResults else { throw V2ClientCommandError.commandConflict }
+        return .init(operationID: try .init(row["plan_id"] as String), sourceMessageCount: sources.count, targetRoomCount: targets.count, totalForwardCount: total, succeededCount: succeeded, failedCount: failed, state: state, terminalCode: row["terminal_code"])
+    }
+    static func validatedForwardChunkProgress(_ row: Row, sourceCount: Int, targetCount: Int) throws -> (index: Int64, total: Int64) {
+        guard sourceCount > 0, targetCount > 0 else { throw V2ClientCommandError.commandConflict }
+        let pageSize = V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+        let pages = sourceCount / pageSize + (sourceCount % pageSize == 0 ? 0 : 1)
+        let (expected, overflow) = pages.multipliedReportingOverflow(by: targetCount)
+        let indexValue: DatabaseValue = row["next_chunk_index"]
+        let totalValue: DatabaseValue = row["total_chunk_count"]
+        guard !overflow, let expectedCount = Int64(exactly: expected),
+              case .int64(let index) = indexValue.storage,
+              case .int64(let total) = totalValue.storage,
+              total == expectedCount, index >= 0, index <= total
+        else { throw V2ClientCommandError.commandConflict }
+        return (index, total)
     }
     static func decodeForwardPlanChunk(_ row: Row) throws -> V2PendingForwardMessagesCommand {
         guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init)
+        let sources = try decodeForwardSourceReferences(row)
         let target = try RoomID(row["target_room_id"] as String)
-        return try .init(command: .init(operationID: try .init(row["operation_id"] as String), sourceMessageIDs: sources, targetRoomIDs: [target]), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(command: .init(operationID: try .init(row["operation_id"] as String), sources: sources, targetRoomIDs: [target]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
     }
 
     static func advanceForwardPlan(planID: String, completedChunkIndex: Int64, succeeded: Int, failed: Int, now: Date, db: Database) throws {
         guard succeeded >= 0, failed >= 0,
-              let row = try Row.fetchOne(db, sql: "SELECT next_chunk_index, total_chunk_count, state FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [planID]),
+              let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [planID]),
               let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String), state == .active
-        else { return }
+        else { throw V2ClientCommandError.commandConflict }
+        let plan = try decodeForwardMessagesPlan(row)
+        let remaining = plan.totalForwardCount - plan.succeededCount - plan.failedCount
+        guard succeeded <= remaining, failed <= remaining - succeeded else { throw V2ClientCommandError.commandConflict }
         let nextChunkIndex: Int64 = row["next_chunk_index"]
         let totalChunkCount: Int64 = row["total_chunk_count"]
-        guard nextChunkIndex == completedChunkIndex else { throw V2ClientCommandError.commandConflict }
+        guard nextChunkIndex == completedChunkIndex, completedChunkIndex >= 0,
+              completedChunkIndex < totalChunkCount else { throw V2ClientCommandError.commandConflict }
         let next = completedChunkIndex + 1
         try db.execute(
-            sql: "UPDATE v2_forward_message_plans SET next_chunk_index = ?, succeeded_count = succeeded_count + ?, failed_count = failed_count + ?, state = ?, updated_at = ? WHERE plan_id = ?",
-            arguments: [next, succeeded, failed, next == totalChunkCount ? V2ForwardMessagesPlan.State.completed.rawValue : V2ForwardMessagesPlan.State.active.rawValue, now.timeIntervalSince1970, planID]
+            sql: "UPDATE v2_forward_message_plans SET next_chunk_index = ?, succeeded_count = ?, failed_count = ?, state = ?, updated_at = ? WHERE plan_id = ?",
+            arguments: [next, plan.succeededCount + succeeded, plan.failedCount + failed, next == totalChunkCount ? V2ForwardMessagesPlan.State.completed.rawValue : V2ForwardMessagesPlan.State.active.rawValue, try Self.commandRetryTimestamp(now), planID]
         )
     }
     static func decodePendingMessageEdit(_ row: Row) throws -> V2PendingMessageEdit {
         guard let state = V2PendingMessageEdit.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), expectedMessageRevision: UInt64(row["expected_message_revision"] as Int64), text: row["text_body"], state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(UInt64.init), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(UInt64.init))
+        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), expectedMessageRevision: try commandStorageUnsigned(row["expected_message_revision"] as Int64), text: row["text_body"], state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingMessageRevision: (row["resulting_message_revision"] as Int64?).map(commandStorageUnsigned), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned), terminalCode: row["terminal_code"], terminalCurrentRevision: (row["terminal_current_revision"] as Int64?).map(commandStorageUnsigned))
     }
-    static func decodePendingReadReceipt(_ row: Row) throws -> V2PendingReadReceipt { guard let state = V2PendingReadReceipt.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), readThroughRoomSequence: UInt64(row["read_through_room_sequence"] as Int64), state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(UInt64.init), terminalCode: row["terminal_code"]) }
+    static func decodePendingReadReceipt(_ row: Row) throws -> V2PendingReadReceipt { guard let state = V2PendingReadReceipt.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), readThroughRoomSequence: try commandStorageUnsigned(row["read_through_room_sequence"] as Int64), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: (row["resulting_room_sequence"] as Int64?).map(commandStorageUnsigned), terminalCode: row["terminal_code"]) }
     static func decodePendingSocialCommand(_ row: Row) throws -> V2PendingSocialCommand {
         guard let kind = V2PendingSocialCommandKind(rawValue: row["command_kind"] as String), let state = V2PendingSocialCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), allowsDirectReadReceipts: row["allows_direct_read_receipts"], allowsGroupReadReceipts: row["allows_group_read_receipts"], state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), terminalCode: row["terminal_code"])
+        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), allowsDirectReadReceipts: row["allows_direct_read_receipts"], allowsGroupReadReceipts: row["allows_group_read_receipts"], state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
     }
     static func encodeGroupMemberUserIDs(_ members: [UserID]) throws -> String {
         guard let encoded = String(data: try JSONEncoder().encode(members.map(\.rawValue)), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
@@ -3483,7 +4338,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let state = V2PendingGroupRoomCreation.State(rawValue: row["state"] as String),
               let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String)
         else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, uploadedMemberCount: row["uploaded_member_count"] as Int, state: state, attemptCount: Int(row["attempt_count"] as Int64), nextAttemptAt: Date(timeIntervalSince1970: row["next_attempt_at"] as Double), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
+        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], deliveryMode: deliveryMode, initialMemberUserIDs: members, uploadedMemberCount: commandNonnegativeInteger(row["uploaded_member_count"]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
     }
 
     enum V2MessageSearchRebuildOutcome {
@@ -3497,6 +4352,144 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createCurrentV2Schema") { db in
             try db.execute(sql: currentSchemaSQL)
+        }
+        // Preserve existing account outboxes. Older completed chunks have no
+        // recoverable result: leave their digest nil and reject unverifiable
+        // replays instead of fabricating a receipt or incrementing counts.
+        migrator.registerMigration("addForwardChunkCompletionDigest") { db in
+            if try !db.columns(in: "v2_forward_message_chunks").contains(where: { $0.name == "completion_digest" }) {
+                try db.execute(sql: "ALTER TABLE v2_forward_message_chunks ADD COLUMN completion_digest TEXT")
+            }
+        }
+        migrator.registerMigration("bindForwardSourceReferences") { db in
+            for table in ["v2_pending_forward_messages", "v2_forward_message_plans", "v2_forward_message_chunks"] {
+                if try !db.columns(in: table).contains(where: { $0.name == "source_references" }) {
+                    try db.execute(sql: "ALTER TABLE \(table) ADD COLUMN source_references TEXT")
+                }
+            }
+            if try !db.columns(in: "v2_forward_message_plans").contains(where: { $0.name == "terminal_code" }) {
+                try db.execute(sql: "ALTER TABLE v2_forward_message_plans ADD COLUMN terminal_code TEXT")
+            }
+            // The old queue never recorded the selected version. A current
+            // projection cannot recover that intent, even if its room is known.
+            // Preserve completed counts/receipts and terminalize only work that
+            // cannot be replayed safely. The user must explicitly select again.
+            try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'rejected', terminal_code = 'SOURCE_RESELECTION_REQUIRED' WHERE state = 'pending' AND source_references IS NULL")
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'cancelled', terminal_code = 'SOURCE_RESELECTION_REQUIRED' WHERE state = 'pending' AND (source_references IS NULL OR plan_id IN (SELECT plan_id FROM v2_forward_message_plans WHERE state = 'active' AND source_references IS NULL))")
+            try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', terminal_code = 'SOURCE_RESELECTION_REQUIRED', updated_at = unixepoch('now') WHERE state = 'active' AND source_references IS NULL")
+        }
+        migrator.registerMigration("useUUIDForwardChunkIdentities") { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT operation_id, plan_id, chunk_index FROM v2_forward_message_chunks WHERE state = 'pending'")
+            for row in rows {
+                let operation: String = row["operation_id"]
+                // Valid UUIDs may already have been accepted. Never re-key
+                // them, or terminal chunks, during an upgrade.
+                if UUID(uuidString: operation) != nil { continue }
+                let plan: String = row["plan_id"]
+                let index: Int64 = row["chunk_index"]
+                guard operation == "\(plan)-f\(index)", UUID(uuidString: plan) != nil, index >= 0 else {
+                    try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'cancelled', terminal_code = 'SOURCE_RESELECTION_REQUIRED' WHERE plan_id = ? AND state = 'pending'", arguments: [plan])
+                    try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', terminal_code = 'SOURCE_RESELECTION_REQUIRED', updated_at = unixepoch('now') WHERE plan_id = ? AND state = 'active'", arguments: [plan])
+                    continue
+                }
+                // This exact legacy spelling could never pass the server's
+                // UUID parser, so no accepted server identity is changed.
+                let id = try V2ForwardChunkIdentity.operationID(planID: .init(plan), chunkIndex: UInt64(index))
+                try db.execute(sql: "UPDATE v2_forward_message_chunks SET operation_id = ? WHERE operation_id = ? AND state = 'pending'", arguments: [id.rawValue, operation])
+            }
+        }
+        migrator.registerMigration("recordSharedMessageEffects") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS v2_message_effects (
+                    source_event_id TEXT NOT NULL,
+                    projection_kind TEXT NOT NULL CHECK (projection_kind = 'message'),
+                    entity_key TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    message_revision INTEGER NOT NULL CHECK (message_revision > 0),
+                    canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+                    PRIMARY KEY (source_event_id, projection_kind, entity_key)
+                )
+                """)
+            // Existing durable feeds already prove application. Streaming the
+            // records backfills hashes without retaining a second message body.
+            for table in ["v2_sync_events", "v2_group_events"] {
+                let rows = try Row.fetchCursor(db, sql: "SELECT source_event_id, payload FROM \(table) WHERE projection_kind = 'message'")
+                while let row = try rows.next() {
+                    let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: try .init(row["source_event_id"] as String), projectionKind: "message", payload: row["payload"])
+                    _ = try claimMessageEffect(V2LocalMessageEffect(record: record), sourceEventID: record.sourceEventID, db: db)
+                }
+            }
+            if try db.tableExists(snapshotShadowTable(for: "v2_message_projections")),
+               try !db.tableExists(snapshotShadowTable(for: "v2_message_effects")) {
+                try createSnapshotShadowTable(for: "v2_message_effects", db: db)
+                if try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import LIMIT 1") == true {
+                    try preserveMessageEffectsInSnapshot(db: db)
+                }
+            }
+        }
+        migrator.registerMigration("orderReactionEffects") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS v2_reaction_versions (
+                message_id TEXT NOT NULL, room_id TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+                reaction TEXT NOT NULL, room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+                source_event_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('add','remove')),
+                canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+                PRIMARY KEY (message_id, actor_user_id, reaction)
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS v2_reaction_effects (
+                source_event_id TEXT NOT NULL, message_id TEXT NOT NULL, room_id TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL, reaction TEXT NOT NULL,
+                room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+                canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+                PRIMARY KEY (source_event_id, message_id, actor_user_id, reaction)
+                )
+                """)
+            for table in ["v2_sync_events", "v2_group_events"] {
+                let rows = try Row.fetchCursor(db, sql: "SELECT source_event_id, payload FROM \(table) WHERE projection_kind = 'message_reaction'")
+                while let row = try rows.next() {
+                    try applyReaction(.init(sequence: 1, sourceEventID: try .init(row["source_event_id"] as String), projectionKind: "message_reaction", payload: row["payload"]), db: db)
+                }
+            }
+            if try db.tableExists(snapshotShadowTable(for: "v2_message_projections")) {
+                // Older staged reaction rows discarded their source version.
+                // Keep the live bank and pending reset, but fetch the immutable
+                // snapshot again instead of activating an unversioned shadow.
+                try dropSnapshotShadowTables(db: db)
+                try db.execute(sql: "DELETE FROM v2_snapshot_import")
+            }
+        }
+        migrator.registerMigration("recordSnapshotRebuildIntent") { db in
+            try db.execute(sql: "CREATE TABLE IF NOT EXISTS v2_sync_rebuild_requests (singleton INTEGER PRIMARY KEY CHECK (singleton = 1))")
+        }
+        migrator.registerMigration("orderAnnouncementEffects") { db in
+            try migrateAnnouncementEffects(db: db)
+        }
+        migrator.registerMigration("orderRolePolicyEffects") { db in
+            try migrateRolePolicyEffects(db: db)
+        }
+        migrator.registerMigration("recordRolePolicyRecovery") { db in
+            if try !db.tableExists("v2_group_role_policy_baselines") { try db.execute(sql: rolePolicyBaselineSchemaSQL) }
+            if try !db.tableExists("v2_role_policy_recovery_requests") { try db.execute(sql: rolePolicyRecoverySchemaSQL) }
+            if try db.tableExists(snapshotShadowTable(for: "v2_message_projections")) {
+                try dropSnapshotShadowTables(db: db)
+                try db.execute(sql: "DELETE FROM v2_snapshot_import")
+            }
+        }
+        migrator.registerMigration("scheduleRolePolicyRecovery") { db in
+            if try !db.columns(in: "v2_role_policy_recovery_requests").contains(where: { $0.name == "attempt_count" }) {
+                try db.execute(sql: "ALTER TABLE v2_role_policy_recovery_requests ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 2147483647)")
+                try db.execute(sql: "ALTER TABLE v2_role_policy_recovery_requests ADD COLUMN next_attempt_at REAL NOT NULL DEFAULT 0")
+                try db.execute(sql: "ALTER TABLE v2_role_policy_recovery_requests ADD COLUMN state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'paused'))")
+            }
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS v2_role_policy_recovery_due_idx ON v2_role_policy_recovery_requests (next_attempt_at, room_id) WHERE state = 'pending'")
+        }
+        migrator.registerMigration("orderPinnedMessageEffects") { db in
+            try migratePinnedMessageEffects(db: db)
+        }
+        migrator.registerMigration("recordPushIntent") { db in
+            if try !db.tableExists("v2_push_intent") { try db.execute(sql: pushIntentSchemaSQL) }
         }
         return migrator
     }()
@@ -3574,7 +4567,11 @@ private enum TimelinePageCandidate {
     }
 
     var cursor: V2ClientTimelineCursor {
-        .init(timelineSequence: timelineSequence, itemID: itemID)
+        .init(timelineSequence: timelineSequence, itemID: itemID, kind: kind)
+    }
+
+    var kind: V2ClientTimelineItemKind {
+        switch self { case .message: .message; case .activity: .activity }
     }
 
     var message: V2ClientMessageProjection? {
@@ -3588,15 +4585,13 @@ private enum TimelinePageCandidate {
     }
 
     static func newerFirst(_ lhs: Self, _ rhs: Self) -> Bool {
-        lhs.timelineSequence == rhs.timelineSequence
-            ? lhs.itemID > rhs.itemID
-            : lhs.timelineSequence > rhs.timelineSequence
+        olderFirst(rhs, lhs)
     }
 
     static func olderFirst(_ lhs: Self, _ rhs: Self) -> Bool {
-        lhs.timelineSequence == rhs.timelineSequence
-            ? lhs.itemID < rhs.itemID
-            : lhs.timelineSequence < rhs.timelineSequence
+        if lhs.timelineSequence != rhs.timelineSequence { return lhs.timelineSequence < rhs.timelineSequence }
+        if lhs.itemID != rhs.itemID { return lhs.itemID < rhs.itemID }
+        return lhs.kind.rawValue < rhs.kind.rawValue
     }
 }
 

@@ -24,6 +24,8 @@ public protocol V2LocalGroupCapabilitiesStore: Sendable {
 public enum V2GroupCapabilitiesFlushResult: Equatable, Sendable { case idle, acknowledged(String), retryScheduled(String), rejected(String, code: String) }
 
 public actor V2GroupCapabilitiesOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2GroupCapabilitiesFlushResult>()
+
     private let store: any V2LocalGroupCapabilitiesStore; private let transport: any V2ClientGroupCapabilitiesTransport
     private let makeUUID: @Sendable () -> UUID; private let now: @Sendable () -> Date; private let retryDelay: TimeInterval
     public init(store: any V2LocalGroupCapabilitiesStore, transport: any V2ClientGroupCapabilitiesTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) { self.store = store; self.transport = transport; self.makeUUID = makeUUID; self.now = now; self.retryDelay = retryDelay }
@@ -33,6 +35,10 @@ public actor V2GroupCapabilitiesOutboxEngine {
     public func enqueueMemberRole(roomID: RoomID, targetUserID: UserID, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) async throws -> V2PendingGroupCapabilityCommand { guard role != .owner else { throw V2GroupPermissionValidationError.memberRoleCannotBeOwner }; return try await enqueue(.init(kind: .memberRole, operationID: makeUUID().uuidString, roomID: roomID, messageID: nil, isPinned: nil, body: nil, role: role, permissions: [], targetUserID: targetUserID, expectedRevision: expectedMembershipRevision, state: .pending, attemptCount: 0, nextAttemptAt: now(), terminalCode: nil)) }
     private func enqueue(_ command: V2PendingGroupCapabilityCommand) async throws -> V2PendingGroupCapabilityCommand { try await store.enqueueOrReuseGroupCapability(command) }
     public func flushOnce() async throws -> V2GroupCapabilitiesFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2GroupCapabilitiesFlushResult {
         guard let pending = try await store.nextReadyGroupCapability(now: now()) else { return .idle }
         do {
             switch pending.kind {
@@ -43,7 +49,12 @@ public actor V2GroupCapabilitiesOutboxEngine {
             }
             try Task.checkCancellation(); try await store.markGroupCapabilityAcknowledged(operationID: pending.operationID); return .acknowledged(pending.operationID)
         } catch is CancellationError { throw CancellationError() }
-        catch let error as V2RealtimeTransportError { if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectGroupCapability(operationID: pending.operationID, code: code); return .rejected(pending.operationID, code: code) }; let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }(); try await store.scheduleGroupCapabilityRetry(operationID: pending.operationID, nextAttemptAt: now().addingTimeInterval(delay)); return .retryScheduled(pending.operationID) }
-        catch { try await store.scheduleGroupCapabilityRetry(operationID: pending.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(pending.operationID) }
+        catch let error as V2RealtimeTransportError { if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectGroupCapability(operationID: pending.operationID, code: code); return .rejected(pending.operationID, code: code) }; let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }(); try await store.scheduleGroupCapabilityRetry(operationID: pending.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(pending.operationID) }
+        catch { try await store.scheduleGroupCapabilityRetry(operationID: pending.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(pending.operationID) }
     }
+}
+
+extension V2GroupCapabilitiesOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

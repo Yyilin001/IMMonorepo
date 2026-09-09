@@ -9,7 +9,9 @@ public struct V2PasswordLoginRateLimitPolicy: Equatable, Sendable {
     public let lockout: TimeInterval
 
     public init(maximumFailures: Int, window: TimeInterval, lockout: TimeInterval) throws {
-        guard maximumFailures > 0, window > 0, lockout > 0 else {
+        guard maximumFailures > 0, maximumFailures <= Int(Int32.max),
+              v2RateLimitDurationIsRepresentable(window),
+              v2RateLimitDurationIsRepresentable(lockout) else {
             throw V2PasswordLoginRateLimitError.invalidPolicy
         }
         self.maximumFailures = maximumFailures

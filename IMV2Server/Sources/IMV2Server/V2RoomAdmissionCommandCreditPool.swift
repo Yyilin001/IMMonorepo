@@ -65,17 +65,18 @@ public actor V2RoomAdmissionCommandCreditPool {
 
   private struct Heat: Sendable {
     var committedCount: Int
-    var lastCommittedAt: Date
+    var lastCommittedAt: ContinuousClock.Instant
   }
 
   private let database: any Database
   private let batchSize: Int
+  private let monotonicNow: @Sendable () -> ContinuousClock.Instant
   /// Sparse direct conversations must never pay an extra reservation
   /// transaction just to cache credits they will never use. Only a room with
   /// this many *previously committed* plain appends in the short window is
   /// eligible for the precharged path.
   private let promotionCommitCount = 4
-  private let promotionWindow: TimeInterval = 5
+  private let promotionWindow: Duration = .seconds(5)
   private let maximumTrackedRooms = 8_192
   private var credits: [Key: Credits] = [:]
   private var heatByRoom: [UUID: Heat] = [:]
@@ -89,10 +90,12 @@ public actor V2RoomAdmissionCommandCreditPool {
   private var expiredCreditsDiscarded = 0
   private var capacityRejections = 0
 
-  public init(database: any Database, batchSize: Int) {
+  public init(database: any Database, batchSize: Int,
+              monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
     precondition((1...32).contains(batchSize))
     self.database = database
     self.batchSize = batchSize
+    self.monotonicNow = monotonicNow
   }
 
   /// Returns true only for a proven locally hot room. This method is called
@@ -101,9 +104,10 @@ public actor V2RoomAdmissionCommandCreditPool {
   /// round-trip. Heat is based only on prior committed messages, never on
   /// untrusted request attempts.
   public func shouldUseCredits(roomID: UUID, now: Date) -> Bool {
+    guard v2PostgresTimestampCanEncode(now) else { return false }
     guard let heat = heatByRoom[roomID] else { return false }
-    let age = now.timeIntervalSince(heat.lastCommittedAt)
-    guard age >= 0, age <= promotionWindow else {
+    let age = heat.lastCommittedAt.duration(to: monotonicNow())
+    guard age >= .zero, age <= promotionWindow else {
       heatByRoom.removeValue(forKey: roomID)
       return false
     }
@@ -121,11 +125,15 @@ public actor V2RoomAdmissionCommandCreditPool {
   /// separate from `commit(_:)`, which applies only to an already precharged
   /// token. Failed, denied, and idempotent commands cannot promote a room.
   public func recordNormalAdmissionCommit(roomID: UUID, now: Date) {
+    guard v2PostgresTimestampCanEncode(now) else { return }
+    // Heat measures elapsed process time. Wall-clock corrections must not
+    // restart or prolong this optimization window.
+    let observed = monotonicNow()
     if var heat = heatByRoom[roomID],
-       now.timeIntervalSince(heat.lastCommittedAt) >= 0,
-       now.timeIntervalSince(heat.lastCommittedAt) <= promotionWindow {
+       heat.lastCommittedAt.duration(to: observed) >= .zero,
+       heat.lastCommittedAt.duration(to: observed) <= promotionWindow {
       heat.committedCount = min(promotionCommitCount, heat.committedCount + 1)
-      heat.lastCommittedAt = now
+      heat.lastCommittedAt = observed
       heatByRoom[roomID] = heat
       return
     }
@@ -133,7 +141,7 @@ public actor V2RoomAdmissionCommandCreditPool {
        let evicted = heatByRoom.keys.first {
       heatByRoom.removeValue(forKey: evicted)
     }
-    heatByRoom[roomID] = .init(committedCount: 1, lastCommittedAt: now)
+    heatByRoom[roomID] = .init(committedCount: 1, lastCommittedAt: observed)
   }
 
   /// Acquires one already-charged room command credit. `shardState` comes
@@ -148,6 +156,9 @@ public actor V2RoomAdmissionCommandCreditPool {
       let leaseID = UUID(uuidString: lease.id.rawValue),
       let generation = Int64(exactly: lease.generation)
     else {
+      throw V2RoomAdmissionCommandCreditError.corruptShardState
+    }
+    guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(lease.validUntil) else {
       throw V2RoomAdmissionCommandCreditError.corruptShardState
     }
     guard lease.validUntil > now else {
@@ -199,6 +210,14 @@ public actor V2RoomAdmissionCommandCreditPool {
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
+    // Reject every invalid clock before a prefix can reserve credits or a
+    // cleanup pass can discard a different request's live reservation.
+    guard requests.allSatisfy({ request in
+      v2PostgresTimestampCanEncode(request.now)
+        && request.shardState.lease.map { v2PostgresTimestampCanEncode($0.validUntil) } == true
+    }) else {
+      throw V2RoomAdmissionCommandCreditError.corruptShardState
+    }
 
     var acquisitions: [Acquisition] = []
     acquisitions.reserveCapacity(requests.count)
@@ -251,12 +270,18 @@ public actor V2RoomAdmissionCommandCreditPool {
       var entry = credits[token.key]
     else { return }
     entry.inFlight.remove(token.id)
-    if entry.validUntil > now {
+    if !v2PostgresTimestampCanEncode(now) {
+      // The transaction already rolled back. Without a usable clock, retire
+      // only its token and leave unrelated credits for a later valid check.
+      expiredCreditsDiscarded += 1
+      credits[token.key] = entry
+    } else if entry.validUntil > now {
       entry.available += 1
       returnedCredits += 1
       credits[token.key] = entry
     } else {
-      expiredCreditsDiscarded += 1
+      expiredCreditsDiscarded += 1 + entry.available + entry.inFlight.count
+      for tokenID in entry.inFlight { tokenKeys.removeValue(forKey: tokenID) }
       credits.removeValue(forKey: token.key)
     }
   }
@@ -269,9 +294,10 @@ public actor V2RoomAdmissionCommandCreditPool {
   }
 
   public func snapshot() -> Snapshot {
-    let now = Date()
+    let observed = monotonicNow()
     heatByRoom = heatByRoom.filter {
-      now.timeIntervalSince($0.value.lastCommittedAt) <= promotionWindow
+      let age = $0.value.lastCommittedAt.duration(to: observed)
+      return age >= .zero && age <= promotionWindow
     }
     return .init(
       activeCredits: credits.values.reduce(into: 0) { $0 += $1.available },

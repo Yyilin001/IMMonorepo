@@ -4,6 +4,23 @@ import IMV2Core
 import Testing
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("Idle timeout must be exactly representable by the NIO nanosecond timer")
+    func idleTimeoutNanosecondsBoundary() throws {
+        let maximum = Int(Int64.max / 1_000_000)
+        for value in [0, -1, maximum + 1, Int.max] {
+            var environment = runtimeValues
+            environment["IM_V2_IDLE_TIMEOUT_MS"] = String(value)
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_IDLE_TIMEOUT_MS")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment))
+            }
+        }
+        for value in [1, 60_000, maximum] {
+            var environment = runtimeValues
+            environment["IM_V2_IDLE_TIMEOUT_MS"] = String(value)
+            #expect(try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment)).idleTimeoutMilliseconds == value)
+        }
+    }
+
     @Test("frame compression is opt-in and bounded by the frame policy")
     func validatesFrameCompressionPolicy() throws {
         let defaults = try V2GatewayRuntimeConfiguration(

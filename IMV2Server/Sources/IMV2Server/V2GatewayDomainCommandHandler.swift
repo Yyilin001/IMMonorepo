@@ -17,22 +17,13 @@ private func v2MessageEntity(_ wire: IMV2MessageEntity) throws -> V2MessageEntit
     return try .init(offsetUTF16: Int(wire.offsetUtf16), lengthUTF16: Int(wire.lengthUtf16), kind: kind, linkURL: wire.linkURL.isEmpty ? nil : URL(string: wire.linkURL))
 }
 
-private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity {
-    var wire = IMV2MessageEntity()
-    wire.offsetUtf16 = UInt32(entity.offsetUTF16)
-    wire.lengthUtf16 = UInt32(entity.lengthUTF16)
-    wire.kind = switch entity.kind {
-    case .bold: .bold
-    case .italic: .italic
-    case .underline: .underline
-    case .strikethrough: .strikethrough
-    case .spoiler: .spoiler
-    case .code: .code
-    case .preformatted: .preformatted
-    case .link: .link
-    }
-    wire.linkURL = entity.linkURL?.absoluteString ?? ""
-    return wire
+private enum V2GatewayResponseValueError: Error {
+    case invalidCount
+}
+
+private func v2GatewayCount(_ value: Int) throws -> UInt32 {
+    guard let count = UInt32(exactly: value) else { throw V2GatewayResponseValueError.invalidCount }
+    return count
 }
 
 /// Exact protobuf payload size for the gateway's `GroupEventPage` envelope.
@@ -199,9 +190,7 @@ protocol V2GatewayGroupCapabilitiesHandling: Sendable {
     func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange>
 }
 
-protocol V2GatewayForwardMessagesHandling: Sendable {
-    func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult]
-}
+typealias V2GatewayForwardMessagesHandling = V2ForwardMessagesHandling
 
 extension V2RoomMembershipService: V2GatewayRoomMembershipHandling {}
 extension V2MessageWithdrawalService: V2GatewayMessageWithdrawalHandling {}
@@ -217,7 +206,6 @@ extension V2SocialRelationshipService: V2GatewaySocialRelationshipHandling {}
 extension V2ModerationService: V2GatewayModerationHandling {}
 extension V2ConversationCapabilitiesService: V2GatewayConversationCapabilitiesHandling {}
 extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
-extension V2ForwardMessagesService: V2GatewayForwardMessagesHandling {}
 
 /// Routes validated authenticated protobuf commands to the V2 domain services.
 public struct V2GatewayDomainCommandHandler:
@@ -239,6 +227,7 @@ public struct V2GatewayDomainCommandHandler:
     private let moderation: any V2GatewayModerationHandling
     private let conversationCapabilities: any V2GatewayConversationCapabilitiesHandling
     private let groupCapabilities: any V2GatewayGroupCapabilitiesHandling
+    private let groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading
     private let forwardMessages: any V2GatewayForwardMessagesHandling
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
@@ -250,8 +239,9 @@ public struct V2GatewayDomainCommandHandler:
     /// disconnect before it reaches that boundary.
     private let maximumGroupEventPagePayloadBytes: Int
     private let now: @Sendable () -> Date
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, forwardMessages: V2ForwardMessagesService, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading, forwardMessages: any V2ForwardMessagesHandling, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
         self.membership = membership
@@ -269,6 +259,7 @@ public struct V2GatewayDomainCommandHandler:
         self.moderation = moderation
         self.conversationCapabilities = conversationCapabilities
         self.groupCapabilities = groupCapabilities
+        self.groupRolePolicyBaseline = groupRolePolicyBaseline
         self.forwardMessages = forwardMessages
         self.sync = sync
         self.telemetry = telemetry
@@ -276,6 +267,7 @@ public struct V2GatewayDomainCommandHandler:
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
+        self.monotonicNow = monotonicNow
     }
 
     init(
@@ -295,13 +287,15 @@ public struct V2GatewayDomainCommandHandler:
         moderationHandler: any V2GatewayModerationHandling,
         conversationCapabilitiesHandler: any V2GatewayConversationCapabilitiesHandling,
         groupCapabilitiesHandler: any V2GatewayGroupCapabilitiesHandling,
+        groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading,
         forwardMessagesHandler: any V2GatewayForwardMessagesHandling,
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
         controlWriteAdmissionEnabled: Bool = false,
         maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
@@ -320,6 +314,7 @@ public struct V2GatewayDomainCommandHandler:
         moderation = moderationHandler
         conversationCapabilities = conversationCapabilitiesHandler
         groupCapabilities = groupCapabilitiesHandler
+        self.groupRolePolicyBaseline = groupRolePolicyBaseline
         forwardMessages = forwardMessagesHandler
         self.sync = sync
         self.telemetry = telemetry
@@ -327,6 +322,7 @@ public struct V2GatewayDomainCommandHandler:
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
+        self.monotonicNow = monotonicNow
     }
 
     public func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
@@ -344,7 +340,7 @@ public struct V2GatewayDomainCommandHandler:
     ) async throws -> IMV2Envelope {
         let traceID = V2SecureProcessUUIDGenerator.shared.makeOne()
         let command = v2TelemetryCommand(for: envelope)
-        let startedAt = now()
+        let startedAt = monotonicNow()
         do {
             let response: IMV2Envelope
             if let databaseWorkAdmission,
@@ -392,7 +388,7 @@ public struct V2GatewayDomainCommandHandler:
                 command: command,
                 outcome: .failed,
                 rejection: nil,
-                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
             ))
             throw error
         }
@@ -408,7 +404,7 @@ public struct V2GatewayDomainCommandHandler:
         var telemetryEnvelope = IMV2Envelope()
         telemetryEnvelope.groupEventPull = request
         let command = v2TelemetryCommand(for: telemetryEnvelope)
-        let startedAt = now()
+        let startedAt = monotonicNow()
         do {
             let result: V2PreparedGroupEventPullResult
             if let databaseWorkAdmission {
@@ -457,7 +453,7 @@ public struct V2GatewayDomainCommandHandler:
                     outcome: .accepted,
                     rejection: nil,
                     elapsedMilliseconds:
-                        v2ElapsedMilliseconds(since: startedAt, now: now())
+                        v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
                 ))
                 return .prepared(prepared)
             case .page(let page):
@@ -475,7 +471,7 @@ public struct V2GatewayDomainCommandHandler:
                     startedAt: startedAt
                 ))
             }
-        } catch V2CoreError.invalidIdentifier,
+        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue,
                 V2GroupEventLogError.invalidRequest {
             return .envelope(await recordAndReturn(
                 errorEnvelope(code: "INVALID_ARGUMENT", retryable: false),
@@ -519,7 +515,7 @@ public struct V2GatewayDomainCommandHandler:
                 command: command,
                 outcome: .failed,
                 rejection: nil,
-                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
             ))
             throw error
         }
@@ -554,7 +550,7 @@ public struct V2GatewayDomainCommandHandler:
         _ response: IMV2Envelope,
         traceID: UUID,
         command: V2GatewayTelemetryCommand,
-        startedAt: Date
+        startedAt: ContinuousClock.Instant
     ) async -> IMV2Envelope {
             let hasProtocolError: Bool
             let rejection: V2GatewayTelemetryRejection?
@@ -573,7 +569,7 @@ public struct V2GatewayDomainCommandHandler:
                 // an accepted command merely because it is unclassified.
                 outcome: hasProtocolError ? .rejected : .accepted,
                 rejection: rejection,
-                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
             ))
             return response
     }
@@ -590,7 +586,8 @@ public struct V2GatewayDomainCommandHandler:
             // not an event append. It must never exhaust the reservation used
             // by sends in conversations that are already open.
             return .foregroundControlWrite
-        case .listRoomMembers,
+        case .getGroupRolePolicyBaseline,
+             .listRoomMembers,
              .groupEventPull,
              .groupEventSubscribe,
              .listReadReceiptReaders,
@@ -646,10 +643,13 @@ public struct V2GatewayDomainCommandHandler:
             case .appendGroupRoomCreationMembers(let request): return try await handleAppendGroupRoomCreationMembers(request, identity: identity)
             case .finalizeGroupRoomCreation(let request): return try await handleFinalizeGroupRoomCreation(request, identity: identity)
             case .cancelGroupRoomCreation(let request): return try await handleCancelGroupRoomCreation(request, identity: identity)
+            case .getGroupRolePolicyBaseline(let request): return try await handleGroupRolePolicyBaseline(request, identity: identity)
             case .listRoomMembers(let request): return try await handleListRoomMembers(request, identity: identity)
             case .groupEventPull(let request): return try await handleGroupEventPull(request, identity: identity)
             case .groupEventSubscribe(let request): return try await handleGroupEventSubscribe(request, identity: identity)
-            case .groupEventUnsubscribe: return successEnvelope()
+            case .groupEventUnsubscribe(let request):
+                _ = try RoomID(request.roomID)
+                return successEnvelope()
             case .setStrangerMessagePermission(let request): return try await handleStrangerMessagePermission(request, identity: identity)
             case .setUserAddPermission(let request): return try await handleUserAddPermission(request, identity: identity)
             case .setReadReceiptPreferences(let request): return try await handleReadReceiptPreferences(request, identity: identity)
@@ -657,9 +657,13 @@ public struct V2GatewayDomainCommandHandler:
             case .setLiveActivityPreferences(let request): return try await handleLiveActivityPreferences(request, identity: identity)
             case .getLiveActivityPreferences: return try await handleGetLiveActivityPreferences(identity: identity)
             case .subscribePresence(let request): return try await handleSubscribePresence(request, identity: identity)
-            case .unsubscribePresence: return successEnvelope()
+            case .unsubscribePresence(let request):
+                _ = try RoomID(request.roomID)
+                return successEnvelope()
             case .subscribeTyping(let request): return try await handleSubscribeTyping(request, identity: identity)
-            case .unsubscribeTyping: return successEnvelope()
+            case .unsubscribeTyping(let request):
+                _ = try RoomID(request.roomID)
+                return successEnvelope()
             case .setTypingState(let request): return try await handleTypingState(request, identity: identity)
             case .changeRelationship(let request): return try await handleRelationship(request, identity: identity)
             case .changeUserBlock(let request): return try await handleUserBlock(request, identity: identity)
@@ -684,9 +688,18 @@ public struct V2GatewayDomainCommandHandler:
                 return successEnvelope()
             default: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
             }
+        } catch V2GatewayTimestampError.unrepresentable, V2GatewayResponseValueError.invalidCount, V2GroupMessagingValidationError.invalidMemberCount,
+                V2AcceptanceIdentifierError.invalidTimestamp {
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        } catch V2SyncServiceError.invalidRequest {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2ForwardPendingError.pending {
+            return errorEnvelope(code: "FORWARD_PENDING", retryable: true, retryAfter: 1)
+        } catch V2ForwardPendingError.paused {
+            return errorEnvelope(code: "FORWARD_PAUSED", retryable: true, retryAfter: 30)
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
             return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
-        } catch V2CoreError.invalidIdentifier, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
+        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -698,10 +711,14 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         } catch V2GroupAudienceImportError.corruptPersistenceState {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        } catch V2RoomMembershipStoreError.ownerChanged, V2RoomOwnerFenceError.ownerChanged, V2ReadReceiptStoreError.ownerChanged {
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipStoreError.actorNotOwner {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2RoomMembershipStoreError.targetUnavailable {
             return errorEnvelope(code: "NOT_FOUND", retryable: false)
+        } catch V2ConversationCapabilitiesStoreError.invalidTimestamp {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2ConversationCapabilitiesStoreError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2ConversationCapabilitiesStoreError.roomNotFound, V2ConversationCapabilitiesStoreError.messageNotFound {
@@ -809,6 +826,11 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "RESET_REQUIRED", retryable: false)
         } catch V2SyncStoreError.acknowledgementBeyondWatermark {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch V2SyncStoreError.syncLogSequenceGap, V2SyncStoreError.snapshotCheckpointUnavailable {
+            // The server cannot produce a complete sync response yet. Keep
+            // the request retryable without issuing partial capabilities or
+            // presenting an unassigned snapshot as ready for the client.
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2SyncStoreError.syncRecordTooLarge {
             // Persisted state must never force a transport-level disconnect.
             // The non-retryable code also prevents an oversized head record
@@ -821,11 +843,14 @@ public struct V2GatewayDomainCommandHandler:
                 V2ModerationStoreError.corruptPersistenceState,
                 V2ReadReceiptStoreError.corruptPersistenceState,
                 V2DirectMessagingStoreError.corruptPersistenceState,
+                V2GroupRoomCreationIntentStoreError.corruptPersistenceState,
                 V2GroupMessagingStoreError.corruptPersistenceState {
             // Domain stores use this closed error for failed persistence
             // invariants. None of these failures invalidates an authenticated
             // transport session, and leaking the underlying database shape
             // would expose internal state.
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        } catch is V2ForwardMessageResultValidationError {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch is CancellationError {
             throw CancellationError()
@@ -873,6 +898,7 @@ public struct V2GatewayDomainCommandHandler:
         }
         switch outcome {
         case .accepted(let message):
+            let response = try acceptedMessageEnvelope(message.receipt)
             if let directEvent = V2DirectRoomLiveEventDraft(
                 message,
                 excludingConnectionID: originatingConnectionID
@@ -901,9 +927,9 @@ public struct V2GatewayDomainCommandHandler:
                     highWatermark: message.roomSequence
                 ))
             }
-            return acceptedMessageEnvelope(message)
+            return response
         case .idempotent(let message):
-            return acceptedMessageEnvelope(message)
+            return try acceptedMessageEnvelope(message)
         case .denied:
             // The durable, private activity and composer capability are
             // synced separately. Do not disclose which counterpart policy
@@ -915,31 +941,12 @@ public struct V2GatewayDomainCommandHandler:
         }
     }
 
-    private func acceptedMessageEnvelope(_ message: V2AcceptedMessage) -> IMV2Envelope {
+    private func acceptedMessageEnvelope(_ message: V2MessageAcceptanceReceipt) throws -> IMV2Envelope {
             var response = IMV2Envelope(); response.messageAccepted = .init()
             response.messageAccepted.messageID = message.messageID.rawValue
             response.messageAccepted.roomID = message.roomID.rawValue
             response.messageAccepted.roomSequence = message.roomSequence
-            response.messageAccepted.serverCreatedAtMs = Int64(message.createdAt.timeIntervalSince1970 * 1_000)
-            response.messageAccepted.mediaIds = message.media.map { $0.mediaID.rawValue }
-            response.messageAccepted.mentionedUserIds = message.mentions.compactMap { if case .user(let userID) = $0 { userID.rawValue } else { nil } }
-            response.messageAccepted.mentionsEveryone = message.mentions.contains(.everyone)
-            response.messageAccepted.mediaPresentations = message.mediaPresentations.map { presentation in
-                var wire = IMV2MediaPresentation()
-                wire.mediaID = presentation.mediaID.rawValue
-                wire.kind = switch presentation.kind {
-                case .image: .image
-                case .animatedImage: .animatedImage
-                case .video: .video
-                case .audio: .audio
-                case .file: .file
-                }
-                wire.contentType = presentation.contentType
-                wire.byteCount = presentation.byteCount
-                return wire
-            }
-            response.messageAccepted.entities = message.entities.map(v2MessageEntityWire)
-            response.messageAccepted.replyToMessageID = message.replyTo?.messageID.rawValue ?? ""
+            response.messageAccepted.serverCreatedAtMs = try v2GatewayMilliseconds(message.createdAt)
             return response
     }
 
@@ -966,7 +973,7 @@ public struct V2GatewayDomainCommandHandler:
             response.membershipChanged.action = change.action == .add ? .add : .remove
             response.membershipChanged.membershipRevision = change.membershipRevision
             response.membershipChanged.roomSequence = change.roomSequence
-            response.membershipChanged.serverCreatedAtMs = Int64(change.createdAt.timeIntervalSince1970 * 1_000)
+            response.membershipChanged.serverCreatedAtMs = try v2GatewayMilliseconds(change.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
@@ -985,7 +992,7 @@ public struct V2GatewayDomainCommandHandler:
             response.messageWithdrawn.messageID = result.messageID.rawValue
             response.messageWithdrawn.messageRevision = result.messageRevision
             response.messageWithdrawn.roomSequence = result.roomSequence
-            response.messageWithdrawn.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.messageWithdrawn.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
@@ -1005,7 +1012,7 @@ public struct V2GatewayDomainCommandHandler:
             response.messageRedacted.messageID = messageID.rawValue
             response.messageRedacted.roomSequence = result.roomSequence
             response.messageRedacted.messageRevision = messageRevision
-            response.messageRedacted.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.messageRedacted.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .messageAlreadyRedacted, .targetNotMember, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1022,7 +1029,7 @@ public struct V2GatewayDomainCommandHandler:
         switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false) }
         var response = IMV2Envelope(); response.conversationStateSet = .init()
         response.conversationStateSet.roomID = value.roomID.rawValue; response.conversationStateSet.isPinned = value.isPinned; response.conversationStateSet.isArchived = value.isArchived
-        response.conversationStateSet.muteUntilMs = value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0; response.conversationStateSet.updatedAtMs = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
+        response.conversationStateSet.muteUntilMs = try value.muteUntil.map { try v2GatewayMilliseconds($0) } ?? 0; response.conversationStateSet.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
         return response
     }
 
@@ -1032,7 +1039,7 @@ public struct V2GatewayDomainCommandHandler:
         let value: V2MessageFavorite
         switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false) }
         var response = IMV2Envelope(); response.messageFavoriteChanged = .init()
-        response.messageFavoriteChanged.roomID = value.roomID.rawValue; response.messageFavoriteChanged.messageID = value.messageID.rawValue; response.messageFavoriteChanged.isFavorited = value.isFavorited; response.messageFavoriteChanged.updatedAtMs = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
+        response.messageFavoriteChanged.roomID = value.roomID.rawValue; response.messageFavoriteChanged.messageID = value.messageID.rawValue; response.messageFavoriteChanged.isFavorited = value.isFavorited; response.messageFavoriteChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
         return response
     }
 
@@ -1042,7 +1049,7 @@ public struct V2GatewayDomainCommandHandler:
         let value: V2PinnedMessage
         switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
         var response = IMV2Envelope(); response.pinnedMessageChanged = .init()
-        response.pinnedMessageChanged.roomID = value.roomID.rawValue; response.pinnedMessageChanged.messageID = value.messageID.rawValue; response.pinnedMessageChanged.isPinned = value.isPinned; response.pinnedMessageChanged.roomSequence = value.roomSequence; response.pinnedMessageChanged.updatedAtMs = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
+        response.pinnedMessageChanged.roomID = value.roomID.rawValue; response.pinnedMessageChanged.messageID = value.messageID.rawValue; response.pinnedMessageChanged.isPinned = value.isPinned; response.pinnedMessageChanged.roomSequence = value.roomSequence; response.pinnedMessageChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
         return response
     }
 
@@ -1052,7 +1059,38 @@ public struct V2GatewayDomainCommandHandler:
         let value: V2GroupAnnouncement
         switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
         var response = IMV2Envelope(); response.groupAnnouncementChanged = .init()
-        response.groupAnnouncementChanged.roomID = value.roomID.rawValue; response.groupAnnouncementChanged.body = value.body; response.groupAnnouncementChanged.revision = value.revision; response.groupAnnouncementChanged.roomSequence = value.roomSequence; response.groupAnnouncementChanged.updatedAtMs = Int64(value.updatedAt.timeIntervalSince1970 * 1_000)
+        response.groupAnnouncementChanged.roomID = value.roomID.rawValue; response.groupAnnouncementChanged.body = value.body; response.groupAnnouncementChanged.revision = value.revision; response.groupAnnouncementChanged.roomSequence = value.roomSequence; response.groupAnnouncementChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
+        return response
+    }
+
+    private func handleGroupRolePolicyBaseline(_ request: IMV2GetGroupRolePolicyBaseline, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard let roomUUID = UUID(uuidString: request.roomID) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
+        let value: V2GroupRolePolicyBaseline
+        do {
+            value = try await groupRolePolicyBaseline.readRolePolicyBaseline(roomID: .init(uuid: roomUUID), actorUserID: identity.userID)
+        } catch V2GroupRolePolicyBaselineError.actorNotMember {
+            return errorEnvelope(code: "FORBIDDEN", retryable: false)
+        } catch V2GroupRolePolicyBaselineError.roomNotFound, V2RoomShardRouteError.roomNotFound {
+            return errorEnvelope(code: "NOT_FOUND", retryable: false)
+        } catch V2RoomShardRouteError.routeConflict {
+            return errorEnvelope(code: "ROOM_OWNER_CHANGED", retryable: true, retryAfter: 1)
+        } catch V2GroupRolePolicyBaselineError.corruptPersistenceState, V2RoomShardRouteError.corruptPersistenceState, V2RoomShardStorageRegistryError.unknownShardID {
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true, retryAfter: 1)
+        }
+        guard value.roomID == RoomID(uuid: roomUUID) else { return errorEnvelope(code: "UNAVAILABLE", retryable: true, retryAfter: 1) }
+        var response = IMV2Envelope()
+        response.groupRolePolicyBaseline.roomID = value.roomID.rawValue
+        response.groupRolePolicyBaseline.permissionRevision = value.permissionRevision
+        response.groupRolePolicyBaseline.membershipRevision = value.membershipRevision
+        response.groupRolePolicyBaseline.roomSequence = value.roomSequence
+        response.groupRolePolicyBaseline.policies = [(V2RoomMembershipRole.admin, value.adminPermissions), (.member, value.memberPermissions)].map { role, permissions in
+            var policy = IMV2GroupRolePolicy()
+            policy.role = role.rawValue
+            policy.permissions = permissions.sorted { $0.rawValue < $1.rawValue }.map { permission in
+                var entry = IMV2GroupRolePermission(); entry.permission = permission.rawValue; return entry
+            }
+            return policy
+        }
         return response
     }
 
@@ -1083,8 +1121,12 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     private func handleForwardMessages(_ request: IMV2ForwardMessages, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let command = try V2ForwardMessagesCommand(operationID: .init(request.operationID), sourceMessageIDs: try request.sourceMessageIds.map(MessageID.init), targetRoomIDs: try request.targetRoomIds.map(RoomID.init))
+        guard let operation = UUID(uuidString: request.operationID) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
+        let command = try V2ForwardMessagesCommand(operationID: .init(uuid: operation), sources: try request.sources.map { try .init(roomID: .init($0.roomID), messageID: .init($0.messageID), revision: .init($0.revision)) }, targetRoomIDs: try request.targetRoomIds.map(RoomID.init))
         let results = try await forwardMessages.forward(actorUserID: identity.userID, command: command)
+        guard results.allSatisfy({ result in
+            result.roomSequence.map { $0 > 0 && $0 <= UInt64(Int64.max) } ?? true
+        }) else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
         var response = IMV2Envelope(); response.messagesForwarded = .init()
         response.messagesForwarded.results = results.map { result in
             var wire = IMV2ForwardMessageResult(); wire.sourceMessageID = result.sourceMessageID.rawValue; wire.targetRoomID = result.targetRoomID.rawValue; wire.messageID = result.messageID?.rawValue ?? ""; wire.roomSequence = result.roomSequence ?? 0; wire.errorCode = result.errorCode ?? ""; return wire
@@ -1111,9 +1153,9 @@ public struct V2GatewayDomainCommandHandler:
             var response = IMV2Envelope(); response.memberMuted = .init()
             response.memberMuted.roomID = result.roomID.rawValue
             response.memberMuted.targetUserID = targetUserID.rawValue
-            response.memberMuted.muteUntilMs = Int64(muteUntil.timeIntervalSince1970 * 1_000)
+            response.memberMuted.muteUntilMs = try v2GatewayMilliseconds(muteUntil)
             response.memberMuted.roomSequence = result.roomSequence
-            response.memberMuted.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.memberMuted.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .targetNotMember, .messageAlreadyRedacted, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1141,7 +1183,7 @@ public struct V2GatewayDomainCommandHandler:
             response.memberRemovedByModerator.targetUserID = targetUserID.rawValue
             response.memberRemovedByModerator.membershipRevision = membershipRevision
             response.memberRemovedByModerator.roomSequence = result.roomSequence
-            response.memberRemovedByModerator.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.memberRemovedByModerator.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .targetNotMember, .messageAlreadyRedacted, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1167,7 +1209,7 @@ public struct V2GatewayDomainCommandHandler:
             response.messageReactionChanged.reaction = result.reaction
             response.messageReactionChanged.action = result.action == .add ? .add : .remove
             response.messageReactionChanged.roomSequence = result.roomSequence
-            response.messageReactionChanged.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.messageReactionChanged.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1187,7 +1229,7 @@ public struct V2GatewayDomainCommandHandler:
             response.messageEdited.text = result.text
             response.messageEdited.messageRevision = result.messageRevision
             response.messageEdited.roomSequence = result.roomSequence
-            response.messageEdited.serverCreatedAtMs = Int64(result.createdAt.timeIntervalSince1970 * 1_000)
+            response.messageEdited.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
@@ -1210,7 +1252,7 @@ public struct V2GatewayDomainCommandHandler:
             response.readReceiptRecorded.roomID = result.roomID.rawValue
             response.readReceiptRecorded.userID = result.userID.rawValue
             response.readReceiptRecorded.readThroughRoomSequence = result.readThroughRoomSequence
-            response.readReceiptRecorded.recordedAtMs = Int64(result.recordedAt.timeIntervalSince1970 * 1_000)
+            response.readReceiptRecorded.recordedAtMs = try v2GatewayMilliseconds(result.recordedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
@@ -1222,7 +1264,7 @@ public struct V2GatewayDomainCommandHandler:
             var response = IMV2Envelope(); response.directRoomOpened = .init()
             response.directRoomOpened.roomID = room.roomID.rawValue
             response.directRoomOpened.targetUserID = room.targetUserID.rawValue
-            response.directRoomOpened.createdAtMs = Int64(room.createdAt.timeIntervalSince1970 * 1_000)
+            response.directRoomOpened.createdAtMs = try v2GatewayMilliseconds(room.createdAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
@@ -1234,7 +1276,7 @@ public struct V2GatewayDomainCommandHandler:
         var response = IMV2Envelope(); response.groupRoomCreationPrepared = .init()
         response.groupRoomCreationPrepared.operationID = draft.operationID.rawValue
         response.groupRoomCreationPrepared.title = draft.title
-        response.groupRoomCreationPrepared.stagedMemberCount = UInt32(draft.stagedMemberCount)
+        response.groupRoomCreationPrepared.stagedMemberCount = try v2GatewayCount(draft.stagedMemberCount)
         return response
     }
 
@@ -1243,7 +1285,7 @@ public struct V2GatewayDomainCommandHandler:
         let draft = try await groupAudienceImports.append(actorUserID: identity.userID, operationID: try .init(request.operationID), memberUserIDs: members)
         var response = IMV2Envelope(); response.groupRoomCreationMembersAppended = .init()
         response.groupRoomCreationMembersAppended.operationID = draft.operationID.rawValue
-        response.groupRoomCreationMembersAppended.stagedMemberCount = UInt32(draft.stagedMemberCount)
+        response.groupRoomCreationMembersAppended.stagedMemberCount = try v2GatewayCount(draft.stagedMemberCount)
         return response
     }
 
@@ -1251,7 +1293,7 @@ public struct V2GatewayDomainCommandHandler:
         let outcome = try await groupAudienceImports.finalize(actorUserID: identity.userID, operationID: try .init(request.operationID))
         switch outcome {
         case .created(let room), .idempotent(let room):
-            return groupRoomCreatedEnvelope(room)
+            return try groupRoomCreatedEnvelope(room)
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .invalidMembers: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         case .memberLimitReached: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1268,13 +1310,13 @@ public struct V2GatewayDomainCommandHandler:
         return response
     }
 
-    private func groupRoomCreatedEnvelope(_ room: V2GroupRoom) -> IMV2Envelope {
+    private func groupRoomCreatedEnvelope(_ room: V2GroupRoom) throws -> IMV2Envelope {
         var response = IMV2Envelope(); response.groupRoomCreated = .init()
         response.groupRoomCreated.roomID = room.roomID.rawValue
         response.groupRoomCreated.title = room.title
-        response.groupRoomCreated.createdAtMs = Int64(room.createdAt.timeIntervalSince1970 * 1_000)
+        response.groupRoomCreated.createdAtMs = try v2GatewayMilliseconds(room.createdAt)
         response.groupRoomCreated.deliveryMode = room.deliveryMode == .standardFanout ? .standardFanout : .largeGroupHybrid
-        response.groupRoomCreated.memberCount = UInt32(room.memberCount)
+        response.groupRoomCreated.memberCount = try v2GatewayCount(room.memberCount)
         return response
     }
 
@@ -1403,7 +1445,7 @@ public struct V2GatewayDomainCommandHandler:
         case .updated(let result, let updatedAt), .idempotent(let result, let updatedAt):
             var response = IMV2Envelope(); response.strangerMessagePermissionSet = .init()
             response.strangerMessagePermissionSet.permission = result == .allow ? .allow : .deny
-            response.strangerMessagePermissionSet.updatedAtMs = Int64(updatedAt.timeIntervalSince1970 * 1_000)
+            response.strangerMessagePermissionSet.updatedAtMs = try v2GatewayMilliseconds(updatedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
@@ -1420,7 +1462,7 @@ public struct V2GatewayDomainCommandHandler:
         case .updated(let result, let updatedAt), .idempotent(let result, let updatedAt):
             var response = IMV2Envelope(); response.userAddPermissionSet = .init()
             response.userAddPermissionSet.permission = result == .allow ? .allow : .deny
-            response.userAddPermissionSet.updatedAtMs = Int64(updatedAt.timeIntervalSince1970 * 1_000)
+            response.userAddPermissionSet.updatedAtMs = try v2GatewayMilliseconds(updatedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
@@ -1432,7 +1474,7 @@ public struct V2GatewayDomainCommandHandler:
             var response = IMV2Envelope(); response.readReceiptPreferencesSet = .init()
             response.readReceiptPreferencesSet.allowsDirectReadReceipts = preferences.allowsDirectReadReceipts
             response.readReceiptPreferencesSet.allowsGroupReadReceipts = preferences.allowsGroupReadReceipts
-            response.readReceiptPreferencesSet.updatedAtMs = Int64(preferences.updatedAt.timeIntervalSince1970 * 1_000)
+            response.readReceiptPreferencesSet.updatedAtMs = try v2GatewayMilliseconds(preferences.updatedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
@@ -1467,7 +1509,7 @@ public struct V2GatewayDomainCommandHandler:
             var response = IMV2Envelope(); response.liveActivityPreferencesSet = .init()
             response.liveActivityPreferencesSet.allowsOnlinePresence = preferences.allowsOnlinePresence
             response.liveActivityPreferencesSet.allowsTypingIndicators = preferences.allowsTypingIndicators
-            response.liveActivityPreferencesSet.updatedAtMs = Int64(preferences.updatedAt.timeIntervalSince1970 * 1_000)
+            response.liveActivityPreferencesSet.updatedAtMs = try v2GatewayMilliseconds(preferences.updatedAt)
             return response
         case .idempotencyConflict:
             return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
@@ -1479,7 +1521,7 @@ public struct V2GatewayDomainCommandHandler:
         var response = IMV2Envelope(); response.liveActivityPreferences = .init()
         response.liveActivityPreferences.allowsOnlinePresence = preferences.allowsOnlinePresence
         response.liveActivityPreferences.allowsTypingIndicators = preferences.allowsTypingIndicators
-        response.liveActivityPreferences.updatedAtMs = Int64(preferences.updatedAt.timeIntervalSince1970 * 1_000)
+        response.liveActivityPreferences.updatedAtMs = try v2GatewayMilliseconds(preferences.updatedAt)
         return response
     }
 
@@ -1489,7 +1531,7 @@ public struct V2GatewayDomainCommandHandler:
         response.presenceSubscribed.roomID = presence.roomID.rawValue
         response.presenceSubscribed.targetUserID = presence.targetUserID.rawValue
         response.presenceSubscribed.isOnline = presence.isOnline
-        response.presenceSubscribed.expiresAtMs = Int64(presence.expiresAt.timeIntervalSince1970 * 1_000)
+        response.presenceSubscribed.expiresAtMs = try v2GatewayMilliseconds(presence.expiresAt)
         return response
     }
 
@@ -1518,7 +1560,7 @@ public struct V2GatewayDomainCommandHandler:
             response.relationshipChanged.targetUserID = change.targetUserID.rawValue
             response.relationshipChanged.action = switch change.action { case .request: .request; case .accept: .accept; case .reject: .reject; case .remove: .remove }
             response.relationshipChanged.resultingState = switch change.resultingState { case .none: .none; case .pending: .pending; case .accepted: .accepted }
-            response.relationshipChanged.updatedAtMs = Int64(change.updatedAt.timeIntervalSince1970 * 1_000)
+            response.relationshipChanged.updatedAtMs = try v2GatewayMilliseconds(change.updatedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .invalidState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -1539,7 +1581,7 @@ public struct V2GatewayDomainCommandHandler:
             response.userBlockChanged.targetUserID = change.targetUserID.rawValue
             response.userBlockChanged.action = change.action == .block ? .block : .unblock
             response.userBlockChanged.isBlocked = change.isBlocked
-            response.userBlockChanged.updatedAtMs = Int64(change.updatedAt.timeIntervalSince1970 * 1_000)
+            response.userBlockChanged.updatedAtMs = try v2GatewayMilliseconds(change.updatedAt)
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
@@ -1547,17 +1589,23 @@ public struct V2GatewayDomainCommandHandler:
 
     private func handlePull(_ request: IMV2SyncPull, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         let token = request.syncToken.isEmpty ? nil : try V2SyncToken(request.syncToken)
-        switch try await sync.pull(userID: identity.userID, deviceID: identity.deviceID, syncToken: token, requestedMaxRecords: Int(request.maxRecords)) {
+        switch try await sync.pull(userID: identity.userID, deviceID: identity.deviceID, syncToken: token, requestedMaxRecords: Int(request.maxRecords), requireSnapshot: request.requireSnapshot) {
         case .ready(let generation, let records, let nextToken, let receipt, let hasMore):
             var response = IMV2Envelope(); response.syncBatch = .init(); response.syncBatch.generation = generation
             response.syncBatch.records = records.map { record in var value = IMV2SyncRecord(); value.userSyncSequence = record.sequence; value.sourceEventID = record.sourceEventID.rawValue; value.projectionKind = record.projectionKind; value.payload = Data(record.payloadJSON.utf8); return value }
             response.syncBatch.nextSyncToken = nextToken.rawValue; response.syncBatch.syncReceipt = receipt.rawValue; response.syncBatch.hasMore_p = hasMore; response.syncBatch.capabilityProfile = identity.capabilityProfile
             return response
         case .resetRequired(let snapshotID, let generation, let base, let expiry):
-            var response = IMV2Envelope(); response.resetRequired = .init(); response.resetRequired.snapshotID = snapshotID.rawValue; response.resetRequired.generation = generation; response.resetRequired.baseUserSyncSequence = base; response.resetRequired.expiresAtMs = Int64(expiry.timeIntervalSince1970 * 1_000)
+            var response = IMV2Envelope(); response.resetRequired = .init(); response.resetRequired.snapshotID = snapshotID.rawValue; response.resetRequired.generation = generation; response.resetRequired.baseUserSyncSequence = base; response.resetRequired.expiresAtMs = try v2GatewayMilliseconds(expiry)
             return response
-        case .resetPreparing:
-            return errorEnvelope(code: "RESET_PREPARING", retryable: true, retryAfter: 1)
+        case .resetPreparing(_, _, let retryAfter):
+            // The wire carries whole seconds. Round up so clients do not
+            // retry before the store's requested interval has elapsed.
+            guard retryAfter >= 0,
+                  let seconds = UInt32(exactly: retryAfter.rounded(.up)) else {
+                return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+            }
+            return errorEnvelope(code: "RESET_PREPARING", retryable: true, retryAfter: Int(seconds))
         }
     }
 
@@ -1579,7 +1627,7 @@ public struct V2GatewayDomainCommandHandler:
         response.snapshotManifest.totalBytes = manifest.totalBytes
         response.snapshotManifest.nextSyncToken = manifest.nextSyncToken.rawValue
         response.snapshotManifest.syncReceipt = manifest.receipt.rawValue
-        response.snapshotManifest.expiresAtMs = Int64(manifest.expiresAt.timeIntervalSince1970 * 1_000)
+        response.snapshotManifest.expiresAtMs = try v2GatewayMilliseconds(manifest.expiresAt)
         return response
     }
 
@@ -1602,5 +1650,20 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     private func successEnvelope() -> IMV2Envelope { var response = IMV2Envelope(); response.acknowledged = .init(); return response }
-    private func errorEnvelope(code: String, retryable: Bool, retryAfter: Int = 0, currentRevision: UInt64 = 0) -> IMV2Envelope { var response = IMV2Envelope(); response.error = .init(); response.error.code = code; response.error.retryable = retryable; response.error.retryAfterSeconds = UInt32(max(retryAfter, 0)); response.error.currentRevision = currentRevision; return response }
+    private func errorEnvelope(code: String, retryable: Bool, retryAfter: Int = 0, currentRevision: UInt64 = 0) -> IMV2Envelope {
+        var response = IMV2Envelope()
+        response.error = .init()
+        guard let seconds = UInt32(exactly: retryAfter), currentRevision <= UInt64(Int64.max) else {
+            // Invalid domain response values indicate a server failure. Do not
+            // truncate a delay or send a revision that cannot be persisted.
+            response.error.code = "UNAVAILABLE"
+            response.error.retryable = true
+            return response
+        }
+        response.error.code = code
+        response.error.retryable = retryable
+        response.error.retryAfterSeconds = seconds
+        response.error.currentRevision = currentRevision
+        return response
+    }
 }

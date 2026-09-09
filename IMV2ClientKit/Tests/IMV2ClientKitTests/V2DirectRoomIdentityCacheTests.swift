@@ -59,7 +59,7 @@ struct V2DirectRoomIdentityCacheTests {
             sourceEventID: .init("00000000-0000-0000-0000-000000000d75"),
             roomSequence: 1, projectionKind: "message", payload: payload
         )
-        let page = V2ClientGroupEventPage(roomID: roomID, events: [event], nextRoomSequence: 1, hasMore: false)
+        let page = try V2ClientGroupEventPage(roomID: roomID, events: [event], nextRoomSequence: 1, hasMore: false)
         #expect(try await store.applyGroupEventPage(page) == 1)
         #expect(try await store.messages(in: roomID).map(\.text) == ["离线恢复的私聊"])
         #expect(try await store.groupEventCursor(roomID: roomID) == 1)

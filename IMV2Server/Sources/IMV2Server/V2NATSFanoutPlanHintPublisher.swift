@@ -25,6 +25,7 @@ public struct V2NATSFanoutHintConfiguration: Equatable, Sendable {
     /// Bounds an optional wake hint. Durable PostgreSQL progression must never
     /// wait indefinitely for an unresponsive broker connection.
     public let acknowledgementTimeout: TimeInterval
+    let acknowledgementTimeoutNanoseconds: Int64
 
     public init(
         url: URL,
@@ -42,8 +43,7 @@ public struct V2NATSFanoutHintConfiguration: Equatable, Sendable {
               url.query == nil,
               url.fragment == nil,
               subject.range(of: "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$", options: .regularExpression) != nil,
-              acknowledgementTimeout.isFinite,
-              acknowledgementTimeout > 0,
+              let timeoutNanoseconds = v2TimeoutNanoseconds(acknowledgementTimeout),
               acknowledgementTimeout <= 30
         else { throw V2NATSFanoutHintConfigurationError.invalidConfiguration }
         let normalizedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -63,6 +63,7 @@ public struct V2NATSFanoutHintConfiguration: Equatable, Sendable {
         self.tlsCAPath = normalizedCAPath
         self.tlsServerName = normalizedServerName
         self.acknowledgementTimeout = acknowledgementTimeout
+        self.acknowledgementTimeoutNanoseconds = timeoutNanoseconds
     }
 
     var usesTLS: Bool { url.scheme?.lowercased() == "tls" }
@@ -110,7 +111,7 @@ public actor V2NATSFanoutPlanHintPublisher: V2FanoutPlanHintPublishing {
     }
 
     public func publishHint(_ trigger: V2FanoutPlanTrigger) async throws {
-        let timeout = TimeAmount.nanoseconds(Int64(configuration.acknowledgementTimeout * 1_000_000_000))
+        let timeout = TimeAmount.nanoseconds(configuration.acknowledgementTimeoutNanoseconds)
         let connection = try await connectedChannel(timeout: timeout)
         let channel = connection.value.channel
         let acknowledgement = try connection.value.handler.beginAcknowledgement(

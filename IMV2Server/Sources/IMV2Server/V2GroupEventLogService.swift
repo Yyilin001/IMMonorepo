@@ -8,7 +8,8 @@ public struct V2GroupEventLogEntry: Equatable, Sendable {
     public let projectionKind: String
     public let payload: Data
 
-    public init(sourceEventID: EventID, roomSequence: UInt64, projectionKind: String, payload: Data) {
+    public init(sourceEventID: EventID, roomSequence: UInt64, projectionKind: String, payload: Data) throws {
+        guard (try? V2RoomCursor(roomSequence)) != nil, roomSequence > 0 else { throw V2GroupEventLogError.corruptPersistenceState }
         self.sourceEventID = sourceEventID
         self.roomSequence = roomSequence
         self.projectionKind = projectionKind
@@ -22,7 +23,8 @@ public struct V2GroupEventLogPage: Equatable, Sendable {
     public let nextRoomSequence: UInt64
     public let hasMore: Bool
 
-    public init(roomID: RoomID, events: [V2GroupEventLogEntry], nextRoomSequence: UInt64, hasMore: Bool) {
+    public init(roomID: RoomID, events: [V2GroupEventLogEntry], nextRoomSequence: UInt64, hasMore: Bool) throws {
+        guard (try? V2RoomCursor(nextRoomSequence)) != nil else { throw V2GroupEventLogError.corruptPersistenceState }
         self.roomID = roomID
         self.events = events
         self.nextRoomSequence = nextRoomSequence
@@ -65,7 +67,8 @@ public struct V2GroupEventSubscription: Equatable, Sendable {
     /// the room audience on every message.
     public let membershipRevision: UInt64
 
-    public init(roomID: RoomID, highWatermark: UInt64, membershipRevision: UInt64 = 0) {
+    public init(roomID: RoomID, highWatermark: UInt64, membershipRevision: UInt64 = 0) throws {
+        guard (try? V2RoomCursor(highWatermark)) != nil, (try? V2MembershipRevision(membershipRevision)) != nil else { throw V2GroupEventLogError.corruptPersistenceState }
         self.roomID = roomID
         self.highWatermark = highWatermark
         self.membershipRevision = membershipRevision
@@ -113,11 +116,11 @@ public struct V2GroupEventLogService: Sendable {
     }
 
     public func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage {
-        guard afterRoomSequence <= UInt64(Int64.max),
+        guard (try? V2RoomCursor(afterRoomSequence)) != nil,
               pageSize > 0,
               pageSize <= Self.maximumPageSize
         else { throw V2GroupEventLogError.invalidRequest }
-        return try await store.pull(roomID: roomID, actorUserID: actorUserID, afterRoomSequence: afterRoomSequence, pageSize: pageSize)
+        return try validatePage(await store.pull(roomID: roomID, actorUserID: actorUserID, afterRoomSequence: afterRoomSequence, pageSize: pageSize), after: afterRoomSequence)
     }
 
     func pullPrepared(
@@ -127,33 +130,59 @@ public struct V2GroupEventLogService: Sendable {
         pageSize: Int,
         context: V2PreparedGroupEventPageEncodingContext
     ) async throws -> V2PreparedGroupEventPullResult {
-        guard afterRoomSequence <= UInt64(Int64.max),
+        guard (try? V2RoomCursor(afterRoomSequence)) != nil,
               pageSize > 0,
               pageSize <= Self.maximumPageSize,
               context.frameVersion >= 21
         else { throw V2GroupEventLogError.invalidRequest }
         guard let preparedStore = store as? any V2PreparedGroupEventLogStore else {
-            return .page(try await store.pull(
+            return .page(try validatePage(await store.pull(
                 roomID: roomID,
                 actorUserID: actorUserID,
                 afterRoomSequence: afterRoomSequence,
                 pageSize: pageSize
-            ))
+            ), after: afterRoomSequence))
         }
-        return try await preparedStore.pullPrepared(
+        let result = try await preparedStore.pullPrepared(
             roomID: roomID,
             actorUserID: actorUserID,
             afterRoomSequence: afterRoomSequence,
             pageSize: pageSize,
             context: context
         )
+        if case .page(let page) = result { return .page(try validatePage(page, after: afterRoomSequence)) }
+        if case .prepared(let response) = result {
+            guard response.nextRoomSequence <= UInt64(Int64.max),
+                  response.nextRoomSequence >= afterRoomSequence,
+                  !response.hasMore || response.nextRoomSequence > afterRoomSequence
+            else { throw V2GroupEventLogError.corruptPersistenceState }
+        }
+        return result
+    }
+
+    private func validatePage(_ page: V2GroupEventLogPage, after: UInt64) throws -> V2GroupEventLogPage {
+        guard page.nextRoomSequence <= UInt64(Int64.max), page.nextRoomSequence >= after,
+              !page.hasMore || page.nextRoomSequence > after
+        else { throw V2GroupEventLogError.corruptPersistenceState }
+        var previous = after
+        for event in page.events {
+            guard event.roomSequence > previous, event.roomSequence <= page.nextRoomSequence else {
+                throw V2GroupEventLogError.corruptPersistenceState
+            }
+            previous = event.roomSequence
+        }
+        return page
     }
 
     /// Verifies that a foreground connection may subscribe before the gateway
     /// retains any process-local watcher state. The caller must still pull by
     /// cursor after this result, because the room can advance immediately.
     public func subscribe(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription {
-        try await store.subscribe(roomID: roomID, actorUserID: actorUserID)
+        let subscription = try await store.subscribe(roomID: roomID, actorUserID: actorUserID)
+        guard subscription.highWatermark <= UInt64(Int64.max),
+              subscription.membershipRevision <= UInt64(Int64.max)
+        else { throw V2GroupEventLogError.corruptPersistenceState }
+        return subscription
     }
 
     /// Best-effort local read acceleration after the message transaction has

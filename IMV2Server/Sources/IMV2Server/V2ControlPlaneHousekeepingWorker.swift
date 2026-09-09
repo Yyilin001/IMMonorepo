@@ -94,7 +94,10 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         else {
             throw V2ControlPlaneHousekeepingError.invalidLimit
         }
-        let cutoff = now.addingTimeInterval(-retention)
+        guard let cutoff = v2PostgresPastTimestamp(now: now, interval: retention),
+              let idempotencyCutoff = v2PostgresPastTimestamp(now: now, interval: idempotencyRetention) else {
+            throw V2ControlPlaneHousekeepingError.corruptPersistenceState
+        }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ControlPlaneHousekeepingError.corruptPersistenceState
@@ -277,7 +280,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             )
             let idempotencyRows = try await purgeIdempotencyResults(
                 sql: sql,
-                cutoff: now.addingTimeInterval(-idempotencyRetention),
+                cutoff: idempotencyCutoff,
                 rotationSeed: now,
                 limit: budget.take()
             )
@@ -305,7 +308,10 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         let tables = Self.idempotencyTables
         let selectedCount = min(limit, tables.count)
         guard selectedCount > 0 else { return 0 }
-        let start = abs(Int(rotationSeed.timeIntervalSince1970 / 60)) % tables.count
+        guard let minute = Int(exactly: (rotationSeed.timeIntervalSince1970 / 60).rounded(.towardZero)) else {
+            throw V2ControlPlaneHousekeepingError.corruptPersistenceState
+        }
+        let start = Int(minute.magnitude % UInt(tables.count))
         let perTableLimit = max(1, limit / selectedCount)
         var deleted = 0
         for offset in 0 ..< selectedCount {
@@ -365,7 +371,12 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: ""),
+        // Approval decisions refer to the exact membership result even after
+        // the applicant leaves. Keep both pending recovery evidence and final
+        // decision results; missing evidence must never be mistaken for a
+        // membership operation that did not commit. Match only the operation
+        // identity so conflicting legacy bindings remain investigable too.
+        .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)"),
         .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)"),

@@ -62,8 +62,14 @@ public enum V2RichMessageContent {
         }
         let length = text.utf16.count
         for entity in entities {
-            let end = entity.offsetUTF16 + entity.lengthUTF16
-            guard end <= length else { throw V2RichMessageContentError.invalidEntity }
+            // Codable can populate stored properties without using the public
+            // initializer. Validate them again before arithmetic or NSRange.
+            _ = try V2MessageEntity(
+                offsetUTF16: entity.offsetUTF16, lengthUTF16: entity.lengthUTF16,
+                kind: entity.kind, linkURL: entity.linkURL
+            )
+            let (end, overflow) = entity.offsetUTF16.addingReportingOverflow(entity.lengthUTF16)
+            guard !overflow, end <= length else { throw V2RichMessageContentError.invalidEntity }
             guard let range = Range(NSRange(location: entity.offsetUTF16, length: entity.lengthUTF16), in: text),
                   text[..<range.lowerBound].utf16.count == entity.offsetUTF16,
                   text[range].utf16.count == entity.lengthUTF16

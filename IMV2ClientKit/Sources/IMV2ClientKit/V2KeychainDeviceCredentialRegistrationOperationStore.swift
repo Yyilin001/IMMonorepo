@@ -3,10 +3,9 @@ import Foundation
 import Security
 #endif
 
-/// Device-only persistence for the non-secret registration replay operation.
-/// It shares the credential store's after-first-unlock policy so an
-/// interruption before credential persistence can recover after foregrounding
-/// without making this identifier backup-restorable.
+/// Device-local persistence for the registration and its cancellation proof.
+/// Legacy records without a proof fail closed and are retained for explicit
+/// recovery; this adapter cannot rotate its separately owned device identity.
 #if canImport(Security)
 public actor V2KeychainDeviceCredentialRegistrationOperationStore: V2DeviceCredentialRegistrationOperationStore {
     private let service: String

@@ -107,7 +107,7 @@ private actor SpecialAccountStoreSpy: V2SpecialAccountMessagingStore {
 
     func record(request _: V2TrustedSpecialAccountMessage, account _: V2ResolvedSpecialAccount, roomID _: RoomID, outcome: V2SendMessageOutcome, now _: Date) async throws {
         switch outcome {
-        case .accepted(let message), .idempotent(let message): recordedMessage = message.messageID
+        case .accepted, .idempotent: recordedMessage = outcome.acceptanceReceipt?.messageID
         case .idempotencyConflict, .rateLimited, .unavailable, .denied:
             throw V2SpecialAccountMessagingError.corruptPersistenceState
         }

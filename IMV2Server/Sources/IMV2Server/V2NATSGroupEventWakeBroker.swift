@@ -41,6 +41,7 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     /// Bounds connect, command and broker PING/PONG confirmation. A TCP write
     /// alone is not evidence that NATS accepted the preceding command.
     public let acknowledgementTimeout: TimeInterval
+    let acknowledgementTimeoutNanoseconds: Int64
 
     public init(
         url: URL,
@@ -75,8 +76,7 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
               normalizedServerName?.isEmpty != true,
               routingKey.count >= 32,
               (0 ... 1_000).contains(wakeDeferralDelayMilliseconds),
-              acknowledgementTimeout.isFinite,
-              acknowledgementTimeout > 0,
+              let timeoutNanoseconds = v2TimeoutNanoseconds(acknowledgementTimeout),
               acknowledgementTimeout <= 30
         else { throw V2NATSGroupEventWakeBrokerError.invalidConfiguration }
         self.url = url
@@ -88,6 +88,7 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
         self.payloadEncoding = payloadEncoding
         self.wakeDeferralDelayMilliseconds = wakeDeferralDelayMilliseconds
         self.acknowledgementTimeout = acknowledgementTimeout
+        self.acknowledgementTimeoutNanoseconds = timeoutNanoseconds
     }
 
     var usesTLS: Bool { url.scheme?.lowercased() == "tls" }
@@ -285,6 +286,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         droppedPayloadObserver: @escaping @Sendable () -> Void = {},
         coveredWakeSuppressedObserver: @escaping @Sendable () -> Void = {},
         wakeDeferralDelay: Duration = .milliseconds(20),
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock().now },
         wakeDeferredObserver: @escaping @Sendable () -> Void = {},
         deferredWakeDeliveredObserver: @escaping @Sendable () -> Void = {},
         receiveNotification: @escaping @Sendable (
@@ -304,7 +306,6 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         lanes = (0 ..< laneCount).map { _ in
             let mailbox = Mailbox(capacity: capacityPerLane)
             let worker = Task(priority: .high) {
-                let clock = ContinuousClock()
                 var recentLive = RecentLiveHighWatermarks(
                     capacity: Self.recentLiveRoomCapacityPerLane
                 )
@@ -347,7 +348,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
                                 }
                                 deferredWakes[wake.roomID] = .init(
                                     wake: wake,
-                                    deadline: clock.now.advanced(
+                                    deadline: monotonicNow().advanced(
                                         by: wakeDeferralDelay
                                     )
                                 )
@@ -366,7 +367,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
                         }
                     }
 
-                    let now = clock.now
+                    let now = monotonicNow()
                     let due = deferredWakes.values
                         .filter { $0.deadline <= now }
                         .sorted {
@@ -1080,7 +1081,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     }
 
     private var acknowledgementTimeout: TimeAmount {
-        .nanoseconds(Int64(configuration.acknowledgementTimeout * 1_000_000_000))
+        .nanoseconds(configuration.acknowledgementTimeoutNanoseconds)
     }
 
     private static func openConnection(

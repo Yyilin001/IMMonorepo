@@ -136,6 +136,40 @@ struct SendMessageAcceptanceTests {
         )
     }
 
+    @Test("Same text with different forward attribution or business rule is a conflict")
+    func retriesCompareOriginalIntentFingerprint() throws {
+        let original = try command(clientMessageID: "client-1", text: "hello")
+        let first = try V2SendMessageReducer.reduce(
+            command: original, roomState: initialRoomState(), shardState: shardState(),
+            profile: profile(), identifiers: identifiers(), now: Date(timeIntervalSince1970: 1_000)
+        )
+        guard case .accepted(let transaction) = first else {
+            Issue.record("Expected first acceptance")
+            return
+        }
+        let variants = [
+            try V2SendMessageCommand(
+                roomID: original.roomID, senderUserID: original.senderUserID,
+                clientMessageID: original.clientMessageID, text: original.text,
+                targetRule: .exactTargetCount(2), limits: .init(maxUTF8Bytes: 128)
+            ),
+            try V2SendMessageCommand(
+                roomID: original.roomID, senderUserID: original.senderUserID,
+                clientMessageID: original.clientMessageID, text: original.text,
+                forwardedFrom: .init(messageID: MessageID("source"), senderUserID: UserID("author"), sourceRevision: try .init(1)),
+                limits: .init(maxUTF8Bytes: 128)
+            )
+        ]
+        for changed in variants {
+            let result = try V2SendMessageReducer.reduce(
+                command: changed, roomState: transaction.nextRoomState, shardState: transaction.nextShardState,
+                profile: profile(), identifiers: identifiers(), now: Date(timeIntervalSince1970: 2_000)
+            )
+            #expect(result == .idempotencyConflict)
+        }
+        #expect(transaction.nextRoomState.acceptedCommands.values.first?.fingerprint == original.fingerprint)
+    }
+
     private func initialRoomState() throws -> V2RoomCommandState {
         try V2RoomCommandState(
             roomID: RoomID("room-1"),

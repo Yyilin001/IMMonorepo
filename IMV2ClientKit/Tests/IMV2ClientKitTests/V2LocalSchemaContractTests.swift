@@ -16,10 +16,10 @@ struct V2LocalSchemaContractTests {
         let primary = try DatabasePool(path: url.path)
         let search = try DatabasePool(path: url.deletingPathExtension().appendingPathExtension("search.sqlite").path)
 
-        #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
+        #expect(try migrationIdentifiers(in: primary) == ["addForwardChunkCompletionDigest", "bindForwardSourceReferences", "createCurrentV2Schema", "orderAnnouncementEffects", "orderPinnedMessageEffects", "orderReactionEffects", "orderRolePolicyEffects", "recordPushIntent", "recordRolePolicyRecovery", "recordSharedMessageEffects", "recordSnapshotRebuildIntent", "scheduleRolePolicyRecovery", "useUUIDForwardChunkIdentities"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
-        #expect(try schemaObjectCount(in: primary) == 162)
-        #expect(try schemaFingerprint(in: primary) == 0x2e6c_e090_d997_ef7c)
+        #expect(try schemaObjectCount(in: primary) == 173)
+        #expect(try schemaFingerprint(in: primary) == 0xd39d3ac5c9ce1b60)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

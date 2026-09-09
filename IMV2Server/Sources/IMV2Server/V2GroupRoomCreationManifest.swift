@@ -29,7 +29,7 @@ public struct V2GroupRoomCreationManifestPage: Equatable, Sendable {
         isFinal: Bool
     ) throws {
         let canonical = memberUserIDs.sorted()
-        guard pageNumber >= 0,
+        guard pageNumber >= 0, Int32(exactly: pageNumber) != nil,
               (1 ... Self.maximumMemberCount).contains(canonical.count),
               Set(canonical).count == canonical.count
         else { throw V2GroupRoomCreationIntentStoreError.invalidIntent }

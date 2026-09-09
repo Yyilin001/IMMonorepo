@@ -24,7 +24,7 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             guard let rawTarget = request.parameters.get("target"), let target = try? UserID(rawTarget) else { throw Abort(.badRequest) }
             let input = try request.content.decode(AliasUpdateRequest.self)
             do {
-                let value = try await presentations.updateContactAlias(ownerUserID: actor.userID, targetUserID: target, operationID: try .init(input.operationID), expectedRevision: input.expectedRevision.flatMap(V2ProfileRevision.init(rawValue:)), remarkName: input.remarkName)
+                let value = try await presentations.updateContactAlias(ownerUserID: actor.userID, targetUserID: target, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), remarkName: input.remarkName)
                 return try response(AliasResponse(value: value))
             } catch { throw map(error) }
         }
@@ -44,10 +44,15 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             guard let rawRoom = request.parameters.get("room"), let room = try? RoomID(rawRoom) else { throw Abort(.badRequest) }
             let input = try request.content.decode(NicknameUpdateRequest.self)
             do {
-                let value = try await presentations.updateOwnGroupNickname(actorUserID: actor.userID, roomID: room, operationID: try .init(input.operationID), expectedRevision: input.expectedRevision.flatMap(V2ProfileRevision.init(rawValue:)), nickname: input.nickname)
+                let value = try await presentations.updateOwnGroupNickname(actorUserID: actor.userID, roomID: room, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), nickname: input.nickname)
                 return try response(NicknameResponse(value: value))
             } catch { throw map(error) }
         }
+    }
+    private func validatedRevision(_ raw: UInt64?) throws -> V2ProfileRevision? {
+        guard let raw else { return nil }
+        guard let revision = V2ProfileRevision(rawValue: raw) else { throw V2ProfilePresentationError.invalidPresentation }
+        return revision
     }
     private func paginationCursor(_ request: Request) throws -> UserID? {
         guard let raw = request.query[String.self, at: "cursor"] else { return nil }

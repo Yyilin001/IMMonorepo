@@ -29,10 +29,18 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CIMV2Argon2",
+            exclude: ["LICENSE", "UPSTREAM.json"],
+            sources: ["src/argon2.c", "src/core.c", "src/encoding.c", "src/ref.c", "src/thread.c", "src/blake2/blake2b.c"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath("src"), .define("ARGON2_NO_THREADS")]
+        ),
+        .target(
             name: "IMV2Server",
             dependencies: [
                 "IMV2Core",
                 "IMV2Compression",
+                "CIMV2Argon2",
                 .product(name: "Fluent", package: "fluent"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "AsyncKit", package: "async-kit"),
@@ -114,6 +122,7 @@ let package = Package(
             name: "IMV2ServerTests",
             dependencies: [
                 "IMV2Server",
+                "CIMV2Argon2",
                 "IMV2ServerHTTP",
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),

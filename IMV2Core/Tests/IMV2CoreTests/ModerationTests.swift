@@ -63,6 +63,20 @@ struct ModerationTests {
         }
     }
 
+    @Test("redaction expected revision fits persistence without changing optional semantics", arguments: [nil, UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max] as [UInt64?])
+    func expectedRevisionPersistenceBounds(revision: UInt64?) throws {
+        func command() throws -> V2ModerationCommand {
+            try .init(roomID: roomID, actorUserID: actorID, operationID: operationID,
+                      action: .redactMessage, messageID: .init("message"),
+                      expectedMessageRevision: revision, reasonCode: .init("policy"))
+        }
+        if let revision, revision == 0 || revision > UInt64(Int64.max) {
+            #expect(throws: V2ModerationValidationError.invalidActionShape) { _ = try command() }
+        } else {
+            #expect(try command().expectedMessageRevision == revision)
+        }
+    }
+
     @Test("only room owner or admin can moderate and mute expiry must be future")
     func authorizationAndExpiryAreFenced() throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -80,6 +94,23 @@ struct ModerationTests {
         let freeze = try V2ModerationCommand(roomID: roomID, actorUserID: actorID, operationID: operationID, action: .freezeRoom, reasonCode: reason)
         #expect(throws: V2ModerationAuthorizationError.notAuthorized) {
             try V2ModerationAuthorization.authorize(actorRole: .owner, action: freeze.action, now: now, command: freeze)
+        }
+    }
+
+    @Test("mute authorization rejects nonfinite clocks and expiry", arguments: [Double.nan, -.infinity, .infinity, -1, 0, 1], [Double.nan, -.infinity, .infinity, -1, 0, 1])
+    func muteClockBounds(nowSeconds: Double, expirySeconds: Double) throws {
+        let now = Date(timeIntervalSince1970: nowSeconds)
+        let command = try V2ModerationCommand(
+            roomID: roomID, actorUserID: actorID, operationID: operationID,
+            action: .muteMember, targetUserID: targetID,
+            muteUntil: Date(timeIntervalSince1970: expirySeconds), reasonCode: .init("policy")
+        )
+        if nowSeconds.isFinite && expirySeconds.isFinite && expirySeconds > nowSeconds {
+            try V2ModerationAuthorization.authorize(actorRole: .owner, action: .muteMember, now: now, command: command)
+        } else {
+            #expect(throws: V2ModerationValidationError.invalidMuteExpiry) {
+                try V2ModerationAuthorization.authorize(actorRole: .owner, action: .muteMember, now: now, command: command)
+            }
         }
     }
 

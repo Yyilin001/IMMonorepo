@@ -36,17 +36,40 @@ struct GroupCapabilitiesTests {
         let operation = try MessageForwardOperationID("00000000-0000-0000-0000-000000000806")
         let source = try MessageID("00000000-0000-0000-0000-000000000807")
         let target = try RoomID("00000000-0000-0000-0000-000000000808")
-        let command = try V2ForwardMessagesCommand(operationID: operation, sourceMessageIDs: [source], targetRoomIDs: [target])
+        let command = try V2ForwardMessagesCommand(operationID: operation, sources: [.init(roomID: target, messageID: source, revision: .init(1))], targetRoomIDs: [target])
         #expect(command.sourceMessageIDs == [source])
         #expect(command.targetRoomIDs == [target])
         #expect(throws: V2CoreError.invalidPositiveValue) {
-            try V2ForwardMessagesCommand(operationID: operation, sourceMessageIDs: [], targetRoomIDs: [target])
+            try V2ForwardMessagesCommand(operationID: operation, sources: [], targetRoomIDs: [target])
         }
         let sources = try (0 ... V2ForwardMessagesCommand.maximumSourceMessages).map {
             try MessageID(String(format: "00000000-0000-0000-0000-%012d", $0 + 900))
         }
         #expect(throws: V2CoreError.invalidPositiveValue) {
-            try V2ForwardMessagesCommand(operationID: operation, sourceMessageIDs: sources, targetRoomIDs: [target])
+            try V2ForwardMessagesCommand(operationID: operation, sources: sources.map { .init(roomID: target, messageID: $0, revision: try .init(1)) }, targetRoomIDs: [target])
+        }
+    }
+}
+
+@Suite("Selected forward source references")
+struct ForwardReferenceTests {
+    @Test("JSON preserves exact rooms and versions and rejects missing or out-of-range context")
+    func referenceCodable() throws {
+        let source = V2ForwardMessageReference(roomID: try .init("room-a"), messageID: try .init("message-a"), revision: try .init(17))
+        #expect(try JSONDecoder().decode(V2ForwardMessageReference.self, from: JSONEncoder().encode(source)) == source)
+        for revision in ["0", "-1", "9223372036854775808", "18446744073709551615", "null"] {
+            let json = Data("{\"roomID\":\"room-a\",\"messageID\":\"message-a\",\"revision\":\(revision)}".utf8)
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(V2ForwardMessageReference.self, from: json) }
+        }
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(V2ForwardMessageReference.self, from: Data("{\"messageID\":\"message-a\"}".utf8)) }
+    }
+
+    @Test("two room or version claims cannot alias the same source identity")
+    func duplicateIdentityRejected() throws {
+        let id = try MessageID("message-a")
+        let sources = try [V2ForwardMessageReference(roomID: .init("room-a"), messageID: id, revision: .init(1)), V2ForwardMessageReference(roomID: .init("room-b"), messageID: id, revision: .init(2))]
+        #expect(throws: V2CoreError.invalidPositiveValue) {
+            try V2ForwardMessagesCommand(operationID: .init("operation-a"), sources: sources, targetRoomIDs: [.init("target")])
         }
     }
 }

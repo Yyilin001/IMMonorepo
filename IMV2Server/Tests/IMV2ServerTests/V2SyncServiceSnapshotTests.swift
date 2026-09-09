@@ -46,7 +46,7 @@ private actor RecordingSnapshotV3Store: V2SyncStore {
     private var root: String?
     private var ack: Ack?
 
-    func pull(userID _: UserID, deviceID _: DeviceID, syncToken _: V2SyncToken?, maxRecords _: Int, now _: Date) throws -> V2SyncPullResult { throw V2SyncStoreError.invalidOrExpiredSyncToken }
+    func pull(userID _: UserID, deviceID _: DeviceID, syncToken _: V2SyncToken?, maxRecords _: Int, requireSnapshot _: Bool, now _: Date) throws -> V2SyncPullResult { throw V2SyncStoreError.invalidOrExpiredSyncToken }
     func acknowledge(userID _: UserID, deviceID _: DeviceID, generation _: UInt64, highestContiguousSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) {}
     func fetchSnapshotManifest(userID _: UserID, deviceID _: DeviceID, snapshotID: SnapshotID, generation: UInt64, now _: Date) throws -> V2SnapshotManifest {
         let digest = V2SnapshotV3Digest.initial(baseSequence: 42, capabilityProfile: "base")

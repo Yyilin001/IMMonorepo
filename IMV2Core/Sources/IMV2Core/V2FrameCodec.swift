@@ -100,6 +100,8 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let groupMemberRoleChanged = Self(rawValue: 104)
     public static let forwardMessages = Self(rawValue: 105)
     public static let messagesForwarded = Self(rawValue: 106)
+    public static let getGroupRolePolicyBaseline = Self(rawValue: 107)
+    public static let groupRolePolicyBaseline = Self(rawValue: 108)
 }
 
 public struct V2FrameFlags: OptionSet, Equatable, Sendable {

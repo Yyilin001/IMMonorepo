@@ -173,10 +173,33 @@ public actor V2LocalStoreBootstrapper {
         }
     }
 
-    private func eraseDatabaseArtifacts(at databaseURL: URL) throws {
-        let fileManager = FileManager.default
-        for artifact in [databaseURL, URL(fileURLWithPath: databaseURL.path + "-wal"), URL(fileURLWithPath: databaseURL.path + "-shm")] where fileManager.fileExists(atPath: artifact.path) {
-            try fileManager.removeItem(at: artifact)
+    /// Migration must distinguish a trusted legacy database from an imported
+    /// one without manufacturing an empty, unbound legacy store.
+    public func openTrustedLegacyStore(databaseURL: URL) async throws -> GRDBV2LocalSyncStore? {
+        let binding: V2LocalInstallationBinding
+        do {
+            guard let existing = try await bindingStore.load() else {
+                try eraseDatabaseArtifacts(at: databaseURL)
+                return nil
+            }
+            binding = existing
+        } catch let error as V2InstallationBindingStoreError {
+            switch error {
+            case .unavailable, .unexpectedStatus: throw V2LocalStoreBootstrapError.installationBindingUnavailable
+            case .malformedRecord, .permanentlyInvalidated:
+                try await bindingStore.delete()
+                try eraseDatabaseArtifacts(at: databaseURL)
+                return nil
+            }
         }
+        do { return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding) }
+        catch V2ClientLocalStorageError.installationBindingMismatch {
+            try eraseDatabaseArtifacts(at: databaseURL)
+            return nil
+        }
+    }
+
+    private func eraseDatabaseArtifacts(at databaseURL: URL) throws {
+        try V2LocalDatabaseArtifacts(primary: databaseURL).removeClosedFiles()
     }
 }

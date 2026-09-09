@@ -5,6 +5,32 @@ import Testing
 
 @Suite("V2 read receipt service")
 struct V2ReadReceiptServiceTests {
+    @Test("Receipt sequence bounds are checked before direct storage or batch admission",
+          arguments: [false, true], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func validatesSequenceBeforeAdmission(batched: Bool, sequence: UInt64) async throws {
+        let store = ReceiptStoreSpy()
+        let admission = ReceiptAdmissionSpy()
+        let service = V2ReadReceiptService(store: store, batcher: batched ? admission : nil,
+            now: { Date(timeIntervalSince1970: 1_750_000_000) })
+        let request = V2AuthenticatedReadReceipt(roomID: .init(uuid: UUID()), actorUserID: .init(uuid: UUID()),
+            operationID: .init(uuid: UUID()), readThroughRoomSequence: sequence)
+        if sequence == 0 || sequence > UInt64(Int64.max) {
+            await #expect(throws: V2ReadReceiptValidationError.invalidRoomSequence) { try await service.record(request) }
+            #expect(await store.command() == nil)
+            #expect(await admission.command() == nil)
+        } else {
+            guard case .recorded(let receipt) = try await service.record(request) else { throw CancellationError() }
+            #expect(receipt.readThroughRoomSequence == sequence)
+            if batched {
+                #expect(await admission.command()?.readThroughRoomSequence == sequence)
+                #expect(await store.command() == nil)
+            } else {
+                #expect(await store.command()?.readThroughRoomSequence == sequence)
+                #expect(await admission.command() == nil)
+            }
+        }
+    }
+
     @Test("explicit viewing state reaches the store independently of sync acknowledgements")
     func forwardsReadReceipt() async throws {
         let store = ReceiptStoreSpy()
@@ -22,13 +48,24 @@ private actor ReceiptStoreSpy: V2ReadReceiptStore {
     private var captured: V2RecordReadReceiptCommand?
     func record(command: V2RecordReadReceiptCommand, now: Date) throws -> V2ReadReceiptOutcome {
         captured = command
-        return .recorded(.init(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: command.readThroughRoomSequence, recordedAt: now))
+        return .recorded(try .init(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: command.readThroughRoomSequence, recordedAt: now))
     }
     func setPreferences(command _: V2SetReadReceiptPreferencesCommand, now _: Date) throws -> V2SetReadReceiptPreferencesOutcome {
         throw V2ReadReceiptStoreError.corruptPersistenceState
     }
     func readers(roomID _: RoomID, messageID _: MessageID, actorUserID _: UserID, cursor _: String?, pageSize _: Int) throws -> V2ReadReceiptReadersPage {
         throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+    func command() -> V2RecordReadReceiptCommand? { captured }
+}
+
+private actor ReceiptAdmissionSpy: V2ReadReceiptAdmission {
+    nonisolated var managesForegroundWriteAdmission: Bool { true }
+    private var captured: V2RecordReadReceiptCommand?
+    func accept(_ request: V2ReadReceiptRecordRequest) throws -> V2ReadReceiptOutcome {
+        captured = request.command
+        return .recorded(try .init(roomID: request.command.roomID, userID: request.command.actorUserID,
+            readThroughRoomSequence: request.command.readThroughRoomSequence, recordedAt: request.now))
     }
     func command() -> V2RecordReadReceiptCommand? { captured }
 }

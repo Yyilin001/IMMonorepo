@@ -109,6 +109,8 @@ message Envelope {
     GroupMemberRoleChanged group_member_role_changed = 104;
     ForwardMessages forward_messages = 105;
     MessagesForwarded messages_forwarded = 106;
+    GetGroupRolePolicyBaseline get_group_role_policy_baseline = 107;
+    GroupRolePolicyBaseline group_role_policy_baseline = 108;
   }
 }
 
@@ -138,6 +140,16 @@ message PinnedMessageChanged { string room_id = 1; string message_id = 2; bool i
 message SetGroupAnnouncement { string operation_id = 1; string room_id = 2; string body = 3; uint64 expected_revision = 4; }
 message GroupAnnouncementChanged { string room_id = 1; string body = 2; uint64 revision = 3; uint64 room_sequence = 4; int64 updated_at_ms = 5; }
 message GroupRolePermission { string permission = 1; }
+// A complete current observation, not two fabricated role-change events.
+message GetGroupRolePolicyBaseline { string room_id = 1; }
+message GroupRolePolicy { string role = 1; repeated GroupRolePermission permissions = 2; }
+message GroupRolePolicyBaseline {
+  string room_id = 1;
+  uint64 permission_revision = 2;
+  uint64 membership_revision = 3; // zero is a valid initial membership fence
+  uint64 room_sequence = 4;
+  repeated GroupRolePolicy policies = 5; // exactly admin and member, even when empty
+}
 message SetGroupRolePermissions { string operation_id = 1; string room_id = 2; string role = 3; repeated GroupRolePermission permissions = 4; uint64 expected_revision = 5; }
 message GroupRolePermissionsChanged { string room_id = 1; string role = 2; repeated GroupRolePermission permissions = 3; uint64 revision = 4; uint64 room_sequence = 5; }
 message ChangeGroupMemberRole { string operation_id = 1; string room_id = 2; string user_id = 3; string role = 4; uint64 expected_membership_revision = 5; }
@@ -146,7 +158,14 @@ message GroupMemberRoleChanged { string room_id = 1; string user_id = 2; string 
 // A forward creates a distinct message for each source/target pair. Results
 // are per pair so callers can report partial target failures without retrying
 // successful output. Source message order is preserved inside each target.
-message ForwardMessages { string operation_id = 1; repeated string source_message_ids = 2; repeated string target_room_ids = 3; }
+message ForwardMessageReference { string room_id = 1; string message_id = 2; uint64 revision = 3; }
+message ForwardMessages {
+  reserved 2;
+  reserved "source_message_ids";
+  string operation_id = 1;
+  repeated string target_room_ids = 3;
+  repeated ForwardMessageReference sources = 4;
+}
 message ForwardMessageResult { string source_message_id = 1; string target_room_id = 2; string message_id = 3; uint64 room_sequence = 4; string error_code = 5; }
 message MessagesForwarded { repeated ForwardMessageResult results = 1; }
 
@@ -318,12 +337,11 @@ message MessageAccepted {
   string room_id = 2;
   uint64 room_sequence = 3;
   int64 server_created_at_ms = 4;
-  repeated string media_ids = 5;
-  repeated string mentioned_user_ids = 6;
-  bool mentions_everyone = 7;
-  repeated MediaPresentation media_presentations = 8;
-  repeated MessageEntity entities = 9;
-  string reply_to_message_id = 10;
+  // A retry may happen after content was edited or erased. ACK never echoes
+  // content, references, links or presentation facts; use authorized sync/read.
+  reserved 5 to 10;
+  reserved "media_ids", "mentioned_user_ids", "mentions_everyone",
+           "media_presentations", "entities", "reply_to_message_id";
 }
 
 // The initial gateway-exposed moderation action is explicit message redaction.
@@ -600,6 +618,10 @@ message GroupEventPull {
   uint32 page_size = 3;
 }
 
+// Protocol 27 message.edited payloads include replacement schema 1: accepted
+// event identity, accepted membership revision, and complete authorized state.
+// Only this explicit contract permits content revision gaps; legacy text deltas
+// still require the preceding revision. Both personal and room feeds preserve it.
 message GroupEvent {
   string source_event_id = 1;
   uint64 room_sequence = 2;
@@ -610,6 +632,10 @@ message GroupEvent {
 message GroupEventPage {
   string room_id = 1;
   repeated GroupEvent events = 2;
+  // Authenticated scanned-through boundary, including events invisible to this reader.
+  // It is at least the last returned sequence and may advance on an empty page.
+  // Missing authority or corrupt payloads must fail the page, never be skipped.
+  // If has_more is true, this boundary must advance beyond the request cursor.
   uint64 next_room_sequence = 3;
   bool has_more = 4;
 }
@@ -793,6 +819,9 @@ message UserBlockChanged {
 message SyncPull {
   string sync_token = 1;
   uint32 max_records = 2;
+  // Authenticated device requests a full personal baseline even above the
+  // retention floor. Existing pending resets are resumed, not duplicated.
+  bool require_snapshot = 3;
 }
 
 message SyncRecord {

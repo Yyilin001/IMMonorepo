@@ -90,6 +90,7 @@ struct V2GroupPermissionsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRole: V2RoomMembershipRole = .admin
     @State private var selectedPermissions: Set<V2GroupPermission> = []
+    @State private var editingPolicy: V2ClientGroupRolePolicy?
 
     var body: some View {
         NavigationStack {
@@ -104,13 +105,20 @@ struct V2GroupPermissionsSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: selectedRole) { _, _ in loadSelectedPolicy() }
-                        Text("当前策略版本 \(selectedPolicy?.revision ?? 1)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if let editingPolicy {
+                            Text("当前策略版本 \(editingPolicy.revision)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if selectedPolicy != editingPolicy {
+                                Button("重新载入最新权限") { loadSelectedPolicy() }
+                            }
+                        }
                     }
+                    recoverySection
                     Section("允许的操作") {
                         ForEach(V2GroupPermission.allCases, id: \.self) { permission in
                             Toggle(permission.title, isOn: binding(for: permission))
+                                .disabled(!canEditPolicy)
                                 .accessibilityIdentifier("v2.group.permission.\(selectedRole.rawValue).\(permission.rawValue)")
                         }
                     }
@@ -134,16 +142,22 @@ struct V2GroupPermissionsSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        guard let policy = selectedPolicy else { return }
+                        guard let policy = editingPolicy else { return }
                         let permissions = selectedPermissions
                         Task {
                             if await store.saveGroupRolePolicy(policy, permissions: permissions) { dismiss() }
                         }
                     }
-                    .disabled(selectedPolicy == nil || store.isSavingGroupRolePolicy || store.groupActorRole != "群主")
+                    .disabled(!canEditPolicy || store.isSavingGroupRolePolicy || store.groupActorRole != "群主")
                     .accessibilityValue(store.isSavingGroupRolePolicy ? "正在保存群权限策略" : "")
                     .accessibilityIdentifier("v2.group.permissions.save")
                 }
+            }
+            .onChange(of: store.groupRolePolicyState) { _, _ in
+                if selectedPolicy == nil || store.groupRolePolicyState.recovery == .unavailable {
+                    editingPolicy = nil
+                    selectedPermissions = []
+                } else if editingPolicy == nil { loadSelectedPolicy() }
             }
             .task {
                 await store.loadGroupRolePolicies()
@@ -151,6 +165,49 @@ struct V2GroupPermissionsSheet: View {
                 loadSelectedPolicy()
             }
         }
+    }
+
+    private var canEditPolicy: Bool {
+        switch store.groupRolePolicyState.recovery {
+        case .unavailable, .waitingForSynchronization: false
+        default: editingPolicy != nil
+        }
+    }
+
+    @ViewBuilder
+    private var recoverySection: some View {
+        if store.groupRolePolicyState.recovery != .ready {
+            Section("权限同步") {
+                switch store.groupRolePolicyState.recovery {
+                case .unavailable:
+                    Text("当前无法读取此群的权限。")
+                case .waitingForSynchronization:
+                    Text("正在同步会话，完成后将继续获取权限。")
+                case .needed:
+                    Text("尚未取得完整权限策略。")
+                    retryRecoveryButton
+                case .pending:
+                    Text("权限同步请求已保存，连接可用后会继续。")
+                case .paused:
+                    Text("权限同步已暂停，请重试。")
+                    retryRecoveryButton
+                case .ready:
+                    EmptyView()
+                }
+                if store.policyRecoveryAction == .failed {
+                    Text("暂时无法确认同步状态，请重试。")
+                }
+            }
+            .accessibilityIdentifier("v2.group.permissions.recovery")
+        }
+    }
+
+    private var retryRecoveryButton: some View {
+        Button("请求同步权限") { Task { await store.retryGroupRolePolicyRecovery() } }
+            .disabled(store.policyRecoveryAction == .requesting)
+            .accessibilityValue(store.policyRecoveryAction == .requesting ? "正在请求同步" : "")
+            .accessibilityHint("请求更新此群的权限策略")
+            .accessibilityIdentifier("v2.group.permissions.retry-recovery")
     }
 
     private var selectedPolicy: V2ClientGroupRolePolicy? {
@@ -168,7 +225,8 @@ struct V2GroupPermissionsSheet: View {
     }
 
     private func loadSelectedPolicy() {
-        selectedPermissions = selectedPolicy?.permissions ?? []
+        editingPolicy = selectedPolicy
+        selectedPermissions = editingPolicy?.permissions ?? []
     }
 }
 

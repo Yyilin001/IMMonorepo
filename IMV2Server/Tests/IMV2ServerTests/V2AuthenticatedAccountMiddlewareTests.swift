@@ -45,6 +45,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
         routes.get("v2", "devices") { _ in Response(status: .ok) }
         routes.get("v2", "public-identities", "me") { _ in Response(status: .ok) }
         routes.get("v2", "public-identities", "resolve") { _ in Response(status: .ok) }
+        routes.get("v2", "push-endpoint", "session") { _ in Response(status: .ok) }
+        routes.post("v2", "push-endpoint", "session") { _ in Response(status: .ok) }
+        routes.put("v2", "push-endpoint", "intent") { _ in Response(status: .ok) }
 
         for (method, path) in [
             (HTTPMethod.POST, "v2/profile-views/batch"),
@@ -53,6 +56,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
             (.GET, "v2/devices?page_size=100"),
             (.GET, "v2/public-identities/me"),
             (.GET, "v2/public-identities/resolve?handle=alice"),
+            (.GET, "v2/push-endpoint/session"),
+            (.POST, "v2/push-endpoint/session"),
+            (.PUT, "v2/push-endpoint/intent"),
         ] {
             try await app.testing().test(method, path, beforeRequest: authenticatedHeaders) { response async in
                 #expect(response.status == .ok)
@@ -60,9 +66,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
         }
         let charges = await limiter.charges()
         #expect(charges.map(\.scope) == [
-            "profile-views", "profile", "profile-presentations", "devices", "public-identities",
+            "profile-views", "profile", "profile-presentations", "devices", "public-identities", "push", "push", "push",
         ])
-        #expect(charges.map(\.cost) == [5, 3, 6, 2, 1])
+        #expect(charges.map(\.cost) == [5, 3, 6, 2, 1, 1, 3, 3])
     }
 
     @Test("authenticated limiter returns a no-store retry interval")

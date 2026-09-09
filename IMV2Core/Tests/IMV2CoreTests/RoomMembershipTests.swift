@@ -2,6 +2,23 @@ import Testing
 @testable import IMV2Core
 
 struct RoomMembershipTests {
+    @Test(arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max],
+          [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func resultPersistenceBounds(revision: UInt64, sequence: UInt64) throws {
+        func result() throws -> V2RoomMembershipChange {
+            try .init(roomID: .init("room"), targetUserID: .init("user"), action: .add,
+                membershipRevision: revision, roomSequence: sequence, eventID: .init("event"),
+                fanoutPlanID: .init("plan"), createdAt: .distantPast)
+        }
+        if revision == 0 || sequence == 0 || revision > UInt64(Int64.max) || sequence > UInt64(Int64.max) {
+            #expect(throws: V2RevisionValidationError.outOfRange) { _ = try result() }
+        } else {
+            let value = try result()
+            #expect(value.membershipRevision == revision)
+            #expect(value.roomSequence == sequence)
+        }
+    }
+
     @Test("membership operation IDs are domain-scoped and self-targeting is rejected")
     func rejectsSelfTargetingChange() throws {
         let user = try UserID("user-a")
@@ -19,7 +36,7 @@ struct RoomMembershipTests {
 
     @Test("a membership result keeps event, fan-out, sequence, and revision distinct")
     func preservesIndependentOrderingAndFanoutIdentities() throws {
-        let result = V2RoomMembershipChange(
+        let result = try V2RoomMembershipChange(
             roomID: try .init("room-a"),
             targetUserID: try .init("user-b"),
             action: .add,

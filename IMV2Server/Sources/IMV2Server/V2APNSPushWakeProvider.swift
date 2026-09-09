@@ -84,10 +84,10 @@ public struct V2APNSJWTAuthorizer: V2APNSAuthorizer {
     public func authorizationValue(now: Date) throws -> String {
         let header = try jsonBase64URL(["alg": "ES256", "kid": keyID])
         let issuedAt = now.timeIntervalSince1970
-        guard issuedAt.isFinite, issuedAt >= 0, issuedAt <= Double(Int64.max) else {
+        guard issuedAt >= 0, let signedIssuedAt = Int64(exactly: issuedAt.rounded(.towardZero)) else {
             throw V2APNSPushProviderError.invalidConfiguration
         }
-        let claims = try jsonBase64URL(["iss": teamID, "iat": Int64(issuedAt.rounded(.towardZero))])
+        let claims = try jsonBase64URL(["iss": teamID, "iat": signedIssuedAt])
         let signingInput = "\(header).\(claims)"
         let privateKey = try P256.Signing.PrivateKey(rawRepresentation: privateKeyRaw)
         let signature = try privateKey.signature(for: Data(signingInput.utf8))

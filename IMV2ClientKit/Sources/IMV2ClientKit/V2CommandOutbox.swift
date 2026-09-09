@@ -70,6 +70,8 @@ public protocol V2ClientCommandFlushing: Sendable {
 /// Serializes local command enqueue/retry. A send is retried only with its
 /// original client message ID, including after process restart or sync reset.
 public actor V2CommandOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2CommandFlushResult>()
+
     private let store: any V2LocalCommandStore
     private let transport: any V2ClientMessageTransport
     private let makeUUID: @Sendable () -> UUID
@@ -100,6 +102,10 @@ public actor V2CommandOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2CommandFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2CommandFlushResult {
         guard let command = try await store.nextReadyMessage(now: now()) else { return .idle }
         do {
             let accepted = try await transport.sendMessage(roomID: command.roomID, clientMessageID: command.clientMessageID, text: command.text, media: command.media, mentions: command.mentions, entities: command.entities, replyTo: command.replyTo)
@@ -121,20 +127,25 @@ public actor V2CommandOutboxEngine {
                     return .rejected(command.clientMessageID, code: code)
                 }
                 if retryable {
-                    try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1))))
+                    try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: TimeInterval(max(retryAfter, 1))))
                     return .retryScheduled(command.clientMessageID)
                 }
                 try await store.rejectMessage(clientMessageID: command.clientMessageID, code: code)
                 return .rejected(command.clientMessageID, code: code)
             default:
-                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
                 return .retryScheduled(command.clientMessageID)
             }
         } catch {
-            try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.clientMessageID)
         }
     }
 }
 
 extension V2CommandOutboxEngine: V2ClientCommandFlushing {}
+
+extension V2CommandOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
+}

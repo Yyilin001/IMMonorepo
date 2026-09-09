@@ -62,6 +62,7 @@ struct V2ConversationAttachmentStagingPolicy: Equatable, Sendable {
 /// importer URL can be security-scoped and is accessed only during the copy;
 /// a sandbox-local file is then supplied to the foreground upload client.
 actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
+    private var isClosed = false
     private let directory: URL
     private let fileManager: FileManager
     private let policy: V2ConversationAttachmentStagingPolicy
@@ -83,6 +84,8 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     }
 
     func stageImportedFile(at sourceURL: URL) throws -> V2StagedConversationAttachment {
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
         let accessGranted = sourceURL.startAccessingSecurityScopedResource()
         defer {
             if accessGranted { sourceURL.stopAccessingSecurityScopedResource() }
@@ -112,6 +115,9 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
                 maximumDirectoryAddition: policy.maximumDirectoryBytes - usage.byteCount
             )
             try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
+        } catch is CancellationError {
+            try? fileManager.removeItem(at: destination)
+            throw CancellationError()
         } catch let error as V2ConversationAttachmentStagingError {
             try? fileManager.removeItem(at: destination)
             throw error
@@ -162,6 +168,7 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         var total: Int64 = 0
         do {
             while let bytes = try source.read(upToCount: 64 * 1_024), !bytes.isEmpty {
+                try Task.checkCancellation()
                 let count = Int64(bytes.count)
                 guard total <= policy.maximumFileBytes - count else {
                     throw V2ConversationAttachmentStagingError.fileTooLarge
@@ -172,7 +179,10 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
                 try target.write(contentsOf: bytes)
                 total += count
             }
+            try Task.checkCancellation()
             try target.synchronize()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as V2ConversationAttachmentStagingError {
             throw error
         } catch {
@@ -213,6 +223,16 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         return (entries.count, byteCount)
     }
 
+    /// Actor serialization waits for any synchronous importer copy before
+    /// deleting its files. This instance can never admit a later import.
+    func close() throws {
+        isClosed = true
+        if fileManager.fileExists(atPath: directory.path) {
+            do { try fileManager.removeItem(at: directory) }
+            catch { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+        }
+    }
+
     func discard(_ attachment: V2StagedConversationAttachment) {
         let candidate = attachment.fileURL.standardizedFileURL
         guard candidate.deletingLastPathComponent() == directory else { return }
@@ -242,6 +262,8 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
 /// App-facing adapter around ClientKit. It generates fresh opaque IDs for an
 /// upload attempt and never exposes the short-lived provider target to UI.
 actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUploading {
+    private var isClosed = false
+    private var transfers: [UUID: Task<V2MediaReference, Error>] = [:]
     private let uploader: V2ClientMediaUploadService
     private let makeUUID: @Sendable () -> UUID
 
@@ -251,6 +273,32 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
     }
 
     func upload(_ attachment: V2StagedConversationAttachment) async throws -> V2MediaReference {
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
+        let id = UUID()
+        // Account ownership allows logout to drain uploads before removing
+        // staging. A cancelling caller also cancels its own transfer.
+        let task = Task { try await self.performUpload(attachment) }
+        transfers[id] = task
+        defer { transfers.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler {
+            let result = try await task.value
+            try Task.checkCancellation()
+            guard !isClosed else { throw CancellationError() }
+            return result
+        } onCancel: { task.cancel() }
+    }
+
+    func close() async {
+        isClosed = true
+        let pending = Array(transfers.values)
+        for task in pending { task.cancel() }
+        for task in pending { _ = await task.result }
+    }
+
+    private func performUpload(_ attachment: V2StagedConversationAttachment) async throws -> V2MediaReference {
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
         let operationID = try MediaUploadOperationID(makeUUID().uuidString)
         let mediaID = try MediaID(makeUUID().uuidString)
         try await uploader.upload(

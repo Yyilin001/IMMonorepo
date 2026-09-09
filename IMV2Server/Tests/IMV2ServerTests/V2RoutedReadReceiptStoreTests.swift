@@ -27,7 +27,24 @@ struct V2RoutedReadReceiptStoreTests {
         ) == .recorded(fixture.receipt))
         #expect(await first.commands().isEmpty)
         #expect(await second.commands() == [fixture.command])
+        #expect(try await second.selectedRoutes() == [.init(shardID: "rooms-b", epoch: 3)])
         #expect(await control.recordCommands().isEmpty)
+    }
+
+    @Test("colocated receipt batch keeps each room route and epoch")
+    func colocatedBatchRetainsEveryRoute() async throws {
+        let fixture = try ReceiptFixture()
+        let otherRoom = RoomID(uuid: UUID())
+        let firstRoute = try V2RoomShardRoute(shardID: "rooms-a", epoch: 3)
+        let otherRoute = try V2RoomShardRoute(shardID: "rooms-b", epoch: 9)
+        let owner = GroupReceiptStoreSpy(attempt: .handled(.recorded(fixture.receipt)))
+        let routed = try V2RoutedReadReceiptStore(router: ReceiptRouter(routes: [fixture.roomID: firstRoute, otherRoom: otherRoute]),
+            ownerStores: ["rooms-a": owner, "rooms-b": owner], controlStore: RoutedReceiptControlSpy(receipt: fixture.receipt),
+            physicalStoreKeyByShard: ["rooms-a": "one-db", "rooms-b": "one-db"])
+        let otherCommand = try V2RecordReadReceiptCommand(roomID: otherRoom, actorUserID: fixture.actorID, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+        _ = try await routed.recordBatch([.init(command: fixture.command, now: fixture.now), .init(command: otherCommand, now: fixture.now)])
+        #expect(await owner.commands() == [fixture.command, otherCommand])
+        #expect(await owner.selectedRoutes() == [firstRoute, otherRoute])
     }
 
     @Test("direct room classification falls back to privacy-preserving control path")
@@ -162,7 +179,7 @@ private struct ReceiptFixture {
             operationID: .init("00000000-0000-0000-0000-00000000e103"),
             readThroughRoomSequence: 19
         )
-        receipt = .init(
+        receipt = try .init(
             roomID: roomID,
             userID: actorID,
             readThroughRoomSequence: 19,
@@ -184,11 +201,12 @@ private actor ReceiptRouter: V2RoomShardRouting {
     }
 }
 
-private actor GroupReceiptStoreSpy: V2GroupReadReceiptOwnerStore {
+private actor GroupReceiptStoreSpy: V2OwnerValidatedReadReceiptStore {
     let attempt: V2GroupReadReceiptRecordingAttempt
     private var recorded: [V2RecordReadReceiptCommand] = []
     private var candidatePages: [V2GroupReadReceiptReaderCandidatePage]
     private var candidateCalls = 0
+    private var routes: [V2RoomShardRoute] = []
 
     init(
         attempt: V2GroupReadReceiptRecordingAttempt,
@@ -198,23 +216,31 @@ private actor GroupReceiptStoreSpy: V2GroupReadReceiptOwnerStore {
         self.candidatePages = candidatePages
     }
 
-    func recordGroup(
+    func recordGroupOwnerValidated(
         command: V2RecordReadReceiptCommand,
+        ownerRoute: V2RoomShardRoute,
         now _: Date
     ) -> V2GroupReadReceiptRecordingAttempt {
+        routes.append(ownerRoute)
         recorded.append(command)
         return attempt
     }
 
+    func recordGroupsOwnerValidated(_ requests: [V2OwnerValidatedReadReceiptRequest]) -> [V2GroupReadReceiptBatchResult] {
+        requests.map { .success(recordGroupOwnerValidated(command: $0.request.command, ownerRoute: $0.ownerRoute, now: $0.request.now)) }
+    }
+    func selectedRoutes() -> [V2RoomShardRoute] { routes }
     func commands() -> [V2RecordReadReceiptCommand] { recorded }
 
-    func readerCandidates(
+    func readerCandidatesOwnerValidated(
         roomID: RoomID,
         messageID: MessageID,
         actorUserID _: UserID,
+        ownerRoute: V2RoomShardRoute,
         cursor _: String?,
         pageSize _: Int
     ) -> V2GroupReadReceiptReaderCandidatePage {
+        routes.append(ownerRoute)
         candidateCalls += 1
         if !candidatePages.isEmpty { return candidatePages.removeFirst() }
         return .init(

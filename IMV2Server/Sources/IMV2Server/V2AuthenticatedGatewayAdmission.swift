@@ -65,7 +65,11 @@ public struct V2GatewayCommandRateLimitPolicy: Equatable, Sendable {
 public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGatewayCommandAdmitting, Sendable {
     private let shards: [V2AuthenticatedGatewayCommandRateLimiterShard]
 
-    public init(policy: V2GatewayCommandRateLimitPolicy, shardCount: Int = 16) {
+    public init(
+        policy: V2GatewayCommandRateLimitPolicy,
+        shardCount: Int = 16,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+    ) {
         precondition(shardCount > 0)
         // Small policy fixtures and deliberately tiny deployments retain one
         // lane. Production-sized maps gain parallelism without creating a
@@ -78,23 +82,19 @@ public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGate
         let remainder = policy.maximumTrackedIdentities % effectiveShardCount
         shards = (0..<effectiveShardCount).map { index in
             let capacity = base + (index < remainder ? 1 : 0)
-            return .init(policy: .init(
-                deviceCommandsPerSecond: Int(policy.deviceCommandsPerSecond),
-                deviceBurst: policy.deviceBurst,
-                userCommandsPerSecond: Int(policy.userCommandsPerSecond),
-                userBurst: policy.userBurst,
-                maximumTrackedIdentities: capacity
-            ))
+            return .init(policy: policy, identityCapacity: capacity, monotonicNow: monotonicNow)
         }
     }
 
     public func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool {
         guard cost >= 0 else { return false }
         guard cost > 0 else { return true }
+        // Match the session's clock contract before charging buckets or
+        // changing LRU state, independently of the monotonic refill clock.
+        guard (try? v2GatewayMilliseconds(now)) != nil else { return false }
         return await shards[shardIndex(for: identity.userID)].admit(
             identity: identity,
-            cost: cost,
-            now: now
+            cost: cost
         )
     }
 
@@ -122,7 +122,7 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
 
     private struct Bucket: Sendable {
         var tokens: Double
-        var refilledAt: Date
+        var refilledAt: ContinuousClock.Instant
     }
 
     private struct LRUNode: Sendable {
@@ -131,6 +131,8 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     }
 
     private let policy: V2GatewayCommandRateLimitPolicy
+    private let identityCapacity: Int
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     private var devices: [DeviceID: Bucket] = [:]
     private var users: [UserID: Bucket] = [:]
     private var lruNodes: [TrackedIdentity: LRUNode] = [:]
@@ -144,9 +146,24 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     /// that point onward every access is tracked exactly as before.
     private var recencyTrackingEnabled = false
 
-    init(policy: V2GatewayCommandRateLimitPolicy) { self.policy = policy }
+    init(
+        policy: V2GatewayCommandRateLimitPolicy,
+        identityCapacity: Int,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        // Rates are already represented as Double for refill arithmetic.
+        // Reconstructing the policy via Int would trap for accepted values
+        // such as Int.max, which rounds up when converted to Double.
+        self.policy = policy
+        self.identityCapacity = identityCapacity
+        self.monotonicNow = monotonicNow
+    }
 
-    func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) -> Bool {
+    func admit(identity: V2AuthenticatedConnection, cost: Int) -> Bool {
+        // Sample inside the lane so queued requests share actor execution
+        // order. Wall-clock adjustments must neither replenish credits early
+        // nor stall normal refill until an earlier timestamp is reached again.
+        let now = monotonicNow()
         var device = refilled(
             devices[identity.deviceID],
             capacity: policy.deviceBurst,
@@ -186,14 +203,16 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
         _ existing: Bucket?,
         capacity: Int,
         rate: Double,
-        now: Date
+        now: ContinuousClock.Instant
     ) -> Bucket {
         guard var bucket = existing else {
             return .init(tokens: Double(capacity), refilledAt: now)
         }
-        let elapsed = now.timeIntervalSince(bucket.refilledAt)
-        if elapsed > 0 {
-            bucket.tokens = min(Double(capacity), bucket.tokens + elapsed * rate)
+        let elapsed = bucket.refilledAt.duration(to: now)
+        if elapsed > .zero {
+            let components = elapsed.components
+            let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
+            bucket.tokens = min(Double(capacity), bucket.tokens + seconds * rate)
             bucket.refilledAt = now
         }
         return bucket
@@ -201,11 +220,11 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
 
     private func ensureCapacity(deviceID: DeviceID, userID: UserID) {
         let additions = (devices[deviceID] == nil ? 1 : 0) + (users[userID] == nil ? 1 : 0)
-        if devices.count + users.count + additions > policy.maximumTrackedIdentities,
+        if devices.count + users.count + additions > identityCapacity,
            !recencyTrackingEnabled {
             enableRecencyTracking()
         }
-        while devices.count + users.count + additions > policy.maximumTrackedIdentities {
+        while devices.count + users.count + additions > identityCapacity {
             precondition(evictLeastRecentlyUsed(excluding: deviceID, userID: userID))
         }
     }
@@ -217,7 +236,7 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     /// tests reproducible; either ordering has identical quota semantics.
     private func enableRecencyTracking() {
         precondition(!recencyTrackingEnabled)
-        var identities: [(identity: TrackedIdentity, lastUsedAt: Date)] = []
+        var identities: [(identity: TrackedIdentity, lastUsedAt: ContinuousClock.Instant)] = []
         identities.reserveCapacity(devices.count + users.count)
         identities.append(contentsOf: devices.map {
             (.device($0.key), $0.value.refilledAt)

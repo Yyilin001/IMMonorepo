@@ -7,22 +7,15 @@ import IMV2Core
 /// single serial writer.
 public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let router: any V2RoomShardRouting
-    private let stores: [String: any V2AtomicRoomWriteBatchStore]
+    private let stores: [String: any V2OwnerValidatedRoomWriteStore]
     /// Logical owner IDs may share one physical database during a staged
     /// rollout.  Commands on such IDs can retain a single atomic append
     /// transaction; commands on distinct keys never cross a physical owner.
     private let physicalStoreKeyByShard: [String: String]
-    /// When deployment topology proves every logical owner is co-located, a
-    /// route lookup cannot influence the database selected for a command.
-    /// Bypassing the control-plane read in this case is therefore safe: the
-    /// owner store still authoritatively verifies room existence, membership,
-    /// admission and idempotency.  A topology with two physical locations
-    /// always leaves this nil and retains durable routing for every request.
-    private let singlePhysicalOwnerStore: (any V2AtomicRoomWriteBatchStore)?
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2AtomicRoomWriteBatchStore],
+        stores: [String: any V2OwnerValidatedRoomWriteStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         guard !stores.isEmpty, stores.keys.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
@@ -37,9 +30,6 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         self.router = router
         self.stores = stores
         self.physicalStoreKeyByShard = keys
-        self.singlePhysicalOwnerStore = Set(keys.values).count == 1
-            ? stores.values.first
-            : nil
     }
 
     public func accept(
@@ -48,16 +38,13 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2SendMessageOutcome {
-        if let singlePhysicalOwnerStore {
-            return try await singlePhysicalOwnerStore.accept(
-                command: command, capacityProfile: capacityProfile,
-                identifiers: identifiers, now: now
-            )
+        let route = try await router.route(for: command.roomID)
+        guard let store = stores[route.shardID] else {
+            throw V2RoomShardStorageRegistryError.unknownShardID
         }
-        let store = try await store(for: command.roomID)
-        return try await store.accept(
-            command: command, capacityProfile: capacityProfile,
-            identifiers: identifiers, now: now
+        return try await store.acceptOwnerValidated(
+            request: .init(command: command, capacityProfile: capacityProfile,
+                identifiers: identifiers, now: now), ownerRoute: route
         )
     }
 
@@ -65,9 +52,6 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         requests: [V2RoomWriteRequest]
     ) async -> [Bool] {
         guard !requests.isEmpty else { return [] }
-        if let singlePhysicalOwnerStore {
-            return await singlePhysicalOwnerStore.atomicBatchEligibility(requests: requests)
-        }
         do {
             let groups = try await groupedRequests(requests)
             return await withTaskGroup(
@@ -106,9 +90,6 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         requests: [V2RoomWriteRequest]
     ) async -> [V2AtomicRoomWriteBatchPartition?] {
         guard !requests.isEmpty else { return [] }
-        if let singlePhysicalOwnerStore {
-            return await singlePhysicalOwnerStore.atomicBatchPartitions(requests: requests)
-        }
         do {
             let groups = try await groupedRequests(requests)
             return await withTaskGroup(
@@ -146,16 +127,6 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
         guard !requests.isEmpty else { return [] }
-        if let singlePhysicalOwnerStore {
-            if requests.count == 1 {
-                let request = requests[0]
-                return [try await singlePhysicalOwnerStore.accept(
-                    command: request.command, capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers, now: request.now
-                )]
-            }
-            return try await singlePhysicalOwnerStore.acceptAtomically(requests: requests)
-        }
         let groups = try await groupedRequests(requests)
 
         // Inputs in different owners are independent. Run those bounded
@@ -176,12 +147,13 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
                     let outcomes: [V2SendMessageOutcome]
                     if shardRequests.count == 1 {
                         let request = shardRequests[0]
-                        outcomes = [try await store.accept(
-                            command: request.command, capacityProfile: request.capacityProfile,
-                            identifiers: request.identifiers, now: request.now
+                        outcomes = [try await store.acceptOwnerValidated(
+                            request: request, ownerRoute: first.route
                         )]
                     } else {
-                        outcomes = try await store.acceptAtomically(requests: shardRequests)
+                        outcomes = try await store.acceptAtomicallyOwnerValidated(
+                            requests: entries.map { .init(request: $0.request, ownerRoute: $0.route) }
+                        )
                     }
                     guard outcomes.count == entries.count else {
                         throw V2RoomWriteStoreError.corruptPersistenceState
@@ -198,14 +170,6 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
             }
             return ordered.map { $0! }
         }
-    }
-
-    private func store(for roomID: RoomID) async throws -> any V2AtomicRoomWriteBatchStore {
-        let route = try await router.route(for: roomID)
-        guard let store = stores[route.shardID] else {
-            throw V2RoomShardStorageRegistryError.unknownShardID
-        }
-        return store
     }
 
     private func groupedRequests(

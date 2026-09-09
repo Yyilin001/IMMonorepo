@@ -29,7 +29,7 @@ private actor EditStoreSpy: V2MessageEditStore {
     private var captured: V2EditMessageCommand?
     func edit(command: V2EditMessageCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageEditOutcome {
         captured = command
-        return .edited(.init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: command.expectedMessageRevision + 1, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .edited(try .init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: command.expectedMessageRevision + 1, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
     }
     func command() -> V2EditMessageCommand? { captured }
 }

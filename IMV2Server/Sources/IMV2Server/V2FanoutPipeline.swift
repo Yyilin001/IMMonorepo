@@ -38,21 +38,21 @@ public struct V2FanoutPipeline: Sendable {
     private let relay: V2OutboxRelay
     private let deliveryWorkers: [V2FanoutDeliveryWorker]
     private let telemetry: any V2TelemetrySink
-    private let now: @Sendable () -> Date
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
 
-    public init(relay: V2OutboxRelay, deliveryWorker: V2FanoutDeliveryWorker, telemetry: any V2TelemetrySink, now: @escaping @Sendable () -> Date = Date.init) {
-        self.init(relay: relay, deliveryWorkers: [deliveryWorker], telemetry: telemetry, now: now)
+    public init(relay: V2OutboxRelay, deliveryWorker: V2FanoutDeliveryWorker, telemetry: any V2TelemetrySink, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+        self.init(relay: relay, deliveryWorkers: [deliveryWorker], telemetry: telemetry, monotonicNow: monotonicNow)
     }
 
     /// Each logical bucket receives a bounded claim pass on every pipeline
     /// tick. `deliveryConcurrency` remains a process-wide cap, not a hidden
     /// multiplier by bucket count.
-    public init(relay: V2OutboxRelay, deliveryWorkers: [V2FanoutDeliveryWorker], telemetry: any V2TelemetrySink, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(relay: V2OutboxRelay, deliveryWorkers: [V2FanoutDeliveryWorker], telemetry: any V2TelemetrySink, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         precondition(!deliveryWorkers.isEmpty)
         self.relay = relay
         self.deliveryWorkers = deliveryWorkers
         self.telemetry = telemetry
-        self.now = now
+        self.monotonicNow = monotonicNow
     }
 
     public func runOnce(limit: Int) async throws -> V2FanoutPipelineReport {
@@ -95,14 +95,14 @@ public struct V2FanoutPipeline: Sendable {
             plannerConcurrency > 0 && deliveryConcurrency > 0
         )
         let traceID = UUID()
-        let startedAt = now()
+        let startedAt = monotonicNow()
         do {
-            let relayStartedAt = now()
+            let relayStartedAt = monotonicNow()
             let relay = try await runRelays(limit: relayPlannerLimit, concurrency: plannerConcurrency)
-            let relayElapsedMilliseconds = v2ElapsedMilliseconds(since: relayStartedAt, now: now())
-            let deliveryStartedAt = now()
+            let relayElapsedMilliseconds = v2ElapsedMilliseconds(since: relayStartedAt, now: monotonicNow())
+            let deliveryStartedAt = monotonicNow()
             let delivery = try await runDeliveries(limit: deliveryClaimLimit, concurrency: deliveryConcurrency)
-            let deliveryElapsedMilliseconds = v2ElapsedMilliseconds(since: deliveryStartedAt, now: now())
+            let deliveryElapsedMilliseconds = v2ElapsedMilliseconds(since: deliveryStartedAt, now: monotonicNow())
             let report = V2FanoutPipelineReport(relay: relay, delivery: delivery)
             // The runtime polls frequently while idle. Emitting an all-zero
             // structured event on each poll turns normal quiescence into log
@@ -124,12 +124,12 @@ public struct V2FanoutPipeline: Sendable {
                     pausedDeliveries: delivery.pausedCount,
                     relayElapsedMilliseconds: relayElapsedMilliseconds,
                     deliveryElapsedMilliseconds: deliveryElapsedMilliseconds,
-                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
                 ))
             }
             return report
         } catch {
-            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .pipeline, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
+            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .pipeline, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())))
             throw error
         }
     }
@@ -143,7 +143,7 @@ public struct V2FanoutPipeline: Sendable {
     ) async throws -> V2OutboxRelayReport {
         precondition(limit > 0 && concurrency > 0)
         let traceID = UUID()
-        let startedAt = now()
+        let startedAt = monotonicNow()
         do {
             let relay = try await runRelays(limit: limit, concurrency: concurrency)
             if relay.containsDurableWork {
@@ -159,14 +159,14 @@ public struct V2FanoutPipeline: Sendable {
                     staleRouteDeliveries: 0,
                     releasedDeliveries: 0,
                     pausedDeliveries: 0,
-                    relayElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now()),
+                    relayElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow()),
                     deliveryElapsedMilliseconds: 0,
-                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
                 ))
             }
             return relay
         } catch {
-            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .relay, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
+            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .relay, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())))
             throw error
         }
     }
@@ -180,7 +180,7 @@ public struct V2FanoutPipeline: Sendable {
     ) async throws -> V2FanoutDeliveryReport {
         precondition(claimLimit > 0 && concurrency > 0)
         let traceID = UUID()
-        let startedAt = now()
+        let startedAt = monotonicNow()
         do {
             let delivery = try await runDeliveries(limit: claimLimit, concurrency: concurrency)
             if delivery.containsDurableWork {
@@ -197,13 +197,13 @@ public struct V2FanoutPipeline: Sendable {
                     releasedDeliveries: delivery.releasedCount,
                     pausedDeliveries: delivery.pausedCount,
                     relayElapsedMilliseconds: 0,
-                    deliveryElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now()),
-                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())
+                    deliveryElapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow()),
+                    elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
                 ))
             }
             return delivery
         } catch {
-            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .delivery, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: now())))
+            await telemetry.record(.fanoutFailure(traceID: traceID, stage: .delivery, elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())))
             throw error
         }
     }

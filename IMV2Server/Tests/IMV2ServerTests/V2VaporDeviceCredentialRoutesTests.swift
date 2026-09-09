@@ -8,6 +8,83 @@ import VaporTesting
 
 @Suite("V2 Vapor device credential routes")
 struct V2VaporDeviceCredentialRoutesTests {
+    @Test("Server clock failure is unavailable rather than a rejected account assertion")
+    func clockFailureIsUnavailable() async throws {
+        let app = try await Application.make(.testing)
+        do {
+            let key = Data(repeating: 6, count: 32), user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+            let signer = try V2HMACAccountAssertionIssuer(rawKey: key)
+            let proof = try signer.issue(userID: user, deviceID: device)
+            let verifier = try V2HMACAccountAssertionIssuer(rawKey: key, now: { Date(timeIntervalSince1970: .nan) })
+            let issuer = DeviceCredentialRouteIssuer(registration: .deviceUnavailable, refresh: .terminalRejection)
+            V2VaporDeviceCredentialRoutes(assertionVerifier: verifier, issuer: issuer).register(on: app)
+            try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+                try request.content.encode(issueInput(assertion: proof, device: device))
+            }) { response async in
+                #expect(response.status == .serviceUnavailable)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                #expect(response.body.readableBytes == 0)
+            }
+            #expect(await issuer.registrationRequest() == nil)
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
+    @Test("issuance rejects missing or mismatched cancellation identity before account verification", arguments: ["missing", "null", "device", "operation", "root-user", "nested-user", "proof"])
+    func requiresCancellationIdentity(scenario: String) async throws {
+        let app = try await Application.make(.testing)
+        do {
+            let verifier = RecordingRouteAssertionVerifier(userID: try UserID(UUID().uuidString))
+            let issuer = DeviceCredentialRouteIssuer(registration: .deviceUnavailable, refresh: .terminalRejection)
+            V2VaporDeviceCredentialRoutes(assertionVerifier: verifier, issuer: issuer).register(on: app)
+            let value = try issueInput(assertion: "opaque-assertion", device: DeviceID(UUID().uuidString))
+            var body = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as? [String: Any])
+            var cancellation = try #require(body["cancellation"] as? [String: Any])
+            switch scenario {
+            case "missing": body.removeValue(forKey: "cancellation")
+            case "null": body["cancellation"] = NSNull()
+            case "device": body["deviceID"] = UUID().uuidString
+            case "operation": body["operationID"] = UUID().uuidString
+            case "root-user": body["userID"] = UUID().uuidString
+            case "nested-user": cancellation["userID"] = NSNull(); body["cancellation"] = cancellation
+            default: cancellation["proof"] = V2DeviceRevocationCredential.generate().rawValue; body["cancellation"] = cancellation
+            }
+            let data = try JSONSerialization.data(withJSONObject: body)
+            try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
+                request.headers.contentType = .json; request.body = .init(data: data)
+            }) { response async in #expect(response.status == .badRequest) }
+            #expect(await verifier.callCount() == 0)
+            #expect(await issuer.registrationRequest() == nil)
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+    private func proof(_ device: DeviceID, operationID: UUID) throws -> V2DeviceRegistrationCancellation {
+        try .init(deviceID: device, operationID: operationID, proof: .generate(), issueBeforeMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000) + 600_000)
+    }
+    private func issueInput(assertion: String, device: DeviceID, deviceName: String? = nil) throws -> V2DeviceCredentialIssueHTTPRequest {
+        let operation = UUID()
+        return try .init(accountAssertion: assertion, deviceID: device.rawValue, operationID: operation,
+            cancellation: proof(device, operationID: operation), deviceName: deviceName, platform: "iOS")
+    }
+    @Test("credential expiry cannot trap response encoding", arguments: [
+        Double(Int64.max) / 1_000, Double(Int64.min).nextDown / 1_000
+    ])
+    func rejectsUnrepresentableTimestamp(seconds: Double) throws {
+        let credentials = try V2IssuedDeviceCredentials(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), accessToken: "test", accessTokenExpiresAt: Date(timeIntervalSince1970: seconds), refreshCredential: "test")
+        #expect(throws: V2DeviceCredentialServiceError.malformedPersistence) {
+            try V2DeviceCredentialIssueHTTPResponse(credentials: credentials)
+        }
+    }
+
+    @Test("credential expiry keeps truncation toward zero", arguments: [
+        (1_750_000_000.1239, Int64(1_750_000_000_123)), (-0.5001, Int64(-500)),
+        (0.0, Int64(0)), (9_000_000_000_000_000.0, Int64(9_000_000_000_000_000_000))
+    ])
+    func preservesTimestamp(sample: (Double, Int64)) throws {
+        let credentials = try V2IssuedDeviceCredentials(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), accessToken: "test", accessTokenExpiresAt: Date(timeIntervalSince1970: sample.0), refreshCredential: "test")
+        #expect(try V2DeviceCredentialIssueHTTPResponse(credentials: credentials).accessTokenExpiresAtMilliseconds == sample.1)
+    }
+
     @Test("opaque account assertion issues device credentials without accepting a user ID")
     func issueRouteVerifiesAssertionAndDisablesCaching() async throws {
         let app = try await Application.make(.testing)
@@ -18,7 +95,7 @@ struct V2VaporDeviceCredentialRoutesTests {
         let issuer = DeviceCredentialRouteIssuer(registration: .issued(credentials), refresh: .rotated(credentials))
         V2VaporDeviceCredentialRoutes(assertionVerifier: RouteAssertionVerifier(userID: userID), issuer: issuer).register(on: app)
 
-        let input = V2DeviceCredentialIssueHTTPRequest(accountAssertion: "opaque-assertion", deviceID: deviceID.rawValue, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000703")!)
+        let input = V2DeviceCredentialIssueHTTPRequest(accountAssertion: "opaque-assertion", deviceID: deviceID.rawValue, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000703")!, cancellation: try proof(deviceID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000703")!))
         try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
             try request.content.encode(input)
         }) { response async in
@@ -31,11 +108,13 @@ struct V2VaporDeviceCredentialRoutesTests {
             #expect(decoded?.deviceID == deviceID.rawValue)
             #expect(decoded?.accessToken == "access-secret")
             #expect(decoded?.refreshCredential == "refresh-secret")
+            #expect(decoded?.registrationCancellation == input.cancellation)
             #expect(!response.body.string.contains("opaque-assertion"))
         }
         let request = try #require(await issuer.registrationRequest())
-        #expect(request.userID == userID)
-        #expect(request.deviceID == deviceID)
+        #expect(request.registration.userID == userID)
+        #expect(request.registration.deviceID == deviceID)
+        #expect(request.cancellation == input.cancellation)
     }
 
     @Test("failed assertion and terminal refresh do not issue replacement credentials")
@@ -51,7 +130,7 @@ struct V2VaporDeviceCredentialRoutesTests {
         ).register(on: app)
 
         try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
-            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(accountAssertion: "rejected", deviceID: deviceID.rawValue, operationID: UUID()))
+            try request.content.encode(issueInput(assertion: "rejected", device: deviceID))
         }) { response async in
             #expect(response.status == .unauthorized)
         }
@@ -75,7 +154,7 @@ struct V2VaporDeviceCredentialRoutesTests {
         V2VaporDeviceCredentialRoutes(assertionVerifier: DeviceBoundRouteAssertionVerifier(userID: userID, deviceID: boundDeviceID), issuer: issuer).register(on: app)
 
         try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
-            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(accountAssertion: "bound-assertion", deviceID: otherDeviceID.rawValue, operationID: UUID()))
+            try request.content.encode(issueInput(assertion: "bound-assertion", device: otherDeviceID))
         }) { response async in
             #expect(response.status == .unauthorized)
         }
@@ -96,11 +175,7 @@ struct V2VaporDeviceCredentialRoutesTests {
         ).register(on: app)
 
         try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
-            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(
-                accountAssertion: "opaque-assertion",
-                deviceID: deviceID.rawValue,
-                operationID: UUID()
-            ))
+            try request.content.encode(issueInput(assertion: "opaque-assertion", device: deviceID))
         }) { response async in
             #expect(response.status == .tooManyRequests)
             #expect(response.headers.first(name: "Retry-After") == "17")
@@ -120,13 +195,7 @@ struct V2VaporDeviceCredentialRoutesTests {
         V2VaporDeviceCredentialRoutes(assertionVerifier: verifier, issuer: issuer).register(on: app)
 
         try await app.testing().test(.POST, "v2/device-credentials", beforeRequest: { request in
-            try request.content.encode(V2DeviceCredentialIssueHTTPRequest(
-                accountAssertion: "opaque-assertion",
-                deviceID: deviceID.rawValue,
-                operationID: UUID(),
-                deviceName: String(repeating: "x", count: 300),
-                platform: "iOS"
-            ))
+            try request.content.encode(issueInput(assertion: "opaque-assertion", device: deviceID, deviceName: String(repeating: "x", count: 300)))
         }) { response async in
             #expect(response.status == .badRequest)
         }
@@ -174,20 +243,20 @@ private actor RecordingRouteAssertionVerifier: V2DeviceBoundAccountAssertionVeri
 private actor DeviceCredentialRouteIssuer: V2DeviceCredentialIssuing {
     private let registration: V2DeviceRegistrationOutcome
     private let refresh: V2DeviceCredentialRefreshOutcome
-    private var receivedRegistration: V2TrustedDeviceRegistration?
+    private var receivedRegistration: V2CancellableDeviceRegistration?
 
     init(registration: V2DeviceRegistrationOutcome, refresh: V2DeviceCredentialRefreshOutcome) {
         self.registration = registration
         self.refresh = refresh
     }
 
-    func register(_ request: V2TrustedDeviceRegistration) -> V2DeviceRegistrationOutcome {
+    func register(_ request: V2CancellableDeviceRegistration) -> V2DeviceRegistrationOutcome {
         receivedRegistration = request
         return registration
     }
 
     func refresh(_: V2DeviceCredentialRefresh) -> V2DeviceCredentialRefreshOutcome { refresh }
-    func registrationRequest() -> V2TrustedDeviceRegistration? { receivedRegistration }
+    func registrationRequest() -> V2CancellableDeviceRegistration? { receivedRegistration }
 }
 
 private extension V2DeviceRegistrationOutcome {

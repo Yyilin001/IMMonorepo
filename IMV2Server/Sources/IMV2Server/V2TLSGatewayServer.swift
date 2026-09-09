@@ -189,14 +189,14 @@ public final class V2TLSGatewayServer {
         eventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         eventLoopThreads: Int = System.coreCount
     ) throws {
+        _ = try V2GatewayConnectionTimeouts(authenticationMilliseconds: authenticationTimeoutMilliseconds,
+                                             idleMilliseconds: idleTimeoutMilliseconds)
         precondition(
             maximumConnections > 0 &&
             listenBacklog > 0 && listenBacklog <= Int(Int32.max) &&
             acceptBatchSize > 0 &&
             maximumQueuedInboundBytes > 0 &&
             maximumQueuedInboundChunks > 0 &&
-            authenticationTimeoutMilliseconds > 0 &&
-            idleTimeoutMilliseconds > 0 &&
             eventLoopThreads > 0
         )
         self.configuration = configuration

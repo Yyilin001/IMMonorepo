@@ -248,8 +248,23 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
 
     public init(database: any Database) { self.database = database }
 
+    private func validatedExpiry(now: Date, duration: TimeInterval) throws -> Date {
+        let expiry = now.addingTimeInterval(duration)
+        guard duration.isFinite, duration > 0,
+              v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(expiry) else {
+            throw V2GroupAudienceImportError.corruptPersistenceState
+        }
+        let epoch = Date(timeIntervalSince1970: 946_684_800)
+        guard (expiry.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero)
+                > (now.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero) else {
+            throw V2GroupAudienceImportError.corruptPersistenceState
+        }
+        return expiry
+    }
+
     public func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceDraft {
-        try await database.transaction { transaction in
+        let expiry = try validatedExpiry(now: now, duration: policy.stagingLifetime)
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupAudienceImportError.corruptPersistenceState }
             let actorID = try audienceUUID(actorUserID)
             let operationID = try audienceUUID(operationID)
@@ -270,14 +285,15 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             try await sql.raw("""
                 INSERT INTO im_v2.group_room_creation_drafts
                     (actor_user_id, operation_id, title, state, created_at, updated_at, expires_at)
-                VALUES (\(bind: actorID), \(bind: operationID), \(bind: title), 'staging', \(bind: now), \(bind: now), \(bind: now.addingTimeInterval(policy.stagingLifetime)))
+                VALUES (\(bind: actorID), \(bind: operationID), \(bind: title), 'staging', \(bind: now), \(bind: now), \(bind: expiry))
                 """).run()
             return .init(operationID: try .init(operationID.uuidString), title: title, stagedMemberCount: 0)
         }
     }
 
     public func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID], maximumMembers: Int, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceDraft {
-        try await database.transaction { transaction in
+        let expiry = try validatedExpiry(now: now, duration: policy.stagingLifetime)
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupAudienceImportError.corruptPersistenceState }
             let actorID = try audienceUUID(actorUserID)
             let operationID = try audienceUUID(operationID)
@@ -330,7 +346,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             }
             try await sql.raw("""
                 UPDATE im_v2.group_room_creation_drafts
-                SET updated_at = \(bind: now), expires_at = \(bind: now.addingTimeInterval(policy.stagingLifetime))
+                SET updated_at = \(bind: now), expires_at = \(bind: expiry)
                 WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
                 """).run()
             return .init(operationID: try .init(operationID.uuidString), title: row.title, stagedMemberCount: Int(count.memberCount))
@@ -338,7 +354,8 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
     }
 
     public func freeze(actorUserID: UserID, operationID: GroupRoomOperationID, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceImport {
-        try await database.transaction { transaction in
+        let expiry = try validatedExpiry(now: now, duration: policy.stagingLifetime)
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupAudienceImportError.corruptPersistenceState }
             let actorID = try audienceUUID(actorUserID)
             let operationID = try audienceUUID(operationID)
@@ -365,7 +382,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             if row.state == "staging" {
                 try await sql.raw("""
                     UPDATE im_v2.group_room_creation_drafts
-                    SET state = 'finalizing', updated_at = \(bind: now), expires_at = \(bind: now.addingTimeInterval(policy.stagingLifetime))
+                    SET state = 'finalizing', updated_at = \(bind: now), expires_at = \(bind: expiry)
                     WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
                     """).run()
             } else if row.state == "finalizing" {
@@ -385,7 +402,8 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
     }
 
     public func complete(actorUserID: UserID, operationID: GroupRoomOperationID, roomID: RoomID, policy: V2GroupAudienceImportPolicy, now: Date) async throws {
-        try await database.transaction { transaction in
+        let expiry = try validatedExpiry(now: now, duration: policy.completedRetention)
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupAudienceImportError.corruptPersistenceState }
             let actorID = try audienceUUID(actorUserID)
             let operationID = try audienceUUID(operationID)
@@ -394,7 +412,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             try await sql.raw("""
                 UPDATE im_v2.group_room_creation_drafts
                 SET state = 'completed', room_id = \(bind: roomID), updated_at = \(bind: now),
-                    expires_at = \(bind: now.addingTimeInterval(policy.completedRetention))
+                    expires_at = \(bind: expiry)
                 WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
                   AND state IN ('finalizing', 'completed')
                 """).run()
@@ -402,6 +420,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
     }
 
     public func cancel(actorUserID: UserID, operationID: GroupRoomOperationID, now: Date) async throws {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupAudienceImportError.corruptPersistenceState }
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupAudienceImportError.corruptPersistenceState }
             let actorID = try audienceUUID(actorUserID)
@@ -436,6 +455,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             if limit <= 0 { return 0 }
             throw V2GroupAudienceImportError.corruptPersistenceState
         }
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupAudienceImportError.corruptPersistenceState }
         let rows = try await sql.raw("""
             WITH expired AS (
                 SELECT actor_user_id, operation_id
@@ -460,6 +480,18 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             if staleAfter > 0, limit <= 0 { return [] }
             throw V2GroupAudienceImportError.corruptPersistenceState
         }
+        let cutoff = now.addingTimeInterval(-staleAfter)
+        guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(cutoff) else {
+            throw V2GroupAudienceImportError.corruptPersistenceState
+        }
+        // A positive interval can disappear at Date or PostgreSQL precision.
+        // The claimed timestamp must be newer than the encoded cutoff, or a
+        // second worker can immediately claim the same draft again.
+        let epoch = Date(timeIntervalSince1970: 946_684_800)
+        guard (cutoff.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero)
+                < (now.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero) else {
+            throw V2GroupAudienceImportError.corruptPersistenceState
+        }
         // Claim by advancing `updated_at` inside the same statement. The
         // recovery worker can then safely run on multiple processes: a crash
         // after this claim simply makes the frozen draft eligible again after
@@ -468,7 +500,7 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
             WITH candidates AS (
                 SELECT ctid
                 FROM im_v2.group_room_creation_drafts
-                WHERE state = 'finalizing' AND updated_at <= \(bind: now.addingTimeInterval(-staleAfter))
+                WHERE state = 'finalizing' AND updated_at <= \(bind: cutoff)
                 ORDER BY updated_at
                 LIMIT \(bind: limit)
                 FOR UPDATE SKIP LOCKED

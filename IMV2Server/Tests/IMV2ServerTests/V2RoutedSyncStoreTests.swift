@@ -30,13 +30,17 @@ struct V2RoutedSyncStoreTests {
         }
 
         _ = try await store.pull(userID: user, deviceID: device, syncToken: nil, maxRecords: 10, now: .init(timeIntervalSince1970: 1_750_000_200))
-        #expect(await recorder.buckets() == ["users-target"])
+        _ = try await store.pull(userID: user, deviceID: device, syncToken: nil, maxRecords: 10, requireSnapshot: true, now: .init(timeIntervalSince1970: 1_750_000_200))
+        #expect(await recorder.buckets() == ["users-target", "users-target"])
+        #expect(await recorder.rebuildFlags() == [false, true])
     }
 }
 
 private actor RoutedSyncRecorder {
     private var values: [String] = []
-    func record(_ bucket: String) { values.append(bucket) }
+    private var flags: [Bool] = []
+    func record(_ bucket: String, requireSnapshot: Bool) { values.append(bucket); flags.append(requireSnapshot) }
+    func rebuildFlags() -> [Bool] { flags }
     func buckets() -> [String] { values }
 }
 
@@ -44,8 +48,8 @@ private struct RoutedSyncStoreFake: V2SyncStore {
     let bucket: String
     let recorder: RoutedSyncRecorder
 
-    func pull(userID _: UserID, deviceID _: DeviceID, syncToken _: V2SyncToken?, maxRecords _: Int, now _: Date) async throws -> V2SyncPullResult {
-        await recorder.record(bucket)
+    func pull(userID _: UserID, deviceID _: DeviceID, syncToken _: V2SyncToken?, maxRecords _: Int, requireSnapshot: Bool, now _: Date) async throws -> V2SyncPullResult {
+        await recorder.record(bucket, requireSnapshot: requireSnapshot)
         return .ready(
             generation: 1, records: [], nextSyncToken: try .init("00000000-0000-0000-0000-000000000fa3"),
             receipt: try .init("00000000-0000-0000-0000-000000000fa4"), hasMore: false

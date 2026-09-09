@@ -20,7 +20,9 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
 
     public func claimAdmitted(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2PushWakeLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
-        let expiry = now.addingTimeInterval(leaseDuration)
+        guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -32,7 +34,7 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
 
             let candidates = try await claimCandidates(now: now, limit: limit, on: sql)
             var leases: [V2PushWakeLease] = []
-            leases.reserveCapacity(limit)
+            leases.reserveCapacity(candidates.count)
             for candidate in candidates {
                 if let lease = try await admit(candidate, now: now, expiry: expiry, on: sql) {
                     leases.append(lease)
@@ -43,7 +45,8 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
     }
 
     public func markSent(_ lease: V2PushWakeLease, now: Date) async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard v2PostgresTimestampCanEncode(now),
+              let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
             UPDATE im_v2.push_wake_outbox
             SET state = 'sent', sent_at = \(bind: now), claim_token = NULL, lease_expires_at = NULL
@@ -143,7 +146,9 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         try await sql.raw("""
                 UPDATE im_v2.push_wake_outbox
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiry),
-                    retry_count = retry_count + 1, admitted_at = COALESCE(admitted_at, \(bind: now))
+                    retry_count = CASE WHEN retry_count = 9223372036854775807
+                        THEN retry_count ELSE retry_count + 1 END,
+                    admitted_at = COALESCE(admitted_at, \(bind: now))
                 WHERE dispatch_id = \(bind: pending.dispatchID) AND state IN ('pending', 'claimed')
                 """).run()
         return try .init(
@@ -198,7 +203,8 @@ private struct PendingPushWakeRow: Decodable {
     let dispatchID: UUID
     let deviceID: UUID
     let campaignID: String
-    let budgetWindowStartedAt: Date
+    // This timestamp is part of the budget key; retain its exact stored value.
+    let budgetWindowStartedAt: V2PostgresTimestamp
     let requiresNewKeyOperation: Bool
     let admittedAt: Date?
     enum CodingKeys: String, CodingKey {

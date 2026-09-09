@@ -5,6 +5,22 @@ import Testing
 
 @Suite("V2 media scanner worker")
 struct V2MediaScanWorkerTests {
+    @Test("Invalid retry clocks keep the media lease unreleased", arguments: Array(0...8))
+    func invalidRetryClockDoesNotRelease(_ boundary: Int) async throws {
+        let clock = V2WorkerRetryClockFixture(boundary)
+        let lease = try V2MediaScanLease(mediaID: .init("media"), claimToken: UUID())
+        let store = RecordingMediaScanStore(leases: [lease])
+        let worker = try V2MediaScanWorker(store: store, provider: FailingMediaScanner(), retryPolicy: clock.policy, now: { clock.now() })
+        await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
+        #expect(await store.retries().isEmpty)
+        #expect(await store.completed().isEmpty)
+        let recoveredAt = Date(timeIntervalSince1970: 1_750_000_010)
+        let recovered = try V2MediaScanWorker(store: store, provider: FailingMediaScanner(),
+            retryPolicy: .init(initialDelay: 0.5, maximumDelay: 0.5, maximumAttempts: 3, jitterFraction: 0), now: { recoveredAt })
+        #expect(try await recovered.runOnce(limit: 1).releasedCount == 1)
+        #expect(await store.retries().map(\.disposition) == [.retry(at: recoveredAt.addingTimeInterval(0.5))])
+    }
+
     @Test("scanner failure releases only the scan job and keeps media non-referenceable")
     func scannerFailureReleasesLease() async throws {
         let lease = try V2MediaScanLease(mediaID: .init("media"), claimToken: UUID())

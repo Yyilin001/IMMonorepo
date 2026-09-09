@@ -5,73 +5,119 @@ import SQLKit
 
 /// The mutable group controls share the same ordered event stream as messages.
 /// In particular, a policy or role change is never committed without its room
-/// event and delivery plan; clients therefore cannot observe a newer policy
-/// while still applying an older membership projection.
-public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
+/// event and delivery plan. Consumers must use the source room sequence,
+/// rather than a recipient's personal sync cursor, to order these effects.
+public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2OwnerValidatedGroupCapabilitiesStore {
     private let database: any Database
     public init(database: any Database) { self.database = database }
 
     public func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
-        try await groupTransaction(database) { transaction in
+        try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    public func setPinnedMessageOwnerValidated(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
+        try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    private func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
+        return try await groupTransaction(database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID, command.messageID)
             guard let messageID = ids.target else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
+            if let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             if let prior = try await sql.raw("SELECT room_id, message_id, is_pinned, room_sequence, created_at FROM im_v2.room_pinned_message_operations WHERE actor_user_id = \(bind: ids.actor) AND operation_id = \(bind: ids.operation)").first(decoding: GroupPinOperationRow.self) {
                 guard prior.roomID == ids.room, prior.messageID == messageID, prior.isPinned == command.isPinned else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
                 return .idempotent(try prior.value(roomID: command.roomID, messageID: command.messageID))
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .pinMessages, capacityProfile: capacityProfile, now: now, sql: sql)
-            guard let message = try await sql.raw("SELECT room_id, withdrawn_at FROM im_v2.messages WHERE message_id = \(bind: messageID) FOR UPDATE").first(decoding: GroupMessageRow.self), message.roomID == ids.room else { throw V2GroupCapabilitiesStoreError.messageNotFound }
+            guard let message = try await sql.raw("""
+                SELECT message.room_id, message.withdrawn_at
+                FROM im_v2.messages AS message
+                JOIN im_v2.rooms AS room ON room.room_id = message.room_id
+                WHERE message.message_id = \(bind: messageID)
+                  AND message.room_id = \(bind: ids.room)
+                  AND (\(v2ForwardSourceVisibility(actorID: ids.actor)))
+                FOR UPDATE OF message
+                """).first(decoding: GroupMessageRow.self), message.roomID == ids.room else { throw V2GroupCapabilitiesStoreError.messageNotFound }
             guard message.withdrawnAt == nil else { throw V2GroupCapabilitiesStoreError.messageWithdrawn }
             let exists = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_pinned_messages WHERE room_id = \(bind: ids.room) AND message_id = \(bind: messageID)) AS value").first(decoding: GroupBoolRow.self)?.value ?? false
             guard exists != command.isPinned else { return .alreadyInDesiredState }
-            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "message.pinned_changed", payload: try groupPayload(["event_type": "message.pinned_changed", "room_id": ids.room.uuidString, "message_id": messageID.uuidString, "is_pinned": command.isPinned, "actor_user_id": ids.actor.uuidString, "server_created_at_ms": Int64(now.timeIntervalSince1970 * 1_000)]), now: now, sql: sql)
+            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "message.pinned_changed", payload: try groupPayload(["event_type": "message.pinned_changed", "room_id": ids.room.uuidString, "message_id": messageID.uuidString, "is_pinned": command.isPinned, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             if command.isPinned { try await sql.raw("INSERT INTO im_v2.room_pinned_messages (room_id, message_id, pinned_by_user_id, pinned_at) VALUES (\(bind: ids.room), \(bind: messageID), \(bind: ids.actor), \(bind: now))").run() }
             else { try await sql.raw("DELETE FROM im_v2.room_pinned_messages WHERE room_id = \(bind: ids.room) AND message_id = \(bind: messageID)").run() }
             try await sql.raw("INSERT INTO im_v2.room_pinned_message_operations (actor_user_id, operation_id, room_id, message_id, is_pinned, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: ids.actor), \(bind: ids.operation), \(bind: ids.room), \(bind: messageID), \(bind: command.isPinned), \(bind: committed.sequence), \(bind: committed.eventID), \(bind: committed.planID), \(bind: now))").run()
-            return .applied(try .init(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: groupUnsigned(committed.sequence), updatedAt: now))
+            return .applied(try .init(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: groupUnsigned(committed.sequence), updatedAt: committed.createdAt))
         }
     }
 
     public func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
-        try await groupTransaction(database) { transaction in
+        try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    public func setAnnouncementOwnerValidated(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
+        try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    private func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
+        return try await groupTransaction(database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID)
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
+            if let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             let expectedRevision = try groupSigned(command.expectedRevision)
             if let prior = try await sql.raw("SELECT room_id, body, expected_revision, resulting_revision, room_sequence, created_at FROM im_v2.group_announcement_operations WHERE actor_user_id = \(bind: ids.actor) AND operation_id = \(bind: ids.operation)").first(decoding: GroupAnnouncementOperationRow.self) {
                 guard prior.roomID == ids.room, prior.body == command.body, prior.expectedRevision == expectedRevision else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
                 return .idempotent(try prior.value(roomID: command.roomID))
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .manageAnnouncements, capacityProfile: capacityProfile, now: now, sql: sql)
             let current = try await sql.raw("SELECT revision FROM im_v2.group_announcements WHERE room_id = \(bind: ids.room) FOR UPDATE").first(decoding: GroupRevisionRow.self)?.revision ?? 0
             guard try groupUnsigned(current) == command.expectedRevision else { return .revisionConflict }
             guard current < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let revision = current + 1
-            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.announcement_changed", payload: try groupPayload(["event_type": "group.announcement_changed", "room_id": ids.room.uuidString, "body": command.body, "revision": revision, "actor_user_id": ids.actor.uuidString, "server_created_at_ms": Int64(now.timeIntervalSince1970 * 1_000)]), now: now, sql: sql)
+            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.announcement_changed", payload: try groupPayload(["event_type": "group.announcement_changed", "room_id": ids.room.uuidString, "body": command.body, "revision": revision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             try await sql.raw("INSERT INTO im_v2.group_announcements (room_id, body, revision, updated_by_user_id, updated_at) VALUES (\(bind: ids.room), \(bind: command.body), \(bind: revision), \(bind: ids.actor), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET body = EXCLUDED.body, revision = EXCLUDED.revision, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("INSERT INTO im_v2.group_announcement_operations (actor_user_id, operation_id, room_id, body, expected_revision, resulting_revision, room_sequence, event_id, plan_id, created_at) VALUES (\(bind: ids.actor), \(bind: ids.operation), \(bind: ids.room), \(bind: command.body), \(bind: groupSigned(command.expectedRevision)), \(bind: revision), \(bind: committed.sequence), \(bind: committed.eventID), \(bind: committed.planID), \(bind: now))").run()
-            return .applied(try .init(roomID: command.roomID, body: command.body, revision: groupUnsigned(revision), roomSequence: groupUnsigned(committed.sequence), updatedAt: now))
+            return .applied(try .init(roomID: command.roomID, body: command.body, revision: groupUnsigned(revision), roomSequence: groupUnsigned(committed.sequence), updatedAt: committed.createdAt))
         }
     }
 
     public func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
-        try await groupTransaction(database) { transaction in
+        try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    public func setRolePermissionsOwnerValidated(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
+        try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    private func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
+        return try await groupTransaction(database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID)
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
+            if let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             let permissionJSON = try groupPermissionsJSON(command.permissions)
             let expectedRevision = try groupSigned(command.expectedRevision)
             if let prior = try await sql.raw("SELECT room_id, expected_revision, resulting_revision, role, permissions::text AS permissions_json, room_sequence FROM im_v2.group_permission_operations WHERE actor_user_id = \(bind: ids.actor) AND operation_id = \(bind: ids.operation)").first(decoding: GroupPermissionOperationRow.self) {
-                guard prior.roomID == ids.room, prior.expectedRevision == expectedRevision, prior.role == command.role.rawValue, prior.permissionsJSON == permissionJSON else { return .idempotencyConflict }
-                return .idempotent(try prior.value(roomID: command.roomID))
+                let value = try prior.value(roomID: command.roomID)
+                // PostgreSQL jsonb::text adds formatting and does not preserve
+                // the request encoder's spelling. Idempotency binds the set.
+                guard prior.roomID == ids.room, prior.expectedRevision == expectedRevision, prior.role == command.role.rawValue, value.permissions == command.permissions else { return .idempotencyConflict }
+                return .idempotent(value)
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .changeMemberRoles, capacityProfile: capacityProfile, now: now, sql: sql)
             guard try groupUnsigned(context.room.groupPermissionRevision) == command.expectedRevision else { return .revisionConflict }
             guard context.room.groupPermissionRevision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let revision = context.room.groupPermissionRevision + 1
-            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.role_permissions_changed", payload: try groupPayload(["event_type": "group.role_permissions_changed", "room_id": ids.room.uuidString, "role": command.role.rawValue, "permissions": command.permissions.map(\.rawValue).sorted(), "revision": revision, "actor_user_id": ids.actor.uuidString, "server_created_at_ms": Int64(now.timeIntervalSince1970 * 1_000)]), now: now, sql: sql)
+            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.role_permissions_changed", payload: try groupPayload(["event_type": "group.role_permissions_changed", "room_id": ids.room.uuidString, "role": command.role.rawValue, "permissions": command.permissions.map(\.rawValue).sorted(), "revision": revision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
+            // Current policy identity outlives the operation replay window,
+            // including when the permission set has no materialized rows.
+            try await sql.raw("INSERT INTO im_v2.group_role_policies (room_id, role) VALUES (\(bind: ids.room), \(bind: command.role.rawValue)) ON CONFLICT (room_id, role) DO NOTHING").run()
             try await sql.raw("DELETE FROM im_v2.group_role_permissions WHERE room_id = \(bind: ids.room) AND role = \(bind: command.role.rawValue)").run()
             for permission in command.permissions { try await sql.raw("INSERT INTO im_v2.group_role_permissions (room_id, role, permission) VALUES (\(bind: ids.room), \(bind: command.role.rawValue), \(bind: permission.rawValue))").run() }
             try await sql.raw("UPDATE im_v2.rooms SET group_permission_revision = \(bind: revision) WHERE room_id = \(bind: ids.room)").run()
@@ -81,17 +127,27 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
     }
 
     public func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
-        try await groupTransaction(database) { transaction in
+        try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    public func changeMemberRoleOwnerValidated(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
+        try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    }
+
+    private func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
+        return try await groupTransaction(database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID, command.targetUserID)
             guard let targetID = ids.target else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
-            guard ids.actor != targetID else { return .alreadyInDesiredState }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
+            if let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
+            guard ids.actor != targetID else { return .alreadyInDesiredState }
             let expectedMembershipRevision = try groupSigned(command.expectedMembershipRevision)
             if let prior = try await sql.raw("SELECT room_id, target_user_id, role, expected_membership_revision, resulting_membership_revision, room_sequence FROM im_v2.group_role_operations WHERE actor_user_id = \(bind: ids.actor) AND operation_id = \(bind: ids.operation)").first(decoding: GroupRoleOperationRow.self) {
                 guard prior.roomID == ids.room, prior.targetUserID == targetID, prior.role == command.role.rawValue, prior.expectedMembershipRevision == expectedMembershipRevision else { return .idempotencyConflict }
                 return .idempotent(try prior.value(roomID: command.roomID, targetUserID: command.targetUserID))
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .changeMemberRoles, capacityProfile: capacityProfile, now: now, sql: sql)
             guard try groupUnsigned(context.room.membershipRevision) == command.expectedMembershipRevision else { return .revisionConflict }
             guard let target = try await sql.raw("SELECT role, joined_revision FROM im_v2.room_memberships WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision <= \(bind: context.room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: context.room.membershipRevision)) ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE").first(decoding: GroupMemberRow.self) else { throw V2GroupCapabilitiesStoreError.targetNotMember }
@@ -99,7 +155,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             guard target.role != command.role else { return .alreadyInDesiredState }
             guard context.room.membershipRevision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let membershipRevision = context.room.membershipRevision + 1
-            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.member_role_changed", payload: try groupPayload(["event_type": "group.member_role_changed", "room_id": ids.room.uuidString, "target_user_id": targetID.uuidString, "role": command.role.rawValue, "membership_revision": membershipRevision, "actor_user_id": ids.actor.uuidString, "server_created_at_ms": Int64(now.timeIntervalSince1970 * 1_000)]), now: now, sql: sql)
+            let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, planID: planID, eventType: "group.member_role_changed", payload: try groupPayload(["event_type": "group.member_role_changed", "room_id": ids.room.uuidString, "target_user_id": targetID.uuidString, "role": command.role.rawValue, "membership_revision": membershipRevision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             // Membership history is revisioned. Close the active row and add
             // a new active interval so historical fan-out remains correct.
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision = \(bind: target.joinedRevision)").run()
@@ -146,7 +202,11 @@ private struct GroupRevisionRow: Decodable { let revision: Int64 }
 private struct GroupAdmissionRow: Decodable { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64; enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
 private struct GroupShardRow: Decodable { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int; enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: try groupUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
 private struct GroupContext { let room: GroupRoomRow; let admission: GroupAdmissionRow; let nextRoom: RoomAdmissionState; let nextShard: ShardAdmissionState }
-private struct GroupCommitted { let sequence: Int64; let eventID: UUID; let planID: UUID }
+private struct GroupCommitted { let sequence: Int64; let eventID: UUID; let planID: UUID; let createdAt: Date }
+private struct GroupCommittedTimestampRow: Decodable {
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
+}
 
 private func prepare(room: UUID, actor: UUID, required: V2GroupPermission, capacityProfile: V2CapacityProfile, now: Date, sql: any SQLDatabase) async throws -> GroupContext {
     guard let state = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, group_permission_revision, capacity_profile_id, room_kind, delivery_mode FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").first(decoding: GroupRoomRow.self) else { throw V2GroupCapabilitiesStoreError.roomNotFound }
@@ -162,12 +222,18 @@ private func commit(room: UUID, context: GroupContext, actor: UUID, eventID: Eve
     guard let lease = context.nextShard.lease, context.room.roomSequence < Int64.max, let event = UUID(uuidString: eventID.rawValue), let plan = UUID(uuidString: planID.rawValue) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
     let sequence = context.room.roomSequence + 1
     guard let leaseID = UUID(uuidString: lease.id.rawValue) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
-    try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: sequence) WHERE room_id = \(bind: room)").run()
+    // Decode the original clock through PostgreSQL during the existing sequence
+    // update. Responses and payloads use that canonical value; storage keeps the
+    // original Date so another encoding cannot discard an additional microsecond.
+    guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: sequence) WHERE room_id = \(bind: room) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: GroupCommittedTimestampRow.self) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
+    let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
     try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: context.nextRoom.commandWindow.used), fanout_window_used = \(bind: context.nextRoom.fanoutWindow.used), outstanding_fanout_units = \(bind: context.nextRoom.outstandingFanoutUnits), outstanding_plans = \(bind: context.nextRoom.outstandingPlans), shard_lease_id = \(bind: leaseID), shard_lease_generation = \(bind: try groupSigned(lease.generation)) WHERE room_id = \(bind: room)").run()
     try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used), fanout_window_used = \(bind: lease.fanoutWindow.used), outstanding_fanout_units = \(bind: context.nextShard.outstandingFanoutUnits), outstanding_plans = \(bind: context.nextShard.outstandingPlans) WHERE room_shard_id = \(bind: context.room.roomShardID) AND capacity_profile_id = \(bind: context.room.capacityProfileID) AND lease_id = \(bind: leaseID) AND generation = \(bind: try groupSigned(lease.generation))").run()
-    try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: event), \(bind: room), \(bind: sequence), \(bind: eventType), \(bind: actor), \(bind: payload)::jsonb, \(bind: context.room.membershipRevision), \(bind: now))").run()
+    // Assign the source version under the same room lock as the append.
+    // Personal fan-out preserves this payload but assigns its own cursor.
+    try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: event), \(bind: room), \(bind: sequence), \(bind: eventType), \(bind: actor), \(bind: payload)::jsonb || jsonb_build_object('room_sequence', \(bind: sequence), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: context.room.membershipRevision), \(bind: now))").run()
     try await V2RoomEventDeliveryMode.persistPlan(deliveryMode: context.room.deliveryMode, planID: plan, eventID: event, roomID: room, roomSequence: sequence, committedMembershipRevision: context.room.membershipRevision, standardTargetRuleJSON: "{\"kind\":\"eligible_member_count\"}", standardTargetCount: context.admission.eligibleMemberCount, now: now, sql: sql)
-    return .init(sequence: sequence, eventID: event, planID: plan)
+    return .init(sequence: sequence, eventID: event, planID: plan, createdAt: timestamp.createdAt)
 }
 private struct GroupPinOperationRow: Decodable { let roomID: UUID; let messageID: UUID; let isPinned: Bool; let roomSequence: Int64; let createdAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", isPinned = "is_pinned", roomSequence = "room_sequence", createdAt = "created_at" }; func value(roomID: RoomID, messageID: MessageID) throws -> V2PinnedMessage { try .init(roomID: roomID, messageID: messageID, isPinned: isPinned, roomSequence: groupUnsigned(roomSequence), updatedAt: createdAt) } }
 private struct GroupAnnouncementOperationRow: Decodable { let roomID: UUID; let body: String; let expectedRevision: Int64; let resultingRevision: Int64; let roomSequence: Int64; let createdAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", body, expectedRevision = "expected_revision", resultingRevision = "resulting_revision", roomSequence = "room_sequence", createdAt = "created_at" }; func value(roomID: RoomID) throws -> V2GroupAnnouncement { try .init(roomID: roomID, body: body, revision: groupUnsigned(resultingRevision), roomSequence: groupUnsigned(roomSequence), updatedAt: createdAt) } }

@@ -201,7 +201,16 @@ public struct V2RoutedGroupMessagingStore:
                 afterUserID: afterUserID,
                 limit: V2GroupRoomCreationManifestPage.maximumMemberCount
             )
-            guard !slice.memberUserIDs.isEmpty else {
+            // Bound the cumulative count before writing any page. The
+            // manifest must advance its cursor and finish exactly at the
+            // immutable intent count, including when resuming a partial copy.
+            let remainingCount = intent.audienceMemberCount - transferredCount
+            guard !slice.memberUserIDs.isEmpty,
+                  slice.memberUserIDs.count <= remainingCount,
+                  slice.memberUserIDs.count <= V2GroupRoomCreationManifestPage.maximumMemberCount,
+                  Set(slice.memberUserIDs).count == slice.memberUserIDs.count,
+                  afterUserID.map({ cursor in slice.memberUserIDs.allSatisfy { $0 > cursor } }) ?? true,
+                  slice.hasMore == (slice.memberUserIDs.count < remainingCount) else {
                 throw V2GroupRoomCreationIntentStoreError
                     .corruptPersistenceState
             }

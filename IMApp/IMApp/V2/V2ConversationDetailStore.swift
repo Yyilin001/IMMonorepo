@@ -38,7 +38,7 @@ final class V2ConversationDetailStore {
     private let groupAnnouncementReader: (any V2GroupAnnouncementReading)?
     private let groupAnnouncementManager: (any V2GroupAnnouncementManaging)?
     private let groupMemberRoleChanger: (any V2GroupMemberRoleChanging)?
-    private let groupRolePolicyReader: (any V2GroupRolePolicyReading)?
+    private let groupRolePolicyReader: (any V2GroupRolePolicyAccessing)?
     private let groupRolePolicyChanger: (any V2GroupRolePolicyChanging)?
     private let groupReadReceiptReader: (any V2GroupReadReceiptReading)?
     private let conversationLiveActivity: (any V2ConversationLiveActivityManaging)?
@@ -52,6 +52,7 @@ final class V2ConversationDetailStore {
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
+    private let roomSubscriptions: V2RoomSubscriptionCoordinator?
     private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     let roomID: String
     let title: String
@@ -85,6 +86,9 @@ final class V2ConversationDetailStore {
     private(set) var groupReadReceiptFeedback: String?
     private var groupReadReceiptMessageID: String?
     private var typingLeaseTask: Task<Void, Never>?
+    private var typingLeaseID: UUID?
+    private var activityConsumerID: UUID?
+    private var activityConnectionID: UUID?
     /// One expiry task per remote user.  The wire expiry is authoritative: a
     /// disconnect can lose the trailing `isTyping = false` event.
     private var typingExpiryTasks: [UserID: Task<Void, Never>] = [:]
@@ -94,13 +98,24 @@ final class V2ConversationDetailStore {
     private var nextGroupMemberCursor: String?
     private var refreshGeneration = 0
     private var newerTimelineBoundary: V2ConversationTimelineCursor?
+    private var timelineLocationID: UUID?
+    private var refreshAfterTimelineLocation = false
     private var inFlightMessageActionIDs: Set<String> = []
     private(set) var isSelectingMessagesForForward = false
-    private(set) var selectedForwardMessageIDs: Set<String> = []
+    private struct SelectedForwardSource {
+        let reference: V2ForwardMessageReference
+        let roomSequence: UInt64
+    }
+    private var selectedForwardSources: [String: SelectedForwardSource] = [:]
+    var selectedForwardMessageIDs: Set<String> { Set(selectedForwardSources.keys) }
     private(set) var isForwardingMessages = false
     private(set) var groupAnnouncement: V2ClientGroupAnnouncement?
     private(set) var isSavingGroupAnnouncement = false
-    private(set) var groupRolePolicies: [V2ClientGroupRolePolicy] = []
+    private(set) var groupRolePolicyState = V2ClientGroupRolePolicyState(policies: [], recovery: .needed)
+    var groupRolePolicies: [V2ClientGroupRolePolicy] { groupRolePolicyState.policies }
+    enum PolicyRecoveryAction: Equatable { case idle, requesting, failed }
+    private(set) var policyRecoveryAction = PolicyRecoveryAction.idle
+    private var rolePolicyReadGeneration: UInt64 = 0
     private(set) var isLoadingGroupRolePolicies = false
     private(set) var isSavingGroupRolePolicy = false
     var draft = ""
@@ -127,7 +142,7 @@ final class V2ConversationDetailStore {
         groupAnnouncementManager = environment.groups.announcementManager
         groupMemberRoleChanger = environment.groups.memberRoleChanger
         groupRolePolicyReader = environment.projections.groupRolePolicyReader
-            ?? (environment.projections.dataSource as? any V2GroupRolePolicyReading)
+            ?? (environment.projections.dataSource as? any V2GroupRolePolicyAccessing)
         groupRolePolicyChanger = environment.groups.rolePolicyChanger
         groupReadReceiptReader = environment.groups.readReceiptReader
         conversationLiveActivity = environment.runtime.liveActivity
@@ -145,6 +160,7 @@ final class V2ConversationDetailStore {
         mediaDownloader = environment.media.downloader
         projectionChangeNotifier = environment.runtime.projectionChangeNotifier
         activeHybridGroupSynchronizer = environment.runtime.activeHybridGroupSynchronizer
+        roomSubscriptions = environment.runtime.roomSubscriptions
         draft = context.initialDraft ?? ""
         mentionHandlesText = context.initialMentionHandles ?? ""
     }
@@ -155,6 +171,7 @@ final class V2ConversationDetailStore {
     }
 
     func refresh() async {
+        if timelineLocationID != nil { refreshAfterTimelineLocation = true; return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
         if timeline.isEmpty { state = .loading }
@@ -171,6 +188,8 @@ final class V2ConversationDetailStore {
                     max(Self.initialTimelinePageSize, timeline.count)
                 )
             )
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             let refreshedTimeline = page.items
             let refreshedMessages = Self.messages(in: refreshedTimeline)
             let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
@@ -178,6 +197,8 @@ final class V2ConversationDetailStore {
             } else {
                 nil
             }
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             let refreshedAnnouncement: V2ClientGroupAnnouncement? = if isGroupConversation, let groupAnnouncementReader {
                 try await groupAnnouncementReader.groupAnnouncement(in: roomID)
             } else {
@@ -185,7 +206,16 @@ final class V2ConversationDetailStore {
             }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            rolePolicyReadGeneration &+= 1
+            let policyReadGeneration = rolePolicyReadGeneration
+            let refreshedPolicies: V2ClientGroupRolePolicyState = if isGroupConversation, let groupRolePolicyReader {
+                try await groupRolePolicyReader.groupRolePolicyState(in: roomID)
+            } else { .init(policies: [], recovery: .unavailable) }
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages)
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             messages = refreshedMessages
             timeline = refreshedTimeline
             timelineRevision &+= 1
@@ -193,6 +223,7 @@ final class V2ConversationDetailStore {
             isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
             canSendInDirectConversation = refreshedCanSend
             groupAnnouncement = refreshedAnnouncement
+            if policyReadGeneration == rolePolicyReadGeneration { updateGroupRolePolicyState(refreshedPolicies) }
             let visibleMediaIDs = Set(refreshedMessages.lazy
                 .filter { !$0.isWithdrawn }
                 .flatMap(\.media)
@@ -202,7 +233,7 @@ final class V2ConversationDetailStore {
         } catch is CancellationError {
             return
         } catch {
-            guard generation == refreshGeneration else { return }
+            guard !Task.isCancelled, generation == refreshGeneration else { return }
             if timeline.isEmpty {
                 state = .failed
             } else {
@@ -213,7 +244,7 @@ final class V2ConversationDetailStore {
     }
 
     func loadOlderTimeline() async {
-        guard !isLoadingOlderTimeline, !isReturningToLatestTimeline,
+        guard timelineLocationID == nil, !isLoadingOlderTimeline, !isReturningToLatestTimeline,
               canLoadOlderTimeline,
               let first = timeline.first
         else { return }
@@ -225,7 +256,7 @@ final class V2ConversationDetailStore {
             let page = try await dataSource.timelinePage(
                 in: roomID,
                 for: userID,
-                before: .init(timelineSequence: first.timelineSequence, itemID: first.storageItemID),
+                before: first.cursor,
                 limit: Self.timelinePageSize
             )
             try Task.checkCancellation()
@@ -235,10 +266,7 @@ final class V2ConversationDetailStore {
             let combined = older + timeline
             if combined.count > Self.maximumRetainedTimelineItems {
                 let boundaryItem = combined[Self.maximumRetainedTimelineItems]
-                newerTimelineBoundary = .init(
-                    timelineSequence: boundaryItem.timelineSequence,
-                    itemID: boundaryItem.storageItemID
-                )
+                newerTimelineBoundary = boundaryItem.cursor
                 timeline = Array(combined.prefix(Self.maximumRetainedTimelineItems))
                 isBrowsingHistoricalTimeline = true
             } else {
@@ -250,6 +278,7 @@ final class V2ConversationDetailStore {
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled, generation == refreshGeneration else { return }
             messageActionFeedback = "无法加载更早的消息。"
         }
     }
@@ -260,6 +289,8 @@ final class V2ConversationDetailStore {
         else { return }
         isReturningToLatestTimeline = true
         defer { isReturningToLatestTimeline = false }
+        timelineLocationID = nil
+        refreshAfterTimelineLocation = false
         newerTimelineBoundary = nil
         await refresh()
         if isBrowsingHistoricalTimeline {
@@ -269,17 +300,51 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Search navigation may target a message outside the initial window. It
-    /// advances bounded keyset pages and preserves cancellation instead of
-    /// falling back to one unbounded history query.
+    /// Search and Favorites navigate directly to a bounded snapshot around
+    /// the target, including newer targets outside a historical window.
     func loadTimeline(containing messageID: String) async {
-        while !Task.isCancelled,
-              !messages.contains(where: { $0.id == messageID }),
-              canLoadOlderTimeline {
-            let previousCount = timeline.count
-            await loadOlderTimeline()
-            guard timeline.count > previousCount else { return }
-            await Task.yield()
+        guard !Task.isCancelled else { return }
+        let id = UUID()
+        timelineLocationID = id
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        do {
+            let location = try await dataSource.timelineWindow(in: roomID, for: userID, around: messageID, before: 40, after: 39)
+            try Task.checkCancellation()
+            guard timelineLocationID == id, generation == refreshGeneration else { return }
+            switch location {
+            case .unavailable:
+                if timeline.isEmpty { state = .failed }
+                messageActionFeedback = "这条消息已不可用。"
+            case .withdrawn:
+                if timeline.isEmpty { state = .failed }
+                messageActionFeedback = "这条消息已撤回。"
+            case .found(let page, let boundary):
+                let refreshedMessages = Self.messages(in: page.items)
+                await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages)
+                try Task.checkCancellation()
+                guard timelineLocationID == id, generation == refreshGeneration else { return }
+                timeline = page.items
+                messages = refreshedMessages
+                newerTimelineBoundary = boundary
+                isBrowsingHistoricalTimeline = boundary != nil
+                canLoadOlderTimeline = page.olderCursor != nil
+                timelineRevision &+= 1
+                state = .loaded
+                messageActionFeedback = nil
+            }
+        } catch is CancellationError { }
+        catch {
+            if timelineLocationID == id, !Task.isCancelled {
+                if timeline.isEmpty { state = .failed }
+                messageActionFeedback = "暂时无法定位这条消息，请重试。"
+            }
+        }
+        guard timelineLocationID == id else { return }
+        timelineLocationID = nil
+        if refreshAfterTimelineLocation {
+            refreshAfterTimelineLocation = false
+            await refresh()
         }
     }
 
@@ -299,7 +364,10 @@ final class V2ConversationDetailStore {
         guard let cache = mediaDownloader as? any V2ConversationMediaCacheDiscarding else { return }
         let withdrawnIDs = Set(refreshed.lazy.filter(\.isWithdrawn).map(\.id))
         for message in previous where !message.isWithdrawn && withdrawnIDs.contains(message.id) {
-            for media in message.media { await cache.discard(media) }
+            for media in message.media {
+                guard !Task.isCancelled else { return }
+                await cache.discard(media)
+            }
         }
     }
 
@@ -308,7 +376,7 @@ final class V2ConversationDetailStore {
             await refresh()
             return
         }
-        for await _ in await projectionChangeNotifier.updates() {
+        await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(scopes: .conversationDetails)) { [self] in
             await refresh()
         }
     }
@@ -321,6 +389,16 @@ final class V2ConversationDetailStore {
         guard isGroupConversation,
               let activeHybridGroupSynchronizer
         else { return }
+        if let roomSubscriptions, let parsedRoom = try? RoomID(roomID) {
+            let scoped = V2ScopedActiveRoomSynchronizer(roomID: parsedRoom, owner: roomSubscriptions, base: activeHybridGroupSynchronizer)
+            await observeActiveRoom(scoped)
+            await scoped.close()
+            return
+        }
+        await observeActiveRoom(activeHybridGroupSynchronizer)
+    }
+
+    private func observeActiveRoom(_ activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing) async {
         let subscription: V2ActiveHybridGroupSubscriptionOutcome
         do {
             subscription = try await activeHybridGroupSynchronizer.subscribe(roomID: roomID)
@@ -456,7 +534,8 @@ final class V2ConversationDetailStore {
     /// A broker wake gives normal foreground latency. The timer only recovers
     /// a lost best-effort wake and is deliberately not a one-second poll.
     private func nextHybridWakeOrFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async throws -> V2ActiveHybridGroupWake? {
-        try await withThrowingTaskGroup(of: V2ActiveHybridGroupWake?.self) { group in
+        if synchronizer.usesRuntimeRecoveryClock { return try await synchronizer.nextWake() }
+        return try await withThrowingTaskGroup(of: V2ActiveHybridGroupWake?.self) { group in
             group.addTask { try await synchronizer.nextWake() }
             group.addTask {
                 try await Task.sleep(for: .seconds(30))
@@ -514,6 +593,10 @@ final class V2ConversationDetailStore {
     /// Owned by the detail view's task. Live activity is ephemeral and must
     /// be stopped when the view disappears; message refresh remains separate.
     func observeLiveActivity() async {
+        if let roomSubscriptions {
+            await observeSharedLiveActivity(roomSubscriptions)
+            return
+        }
         guard let conversationLiveActivity else { return }
         let includesPresence = !isGroupConversation
         do {
@@ -546,6 +629,56 @@ final class V2ConversationDetailStore {
             try? await conversationLiveActivity.setTyping(roomID: roomID, isTyping: false)
         }
         await conversationLiveActivity.deactivate(roomID: roomID, includesPresence: includesPresence)
+    }
+
+    private func observeSharedLiveActivity(_ owner: V2RoomSubscriptionCoordinator) async {
+        guard let room = try? RoomID(roomID) else { return }
+        var channels: Set<V2RoomSubscriptionChannel> = [.typing]
+        if !isGroupConversation { channels.insert(.presence) }
+        do {
+            let lease = try await owner.acquire(roomID: room, channels: channels)
+            activityConsumerID = lease.id
+            var observedConnectionID: UUID?
+            for await snapshot in lease.updates {
+                guard !Task.isCancelled else { break }
+                if observedConnectionID != snapshot.connectionID || snapshot.state == .offline || snapshot.state == .revoked {
+                    observedConnectionID = snapshot.connectionID
+                    typingLeaseTask?.cancel()
+                    typingLeaseTask = nil
+                    typingLeaseID = nil
+                }
+                activityConnectionID = snapshot.state == .subscribed ? snapshot.connectionID : nil
+                // Each snapshot replaces all transient facts, including when
+                // an intermediate offline value was coalesced away.
+                clearTypingStates()
+                setPeerPresence(snapshot.presence)
+                for typing in snapshot.typing { applyTypingState(typing) }
+            }
+            await owner.release(roomID: room, consumerID: lease.id)
+        } catch {
+            // Registration is bounded; local history remains available.
+        }
+        activityConsumerID = nil
+        activityConnectionID = nil
+        setPeerPresence(nil)
+        clearTypingStates()
+        typingLeaseTask?.cancel()
+        typingLeaseTask = nil
+    }
+
+    private var presenceExpiryTask: Task<Void, Never>?
+    private func setPeerPresence(_ presence: V2PresenceState?) {
+        presenceExpiryTask?.cancel()
+        presenceExpiryTask = nil
+        guard let presence, presence.expiresAt > Date() else { peerPresence = nil; return }
+        peerPresence = presence
+        presenceExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, presence.expiresAt.timeIntervalSinceNow))) }
+            catch { return }
+            guard let self, self.peerPresence == presence else { return }
+            self.peerPresence = nil
+            self.presenceExpiryTask = nil
+        }
     }
 
     /// Applies a wire event and owns the receiver-side expiry. Kept separate
@@ -590,16 +723,31 @@ final class V2ConversationDetailStore {
     }
 
     func updateTypingForDraft() {
-        guard conversationLiveActivity != nil else { return }
+        let sendTyping: @Sendable (Bool) async throws -> Void
+        if let roomSubscriptions {
+            guard let consumerID = activityConsumerID, let connectionID = activityConnectionID,
+                  let room = try? RoomID(roomID) else { return }
+            sendTyping = { value in
+                try await roomSubscriptions.setTyping(roomID: room, consumerID: consumerID, connectionID: connectionID, isTyping: value)
+            }
+        } else if let activity = conversationLiveActivity {
+            let room = roomID
+            sendTyping = { value in try await activity.setTyping(roomID: room, isTyping: value) }
+        } else { return }
         let shouldType = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if shouldType, typingLeaseTask == nil {
-            let roomID = roomID
-            let activity = conversationLiveActivity
-            typingLeaseTask = Task {
-                guard let activity else { return }
+            let leaseID = UUID()
+            typingLeaseID = leaseID
+            typingLeaseTask = Task { [weak self] in
+                defer {
+                    if self?.typingLeaseID == leaseID {
+                        self?.typingLeaseTask = nil
+                        self?.typingLeaseID = nil
+                    }
+                }
                 while !Task.isCancelled {
                     do {
-                        try await activity.setTyping(roomID: roomID, isTyping: true)
+                        try await sendTyping(true)
                         try await Task.sleep(for: .seconds(4))
                     } catch is CancellationError {
                         return
@@ -611,11 +759,8 @@ final class V2ConversationDetailStore {
         } else if !shouldType, let typingLeaseTask {
             typingLeaseTask.cancel()
             self.typingLeaseTask = nil
-            let roomID = roomID
-            let activity = conversationLiveActivity
-            Task {
-                try? await activity?.setTyping(roomID: roomID, isTyping: false)
-            }
+            typingLeaseID = nil
+            Task { try? await sendTyping(false) }
         }
     }
 
@@ -904,7 +1049,8 @@ final class V2ConversationDetailStore {
         guard mediaDownloadState(for: media) != .downloading else { return }
         mediaDownloadStates[media.mediaID] = .downloading
         do {
-            let downloaded = try await mediaDownloader.download(media)
+            let location = try V2MediaMessageLocation(roomID: RoomID(roomID), messageID: MessageID(message.id))
+            let downloaded = try await mediaDownloader.download(media, message: location)
             try Task.checkCancellation()
             guard messages.contains(where: { !$0.isWithdrawn && $0.media.contains(media) }) else {
                 mediaDownloadStates[media.mediaID] = .notDownloaded
@@ -1076,15 +1222,20 @@ final class V2ConversationDetailStore {
 
     func endForwardSelection() {
         isSelectingMessagesForForward = false
-        selectedForwardMessageIDs.removeAll()
+        selectedForwardSources.removeAll()
     }
 
     func toggleForwardSelection(for message: V2ConversationMessageItem) {
         guard !message.isWithdrawn else { return }
         if selectedForwardMessageIDs.contains(message.id) {
-            selectedForwardMessageIDs.remove(message.id)
+            selectedForwardSources.removeValue(forKey: message.id)
         } else if selectedForwardMessageIDs.count < V2ForwardMessagesCommand.maximumSourceMessages {
-            selectedForwardMessageIDs.insert(message.id)
+            do {
+                let reference = V2ForwardMessageReference(roomID: try .init(roomID), messageID: try .init(message.id), revision: try .init(message.revision))
+                selectedForwardSources[message.id] = .init(reference: reference, roomSequence: message.roomSequence)
+            } catch {
+                messageActionFeedback = "此消息暂不能转发，请刷新后重新选择。"
+            }
         } else {
             messageActionFeedback = "一次最多转发 \(V2ForwardMessagesCommand.maximumSourceMessages) 条消息。"
         }
@@ -1098,10 +1249,11 @@ final class V2ConversationDetailStore {
     /// queued command is durable, so it is also safe to leave the sheet then.
     func forwardSelectedMessages(to targetRoomIDs: [String]) async -> Bool {
         guard !isForwardingMessages else { return false }
-        let sourceMessageIDs = messages
-            .filter { selectedForwardMessageIDs.contains($0.id) && !$0.isWithdrawn }
-            .map(\.id)
-        guard !sourceMessageIDs.isEmpty else {
+        let sources = selectedForwardSources.values.sorted {
+            if $0.roomSequence != $1.roomSequence { return $0.roomSequence < $1.roomSequence }
+            return $0.reference.messageID.rawValue < $1.reference.messageID.rawValue
+        }.map(\.reference)
+        guard !sources.isEmpty else {
             messageActionFeedback = "请选择要转发的消息。"
             return false
         }
@@ -1116,7 +1268,7 @@ final class V2ConversationDetailStore {
         isForwardingMessages = true
         defer { isForwardingMessages = false }
         do {
-            switch try await messageForwarder.forward(sourceMessageIDs: sourceMessageIDs, targetRoomIDs: targetRoomIDs) {
+            switch try await messageForwarder.forward(sources: sources, targetRoomIDs: targetRoomIDs) {
             case .completed(let succeeded, let failed):
                 if failed == 0 {
                     messageActionFeedback = "已转发 \(succeeded) 条消息，正在同步。"
@@ -1126,8 +1278,8 @@ final class V2ConversationDetailStore {
                 endForwardSelection()
                 await refresh()
                 return true
-            case .queuedForRetry:
-                messageActionFeedback = "转发已安全保存，连接恢复后会重试。"
+            case .queued:
+                messageActionFeedback = "转发任务已保存，剩余消息会继续处理。"
                 endForwardSelection()
                 return true
             case .rejected(let code):
@@ -1187,18 +1339,57 @@ final class V2ConversationDetailStore {
     func loadGroupRolePolicies() async {
         guard isGroupConversation, !isLoadingGroupRolePolicies else { return }
         guard let groupRolePolicyReader else {
+            updateGroupRolePolicyState(.init(policies: [], recovery: .unavailable))
             messageActionFeedback = "群权限策略暂不可用。"
             return
         }
+        rolePolicyReadGeneration &+= 1
+        let generation = rolePolicyReadGeneration
         isLoadingGroupRolePolicies = true
         defer { isLoadingGroupRolePolicies = false }
         do {
-            groupRolePolicies = try await groupRolePolicyReader.groupRolePolicies(in: roomID)
+            let policies = try await groupRolePolicyReader.groupRolePolicyState(in: roomID)
+            try Task.checkCancellation()
+            guard generation == rolePolicyReadGeneration else { return }
+            updateGroupRolePolicyState(policies)
         } catch is CancellationError {
             return
         } catch {
+            guard generation == rolePolicyReadGeneration else { return }
             messageActionFeedback = "无法读取群权限策略。"
         }
+    }
+
+    func retryGroupRolePolicyRecovery() async {
+        guard policyRecoveryAction != .requesting else { return }
+        guard let groupRolePolicyReader else {
+            updateGroupRolePolicyState(.init(policies: [], recovery: .unavailable))
+            return
+        }
+        switch groupRolePolicyState.recovery {
+        case .paused, .needed: break
+        default: return
+        }
+        rolePolicyReadGeneration &+= 1
+        let generation = rolePolicyReadGeneration
+        policyRecoveryAction = .requesting
+        do {
+            let state = try await groupRolePolicyReader.retryGroupRolePolicyRecovery(in: roomID)
+            try Task.checkCancellation()
+            if generation == rolePolicyReadGeneration { updateGroupRolePolicyState(state) }
+            policyRecoveryAction = .idle
+        } catch is CancellationError {
+            policyRecoveryAction = .idle
+        } catch {
+            policyRecoveryAction = generation == rolePolicyReadGeneration ? .failed : .idle
+        }
+    }
+
+    private func updateGroupRolePolicyState(_ state: V2ClientGroupRolePolicyState) {
+        if policyRecoveryAction == .failed, groupRolePolicyState.recovery != state.recovery {
+            policyRecoveryAction = .idle
+        }
+        groupRolePolicyState = state
     }
 
     func saveGroupRolePolicy(_ policy: V2ClientGroupRolePolicy, permissions: Set<V2GroupPermission>) async -> Bool {

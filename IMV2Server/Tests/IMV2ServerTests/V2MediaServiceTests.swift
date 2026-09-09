@@ -2,9 +2,41 @@ import Foundation
 import IMV2Core
 @testable import IMV2Server
 import Testing
+import Synchronization
 
 @Suite("V2 media service")
 struct V2MediaServiceTests {
+    @Test("grant responses recheck the clock after persistence", arguments: [false, true])
+    func grantReturnClockBoundary(upload: Bool) async throws {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12, base.timeIntervalSince1970 + 60] {
+            let clock = MediaGrantClock(base)
+            let store = RecordingMediaStore(onGrant: { clock.set(Date(timeIntervalSince1970: seconds)) })
+            let service = V2MediaService(store: store, limits: try .init(maximumBytes: 100, temporaryLifetime: 60), downloadLimits: try .init(grantLifetime: 60), now: { clock.now() })
+            await #expect(throws: V2MediaServiceError.invalidGrant) {
+                if upload {
+                    _ = try await service.requestUpload(actorUserID: .init("user"), deviceID: .init("device"), operationID: .init("operation"), mediaID: .init("media"), contentType: "image/png", byteCount: 10)
+                } else {
+                    _ = try await service.requestDownload(actorUserID: .init("user"), deviceID: .init("device"), mediaID: .init("media"))
+                }
+            }
+            #expect(await store.events() == [upload ? "requested" : "downloaded"])
+        }
+    }
+
+    @Test("download grant creation rejects invalid or overflowing clocks before persistence")
+    func downloadDeadlineBounds() async throws {
+        let dates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12, 946_684_800 + 9_223_371_331_200 - 10]
+        for seconds in dates {
+            let store = RecordingMediaStore()
+            let service = V2MediaService(store: store, limits: try .init(maximumBytes: 100), now: { Date(timeIntervalSince1970: seconds) })
+            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
+                try await service.requestDownload(actorUserID: .init("user"), deviceID: .init("device"), mediaID: .init("media"))
+            }
+            #expect(await store.events().isEmpty)
+        }
+    }
+
     @Test("an authenticated upload intent receives an opaque short-lived grant")
     func requestsUpload() async throws {
         let store = RecordingMediaStore()
@@ -45,12 +77,16 @@ struct V2MediaServiceTests {
 
 private actor RecordingMediaStore: V2MediaStore {
     private var eventLog: [String] = []
+    private let onGrant: @Sendable () -> Void
+    init(onGrant: @escaping @Sendable () -> Void = {}) { self.onGrant = onGrant }
     func requestUpload(_ command: V2RequestMediaUploadCommand, deviceID _: DeviceID, expiresAt: Date, now _: Date) -> V2MediaUploadGrant {
         eventLog.append("requested")
+        onGrant()
         return try! .init(mediaID: command.mediaID, uploadSessionID: .init("session"), expiresAt: expiresAt)
     }
     func requestDownload(requesterUserID _: UserID, deviceID _: DeviceID, mediaID: MediaID, expiresAt: Date, now _: Date) -> V2MediaDownloadGrant {
         eventLog.append("downloaded")
+        onGrant()
         return try! .init(mediaID: mediaID, downloadSessionID: .init("download-session"), expiresAt: expiresAt)
     }
     func markUploadCompleted(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) { eventLog.append("uploaded") }
@@ -59,4 +95,11 @@ private actor RecordingMediaStore: V2MediaStore {
     func assertAvailableForReference(ownerUserID _: UserID, mediaIDs _: [MediaID], now _: Date) { eventLog.append("referenced") }
     func uploadRequestCount() -> Int { eventLog.filter { $0 == "requested" }.count }
     func events() -> [String] { eventLog }
+}
+
+private final class MediaGrantClock: Sendable {
+    private let value: Mutex<Date>
+    init(_ now: Date) { value = Mutex(now) }
+    func now() -> Date { value.withLock { $0 } }
+    func set(_ now: Date) { value.withLock { $0 = now } }
 }

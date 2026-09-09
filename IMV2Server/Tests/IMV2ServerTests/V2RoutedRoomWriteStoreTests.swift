@@ -5,6 +5,20 @@ import Testing
 
 @Suite("Routed room write store")
 struct V2RoutedRoomWriteStoreTests {
+    @Test("single physical owner preserves distinct direct and group routes for scalar writes")
+    func colocatedDirectAndGroupScalarRoutes() async throws {
+        let requests = try makeRequests(count: 2)
+        let routes = try [V2RoomShardRoute(shardID: "direct-00", epoch: 4), V2RoomShardRoute(shardID: "group-00", epoch: 7)]
+        let router = TestRoomRouter(routes: Dictionary(uniqueKeysWithValues: zip(requests.map { $0.command.roomID }, routes)))
+        let owner = RecordingAtomicStore()
+        let routed = try V2RoutedRoomWriteStore(router: router, stores: ["direct-00": owner, "group-00": owner], physicalStoreKeyByShard: ["direct-00": "local", "group-00": "local"])
+        for request in requests {
+            _ = try await routed.accept(command: request.command, capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now)
+        }
+        #expect(await router.singleRouteCallCount() == 2)
+        #expect(await owner.capturedRoutes() == routes)
+    }
+
     @Test("distinct physical owners receive independent atomic append batches")
     func distinctOwnersReceiveIndependentBatches() async throws {
         let requests = try makeRequests(count: 4)
@@ -45,12 +59,12 @@ struct V2RoutedRoomWriteStoreTests {
         ]])
     }
 
-    @Test("co-located logical owners bypass route resolution and retain one atomic append batch")
-    func coLocatedOwnersBypassRoutingAndRetainOneAtomicBatch() async throws {
+    @Test("co-located logical owners preserve each route and retain one atomic append batch")
+    func coLocatedOwnersPreserveRoutesAndRetainOneAtomicBatch() async throws {
         let requests = try makeRequests(count: 3)
         let routes = try Dictionary(uniqueKeysWithValues: zip(
             requests.map { $0.command.roomID }, ["rooms-00", "rooms-01", "rooms-02"]
-        ).map { roomID, shardID in (roomID, try V2RoomShardRoute(shardID: shardID, epoch: 0)) })
+        ).map { roomID, shardID in (roomID, try V2RoomShardRoute(shardID: shardID, epoch: Int64(roomID.uuidValue!.uuidString.suffix(2))!)) })
         let router = TestRoomRouter(routes: routes)
         let store = RecordingAtomicStore()
         let routed = try V2RoutedRoomWriteStore(
@@ -62,13 +76,14 @@ struct V2RoutedRoomWriteStoreTests {
         let outcomes = try await routed.acceptAtomically(requests: requests)
 
         #expect(outcomes.count == requests.count)
-        #expect(await router.batchRouteCallCount() == 0)
+        #expect(await router.batchRouteCallCount() == 1)
         #expect(await router.singleRouteCallCount() == 0)
         #expect(await store.batches() == [requests.map(\.command.clientMessageID)])
+        #expect(await store.capturedRoutes() == requests.map { routes[$0.command.roomID]! })
     }
 
-    @Test("eligibility bypasses route resolution for a single physical owner")
-    func eligibilityBypassesRouteLookupForSinglePhysicalOwner() async throws {
+    @Test("eligibility resolves routes for a single physical owner")
+    func eligibilityResolvesRoutesForSinglePhysicalOwner() async throws {
         let requests = try makeRequests(count: 3)
         let routes = try Dictionary(uniqueKeysWithValues: requests.map {
             ($0.command.roomID, try V2RoomShardRoute(shardID: "rooms-00", epoch: 0))
@@ -82,7 +97,7 @@ struct V2RoutedRoomWriteStoreTests {
         )
 
         #expect(await routed.atomicBatchEligibility(requests: requests) == [true, true, true])
-        #expect(await router.batchRouteCallCount() == 0)
+        #expect(await router.batchRouteCallCount() == 1)
         #expect(await store.eligibilityBatches() == [requests.map(\.command.clientMessageID)])
     }
 }
@@ -114,8 +129,21 @@ private actor TestRoomRouter: V2RoomShardRouting {
     func batchRouteCallCount() -> Int { batchCalls }
 }
 
-private actor RecordingAtomicStore: V2AtomicRoomWriteBatchStore {
+private actor RecordingAtomicStore: V2OwnerValidatedRoomWriteStore {
     private var atomicBatches: [[ClientMessageID]] = []
+    private var receivedRoutes: [V2RoomShardRoute] = []
+
+    func acceptOwnerValidated(request: V2RoomWriteRequest, ownerRoute: V2RoomShardRoute) -> V2SendMessageOutcome {
+        receivedRoutes.append(ownerRoute)
+        return accept(command: request.command, capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now)
+    }
+
+    func acceptAtomicallyOwnerValidated(requests: [V2OwnerValidatedRoomWriteRequest]) -> [V2SendMessageOutcome] {
+        receivedRoutes += requests.map(\.ownerRoute)
+        return acceptAtomically(requests: requests.map(\.request))
+    }
+
+    func capturedRoutes() -> [V2RoomShardRoute] { receivedRoutes }
     private var eligibilityCalls: [[ClientMessageID]] = []
 
     func accept(

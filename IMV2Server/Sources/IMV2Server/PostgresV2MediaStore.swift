@@ -18,15 +18,18 @@ public struct PostgresV2MediaStore: V2MediaStore {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             guard try await isActiveDevice(owner: actor, device: device, on: sql) else { throw V2MediaStoreError.uploadNotAuthorized }
+            let operationLockKey = "v2-media-upload-operation:" + actor.uuidString.lowercased() + ":" + operation.uuidString.lowercased()
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
             if let existing = try await sql.raw("SELECT media_id, content_type, byte_count, upload_session_id, expires_at, requesting_device_id FROM im_v2.media_upload_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation) FOR UPDATE").first(decoding: MediaUploadOperationRow.self) {
                 guard existing.mediaID == media, existing.contentType == command.contentType, existing.byteCount == command.byteCount, existing.requestingDeviceID == device else { throw V2MediaStoreError.idempotencyConflict }
                 return try .init(mediaID: command.mediaID, uploadSessionID: .init(existing.uploadSessionID.uuidString), expiresAt: existing.expiresAt)
             }
+            guard v2PostgresTimestampPrecedes(now, expiresAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let session = makeUUID()
             try await sql.raw("INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at) VALUES (\(bind: media), \(bind: actor), \(bind: command.contentType), \(bind: command.byteCount), 'pending_upload', \(bind: session), \(bind: expiresAt), \(bind: now), \(bind: now))").run()
             try await sql.raw("INSERT INTO im_v2.media_upload_operations (actor_user_id, operation_id, media_id, content_type, byte_count, upload_session_id, expires_at, created_at, requesting_device_id) VALUES (\(bind: actor), \(bind: operation), \(bind: media), \(bind: command.contentType), \(bind: command.byteCount), \(bind: session), \(bind: expiresAt), \(bind: now), \(bind: device))").run()
-            try await sql.raw("INSERT INTO im_v2.media_upload_grants (upload_session_id, media_id, user_id, device_id, content_type, byte_count, expires_at, created_at) VALUES (\(bind: session), \(bind: media), \(bind: actor), \(bind: device), \(bind: command.contentType), \(bind: command.byteCount), \(bind: expiresAt), \(bind: now))").run()
-            return try .init(mediaID: command.mediaID, uploadSessionID: .init(session.uuidString), expiresAt: expiresAt)
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.media_upload_grants (upload_session_id, media_id, user_id, device_id, content_type, byte_count, expires_at, created_at) VALUES (\(bind: session), \(bind: media), \(bind: actor), \(bind: device), \(bind: command.contentType), \(bind: command.byteCount), \(bind: expiresAt), \(bind: now)) RETURNING expires_at").first(decoding: MediaGrantExpiryRow.self) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return try .init(mediaID: command.mediaID, uploadSessionID: .init(session.uuidString), expiresAt: persisted.expiresAt)
         }
     }
 
@@ -49,13 +52,15 @@ public struct PostgresV2MediaStore: V2MediaStore {
                 on: sql
             )
             guard authorized else { throw V2MediaStoreError.downloadNotAuthorized }
-            try await sql.raw("""
+            guard v2PostgresTimestampPrecedes(now, expiresAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard let persisted = try await sql.raw("""
                 INSERT INTO im_v2.media_download_grants
                     (download_session_id, media_id, user_id, device_id, expires_at, created_at)
                 VALUES
                     (\(bind: session), \(bind: media), \(bind: requester), \(bind: device), \(bind: expiresAt), \(bind: now))
-                """).run()
-            return try .init(mediaID: mediaID, downloadSessionID: .init(session.uuidString), expiresAt: expiresAt)
+                RETURNING expires_at
+                """).first(decoding: MediaGrantExpiryRow.self) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return try .init(mediaID: mediaID, downloadSessionID: .init(session.uuidString), expiresAt: persisted.expiresAt)
         }
     }
 
@@ -68,8 +73,10 @@ public struct PostgresV2MediaStore: V2MediaStore {
                   let row = try await sql.raw("SELECT owner_user_id, state, expires_at, upload_session_id FROM im_v2.media_objects WHERE media_id = \(bind: media) FOR UPDATE").first(decoding: MediaStateRow.self)
             else { throw V2MediaStoreError.mediaUnavailable }
             guard row.ownerUserID == owner else { throw V2MediaStoreError.mediaUnavailable }
+            guard try await isActiveDevice(owner: owner, device: device, on: sql) else { throw V2MediaStoreError.uploadNotAuthorized }
+            let currentTime = try V2PostgresTimestamp(date: now)
             guard try await isCompletedUploadGrant(session: row.uploadSessionID, owner: owner, device: device, now: now, on: sql) else { throw V2MediaStoreError.uploadNotAuthorized }
-            guard row.expiresAt > now else { throw V2MediaStoreError.mediaExpired }
+            guard row.expiresAt.microseconds > currentTime.microseconds else { throw V2MediaStoreError.mediaExpired }
             guard row.state == "pending_upload" else { throw V2MediaStoreError.invalidStateTransition }
             try await sql.raw("UPDATE im_v2.media_objects SET state = 'scanning', state_updated_at = \(bind: now) WHERE media_id = \(bind: media)").run()
             try await sql.raw("INSERT INTO im_v2.media_scan_outbox (media_id, state, created_at) VALUES (\(bind: media), 'pending', \(bind: now)) ON CONFLICT (media_id) DO NOTHING").run()
@@ -93,12 +100,13 @@ public struct PostgresV2MediaStore: V2MediaStore {
                   SELECT 1 FROM im_v2.auth_devices AS authenticated_device
                   WHERE authenticated_device.user_id = \(bind: owner)
                     AND authenticated_device.device_id = \(bind: device)
-                    AND authenticated_device.revoked_at IS NULL
+                    AND authenticated_device.revoked_at IS NULL AND authenticated_device.session_expires_at > clock_timestamp()
               )
             """).first(decoding: MediaUploadStatusRow.self) else {
             throw V2MediaStoreError.uploadNotAuthorized
         }
-        guard row.expiresAt > now else { return .expired }
+        let currentTime = try V2PostgresTimestamp(date: now)
+        guard row.expiresAt.microseconds > currentTime.microseconds else { return .expired }
         guard let state = V2MediaObjectState(databaseState: row.state) else {
             throw V2MediaStoreError.mediaUnavailable
         }
@@ -106,15 +114,16 @@ public struct PostgresV2MediaStore: V2MediaStore {
     }
 
     public func recordScanResult(mediaID: MediaID, passed: Bool, now: Date) async throws {
+        let currentTime = try V2PostgresTimestamp(date: now)
         let media = try mediaUUID(mediaID)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let row = try await sql.raw("SELECT owner_user_id, state, expires_at, upload_session_id FROM im_v2.media_objects WHERE media_id = \(bind: media) FOR UPDATE").first(decoding: MediaStateRow.self)
             else { throw V2MediaStoreError.mediaUnavailable }
-            guard row.expiresAt > now else { throw V2MediaStoreError.mediaExpired }
+            guard row.expiresAt.microseconds > currentTime.microseconds else { throw V2MediaStoreError.mediaExpired }
             guard row.state == "scanning" else { throw V2MediaStoreError.invalidStateTransition }
             try await sql.raw("UPDATE im_v2.media_objects SET state = \(bind: passed ? "available" : "failed"), state_updated_at = \(bind: now) WHERE media_id = \(bind: media)").run()
-            try await sql.raw("UPDATE im_v2.media_scan_outbox SET state = 'completed', completed_at = \(bind: now), claim_token = NULL, lease_expires_at = NULL WHERE media_id = \(bind: media) AND state <> 'completed'").run()
+            try await sql.raw("UPDATE im_v2.media_scan_outbox SET state = 'completed', completed_at = \(bind: now), claim_token = NULL, lease_expires_at = NULL, next_attempt_at = NULL, paused_at = NULL WHERE media_id = \(bind: media) AND state <> 'completed'").run()
         }
     }
 
@@ -122,6 +131,7 @@ public struct PostgresV2MediaStore: V2MediaStore {
         guard Set(mediaIDs).count == mediaIDs.count else { throw V2MediaStoreError.invalidReferenceSet }
         let owner = try mediaUUID(ownerUserID)
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard mediaIDs.isEmpty || v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         for mediaID in mediaIDs {
             let media = try mediaUUID(mediaID)
             guard try await sql.raw("SELECT media_id FROM im_v2.media_objects WHERE media_id = \(bind: media) AND owner_user_id = \(bind: owner) AND state = 'available' AND expires_at > \(bind: now)").first(decoding: MediaIDRow.self) != nil else { throw V2MediaStoreError.mediaUnavailable }
@@ -129,20 +139,21 @@ public struct PostgresV2MediaStore: V2MediaStore {
     }
 
     private func transition(mediaID: MediaID, expected: String, next: String, owner: UserID?, now: Date) async throws {
+        let currentTime = try V2PostgresTimestamp(date: now)
         let media = try mediaUUID(mediaID); let ownerUUID = try owner.map(mediaUUID)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let row = try await sql.raw("SELECT owner_user_id, state, expires_at, upload_session_id FROM im_v2.media_objects WHERE media_id = \(bind: media) FOR UPDATE").first(decoding: MediaStateRow.self)
             else { throw V2MediaStoreError.mediaUnavailable }
             guard ownerUUID == nil || row.ownerUserID == ownerUUID else { throw V2MediaStoreError.mediaUnavailable }
-            guard row.expiresAt > now else { throw V2MediaStoreError.mediaExpired }
+            guard row.expiresAt.microseconds > currentTime.microseconds else { throw V2MediaStoreError.mediaExpired }
             guard row.state == expected else { throw V2MediaStoreError.invalidStateTransition }
             try await sql.raw("UPDATE im_v2.media_objects SET state = \(bind: next), state_updated_at = \(bind: now) WHERE media_id = \(bind: media)").run()
         }
     }
 
     private func isActiveDevice(owner: UUID, device: UUID, on sql: any SQLDatabase) async throws -> Bool {
-        try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.auth_devices WHERE user_id = \(bind: owner) AND device_id = \(bind: device) AND revoked_at IS NULL) AS authorized").first(decoding: MediaUploadAuthorizationRow.self)?.authorized ?? false
+        try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.auth_devices WHERE user_id = \(bind: owner) AND device_id = \(bind: device) AND revoked_at IS NULL AND session_expires_at > clock_timestamp()) AS authorized").first(decoding: MediaUploadAuthorizationRow.self)?.authorized ?? false
     }
 
     private func isCompletedUploadGrant(session: UUID, owner: UUID, device: UUID, now: Date, on sql: any SQLDatabase) async throws -> Bool {
@@ -153,10 +164,11 @@ public struct PostgresV2MediaStore: V2MediaStore {
 public enum V2MediaStoreError: Error, Equatable, Sendable { case idempotencyConflict, mediaUnavailable, mediaExpired, invalidStateTransition, invalidReferenceSet, downloadNotAuthorized, uploadNotAuthorized }
 
 private struct MediaUploadOperationRow: Decodable { let mediaID: UUID; let contentType: String; let byteCount: Int64; let uploadSessionID: UUID; let expiresAt: Date; let requestingDeviceID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case contentType = "content_type"; case byteCount = "byte_count"; case uploadSessionID = "upload_session_id"; case expiresAt = "expires_at"; case requestingDeviceID = "requesting_device_id" } }
-private struct MediaStateRow: Decodable { let ownerUserID: UUID; let state: String; let expiresAt: Date; let uploadSessionID: UUID; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id"; case state; case expiresAt = "expires_at"; case uploadSessionID = "upload_session_id" } }
+private struct MediaStateRow: Decodable { let ownerUserID: UUID; let state: String; let expiresAt: V2PostgresTimestamp; let uploadSessionID: UUID; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id"; case state; case expiresAt = "expires_at"; case uploadSessionID = "upload_session_id" } }
 private struct MediaIDRow: Decodable { let mediaID: UUID; enum CodingKeys: String, CodingKey { case mediaID = "media_id" } }
+private struct MediaGrantExpiryRow: Decodable { let expiresAt: Date; enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" } }
 private struct MediaUploadAuthorizationRow: Decodable { let authorized: Bool }
-private struct MediaUploadStatusRow: Decodable { let state: String; let expiresAt: Date; enum CodingKeys: String, CodingKey { case state; case expiresAt = "expires_at" } }
+private struct MediaUploadStatusRow: Decodable { let state: String; let expiresAt: V2PostgresTimestamp; enum CodingKeys: String, CodingKey { case state; case expiresAt = "expires_at" } }
 private func mediaUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let uuid = UUID(uuidString: value.rawValue) else { throw V2MediaStoreError.mediaUnavailable }; return uuid }
 
 private extension V2MediaObjectState {

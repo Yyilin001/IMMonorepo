@@ -50,6 +50,10 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let payload: Wire
         do { payload = try JSONDecoder().decode(Wire.self, from: record.payload) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
+        try self.init(sourceEventID: record.sourceEventID, payload: payload)
+    }
+
+    private init(sourceEventID: EventID, payload: Wire) throws {
         guard payload.eventType == "message.accepted", payload.roomSequence > 0, (payload.timelineSequence ?? payload.roomSequence) > 0, payload.messageRevision > 0,
               payload.serverCreatedAtMilliseconds >= 0,
               (!payload.text.isEmpty || !(payload.mediaIDs ?? []).isEmpty)
@@ -75,8 +79,29 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
             try V2RichMessageContent.validate(text: payload.text, entities: entities)
-            self.init(sourceEventID: record.sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, timelineSequence: payload.timelineSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
+            self.init(sourceEventID: sourceEventID, messageID: try .init(payload.messageID), roomID: try .init(payload.roomID), roomSequence: payload.roomSequence, timelineSequence: payload.timelineSequence, messageRevision: payload.messageRevision, senderUserID: try .init(payload.senderUserID), text: payload.text, media: media, mediaPresentations: mediaPresentations, mentions: mentions, entities: entities, replyTo: replyTo, forwardedFrom: forwardedFrom, createdAt: Date(timeIntervalSince1970: TimeInterval(payload.serverCreatedAtMilliseconds) / 1_000))
         } catch { throw V2ClientProjectionError.invalidMessagePayload }
+    }
+
+    // A replacement must explicitly supply every content field, including
+    // null references. Legacy acceptance defaults cannot prove completeness.
+    fileprivate init(replacementState decoder: any Decoder, sourceEventID: EventID) throws {
+        let fields = try decoder.container(keyedBy: Wire.CodingKeys.self)
+        for key in Wire.CodingKeys.allCases {
+            guard fields.contains(key) else { throw V2ClientProjectionError.invalidMessagePayload }
+            if ![Wire.CodingKeys.replyToMessageID, .forwardedFromMessageID, .forwardedFromUserID].contains(key) {
+                guard try !fields.decodeNil(forKey: key) else { throw V2ClientProjectionError.invalidMessagePayload }
+            }
+        }
+        struct Removal: Decodable { let is_withdrawn: Bool? }
+        guard try Removal(from: decoder).is_withdrawn != true else { throw V2ClientProjectionError.invalidMessagePayload }
+        try self.init(sourceEventID: sourceEventID, payload: Wire(from: decoder))
+    }
+
+    func hasSameAcceptance(as other: Self) -> Bool {
+        sourceEventID == other.sourceEventID && messageID == other.messageID && roomID == other.roomID
+            && roomSequence == other.roomSequence && timelineSequence == other.timelineSequence
+            && senderUserID == other.senderUserID && createdAt == other.createdAt
     }
 
     private struct Wire: Decodable {
@@ -97,7 +122,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
         let forwardedFromMessageID: String?
         let forwardedFromUserID: String?
         let serverCreatedAtMilliseconds: Int64
-        enum CodingKeys: String, CodingKey {
+        enum CodingKeys: String, CodingKey, CaseIterable {
             case eventType = "event_type"
             case messageID = "message_id"
             case roomID = "room_id"
@@ -155,12 +180,17 @@ public struct V2ClientConversationSummary: Equatable, Sendable {
 /// Stable keyset cursor for the unified room timeline.  The sequence is the
 /// authoritative order; the opaque item ID is the deterministic tie-breaker
 /// shared by message and private-activity projections.
+public enum V2ClientTimelineItemKind: Int, Equatable, Sendable { case message, activity }
+
 public struct V2ClientTimelineCursor: Equatable, Sendable {
     public let timelineSequence: UInt64
     public let itemID: String
 
-    public init(timelineSequence: UInt64, itemID: String) {
+    public let kind: V2ClientTimelineItemKind
+
+    public init(timelineSequence: UInt64, itemID: String, kind: V2ClientTimelineItemKind = .message) {
         precondition(timelineSequence > 0 && !itemID.isEmpty)
+        self.kind = kind
         self.timelineSequence = timelineSequence
         self.itemID = itemID
     }
@@ -197,32 +227,93 @@ public struct V2ClientConversationTimelinePage: Equatable, Sendable {
     }
 }
 
+/// Both boundaries belong to the same snapshot as the target and decorations.
+/// `newerBoundary` is the first excluded newer item, suitable for a strict
+/// `before` refresh of this window even when that item is later deleted.
+public struct V2ClientConversationTimelineWindow: Equatable, Sendable {
+    public let page: V2ClientConversationTimelinePage
+    public let newerBoundary: V2ClientTimelineCursor?
+}
+
+public enum V2ClientTimelineLocation: Equatable, Sendable {
+    case found(V2ClientConversationTimelineWindow)
+    case withdrawn
+    /// Missing, outside this room, or outside the bound local account. This
+    /// deliberately does not disclose another account's message existence.
+    case unavailable
+}
+
 public enum V2ClientProjectionError: Error, Equatable, Sendable { case invalidMessagePayload }
 
-/// A later room event that replaces only the visible text of an existing
-/// message. The local store applies it only to the immediately preceding
-/// content revision, so an out-of-order or incomplete stream cannot silently
-/// overwrite state.
+/// Text deltas require the preceding revision. Explicit complete values may
+/// bridge authorized gaps after their accepted identity is validated.
 struct V2ClientMessageEditProjection: Equatable, Sendable {
+    enum Content: Equatable, Sendable {
+        case textDelta(String)
+        case complete(V2ClientMessageReplacement)
+    }
     let roomID: RoomID
     let messageID: MessageID
-    let text: String
     let messageRevision: UInt64
+    let content: Content
+    var text: String {
+        switch content { case .textDelta(let text): text; case .complete(let value): value.projection.text }
+    }
 
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String; let roomID: String; let messageID: String
             let text: String; let messageRevision: UInt64
-            enum CodingKeys: String, CodingKey { case eventType = "event_type"; case roomID = "room_id"; case messageID = "message_id"; case text; case messageRevision = "message_revision" }
+            let roomSequence: UInt64?; let entities: [V2MessageEntity]?
+            let replacement: V2ClientMessageReplacement?
+            enum CodingKeys: String, CodingKey { case eventType = "event_type", roomID = "room_id", messageID = "message_id", text, messageRevision = "message_revision", roomSequence = "room_sequence", entities, replacement }
+            init(from decoder: any Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                eventType = try c.decode(String.self, forKey: .eventType)
+                roomID = try c.decode(String.self, forKey: .roomID)
+                messageID = try c.decode(String.self, forKey: .messageID)
+                text = try c.decode(String.self, forKey: .text)
+                messageRevision = try c.decode(UInt64.self, forKey: .messageRevision)
+                roomSequence = try c.decodeIfPresent(UInt64.self, forKey: .roomSequence)
+                entities = try c.decodeIfPresent([V2MessageEntity].self, forKey: .entities)
+                // A present but null/invalid replacement never falls back to delta.
+                replacement = c.contains(.replacement) ? try c.decode(V2ClientMessageReplacement.self, forKey: .replacement) : nil
+            }
         }
-        let payload: Wire
-        do { payload = try JSONDecoder().decode(Wire.self, from: record.payload) }
-        catch { throw V2ClientProjectionError.invalidMessagePayload }
-        guard record.projectionKind == "message", payload.eventType == "message.edited",
-              payload.messageRevision > 1, !payload.text.isEmpty
-        else { throw V2ClientProjectionError.invalidMessagePayload }
-        do { roomID = try .init(payload.roomID); messageID = try .init(payload.messageID); text = payload.text; messageRevision = payload.messageRevision }
-        catch { throw V2ClientProjectionError.invalidMessagePayload }
+        do {
+            let payload = try JSONDecoder().decode(Wire.self, from: record.payload)
+            guard record.projectionKind == "message", payload.eventType == "message.edited",
+                  payload.messageRevision > 1, !payload.text.isEmpty else { throw V2ClientProjectionError.invalidMessagePayload }
+            roomID = try .init(payload.roomID); messageID = try .init(payload.messageID)
+            messageRevision = payload.messageRevision
+            if let replacement = payload.replacement {
+                let state = replacement.projection
+                guard state.roomID == roomID, state.messageID == messageID,
+                      state.messageRevision == messageRevision, state.text == payload.text,
+                      state.entities == payload.entities,
+                      let sequence = payload.roomSequence, sequence > state.roomSequence
+                else { throw V2ClientProjectionError.invalidMessagePayload }
+                content = .complete(replacement.withMutationSequence(sequence))
+            } else { content = .textDelta(payload.text) }
+        } catch { throw V2ClientProjectionError.invalidMessagePayload }
+    }
+}
+
+struct V2ClientMessageReplacement: Decodable, Equatable, Sendable {
+    let projection: V2ClientMessageProjection
+    let acceptedMembershipRevision: UInt64
+    private(set) var mutationRoomSequence: UInt64 = 0
+    enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", acceptedEventID = "accepted_event_id", acceptedMembershipRevision = "accepted_membership_revision", state }
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard try c.decode(Int.self, forKey: .schemaVersion) == 1 else { throw V2ClientProjectionError.invalidMessagePayload }
+        let origin = try EventID(c.decode(String.self, forKey: .acceptedEventID))
+        guard origin.uuidValue != nil else { throw V2ClientProjectionError.invalidMessagePayload }
+        acceptedMembershipRevision = try c.decode(UInt64.self, forKey: .acceptedMembershipRevision)
+        projection = try .init(replacementState: c.superDecoder(forKey: .state), sourceEventID: origin)
+    }
+    func withMutationSequence(_ value: UInt64) -> Self {
+        var result = self; result.mutationRoomSequence = value; return result
     }
 }
 

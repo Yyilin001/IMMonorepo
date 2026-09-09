@@ -79,6 +79,7 @@ public actor V2LivePresenceRenewalBatcher {
         now: Date
     ) async throws -> V2LivePresenceLeaseRefresh {
         try Task.checkCancellation()
+        guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
         let continuationID = makeGeneration()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in

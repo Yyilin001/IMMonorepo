@@ -5,6 +5,22 @@ import Testing
 
 @Suite("V2 device revocation worker")
 struct V2DeviceRevocationWorkerTests {
+    @Test("invalid batch limits fail before reading events or running cleanup", arguments: [Int.min, -1, 0])
+    func invalidBatchLimits(limit: Int) async throws {
+        let store = InMemoryDeviceRevocationEventStore(events: [])
+        let cleaner = FailOnceProjectionCleaner()
+        let gateway = V2DeviceRevocationWorker(store: store, registry: V2DeviceConnectionRegistry(), nodeID: "gateway-limit-test")
+        let cleanup = V2RevokedDeviceProjectionCleanupWorker(store: store, cleaner: cleaner)
+        await #expect(throws: V2GatewayAuthenticationError.corruptPersistenceState) {
+            try await gateway.runOnce(limit: limit)
+        }
+        await #expect(throws: V2GatewayAuthenticationError.corruptPersistenceState) {
+            try await cleanup.runOnce(limit: limit)
+        }
+        #expect(await store.eventReadCount == 0)
+        #expect(await cleaner.cleanedDevices().isEmpty)
+    }
+
     @Test("every event is acknowledged only after local revocation handling")
     func consumesEventsInOrderForItsNode() async throws {
         let device = try DeviceID("00000000-0000-0000-0000-000000000701")
@@ -143,6 +159,7 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
     private var cursors: [String: Int64] = [:]
     private var processed: [String: [Int64]] = [:]
     private var closeObservations: [String: [Bool]] = [:]
+    private(set) var eventReadCount = 0
 
     init(
         events: [V2DeviceRevocationEvent],
@@ -163,6 +180,7 @@ private actor InMemoryDeviceRevocationEventStore: V2DeviceRevocationEventStore {
     }
 
     func events(afterCursorFor nodeID: String, limit: Int) -> [V2DeviceRevocationEvent] {
+        eventReadCount += 1
         let cursor = cursors[nodeID] ?? 0
         return Array(events.filter { $0.eventID > cursor }.prefix(limit))
     }

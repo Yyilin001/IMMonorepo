@@ -25,9 +25,8 @@ enum IMV2AccountServerApp {
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         let runtimeTasks = RuntimeTaskSupervisor()
         do {
-            // Keep the password fallback cost explicit. The dummy verifier in
-            // the runtime configuration must be generated at this same cost.
-            app.passwords.use(.bcrypt(cost: 12))
+            let passwordWorker = V2PasswordHashWorker()
+            app.lifecycle.use(PasswordWorkerLifecycle(worker: passwordWorker))
             app.databases.use(
                 try postgresDatabaseConfiguration(
                     url: configuration.databaseURL,
@@ -52,6 +51,7 @@ enum IMV2AccountServerApp {
             }
             let database: any Database = databasePool.database
             try await V2SchemaReadiness.verify(database: database)
+            try await V2CapacityProfileReadiness.verify(database: database, profile: configuration.capacityProfile)
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
             app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: configuration.edgeAuthorizationSecret))
@@ -66,7 +66,10 @@ enum IMV2AccountServerApp {
                     "/v2/account-auth/password/register",
                     "/v2/account-auth/password/assertion",
                     "/v2/device-credentials",
-                    "/v2/device-credentials/refresh"
+                    "/v2/device-credentials/refresh",
+                    V2VaporDeviceRevocationCapabilityRoutes.path,
+                    V2VaporDeviceRegistrationCancellationRoutes.path,
+                    V2VaporLegacyDeviceRegistrationCancellationRoutes.path
                 ]
             ))
 
@@ -100,6 +103,24 @@ enum IMV2AccountServerApp {
                     }
                 }
             }
+            // Reuse one physical pool for room invitations and local media.
+            // Owner routing must exist even when the filesystem media adapter is off.
+            var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
+            for url in Set(configuration.roomShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
+                let identifier = DatabaseID(string: "account-owner-\(accountStorageDatabases.count)")
+                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
+                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: databaseEventLoops)
+                for member in pool.eventLoopDatabases {
+                    try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+                }
+                try await V2SchemaReadiness.verify(database: pool.database)
+                try await V2CapacityProfileReadiness.verify(database: pool.database, profile: configuration.capacityProfile)
+                accountStorageDatabases[url] = pool.database
+            }
+            let invitationOwners = try V2StaticRoomShardStorageRegistry(locations: configuration.roomShardStorage.map { storage in
+                guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomShardStorageRegistryError.unknownShardID }
+                return try .init(shardID: storage.shardID, database: owner, schema: storage.schema)
+            })
             if let localMediaConfiguration {
                 let provider = try V2LocalFilesystemMediaProvider(
                     rootDirectory: localMediaConfiguration.rootDirectory,
@@ -119,13 +140,42 @@ enum IMV2AccountServerApp {
                     store: PostgresV2MediaDownloadSessionStore(database: database),
                     provider: provider
                 )
+                let mediaEventLoops = Array(applicationEventLoops.makeIterator())
+                for url in Set(configuration.roomShardStorage.map(\.databaseURL) + configuration.userShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
+                    let identifier = DatabaseID(string: "media-store-\(accountStorageDatabases.count)")
+                    app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
+                    let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: mediaEventLoops)
+                    for member in pool.eventLoopDatabases {
+                        try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+                    }
+                    accountStorageDatabases[url] = pool.database
+                }
+                var mediaOwners: [String: V2MessageMediaOwner] = [:]
+                for storage in configuration.roomShardStorage {
+                    guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    try await V2SchemaReadiness.verify(database: owner)
+                    mediaOwners[storage.shardID] = .init(database: owner, provider: provider)
+                }
+                var mediaUserLocations: [V2UserShardStorageLocation] = []
+                for storage in configuration.userShardStorage {
+                    guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    try await V2SchemaReadiness.verify(database: owner, schema: storage.schema)
+                    mediaUserLocations.append(try .init(bucket: storage.bucket, database: owner, schema: storage.schema))
+                }
+                let mediaDownloads = V2RoutedMediaDownloadService(
+                    legacy: .init(media: media, providerSessions: downloadProviderSessions),
+                    rooms: V2PostgresRoomShardRouter(database: database), owners: mediaOwners,
+                    userRoutes: V2PostgresUserShardRouter(database: database),
+                    userStores: try V2StaticUserShardStorageRegistry(locations: mediaUserLocations),
+                    coLocatedControlBuckets: Set(configuration.userShardStorage.filter { $0.databaseURL == configuration.databaseURL && $0.schema == "im_v2" }.map(\.bucket))
+                )
                 V2VaporMediaUploadRoutes(
                     authenticator: authenticator,
                     handler: .init(edge: .init(media: media, providerSessions: uploadProviderSessions))
                 ).register(on: authenticatedAccountRoutes)
                 V2VaporMediaEdgeRoutes(
                     authenticator: authenticator,
-                    handler: .init(edge: .init(media: media, providerSessions: downloadProviderSessions))
+                    handler: .init(resolver: mediaDownloads)
                 ).register(on: authenticatedAccountRoutes)
                 try V2VaporLocalFilesystemMediaRoutes(
                     provider: provider,
@@ -167,13 +217,19 @@ enum IMV2AccountServerApp {
                 app.logger.notice("IM V2 local filesystem media edge enabled")
             }
             V2VaporDeviceCredentialRoutes(assertionVerifier: assertionIssuer, issuer: credentials).register(on: app)
-            V2VaporPushEndpointRoutes(
-                authenticator: authenticator,
-                store: PostgresV2PushDeviceEndpointStore(
-                    database: database,
-                    envelopeKey: configuration.pushEndpointEnvelopeKey
-                )
-            ).register(on: authenticatedAccountRoutes)
+            V2VaporDeviceRevocationCapabilityRoutes(
+                service: V2PostgresDeviceSessionService(database: database)
+            ).register(on: app)
+            V2VaporDeviceRegistrationCancellationRoutes(
+                service: V2PostgresDeviceRegistrationCancellationService(database: database)
+            ).register(on: app)
+            V2VaporLegacyDeviceRegistrationCancellationRoutes(
+                assertionVerifier: assertionIssuer,
+                service: V2PostgresLegacyDeviceRegistrationCancellationService(database: database)
+            ).register(on: app)
+            let pushEndpoints = PostgresV2PushDeviceEndpointStore(database: database, envelopeKey: configuration.pushEndpointEnvelopeKey)
+            V2VaporPushEndpointRoutes(authenticator: authenticator, store: pushEndpoints).register(on: authenticatedAccountRoutes)
+            V2VaporPushIntentRoutes(authenticator: authenticator, store: pushEndpoints).register(on: authenticatedAccountRoutes)
             V2VaporDeviceSessionRoutes(
                 authenticator: authenticator,
                 sessions: V2PostgresDeviceSessionService(database: database)
@@ -198,10 +254,35 @@ enum IMV2AccountServerApp {
                 authenticator: authenticator,
                 presentations: PostgresV2ProfilePresentationStore(database: database)
             ).register(on: authenticatedAccountRoutes)
+            let routedInvitations = V2RoutedGroupInvitationStore(controlDatabase: database, router: V2PostgresRoomShardRouter(database: database), owners: invitationOwners)
+            let inviteRecovery = V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: database), invitations: routedInvitations)
+            await runtimeTasks.start {
+                while !Task.isCancelled {
+                    do {
+                        let report = try await inviteRecovery.runOnce(limit: 8)
+                        if report.paused > 0 {
+                            app.logger.error("IM V2 invite creation recovery paused; inspect control recovery reasons", metadata: ["paused": "\(report.paused)"])
+                        } else if report.deferred > 0 {
+                            app.logger.warning("IM V2 invite creation recovery deferred", metadata: ["deferred": "\(report.deferred)"])
+                        }
+                    } catch is CancellationError { break }
+                    catch { app.logger.error("IM V2 invite creation recovery failed; retrying") }
+                    do { try await Task.sleep(for: .seconds(5)) } catch { break }
+                }
+            }
+            let groupInvitations = V2GroupInvitationService(
+                store: routedInvitations,
+                capacityProfile: configuration.capacityProfile,
+                secretIssuer: try .init(rawKey: configuration.groupInviteTokenHMACKey)
+            )
+            V2VaporGroupInvitationRoutes(
+                authenticator: authenticator,
+                invitations: groupInvitations
+            ).register(on: authenticatedAccountRoutes)
             V2PasswordAccountRoutes(
                 store: V2PostgresPasswordAccountStore(database: database),
                 assertionIssuer: assertionIssuer,
-                dummyPasswordHash: configuration.dummyPasswordHash,
+                passwords: passwordWorker,
                 loginAttemptLimiter: V2PostgresPasswordLoginAttemptLimiter(
                     database: database,
                     policy: configuration.passwordLoginRateLimit
@@ -264,5 +345,13 @@ private actor RuntimeTaskSupervisor {
         tasks.removeAll(keepingCapacity: false)
         for task in ownedTasks { task.cancel() }
         for task in ownedTasks { await task.value }
+    }
+}
+
+private struct PasswordWorkerLifecycle: LifecycleHandler {
+    let worker: V2PasswordHashWorker
+    func shutdownAsync(_ application: Application) async {
+        do { try await worker.shutdown() }
+        catch { application.logger.error("Password worker shutdown failed") }
     }
 }

@@ -38,8 +38,11 @@ public struct PostgresV2SyncStore: V2SyncStore {
         self.maximumEncodedRecordsBytes = maximumEncodedRecordsBytes
     }
 
-    public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, now: Date) async throws -> V2SyncPullResult {
-        guard maxRecords > 0 else { throw V2SyncStoreError.invalidRecordLimit }
+    public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool = false, now: Date) async throws -> V2SyncPullResult {
+        guard maxRecords > 0, maxRecords < Int.max else { throw V2SyncStoreError.invalidRecordLimit }
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
         return try await database.transaction { transaction in
@@ -62,10 +65,17 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 guard let snapshotID = cursor.pendingSnapshotID,
                       let base = cursor.pendingBaseSequence,
                       let snapshot = try await sql.raw("""
-                    SELECT expires_at FROM \(unsafeRaw: table("sync_snapshot_artifacts"))
-                    WHERE snapshot_id = \(bind: snapshotID) AND state = 'published'
+                    SELECT LEAST(artifact.expires_at, reset.expires_at) AS expires_at
+                    FROM \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
+                    JOIN \(unsafeRaw: table("device_snapshot_resets")) AS reset
+                      ON reset.snapshot_id = artifact.snapshot_id
+                    WHERE artifact.snapshot_id = \(bind: snapshotID) AND artifact.user_id = \(bind: userUUID)
+                      AND reset.user_id = \(bind: userUUID) AND reset.device_id = \(bind: deviceUUID)
+                      AND reset.reset_generation = \(bind: cursor.resetGeneration)
+                      AND artifact.state = 'published' AND reset.state = 'ready'
                     """).first(decoding: SnapshotMetadataRow.self)
                 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                guard v2PostgresTimestampCanEncode(snapshot.expiresAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 return .resetRequired(
                     snapshotID: try SnapshotID(snapshotID.uuidString),
                     generation: try unsigned(cursor.resetGeneration),
@@ -74,9 +84,14 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 )
             }
             guard cursor.state == "ready" else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            // Pending resets only report their existing assignment. A new
+            // deadline is required when issuing capabilities or staging a reset.
+            guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: capabilityLifetime) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             let generation = try unsigned(cursor.resetGeneration)
             let startSequence: Int64
-            if let syncToken {
+            if let syncToken, !requireSnapshot {
                 guard let issued = try await sql.raw("""
                     SELECT watermark FROM \(unsafeRaw: table("sync_tokens"))
                     WHERE token = \(bind: syncToken.rawValue) AND user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
@@ -93,12 +108,23 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 WHERE user_id = \(bind: userUUID)
                 FOR SHARE
                 """).first(decoding: SyncRetentionRow.self)?.compactedThroughSequence ?? 0
-            guard startSequence >= retainedFloor else {
+            if requireSnapshot {
+                // An empty account has no sync-log trigger to initialize its
+                // checkpoint. Base zero is valid before its first event; an
+                // acknowledged nonzero cursor is fenced by the floor below.
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: table("user_projection_checkpoints")) (user_id, projected_sequence, updated_at)
+                    SELECT \(bind: userUUID), 0, \(bind: now)
+                    WHERE NOT EXISTS (SELECT 1 FROM \(unsafeRaw: table("user_sync_sequences")) WHERE user_id = \(bind: userUUID) AND next_sequence > 0)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """).run()
+            }
+            if requireSnapshot || startSequence < retainedFloor {
                 let reset = try await PostgresV2SnapshotResetStager.stage(
                     sql: sql, schema: schema,
                     userID: userUUID, deviceID: deviceUUID,
                     currentGeneration: cursor.resetGeneration,
-                    retainedFloor: retainedFloor,
+                    retainedFloor: requireSnapshot ? max(retainedFloor, cursor.acknowledgedSequence) : retainedFloor,
                     capabilityProfile: capabilityProfile,
                     capabilityLifetime: capabilityLifetime,
                     now: now, makeUUID: makeUUID
@@ -121,32 +147,38 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
                 """).all(decoding: SyncLogRow.self)
-            if let first = rows.first, first.sequence != startSequence + 1 {
-                // A missing sequence above the retained floor is corruption,
-                // not an empty page. Never mint a token that skips the gap.
-                throw V2SyncStoreError.syncLogSequenceGap
-            }
             let candidates = try rows.prefix(maxRecords).map {
-                V2SyncRecord(sequence: try unsigned($0.sequence), sourceEventID: try EventID($0.sourceEventID.uuidString), projectionKind: $0.projectionKind, payloadJSON: $0.payloadJSON)
+                try V2SyncRecord(sequence: try unsigned($0.sequence), sourceEventID: try EventID($0.sourceEventID.uuidString), projectionKind: $0.projectionKind, payloadJSON: $0.payloadJSON)
             }
             var records: [V2SyncRecord] = []
             records.reserveCapacity(candidates.count)
             var encodedRecordsBytes = 0
+            var previousSequence = startSequence
             for candidate in candidates {
                 let candidateBytes = v2EncodedSyncBatchRecordFieldBytes(candidate)
                 guard candidateBytes <= maximumEncodedRecordsBytes else {
-                    throw V2SyncStoreError.syncRecordTooLarge
+                    // Preserve a sendable prefix. The oversized record stays
+                    // at the head of the next page and must not be skipped.
+                    guard !records.isEmpty else { throw V2SyncStoreError.syncRecordTooLarge }
+                    break
                 }
                 guard encodedRecordsBytes <= maximumEncodedRecordsBytes - candidateBytes else {
                     break
                 }
+                // Validate the entire returned prefix before issuing its
+                // capabilities. Unsent look-ahead rows belong to a later pull.
+                let (expectedSequence, overflow) = previousSequence.addingReportingOverflow(1)
+                guard !overflow, expectedSequence > 0,
+                      candidate.sequence == UInt64(expectedSequence) else {
+                    throw V2SyncStoreError.syncLogSequenceGap
+                }
                 records.append(candidate)
                 encodedRecordsBytes += candidateBytes
+                previousSequence = expectedSequence
             }
             let hasMore = rows.count > records.count
             let lastSequence = try records.last.map { try signed($0.sequence) } ?? startSequence
             let firstSequence = try records.first.map { try signed($0.sequence) } ?? startSequence
-            let expiresAt = now.addingTimeInterval(capabilityLifetime)
             let nextToken = try V2SyncToken(makeUUID().uuidString)
             let receipt = try V2SyncReceipt(makeUUID().uuidString)
             try await sql.raw("""
@@ -170,6 +202,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
     }
 
     public func acknowledge(userID: UserID, deviceID: DeviceID, generation: UInt64, highestContiguousSequence: UInt64, receipt: V2SyncReceipt, now: Date) async throws {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
         let generation = try signed(generation)
@@ -224,6 +257,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
     }
 
     public func fetchSnapshotManifest(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, now: Date) async throws -> V2SnapshotManifest {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
         let snapshotUUID = try uuid(snapshotID)
@@ -250,6 +284,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
                       AND artifact.expires_at > \(bind: now) AND reset.expires_at > \(bind: now)
                     """).first(decoding: SnapshotManifestRow.self)
             else { throw V2SyncStoreError.snapshotExpiredOrInvalid }
+            guard v2PostgresTimestampCanEncode(manifest.expiresAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return try .init(
                 snapshotID: snapshotID,
                 generation: unsigned(generation),
@@ -268,6 +303,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
     }
 
     public func fetchSnapshotPage(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, rootDigest: String, index: UInt32, now: Date) async throws -> V2SnapshotPage {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
         let snapshotUUID = try uuid(snapshotID)
@@ -308,6 +344,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
     }
 
     public func acknowledgeSnapshot(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, baseSequence: UInt64, receipt: V2SyncReceipt, now: Date) async throws {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
         let deviceUUID = try uuid(deviceID)
         let snapshotUUID = try uuid(snapshotID)

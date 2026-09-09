@@ -71,6 +71,24 @@ struct V2VaporProfilePresentationRoutesTests {
         #expect(request.nickname == "值班")
     }
 
+    @Test("overflowing profile revisions are rejected before the presentation store", arguments: [UInt64(0), UInt64(Int64.max)+1, UInt64.max], ["alias", "nickname"])
+    func rejectsUnrepresentableRevision(_ revision: UInt64, route: String) async throws {
+        let app = try await Application.make(.testing)
+        do {
+            let actor = try UserID("actor")
+            let manager = PresentationRouteManager()
+            V2VaporProfilePresentationRoutes(authenticator: PresentationRouteAuthenticator(userID: actor), presentations: manager).register(on: app)
+            let path = route == "alias" ? "v2/profile-presentations/contact-aliases/target" : "v2/profile-presentations/groups/room/nickname"
+            try await app.testing().test(.PUT, path, headers: authenticatedHeaders(), beforeRequest: { request in
+                if route == "alias" { try request.content.encode(AliasMutationRequest(operationID: "operation", expectedRevision: revision, remarkName: "name")) }
+                else { try request.content.encode(NicknameMutationRequest(operationID: "operation", expectedRevision: revision, nickname: "name")) }
+            }) { response async in #expect(response.status == .badRequest) }
+            #expect(await manager.nicknameUpdateRequest() == nil)
+            #expect(await manager.aliasUpdateCount() == 0)
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
     @Test("pagination and domain errors map to stable public statuses")
     func mapsValidationAndDomainErrors() async throws {
         let app = try await Application.make(.testing)
@@ -110,6 +128,8 @@ private actor PresentationRouteManager: V2ProfilePresentationManaging {
     private let error: V2ProfilePresentationError?
     private var aliasList: AliasListRequest?
     private var nicknameUpdate: NicknameUpdateRequest?
+    private var aliasUpdates = 0
+    func aliasUpdateCount() -> Int { aliasUpdates }
 
     init(alias: V2ContactAlias? = nil, nickname: V2GroupMemberPresentation? = nil, error: V2ProfilePresentationError? = nil) {
         self.alias = alias
@@ -122,6 +142,7 @@ private actor PresentationRouteManager: V2ProfilePresentationManaging {
         return .init(values: alias.map { [$0] } ?? [], nextCursor: afterTargetUserID)
     }
     func updateContactAlias(ownerUserID _: UserID, targetUserID _: UserID, operationID _: ContactAliasOperationID, expectedRevision _: V2ProfileRevision?, remarkName _: String?) throws -> V2ContactAlias {
+        aliasUpdates += 1
         if let error { throw error }
         return try #require(alias)
     }
@@ -147,4 +168,13 @@ private struct PresentationRouteAuthenticator: V2GatewayAuthenticator {
 
 private func authenticatedHeaders() -> HTTPHeaders {
     ["Authorization": "Bearer access-token", "X-IM-Device-ID": "device"]
+}
+
+private struct AliasMutationRequest: Content {
+    let operationID: String
+    let expectedRevision: UInt64?
+    let remarkName: String?
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id", expectedRevision = "expected_revision", remarkName = "remark_name"
+    }
 }

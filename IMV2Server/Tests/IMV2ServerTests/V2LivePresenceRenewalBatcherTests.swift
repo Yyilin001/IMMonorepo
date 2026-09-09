@@ -5,6 +5,27 @@ import Testing
 
 @Suite("V2 live presence renewal batching")
 struct V2LivePresenceRenewalBatcherTests {
+    @Test("invalid clocks cannot enter or poison a coalesced heartbeat")
+    func invalidClockDoesNotEnterBatch() async throws {
+        let leases = RecordingRenewalLeases()
+        let batcher = V2LivePresenceRenewalBatcher(leases: leases,
+            configuration: .init(maximumBatchSize: 1, maximumDelay: .zero))
+        let identity = V2AuthenticatedConnection(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), capabilityProfile: "base")
+        let connectionID = UUID()
+        for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12] {
+            await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
+                try await batcher.renew(identity: identity, connectionID: connectionID, now: Date(timeIntervalSince1970: seconds))
+            }
+        }
+        #expect(await leases.batchSizes().isEmpty)
+        let before = await batcher.snapshot()
+        #expect(before.submittedRequests == 0 && before.pendingConnections == 0)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let result = try await batcher.renew(identity: identity, connectionID: connectionID, now: now)
+        #expect(result.outcome == .accepted(expiresAt: now.addingTimeInterval(90)))
+        #expect(await leases.batchSizes() == [1])
+    }
+
     @Test("concurrent heartbeats share bounded renewal calls")
     func coalescesConcurrentHeartbeats() async throws {
         let leases = RecordingRenewalLeases()

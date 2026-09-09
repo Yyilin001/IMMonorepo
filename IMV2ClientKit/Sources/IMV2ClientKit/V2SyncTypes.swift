@@ -7,7 +7,9 @@ public struct V2ClientSyncRecord: Equatable, Sendable {
     public let projectionKind: String
     public let payload: Data
 
-    public init(sequence: UInt64, sourceEventID: EventID, projectionKind: String, payload: Data) {
+    public init(sequence: UInt64, sourceEventID: EventID, projectionKind: String, payload: Data) throws {
+        guard sequence <= UInt64(Int64.max) else { throw V2ClientSyncError.storageRangeExceeded }
+        guard sequence > 0 else { throw V2ClientSyncError.invalidRecordOrdering }
         self.sequence = sequence
         self.sourceEventID = sourceEventID
         self.projectionKind = projectionKind
@@ -23,7 +25,9 @@ public struct V2ClientSyncBatch: Equatable, Sendable {
     public let hasMore: Bool
     public let capabilityProfile: String
 
-    public init(generation: UInt64, records: [V2ClientSyncRecord], nextSyncToken: V2SyncToken, receipt: V2SyncReceipt, hasMore: Bool, capabilityProfile: String) {
+    public init(generation: UInt64, records: [V2ClientSyncRecord], nextSyncToken: V2SyncToken, receipt: V2SyncReceipt, hasMore: Bool, capabilityProfile: String) throws {
+        guard generation <= UInt64(Int64.max) else { throw V2ClientSyncError.storageRangeExceeded }
+        guard generation > 0 else { throw V2ClientSyncError.generationMismatch }
         self.generation = generation
         self.records = records
         self.nextSyncToken = nextSyncToken
@@ -39,11 +43,18 @@ public struct V2ClientResetRequired: Equatable, Sendable {
     public let baseSequence: UInt64
     public let expiresAt: Date
 
-    public init(snapshotID: SnapshotID, generation: UInt64, baseSequence: UInt64, expiresAt: Date) {
+    public init(snapshotID: SnapshotID, generation: UInt64, baseSequence: UInt64, expiresAt: Date) throws {
+        guard generation <= UInt64(Int64.max), baseSequence <= UInt64(Int64.max) else { throw V2ClientSyncError.storageRangeExceeded }
+        guard generation > 0 else { throw V2ClientSyncError.generationMismatch }
+        guard expiresAt.timeIntervalSince1970.isFinite else { throw V2ClientSyncError.snapshotMismatch }
         self.snapshotID = snapshotID
         self.generation = generation
         self.baseSequence = baseSequence
         self.expiresAt = expiresAt
+    }
+
+    var hasPersistableIntegers: Bool {
+        generation > 0 && generation <= UInt64(Int64.max) && baseSequence <= UInt64(Int64.max)
     }
 }
 
@@ -63,7 +74,8 @@ public struct V2ClientSnapshotManifest: Equatable, Sendable {
     public let capabilityProfile: String
 
     public init(reset: V2ClientResetRequired, rootDigest: String, pageCount: Int, totalItems: UInt64, totalBytes: UInt64, nextSyncToken: V2SyncToken, receipt: V2SyncReceipt, capabilityProfile: String) throws {
-        guard (0 ... V2SnapshotProjectionV3Codec.maximumPageCount).contains(pageCount),
+        guard reset.hasPersistableIntegers,
+              (0 ... V2SnapshotProjectionV3Codec.maximumPageCount).contains(pageCount),
               totalItems <= V2SnapshotProjectionV3Codec.maximumTotalItems,
               totalBytes <= V2SnapshotProjectionV3Codec.maximumTotalBytes,
               (pageCount == 0) == (totalItems == 0),
@@ -72,6 +84,7 @@ public struct V2ClientSnapshotManifest: Equatable, Sendable {
                   totalItems >= UInt64(pageCount)
                   && totalItems <= UInt64(pageCount * V2SnapshotProjectionV3Codec.maximumPageItems)
                   && totalBytes >= UInt64(pageCount)
+                  && totalBytes <= UInt64(pageCount) * UInt64(V2SnapshotProjectionV3Codec.maximumPageBytes)
               )
         else { throw V2ClientSyncError.snapshotMismatch }
         self.reset = reset
@@ -93,7 +106,9 @@ public struct V2ClientSnapshotPage: Equatable, Sendable {
     public let itemCount: Int
     public let payload: Data
 
-    public init(index: Int, digest: String, firstKey: V2SnapshotProjectionKey, lastKey: V2SnapshotProjectionKey, itemCount: Int, payload: Data) {
+    public init(index: Int, digest: String, firstKey: V2SnapshotProjectionKey, lastKey: V2SnapshotProjectionKey, itemCount: Int, payload: Data) throws {
+        guard (0..<V2SnapshotProjectionV3Codec.maximumPageCount).contains(index) else { throw V2ClientSyncError.snapshotMismatch }
+        guard (1...V2SnapshotProjectionV3Codec.maximumPageItems).contains(itemCount) else { throw V2ClientSyncError.snapshotProjectionConflict }
         self.index = index
         self.digest = digest
         self.firstKey = firstKey
@@ -108,6 +123,7 @@ public enum V2ClientSyncError: Error, Equatable, Sendable {
     /// durable SQLite schema uses signed `INTEGER` / `BIGINT` values.
     case storageRangeExceeded
     case invalidRecordOrdering
+    case snapshotRebuildRequired
     case generationMismatch
     case resetPending
     case noResetPending
@@ -142,6 +158,13 @@ public struct V2LocalSyncCursor: Equatable, Sendable {
         pendingAcknowledgementSequence: UInt64?,
         pendingReset: V2ClientResetRequired?
     ) throws {
+        let maximum = UInt64(Int64.max)
+        guard generation <= maximum, appliedSequence <= maximum,
+              serverAcknowledgedSequence <= maximum,
+              (pendingAcknowledgementSequence ?? 0) <= maximum,
+              (pendingReset?.generation ?? 0) <= maximum,
+              (pendingReset?.baseSequence ?? 0) <= maximum
+        else { throw V2ClientSyncError.storageRangeExceeded }
         guard generation > 0, serverAcknowledgedSequence <= appliedSequence else {
             throw V2ClientSyncError.generationMismatch
         }
@@ -157,7 +180,8 @@ public struct V2LocalSyncCursor: Equatable, Sendable {
         guard !hasPendingAcknowledgement || validPendingAcknowledgement else {
             throw V2ClientSyncError.acknowledgementReceiptMismatch
         }
-        guard (state == .ready) == (pendingReset == nil) else {
+        guard (state == .ready) == (pendingReset == nil),
+              pendingReset.map({ $0.generation == generation }) ?? true else {
             throw V2ClientSyncError.resetFenceMismatch
         }
         self.state = state
@@ -172,14 +196,22 @@ public struct V2LocalSyncCursor: Equatable, Sendable {
 }
 
 public protocol V2ClientSyncTransport: Sendable {
-    func pull(syncToken: V2SyncToken?, maxRecords: Int) async throws -> V2ClientPullResult
+    func pull(syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool) async throws -> V2ClientPullResult
     func acknowledge(generation: UInt64, highestContiguousSequence: UInt64, receipt: V2SyncReceipt) async throws
     func fetchSnapshotManifest(for reset: V2ClientResetRequired) async throws -> V2ClientSnapshotManifest
     func fetchSnapshotPage(for manifest: V2ClientSnapshotManifest, index: Int) async throws -> V2ClientSnapshotPage
     func acknowledgeSnapshot(_ manifest: V2ClientSnapshotManifest) async throws
 }
 
+public extension V2ClientSyncTransport {
+    func pull(syncToken: V2SyncToken?, maxRecords: Int) async throws -> V2ClientPullResult {
+        try await pull(syncToken: syncToken, maxRecords: maxRecords, requireSnapshot: false)
+    }
+}
+
 public protocol V2LocalSyncStore: Sendable {
+    func requestSnapshotRebuild() async throws
+    func requiresSnapshotRebuild() async throws -> Bool
     func cursor() async throws -> V2LocalSyncCursor?
     func discardSyncCapabilities(generation: UInt64) async throws
     func apply(_ batch: V2ClientSyncBatch) async throws -> V2LocalSyncCursor

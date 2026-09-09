@@ -12,16 +12,20 @@ public struct V2IssuedDeviceCredentials: Equatable, Sendable {
     public let accessToken: String
     public let accessTokenExpiresAt: Date
     public let refreshCredential: String
+    public let revocationCredential: V2DeviceRevocationCredential
+    public let revocationCredentialExpiresAt: Date
 
-    public init(userID: UserID, deviceID: DeviceID, accessToken: String, accessTokenExpiresAt: Date, refreshCredential: String) throws {
+    public init(userID: UserID, deviceID: DeviceID, accessToken: String, accessTokenExpiresAt: Date, refreshCredential: String, revocationCredential: V2DeviceRevocationCredential, revocationCredentialExpiresAt: Date) throws {
         guard !accessToken.isEmpty, !refreshCredential.isEmpty,
-              accessTokenExpiresAt.timeIntervalSinceReferenceDate.isFinite
+              accessTokenExpiresAt.timeIntervalSinceReferenceDate.isFinite, revocationCredentialExpiresAt.timeIntervalSinceReferenceDate.isFinite
         else { throw V2DeviceCredentialServiceError.malformedPersistence }
         self.userID = userID
         self.deviceID = deviceID
         self.accessToken = accessToken
         self.accessTokenExpiresAt = accessTokenExpiresAt
         self.refreshCredential = refreshCredential
+        self.revocationCredential = revocationCredential
+        self.revocationCredentialExpiresAt = revocationCredentialExpiresAt
     }
 }
 
@@ -84,13 +88,15 @@ public struct V2DeviceCredentialRefresh: Sendable {
     public let userID: UserID
     public let deviceID: DeviceID
     public let refreshCredential: String
+    public let revocationCredential: V2DeviceRevocationCredential
     public let operationID: UUID
 
-    public init(userID: UserID, deviceID: DeviceID, refreshCredential: String, operationID: UUID) throws {
+    public init(userID: UserID, deviceID: DeviceID, refreshCredential: String, revocationCredential: V2DeviceRevocationCredential, operationID: UUID) throws {
         guard !refreshCredential.isEmpty else { throw V2DeviceCredentialServiceError.invalidRefreshCredential }
         self.userID = userID
         self.deviceID = deviceID
         self.refreshCredential = refreshCredential
+        self.revocationCredential = revocationCredential
         self.operationID = operationID
     }
 }
@@ -166,7 +172,7 @@ public struct V2DeviceRegistrationPolicy: Equatable, Sendable {
 /// The issuer implementation owns credential persistence; HTTP and identity
 /// adapters only translate their trusted input into this domain request.
 public protocol V2DeviceCredentialIssuing: Sendable {
-    func register(_ request: V2TrustedDeviceRegistration) async throws -> V2DeviceRegistrationOutcome
+    func register(_ request: V2CancellableDeviceRegistration) async throws -> V2DeviceRegistrationOutcome
     func refresh(_ request: V2DeviceCredentialRefresh) async throws -> V2DeviceCredentialRefreshOutcome
 }
 
@@ -236,6 +242,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     private let now: @Sendable () -> Date
     private let accessTokenLifetime: TimeInterval
     private let refreshCredentialLifetime: TimeInterval
+    private let maximumSessionLifetime: TimeInterval
     private let replayWindow: TimeInterval
     private let registrationPolicy: V2DeviceRegistrationPolicy
 
@@ -247,11 +254,13 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         accessTokenLifetime: TimeInterval = 15 * 60,
         refreshCredentialLifetime: TimeInterval = 30 * 24 * 60 * 60,
         replayWindow: TimeInterval = 10 * 60,
+        maximumSessionLifetime: TimeInterval = 30 * 24 * 60 * 60,
         registrationPolicy: V2DeviceRegistrationPolicy = .standard,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         guard accessTokenLifetime > 0, refreshCredentialLifetime > 0, replayWindow > 0,
-              accessTokenLifetime.isFinite, refreshCredentialLifetime.isFinite, replayWindow.isFinite
+              accessTokenLifetime.isFinite, refreshCredentialLifetime.isFinite, replayWindow.isFinite,
+              maximumSessionLifetime.isFinite, maximumSessionLifetime >= 1, maximumSessionLifetime <= 366 * 86_400
         else { throw V2DeviceCredentialServiceError.invalidConfiguration }
         self.database = database
         self.tokenHMACKey = tokenHMACKey
@@ -259,13 +268,22 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         self.tokenGenerator = tokenGenerator
         self.accessTokenLifetime = accessTokenLifetime
         self.refreshCredentialLifetime = refreshCredentialLifetime
+        self.maximumSessionLifetime = maximumSessionLifetime
         self.replayWindow = replayWindow
         self.registrationPolicy = registrationPolicy
         self.now = now
     }
 
     public func register(_ request: V2TrustedDeviceRegistration) async throws -> V2DeviceRegistrationOutcome {
-        let issuedAt = now()
+        try await register(request, cancellation: nil)
+    }
+
+    public func register(_ request: V2CancellableDeviceRegistration) async throws -> V2DeviceRegistrationOutcome {
+        try await register(request.registration, cancellation: request.cancellation)
+    }
+
+    private func register(_ request: V2TrustedDeviceRegistration, cancellation: V2DeviceRegistrationCancellation?) async throws -> V2DeviceRegistrationOutcome {
+        guard v2PostgresTimestampCanEncode(now()) else { throw V2DeviceCredentialServiceError.unavailable }
         let accessToken = tokenGenerator.next()
         let refreshCredential = tokenGenerator.next()
         guard !accessToken.isEmpty, !refreshCredential.isEmpty else { throw V2DeviceCredentialServiceError.unavailable }
@@ -274,6 +292,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let userUUID = try credentialUUID(request.userID)
             let deviceUUID = try credentialUUID(request.deviceID)
             let metadata = try normalizedMetadata(request.metadata)
+            if let cancellation { try await V2PostgresDeviceRegistrationCancellationService.lock(sql, request: cancellation) }
             try await lockAccountState(sql, userID: userUUID)
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
             // Special accounts are operated only through the trusted service
@@ -281,37 +300,68 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             // one available to the public gateway.
             guard !(try await isSpecialAccount(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
+            guard try await V2PostgresLegacyDeviceRegistrationCancellationService.permitsIssuance(sql, userID: userUUID, deviceID: deviceUUID) else {
+                return .deviceUnavailable
+            }
 
+            let existingDevice = try await sql.raw("SELECT user_id, revoked_at, session_expires_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self)
+            // Locks may have waited across a clock correction. Keep this
+            // fresh observation authoritative and validate it before binding.
+            let issuedAt = now()
+            guard v2PostgresTimestampCanEncode(issuedAt) else { throw V2DeviceCredentialServiceError.unavailable }
+            if let cancellation, try await !V2PostgresDeviceRegistrationCancellationService.permitsIssuance(sql, request: cancellation, at: issuedAt) {
+                return .deviceUnavailable
+            }
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
                 guard prior.operationKind == "registration", prior.userID == userUUID, prior.requestRefreshHMAC == nil else {
                     return .idempotencyConflict
                 }
+                guard let existingDevice, existingDevice.userID == userUUID, existingDevice.revokedAt == nil, existingDevice.sessionExpiresAt > issuedAt else { return .deviceUnavailable }
                 guard prior.replayExpiresAt > issuedAt else { return .idempotencyConflict }
+                if let cancellation, try await !V2PostgresDeviceRegistrationCancellationService.ownsReplay(sql, request: cancellation, userID: userUUID) {
+                    return .idempotencyConflict
+                }
                 return .idempotent(try credentials(from: prior, request: request))
             }
 
             let isNewDevice: Bool
-            if let existing = try await sql.raw("SELECT user_id, revoked_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self) {
-                guard existing.userID == userUUID, existing.revokedAt == nil else { return .deviceUnavailable }
+            let sessionExpiresAt: Date
+            if let existing = existingDevice {
+                guard existing.userID == userUUID, existing.revokedAt == nil, existing.sessionExpiresAt > issuedAt else { return .deviceUnavailable }
                 guard try await sql.raw("SELECT 1 FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first() == nil else {
                     return .idempotencyConflict
                 }
-                try await sql.raw("UPDATE im_v2.auth_devices SET display_name = \(bind: metadata.displayName), platform = \(bind: metadata.platform), last_active_at = GREATEST(last_active_at, \(bind: issuedAt)) WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)").run()
+                sessionExpiresAt = min(existing.sessionExpiresAt, issuedAt.addingTimeInterval(maximumSessionLifetime))
                 isNewDevice = false
             } else {
-                guard try await activeDeviceCount(sql, userID: userUUID) < registrationPolicy.maximumActiveDevices else {
+                guard try await activeDeviceCount(sql, userID: userUUID, at: issuedAt) < registrationPolicy.maximumActiveDevices else {
                     return .activeDeviceLimitReached
                 }
                 if let retryAfter = try await newDeviceRegistrationRetryAfter(sql, userID: userUUID, now: issuedAt) {
                     return .rateLimited(retryAfterSeconds: retryAfter)
                 }
-                try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, display_name, platform, last_active_at, created_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: metadata.displayName), \(bind: metadata.platform), \(bind: issuedAt), \(bind: issuedAt))").run()
+                sessionExpiresAt = issuedAt.addingTimeInterval(maximumSessionLifetime)
                 isNewDevice = true
             }
 
-            let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, issuedAt: issuedAt)
-            try await insertNewSession(sql, credentials: credentials, issuedAt: issuedAt)
-            try await insertOperation(sql, kind: "registration", requestRefreshHMAC: nil, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt)
+            let deadlines = try credentialDeadlines(issuedAt: issuedAt, sessionExpiresAt: sessionExpiresAt)
+            if isNewDevice {
+                try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, display_name, platform, last_active_at, created_at, session_expires_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: metadata.displayName), \(bind: metadata.platform), \(bind: issuedAt), \(bind: issuedAt), \(bind: sessionExpiresAt))").run()
+            } else {
+                let maximumDeadline = issuedAt.addingTimeInterval(maximumSessionLifetime)
+                // PostgreSQL LEAST ignores NULL. If the unused upper bound is
+                // outside its range, retain the existing native session limit.
+                let sessionLimit = v2PostgresTimestampCanEncode(maximumDeadline) ? maximumDeadline : nil
+                try await sql.raw("UPDATE im_v2.auth_devices SET display_name = \(bind: metadata.displayName), platform = \(bind: metadata.platform), last_active_at = GREATEST(last_active_at, \(bind: issuedAt)), session_expires_at = LEAST(session_expires_at, \(bind: sessionLimit)::timestamptz) WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)").run()
+            }
+
+            let capability = try await V2PostgresDeviceSessionService.issueRevocationCapability(on: sql, userID: request.userID, deviceID: request.deviceID, at: issuedAt)
+            let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, deadlines: deadlines, capability: capability)
+            try await insertNewSession(sql, credentials: credentials, issuedAt: issuedAt, refreshExpiresAt: deadlines.refreshExpiresAt)
+            try await insertOperation(sql, kind: "registration", requestRefreshHMAC: nil, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt, replayExpiresAt: deadlines.replayExpiresAt)
+            if let cancellation {
+                try await V2PostgresDeviceRegistrationCancellationService.bindIssuedSession(sql, request: cancellation, userID: userUUID, at: issuedAt)
+            }
             if isNewDevice {
                 try await recordSuccessfulNewDeviceRegistration(sql, userID: userUUID, now: issuedAt)
             }
@@ -320,7 +370,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     }
 
     public func refresh(_ request: V2DeviceCredentialRefresh) async throws -> V2DeviceCredentialRefreshOutcome {
-        let issuedAt = now()
+        guard v2PostgresTimestampCanEncode(now()) else { throw V2DeviceCredentialServiceError.unavailable }
         let accessToken = tokenGenerator.next()
         let refreshCredential = tokenGenerator.next()
         guard !accessToken.isEmpty, !refreshCredential.isEmpty else { throw V2DeviceCredentialServiceError.unavailable }
@@ -330,6 +380,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let deviceUUID = try credentialUUID(request.deviceID)
             let incomingRefreshHMAC = tokenHMACKey.digest(request.refreshCredential)
             try await lockAccountState(sql, userID: userUUID)
+            var issuedAt = now()
+            guard v2PostgresTimestampCanEncode(issuedAt) else { throw V2DeviceCredentialServiceError.unavailable }
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else {
                 try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
                 return .terminalRejection
@@ -339,6 +391,18 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 return .terminalRejection
             }
             try await lock(sql, key: "refresh:" + deviceUUID.uuidString)
+            let device = try await sql.raw("SELECT user_id, revoked_at, session_expires_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self)
+            // Re-observe after every lock that can delay the expiry decision;
+            // the same fresh time drives the response and all rotation writes.
+            issuedAt = now()
+            guard v2PostgresTimestampCanEncode(issuedAt) else { throw V2DeviceCredentialServiceError.unavailable }
+            guard let device,
+                  device.userID == userUUID, device.revokedAt == nil, device.sessionExpiresAt > issuedAt
+            else { return .terminalRejection }
+
+            guard let capability = try await V2PostgresDeviceSessionService.matchingRevocationCapability(
+                on: sql, userID: request.userID, deviceID: request.deviceID, credential: request.revocationCredential
+            ) else { return .terminalRejection }
 
             if let prior = try await credentialOperation(sql, deviceID: deviceUUID, operationID: request.operationID) {
                 guard prior.operationKind == "refresh",
@@ -372,10 +436,7 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 return .idempotent(try credentials(from: prior, request: request))
             }
 
-            guard let device = try await sql.raw("SELECT user_id, revoked_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self),
-                  device.userID == userUUID,
-                  device.revokedAt == nil,
-                  let session = try await sql.raw("SELECT family_generation, refresh_hmac, expires_at, revoked_at FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: RefreshSessionRow.self),
+            guard let session = try await sql.raw("SELECT family_generation, refresh_hmac, expires_at, revoked_at FROM im_v2.device_refresh_sessions WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: RefreshSessionRow.self),
                   session.revokedAt == nil,
                   session.expiresAt > issuedAt
             else { return .terminalRejection }
@@ -395,22 +456,32 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 return .terminalRejection
             }
 
-            let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, issuedAt: issuedAt)
+            guard session.familyGeneration > 0 else { throw V2DeviceCredentialServiceError.malformedPersistence }
+            let (nextGeneration, generationOverflow) = session.familyGeneration.addingReportingOverflow(1)
+            guard !generationOverflow else { throw V2DeviceCredentialServiceError.unavailable }
+            let deadlines = try credentialDeadlines(issuedAt: issuedAt, sessionExpiresAt: device.sessionExpiresAt)
+            let credentials = try makeCredentials(userID: request.userID, deviceID: request.deviceID, accessToken: accessToken, refreshCredential: refreshCredential, deadlines: deadlines, capability: capability)
             try await sql.raw("INSERT INTO im_v2.device_refresh_token_history (user_id, device_id, family_generation, refresh_hmac, consumed_at, expires_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: session.familyGeneration), \(bind: session.refreshHMAC), \(bind: issuedAt), \(bind: session.expiresAt))").run()
-            try await sql.raw("UPDATE im_v2.device_refresh_sessions SET refresh_hmac = \(bind: tokenHMACKey.digest(refreshCredential)), family_generation = family_generation + 1, issued_at = \(bind: issuedAt), expires_at = \(bind: issuedAt.addingTimeInterval(refreshCredentialLifetime)) WHERE device_id = \(bind: deviceUUID)").run()
+            try await sql.raw("UPDATE im_v2.device_refresh_sessions SET refresh_hmac = \(bind: tokenHMACKey.digest(refreshCredential)), family_generation = \(bind: nextGeneration), issued_at = \(bind: issuedAt), expires_at = \(bind: deadlines.refreshExpiresAt) WHERE device_id = \(bind: deviceUUID)").run()
             try await insertAccessToken(sql, credentials: credentials, issuedAt: issuedAt)
-            try await insertOperation(sql, kind: "refresh", requestRefreshHMAC: incomingRefreshHMAC, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt)
+            try await insertOperation(sql, kind: "refresh", requestRefreshHMAC: incomingRefreshHMAC, operationID: request.operationID, credentials: credentials, issuedAt: issuedAt, replayExpiresAt: deadlines.replayExpiresAt)
             return .rotated(credentials)
         }
     }
 
-    private func makeCredentials(userID: UserID, deviceID: DeviceID, accessToken: String, refreshCredential: String, issuedAt: Date) throws -> V2IssuedDeviceCredentials {
-        try .init(userID: userID, deviceID: deviceID, accessToken: accessToken, accessTokenExpiresAt: issuedAt.addingTimeInterval(accessTokenLifetime), refreshCredential: refreshCredential)
+    private func credentialDeadlines(issuedAt: Date, sessionExpiresAt: Date) throws -> V2DeviceCredentialDeadlines {
+        try .init(issuedAt: issuedAt, sessionExpiresAt: sessionExpiresAt,
+                  accessLifetime: accessTokenLifetime, refreshLifetime: refreshCredentialLifetime,
+                  replayWindow: replayWindow)
     }
 
-    private func insertNewSession(_ sql: any SQLDatabase, credentials: V2IssuedDeviceCredentials, issuedAt: Date) async throws {
+    private func makeCredentials(userID: UserID, deviceID: DeviceID, accessToken: String, refreshCredential: String, deadlines: V2DeviceCredentialDeadlines, capability: V2IssuedDeviceRevocationCapability) throws -> V2IssuedDeviceCredentials {
+        try .init(userID: userID, deviceID: deviceID, accessToken: accessToken, accessTokenExpiresAt: deadlines.accessExpiresAt, refreshCredential: refreshCredential, revocationCredential: capability.credential, revocationCredentialExpiresAt: capability.expiresAt)
+    }
+
+    private func insertNewSession(_ sql: any SQLDatabase, credentials: V2IssuedDeviceCredentials, issuedAt: Date, refreshExpiresAt: Date) async throws {
         let userID = try credentialUUID(credentials.userID), deviceID = try credentialUUID(credentials.deviceID)
-        try await sql.raw("INSERT INTO im_v2.device_refresh_sessions (user_id, device_id, refresh_hmac, issued_at, expires_at) VALUES (\(bind: userID), \(bind: deviceID), \(bind: tokenHMACKey.digest(credentials.refreshCredential)), \(bind: issuedAt), \(bind: issuedAt.addingTimeInterval(refreshCredentialLifetime)))").run()
+        try await sql.raw("INSERT INTO im_v2.device_refresh_sessions (user_id, device_id, refresh_hmac, issued_at, expires_at) VALUES (\(bind: userID), \(bind: deviceID), \(bind: tokenHMACKey.digest(credentials.refreshCredential)), \(bind: issuedAt), \(bind: refreshExpiresAt))").run()
         try await insertAccessToken(sql, credentials: credentials, issuedAt: issuedAt)
     }
 
@@ -418,25 +489,25 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: credentialUUID(credentials.userID)), \(bind: credentialUUID(credentials.deviceID)), \(bind: issuedAt), \(bind: credentials.accessTokenExpiresAt))").run()
     }
 
-    private func insertOperation(_ sql: any SQLDatabase, kind: String, requestRefreshHMAC: String?, operationID: UUID, credentials: V2IssuedDeviceCredentials, issuedAt: Date) async throws {
+    private func insertOperation(_ sql: any SQLDatabase, kind: String, requestRefreshHMAC: String?, operationID: UUID, credentials: V2IssuedDeviceCredentials, issuedAt: Date, replayExpiresAt: Date) async throws {
         let context = replayContext(userID: credentials.userID, deviceID: credentials.deviceID, operationID: operationID)
-        try await sql.raw("INSERT INTO im_v2.device_credential_operations (device_id, operation_id, operation_kind, user_id, request_refresh_hmac, resulting_access_token_hmac, encrypted_access_token, encrypted_refresh_credential, access_token_expires_at, replay_expires_at, created_at) VALUES (\(bind: credentialUUID(credentials.deviceID)), \(bind: operationID), \(bind: kind), \(bind: credentialUUID(credentials.userID)), \(bind: requestRefreshHMAC), \(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: try replayEnvelopeKey.seal(credentials.accessToken, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.refreshCredential, authenticating: context)), \(bind: credentials.accessTokenExpiresAt), \(bind: issuedAt.addingTimeInterval(replayWindow)), \(bind: issuedAt))").run()
+        try await sql.raw("INSERT INTO im_v2.device_credential_operations (device_id, operation_id, operation_kind, user_id, request_refresh_hmac, resulting_access_token_hmac, encrypted_access_token, encrypted_refresh_credential, encrypted_revocation_credential, revocation_credential_expires_at, access_token_expires_at, replay_expires_at, created_at) VALUES (\(bind: credentialUUID(credentials.deviceID)), \(bind: operationID), \(bind: kind), \(bind: credentialUUID(credentials.userID)), \(bind: requestRefreshHMAC), \(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: try replayEnvelopeKey.seal(credentials.accessToken, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.refreshCredential, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.revocationCredential.rawValue, authenticating: context)), \(bind: credentials.revocationCredentialExpiresAt), \(bind: credentials.accessTokenExpiresAt), \(bind: replayExpiresAt), \(bind: issuedAt))").run()
     }
 
     private func credentials(from operation: CredentialOperationRow, request: V2TrustedDeviceRegistration) throws -> V2IssuedDeviceCredentials {
         let userID = try UserID(operation.userID.uuidString), deviceID = try DeviceID(operation.deviceID.uuidString)
         let context = replayContext(userID: userID, deviceID: deviceID, operationID: request.operationID)
-        return try .init(userID: userID, deviceID: deviceID, accessToken: replayEnvelopeKey.open(operation.encryptedAccessToken, authenticating: context), accessTokenExpiresAt: operation.accessTokenExpiresAt, refreshCredential: replayEnvelopeKey.open(operation.encryptedRefreshCredential, authenticating: context))
+        return try .init(userID: userID, deviceID: deviceID, accessToken: replayEnvelopeKey.open(operation.encryptedAccessToken, authenticating: context), accessTokenExpiresAt: operation.accessTokenExpiresAt, refreshCredential: replayEnvelopeKey.open(operation.encryptedRefreshCredential, authenticating: context), revocationCredential: .init(rawValue: replayEnvelopeKey.open(operation.encryptedRevocationCredential, authenticating: context)), revocationCredentialExpiresAt: operation.revocationCredentialExpiresAt)
     }
 
     private func credentials(from operation: CredentialOperationRow, request: V2DeviceCredentialRefresh) throws -> V2IssuedDeviceCredentials {
         let userID = try UserID(operation.userID.uuidString), deviceID = try DeviceID(operation.deviceID.uuidString)
         let context = replayContext(userID: userID, deviceID: deviceID, operationID: request.operationID)
-        return try .init(userID: userID, deviceID: deviceID, accessToken: replayEnvelopeKey.open(operation.encryptedAccessToken, authenticating: context), accessTokenExpiresAt: operation.accessTokenExpiresAt, refreshCredential: replayEnvelopeKey.open(operation.encryptedRefreshCredential, authenticating: context))
+        return try .init(userID: userID, deviceID: deviceID, accessToken: replayEnvelopeKey.open(operation.encryptedAccessToken, authenticating: context), accessTokenExpiresAt: operation.accessTokenExpiresAt, refreshCredential: replayEnvelopeKey.open(operation.encryptedRefreshCredential, authenticating: context), revocationCredential: .init(rawValue: replayEnvelopeKey.open(operation.encryptedRevocationCredential, authenticating: context)), revocationCredentialExpiresAt: operation.revocationCredentialExpiresAt)
     }
 
     private func credentialOperation(_ sql: any SQLDatabase, deviceID: UUID, operationID: UUID) async throws -> CredentialOperationRow? {
-        try await sql.raw("SELECT device_id, operation_id, operation_kind, user_id, request_refresh_hmac, encrypted_access_token, encrypted_refresh_credential, access_token_expires_at, replay_expires_at FROM im_v2.device_credential_operations WHERE device_id = \(bind: deviceID) AND operation_id = \(bind: operationID)").first(decoding: CredentialOperationRow.self)
+        try await sql.raw("SELECT device_id, operation_id, operation_kind, user_id, request_refresh_hmac, encrypted_access_token, encrypted_refresh_credential, encrypted_revocation_credential, revocation_credential_expires_at, access_token_expires_at, replay_expires_at FROM im_v2.device_credential_operations WHERE device_id = \(bind: deviceID) AND operation_id = \(bind: operationID)").first(decoding: CredentialOperationRow.self)
     }
 
     private func isConsumedRefreshCredential(
@@ -498,8 +569,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         try await sql.raw("SELECT 1 FROM im_v2.special_accounts WHERE account_user_id = \(bind: userID) AND status = 'active'").first() != nil
     }
 
-    private func activeDeviceCount(_ sql: any SQLDatabase, userID: UUID) async throws -> Int {
-        try await sql.raw("SELECT COUNT(*)::integer AS count FROM im_v2.auth_devices WHERE user_id = \(bind: userID) AND revoked_at IS NULL")
+    private func activeDeviceCount(_ sql: any SQLDatabase, userID: UUID, at observedAt: Date) async throws -> Int {
+        try await sql.raw("SELECT COUNT(*)::integer AS count FROM im_v2.auth_devices WHERE user_id = \(bind: userID) AND revoked_at IS NULL AND session_expires_at > \(bind: observedAt)")
             .first(decoding: DeviceCountRow.self)?.count ?? 0
     }
 
@@ -508,14 +579,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         userID: UUID,
         now: Date
     ) async throws -> Int? {
-        guard let row = try await sql.raw("SELECT window_started_at, successful_registrations FROM im_v2.device_registration_rate_limits WHERE user_id = \(bind: userID) FOR UPDATE")
-            .first(decoding: DeviceRegistrationRateLimitRow.self)
-        else { return nil }
-        let elapsed = max(0, now.timeIntervalSince(row.windowStartedAt))
-        guard elapsed < registrationPolicy.window,
-              row.successfulRegistrations >= registrationPolicy.maximumNewDevicesPerWindow
-        else { return nil }
-        return max(1, Int(ceil(registrationPolicy.window - elapsed)))
+        try await PostgresV2DeviceRegistrationBudget(policy: registrationPolicy)
+            .retryAfter(sql, userID: userID, now: now)
     }
 
     private func recordSuccessfulNewDeviceRegistration(
@@ -523,26 +588,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         userID: UUID,
         now: Date
     ) async throws {
-        let windowSeconds = Int64(registrationPolicy.window.rounded(.towardZero))
-        try await sql.raw("""
-            INSERT INTO im_v2.device_registration_rate_limits
-                (user_id, window_started_at, successful_registrations, updated_at)
-            VALUES (\(bind: userID), \(bind: now), 1, \(bind: now))
-            ON CONFLICT (user_id) DO UPDATE
-            SET window_started_at = CASE
-                    WHEN im_v2.device_registration_rate_limits.window_started_at
-                           + \(bind: windowSeconds) * INTERVAL '1 second' <= \(bind: now)
-                    THEN EXCLUDED.window_started_at
-                    ELSE im_v2.device_registration_rate_limits.window_started_at
-                END,
-                successful_registrations = CASE
-                    WHEN im_v2.device_registration_rate_limits.window_started_at
-                           + \(bind: windowSeconds) * INTERVAL '1 second' <= \(bind: now)
-                    THEN 1
-                    ELSE im_v2.device_registration_rate_limits.successful_registrations + 1
-                END,
-                updated_at = EXCLUDED.updated_at
-            """).run()
+        try await PostgresV2DeviceRegistrationBudget(policy: registrationPolicy)
+            .recordSuccess(sql, userID: userID, now: now)
     }
 
     private func normalizedMetadata(_ metadata: V2DeviceRegistrationMetadata) throws -> (displayName: String, platform: String) {
@@ -561,19 +608,11 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
 private struct DeviceRow: Decodable {
     let userID: UUID
     let revokedAt: Date?
-    enum CodingKeys: String, CodingKey { case userID = "user_id"; case revokedAt = "revoked_at" }
+    let sessionExpiresAt: Date
+    enum CodingKeys: String, CodingKey { case userID = "user_id"; case revokedAt = "revoked_at"; case sessionExpiresAt = "session_expires_at" }
 }
 
 private struct DeviceCountRow: Decodable { let count: Int }
-
-private struct DeviceRegistrationRateLimitRow: Decodable {
-    let windowStartedAt: Date
-    let successfulRegistrations: Int
-    enum CodingKeys: String, CodingKey {
-        case windowStartedAt = "window_started_at"
-        case successfulRegistrations = "successful_registrations"
-    }
-}
 
 private struct RefreshSessionRow: Decodable {
     let familyGeneration: Int64
@@ -596,12 +635,15 @@ private struct CredentialOperationRow: Decodable {
     let requestRefreshHMAC: String?
     let encryptedAccessToken: String
     let encryptedRefreshCredential: String
+    let encryptedRevocationCredential: String
+    let revocationCredentialExpiresAt: Date
     let accessTokenExpiresAt: Date
     let replayExpiresAt: Date
     enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"; case operationID = "operation_id"; case operationKind = "operation_kind"
         case userID = "user_id"; case requestRefreshHMAC = "request_refresh_hmac"
         case encryptedAccessToken = "encrypted_access_token"; case encryptedRefreshCredential = "encrypted_refresh_credential"
+        case encryptedRevocationCredential = "encrypted_revocation_credential"; case revocationCredentialExpiresAt = "revocation_credential_expires_at"
         case accessTokenExpiresAt = "access_token_expires_at"; case replayExpiresAt = "replay_expires_at"
     }
 }

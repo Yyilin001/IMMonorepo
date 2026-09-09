@@ -47,13 +47,7 @@ public struct V2VaporPushEndpointRoutes: Sendable {
                     endpoint: endpoint,
                     now: now()
                 )
-            } catch V2PushDeviceEndpointError.invalidRegistration {
-                throw Abort(.badRequest)
-            } catch V2PushDeviceEndpointError.deviceUnavailable {
-                throw Abort(.forbidden)
-            } catch {
-                throw Abort(.serviceUnavailable)
-            }
+            } catch { return v2PushIntentErrorResponse(error) }
             return noStoreNoContent()
         }
 
@@ -65,9 +59,7 @@ public struct V2VaporPushEndpointRoutes: Sendable {
                     deviceID: identity.deviceID,
                     now: now()
                 )
-            } catch {
-                throw Abort(.serviceUnavailable)
-            }
+            } catch { return v2PushIntentErrorResponse(error) }
             return noStoreNoContent()
         }
     }

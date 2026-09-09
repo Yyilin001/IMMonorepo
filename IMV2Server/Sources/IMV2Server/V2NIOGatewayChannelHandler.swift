@@ -14,8 +14,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public typealias OutboundOut = ByteBuffer
 
     private let stream: V2GatewayByteStream
-    private let authenticationTimeoutMilliseconds: Int
-    private let idleTimeoutMilliseconds: Int
+    private let timeouts: V2GatewayConnectionTimeouts
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
     private let foregroundWriteScheduler: V2NIOForegroundWriteScheduler
     private let logger = Logger(label: "imv2.gateway.transport")
@@ -56,8 +55,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
         transportMetrics: any V2GatewayTransportMetricsRecorder
-    ) {
-        self.init(
+    ) throws {
+        try self.init(
             stream: stream,
             maximumQueuedInboundBytes: maximumQueuedInboundBytes,
             maximumQueuedInboundChunks: maximumQueuedInboundChunks,
@@ -76,20 +75,18 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         idleTimeoutMilliseconds: Int,
         transportMetrics: any V2GatewayTransportMetricsRecorder,
         foregroundWriteScheduler: V2NIOForegroundWriteScheduler
-    ) {
+    ) throws {
+        self.timeouts = try .init(authenticationMilliseconds: authenticationTimeoutMilliseconds,
+                                  idleMilliseconds: idleTimeoutMilliseconds)
         precondition(
             maximumQueuedInboundBytes > 0 &&
-            maximumQueuedInboundChunks > 0 &&
-            authenticationTimeoutMilliseconds > 0 &&
-            idleTimeoutMilliseconds > 0
+            maximumQueuedInboundChunks > 0
         )
         self.stream = stream
         self.pending = .init(
             maximumBytes: maximumQueuedInboundBytes,
             maximumChunks: maximumQueuedInboundChunks
         )
-        self.authenticationTimeoutMilliseconds = authenticationTimeoutMilliseconds
-        self.idleTimeoutMilliseconds = idleTimeoutMilliseconds
         self.transportMetrics = transportMetrics
         self.foregroundWriteScheduler = foregroundWriteScheduler
     }
@@ -358,7 +355,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private func scheduleIdleCheck(context: ChannelHandlerContext) {
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
-        idleCheck = context.eventLoop.scheduleTask(in: .milliseconds(Int64(idleTimeoutMilliseconds))) {
+        idleCheck = context.eventLoop.scheduleTask(in: timeouts.idle) {
             handler.value.checkIdle(context: boundContext.value)
         }
     }
@@ -367,7 +364,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         authenticationDeadline = context.eventLoop.scheduleTask(
-            in: .milliseconds(Int64(authenticationTimeoutMilliseconds))
+            in: timeouts.authentication
         ) {
             let handler = handler.value
             guard !handler.closed, handler.authenticationDeadline != nil else { return }
@@ -378,7 +375,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private func checkIdle(context: ChannelHandlerContext) {
         guard !closed, let lastInboundAt else { return }
         let elapsed = NIODeadline.now().uptimeNanoseconds - lastInboundAt.uptimeNanoseconds
-        let timeout = UInt64(idleTimeoutMilliseconds) * 1_000_000
+        let timeout = UInt64(timeouts.idle.nanoseconds)
         if elapsed >= timeout {
             close(context: context, reason: .idleTimeout)
         } else {

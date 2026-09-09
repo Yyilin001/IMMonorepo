@@ -43,6 +43,16 @@ struct V2ContactProjectionPage: Sendable {
     let totalCount: Int?
 }
 
+struct V2ContactProjectionWindow: Sendable {
+    let page: V2ContactProjectionPage
+    let anchorID: String?
+    let hasEarlier: Bool
+}
+
+protocol V2ContactsWindowReading: Sendable {
+    func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow
+}
+
 protocol V2ContactsReading: Sendable {
     func contactProjectionPage(
         scope: V2ContactProjectionPageScope,
@@ -57,7 +67,7 @@ protocol V2ContactsReading: Sendable {
 /// App-side composition of the reusable ClientKit stores. The profile reader
 /// receives the relationship authorization context; it cannot turn a list of
 /// IDs into a global profile directory.
-actor V2GRDBContactsDataSource: V2ContactsReading {
+actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
     private let localStore: GRDBV2LocalSyncStore
     private let profiles: V2ProfileRepository
     private let currentUserID: UserID
@@ -87,6 +97,22 @@ actor V2GRDBContactsDataSource: V2ContactsReading {
             limit: limit,
             includeTotalCount: includeTotalCount
         )
+        return try await projectionPage(page)
+    }
+
+    func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
+        let clientScope: V2ClientRelationshipPageScope = switch scope {
+        case .friends: .accepted
+        case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
+        case .outgoingRequests: .outgoingRequests(currentUserID: currentUserID)
+        }
+        let window = try await localStore.relationshipWindow(scope: clientScope, matching: query, around: anchor, limit: limit, precedingCount: precedingCount)
+        let page = try await projectionPage(window.page)
+        let total = includeTotalCount ? try await localStore.relationshipPage(scope: clientScope, matching: query, limit: 1, includeTotalCount: true).totalCount : nil
+        return .init(page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total), anchorID: window.anchor?.targetUserID.rawValue, hasEarlier: window.hasEarlier)
+    }
+
+    private func projectionPage(_ page: V2ClientRelationshipPage) async throws -> V2ContactProjectionPage {
         let profileViews = try await localStore.profileViews(userIDs: page.relationships.map(\.targetUserID))
         let projections: [V2ContactProjection] = page.relationships.map {
             V2ContactProjection(
@@ -116,6 +142,8 @@ actor V2GRDBContactsDataSource: V2ContactsReading {
 @Observable
 final class V2ContactsStore {
     private static let pageSize = 50
+    let friendsViewport = V2ListViewport()
+    let requestsViewport = V2ListViewport()
 
     enum State: Equatable {
         case loading
@@ -131,6 +159,7 @@ final class V2ContactsStore {
     }
 
     private let dataSource: any V2ContactsReading
+    private let windowReader: (any V2ContactsWindowReading)?
     private let identityResolver: any V2ConversationPublicIdentityResolving
     private let relationshipChanger: any V2RelationshipChanging
     private let userBlockChanger: any V2UserBlockChanging
@@ -143,6 +172,15 @@ final class V2ContactsStore {
     private var refreshingGeneration = 0
     private var searchGeneration = 0
     private var updatingUserIDs = Set<UserID>()
+    private enum PageLane: Hashable { case friends, search, incoming, outgoing }
+    private var pageOperations: [PageLane: UUID] = [:]
+    private var refreshOperation: UUID?
+    private var searchRefreshOperation: UUID?
+    private var loadedSearchQuery: String?
+    private var earlierLanes = Set<PageLane>()
+    var hasEarlierFriends: Bool { earlierLanes.contains(searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .friends : .search) }
+    var hasEarlierIncomingRequests: Bool { earlierLanes.contains(.incoming) }
+    var hasEarlierOutgoingRequests: Bool { earlierLanes.contains(.outgoing) }
 
     private(set) var state: State = .loading
     private(set) var friends: [V2ContactListItem] = []
@@ -153,7 +191,7 @@ final class V2ContactsStore {
     private(set) var incomingRequestsNextCursor: V2ClientRelationshipCursor?
     private(set) var outgoingRequestsNextCursor: V2ClientRelationshipCursor?
     private(set) var friendSearchNextCursor: V2ClientRelationshipCursor?
-    private(set) var isLoadingMoreContacts = false
+    var isLoadingMoreContacts: Bool { !pageOperations.isEmpty }
     private(set) var feedback: String?
     private(set) var addFriendState: AddFriendState = .entering
     var searchQuery = ""
@@ -169,6 +207,7 @@ final class V2ContactsStore {
         projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
     ) {
         self.dataSource = dataSource
+        windowReader = dataSource as? any V2ContactsWindowReading
         self.identityResolver = identityResolver
         self.relationshipChanger = relationshipChanger
         self.userBlockChanger = userBlockChanger
@@ -199,27 +238,61 @@ final class V2ContactsStore {
     func refresh(revalidateProfiles: Bool = false) async {
         refreshingGeneration &+= 1
         let generation = refreshingGeneration
+        let operation = UUID()
+        refreshOperation = operation
+        pageOperations.removeAll()
+        defer { if refreshOperation == operation { refreshOperation = nil } }
+        let friendCount = max(Self.pageSize, friends.count)
+        let incomingCount = max(Self.pageSize, incomingRequests.count)
+        let outgoingCount = max(Self.pageSize, outgoingRequests.count)
         if allItems.isEmpty { state = .loading }
         do {
-            let friendPage = try await loadProjectionPage(scope: .friends, before: nil, revalidateProfiles: revalidateProfiles)
-            let incomingPage = try await loadProjectionPage(scope: .incomingRequests, before: nil, revalidateProfiles: revalidateProfiles, includeTotalCount: true)
-            let outgoingPage = try await loadProjectionPage(scope: .outgoingRequests, before: nil, revalidateProfiles: revalidateProfiles)
-            guard generation == refreshingGeneration else { return }
-            apply(friendPage.projections, scope: .friends, appending: false)
-            apply(incomingPage.projections, scope: .incomingRequests, appending: false)
-            apply(outgoingPage.projections, scope: .outgoingRequests, appending: false)
-            friendsNextCursor = friendPage.nextCursor
-            incomingRequestsNextCursor = incomingPage.nextCursor
-            outgoingRequestsNextCursor = outgoingPage.nextCursor
-            incomingRequestCount = incomingPage.totalCount ?? incomingPage.projections.count
-            state = .loaded
-            if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                await refreshFriendSearch()
+            while true {
+                let capturedFriendAnchor = friendsViewport.anchorID
+                let requestAnchor = requestsViewport.anchorID
+                let requestAnchorIsIncoming = incomingRequests.contains { $0.id == requestAnchor }
+                let friendWindow = try await loadRetainedWindow(lane: .friends, viewportAnchorID: capturedFriendAnchor, count: friendCount, revalidateProfiles: revalidateProfiles)
+                let incomingWindow = try await loadRetainedWindow(lane: .incoming, viewportAnchorID: requestAnchor, count: incomingCount, revalidateProfiles: revalidateProfiles, includeTotalCount: true)
+                let outgoingWindow = try await loadRetainedWindow(lane: .outgoing, viewportAnchorID: requestAnchor, count: outgoingCount, revalidateProfiles: revalidateProfiles)
+                let friendPage = friendWindow.page, incomingPage = incomingWindow.page, outgoingPage = outgoingWindow.page
+                try Task.checkCancellation()
+                guard generation == refreshingGeneration else { return }
+                let friendRestoration: String?
+                if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if case let .ready(target) = friendsViewport.resolveRead(capturedAnchorID: capturedFriendAnchor,
+                        returnedIDs: friendPage.projections.map { $0.userID.rawValue }, fallback: friendWindow.anchorID) { friendRestoration = target }
+                    else if windowReader != nil { continue }
+                    else { friendRestoration = nil }
+                } else { friendRestoration = nil }
+                let requestRestoration: String?
+                if case let .ready(target) = requestsViewport.resolveRead(capturedAnchorID: requestAnchor,
+                    returnedIDs: (incomingPage.projections + outgoingPage.projections).map { $0.userID.rawValue },
+                    fallback: requestAnchor == nil ? nil : (requestAnchorIsIncoming ? incomingWindow.anchorID : outgoingWindow.anchorID)) { requestRestoration = target }
+                else if windowReader != nil { continue }
+                else { requestRestoration = nil }
+                apply(friendPage.projections, scope: .friends, appending: false)
+                apply(incomingPage.projections, scope: .incomingRequests, appending: false)
+                apply(outgoingPage.projections, scope: .outgoingRequests, appending: false)
+                friendsNextCursor = friendPage.nextCursor
+                incomingRequestsNextCursor = incomingPage.nextCursor
+                outgoingRequestsNextCursor = outgoingPage.nextCursor
+                incomingRequestCount = incomingPage.totalCount ?? incomingPage.projections.count
+                setEarlier(friendWindow.hasEarlier, lane: .friends)
+                setEarlier(incomingWindow.hasEarlier, lane: .incoming)
+                setEarlier(outgoingWindow.hasEarlier, lane: .outgoing)
+                reconcileViewports()
+                if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { friendsViewport.restore(to: friendRestoration) }
+                requestsViewport.restore(to: requestRestoration)
+                state = .loaded
+                if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    await refreshFriendSearch()
+                }
+                return
             }
         } catch is CancellationError {
             return
         } catch {
-            guard generation == refreshingGeneration else { return }
+            guard !Task.isCancelled, generation == refreshingGeneration else { return }
             state = .failed
         }
     }
@@ -227,26 +300,51 @@ final class V2ContactsStore {
     func refreshFriendSearch() async {
         searchGeneration &+= 1
         let generation = searchGeneration
+        let operation = UUID()
+        searchRefreshOperation = operation
+        defer { if searchRefreshOperation == operation { searchRefreshOperation = nil } }
+        pageOperations[.search] = nil
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (loadedSearchQuery ?? "") != query {
+            friendsViewport.reset()
+            earlierLanes.remove(.search)
+        }
         guard !query.isEmpty else {
             friendSearchResults = []
             friendSearchNextCursor = nil
+            loadedSearchQuery = nil
             rebuildAllItems()
+            reconcileViewports()
             return
         }
         do {
-            let page = try await loadProjectionPage(scope: .friends, matching: query, before: nil, revalidateProfiles: false)
-            try Task.checkCancellation()
-            guard generation == searchGeneration,
-                  query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            else { return }
-            friendSearchResults = makeItems(page.projections)
-            friendSearchNextCursor = page.nextCursor
-            rebuildAllItems()
+            let retainedCount = loadedSearchQuery == query ? max(Self.pageSize, friendSearchResults.count) : Self.pageSize
+            while true {
+                let capturedAnchor = friendsViewport.anchorID
+                let window = try await loadRetainedWindow(lane: .search, viewportAnchorID: capturedAnchor, query: query, count: retainedCount, revalidateProfiles: false)
+                let page = window.page
+                try Task.checkCancellation()
+                guard generation == searchGeneration,
+                      query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                else { return }
+                let restorationID: String?
+                if case let .ready(target) = friendsViewport.resolveRead(capturedAnchorID: capturedAnchor,
+                    returnedIDs: page.projections.map { $0.userID.rawValue }, fallback: window.anchorID) { restorationID = target }
+                else if windowReader != nil { continue }
+                else { restorationID = nil }
+                friendSearchResults = makeItems(page.projections)
+                friendSearchNextCursor = page.nextCursor
+                loadedSearchQuery = query
+                setEarlier(window.hasEarlier, lane: .search)
+                rebuildAllItems()
+                reconcileViewports()
+                friendsViewport.restore(to: restorationID)
+                return
+            }
         } catch is CancellationError {
             return
         } catch {
-            guard generation == searchGeneration else { return }
+            guard !Task.isCancelled, generation == searchGeneration else { return }
             feedback = "无法搜索联系人。"
         }
     }
@@ -268,13 +366,30 @@ final class V2ContactsStore {
         await loadMore(scope: .outgoingRequests, matching: nil, cursor: outgoingRequestsNextCursor)
     }
 
+    func loadEarlierFriends() async {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        await loadEarlier(query.isEmpty ? .friends : .search, query: query.isEmpty ? nil : query)
+    }
+    func loadEarlierIncomingRequests() async { await loadEarlier(.incoming) }
+    func loadEarlierOutgoingRequests() async { await loadEarlier(.outgoing) }
+
+    func returnToFirstFriends() async {
+        friendsViewport.reset()
+        if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            friends = []; friendsNextCursor = nil; earlierLanes.remove(.friends)
+            await refresh()
+        } else {
+            friendSearchResults = []; friendSearchNextCursor = nil; earlierLanes.remove(.search)
+            await refreshFriendSearch()
+        }
+    }
+
     func observeProjectionChanges() async {
         guard let projectionChangeNotifier else {
             await refresh()
             return
         }
-        for await _ in await projectionChangeNotifier.updates() {
-            guard !Task.isCancelled else { return }
+        await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(scopes: .contacts)) { [self] in
             await refresh()
         }
     }
@@ -399,6 +514,104 @@ final class V2ContactsStore {
         }
     }
 
+    private func laneItems(_ lane: PageLane) -> [V2ContactListItem] {
+        switch lane { case .friends: friends; case .search: friendSearchResults; case .incoming: incomingRequests; case .outgoing: outgoingRequests }
+    }
+
+    private func laneScope(_ lane: PageLane) -> V2ContactProjectionPageScope {
+        switch lane { case .friends, .search: .friends; case .incoming: .incomingRequests; case .outgoing: .outgoingRequests }
+    }
+
+    private func windowLimit(_ lane: PageLane) -> Int { lane == .friends || lane == .search ? 300 : 150 }
+
+    private func setEarlier(_ value: Bool, lane: PageLane) {
+        if value { earlierLanes.insert(lane) } else { earlierLanes.remove(lane) }
+    }
+
+    private func reconcileViewports() {
+        friendsViewport.reconcile(ids: filteredFriends.map(\.id))
+        requestsViewport.reconcile(ids: (incomingRequests + outgoingRequests).map(\.id))
+    }
+
+    private func loadRetainedWindow(lane: PageLane, viewportAnchorID: String?, query: String? = nil, count: Int, revalidateProfiles: Bool, includeTotalCount: Bool = false) async throws -> V2ContactProjectionWindow {
+        let values = laneItems(lane)
+        let activeID = lane == .friends && !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : viewportAnchorID
+        let anchorID = values.contains(where: { $0.id == activeID }) ? activeID : (earlierLanes.contains(lane) ? values.first?.id : nil)
+        let limit = min(count, windowLimit(lane))
+        guard let windowReader, let index = values.firstIndex(where: { $0.id == anchorID }) else {
+            let page = try await loadProjectionWindow(scope: laneScope(lane), matching: query, count: limit, revalidateProfiles: revalidateProfiles, includeTotalCount: includeTotalCount)
+            return .init(page: page, anchorID: nil, hasEarlier: false)
+        }
+        let anchor = V2ClientRelationshipCursor(updatedAt: values[index].updatedAt, targetUserID: values[index].userID)
+        return try await loadAnchoredWindow(reader: windowReader, lane: lane, query: query, anchor: anchor,
+            limit: limit, precedingCount: min(50, index, limit - 1), revalidateProfiles: revalidateProfiles, includeTotalCount: includeTotalCount)
+    }
+
+    private func loadAnchoredWindow(reader: any V2ContactsWindowReading, lane: PageLane, query: String?,
+        anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int,
+        revalidateProfiles: Bool, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
+        let generation = refreshingGeneration, queryGeneration = searchGeneration
+        var window = try await reader.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
+            limit: limit, precedingCount: precedingCount, includeTotalCount: includeTotalCount)
+        try Task.checkCancellation()
+        guard generation == refreshingGeneration,
+              lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { throw CancellationError() }
+        let targets = revalidateProfiles ? window.page.projections.map(\.userID) : window.page.projections.compactMap { $0.publicIdentity == nil ? $0.userID : nil }
+        if !targets.isEmpty {
+            do {
+                try await dataSource.hydrateRelationshipProfiles(for: targets)
+                try Task.checkCancellation()
+                guard generation == refreshingGeneration,
+                      lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+                else { throw CancellationError() }
+                let refreshed = try await reader.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
+                    limit: limit, precedingCount: precedingCount, includeTotalCount: false)
+                try Task.checkCancellation()
+                guard generation == refreshingGeneration,
+                      lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+                else { throw CancellationError() }
+                window = .init(page: .init(projections: refreshed.page.projections, nextCursor: refreshed.page.nextCursor, totalCount: window.page.totalCount), anchorID: refreshed.anchorID, hasEarlier: refreshed.hasEarlier)
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                try Task.checkCancellation()
+                guard generation == refreshingGeneration,
+                      lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+                else { throw CancellationError() }
+                feedback = "部分联系人资料暂不可更新。"
+            }
+        }
+        return window
+    }
+
+    private func loadProjectionWindow(
+        scope: V2ContactProjectionPageScope,
+        matching query: String? = nil,
+        count: Int,
+        revalidateProfiles: Bool,
+        includeTotalCount: Bool = false
+    ) async throws -> V2ContactProjectionPage {
+        let generation = refreshingGeneration, queryGeneration = searchGeneration
+        var projections: [V2ContactProjection] = []
+        var seen = Set<UserID>()
+        var cursor: V2ClientRelationshipCursor?
+        var totalCount: Int?
+        for offset in stride(from: 0, to: count, by: Self.pageSize) {
+            let page = try await loadProjectionPage(scope: scope, matching: query, before: cursor,
+                revalidateProfiles: revalidateProfiles, includeTotalCount: includeTotalCount && offset == 0)
+            try Task.checkCancellation()
+            guard generation == refreshingGeneration,
+                  query == nil || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { throw CancellationError() }
+            guard page.nextCursor == nil || page.nextCursor != cursor else { throw V2ClientProjectionError.invalidMessagePayload }
+            projections.append(contentsOf: page.projections.filter { seen.insert($0.userID).inserted })
+            cursor = page.nextCursor
+            if offset == 0 { totalCount = page.totalCount }
+            if cursor == nil { break }
+        }
+        return .init(projections: projections, nextCursor: cursor, totalCount: totalCount)
+    }
+
     private func loadProjectionPage(
         scope: V2ContactProjectionPageScope,
         matching query: String? = nil,
@@ -413,6 +626,7 @@ final class V2ContactsStore {
             limit: Self.pageSize,
             includeTotalCount: includeTotalCount
         )
+        try Task.checkCancellation()
         let totalCount = page.totalCount
         let profileTargets = revalidateProfiles
             ? page.projections.map(\.userID)
@@ -428,6 +642,7 @@ final class V2ContactsStore {
                 limit: Self.pageSize,
                 includeTotalCount: false
             )
+            try Task.checkCancellation()
             page = .init(
                 projections: page.projections,
                 nextCursor: page.nextCursor,
@@ -436,6 +651,7 @@ final class V2ContactsStore {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             // A cached page remains useful offline. Missing profiles are
             // explicit and hydration work never expands beyond this page.
             feedback = "部分联系人资料暂不可更新。"
@@ -448,11 +664,20 @@ final class V2ContactsStore {
         matching query: String?,
         cursor: V2ClientRelationshipCursor?
     ) async {
-        guard let cursor, !isLoadingMoreContacts else { return }
+        let lane: PageLane = switch scope {
+        case .friends: query == nil ? .friends : .search
+        case .incomingRequests: .incoming
+        case .outgoingRequests: .outgoing
+        }
+        guard let cursor, state == .loaded, refreshOperation == nil, pageOperations[lane] == nil else { return }
+        if lane == .search {
+            guard searchRefreshOperation == nil, query == loadedSearchQuery else { return }
+        }
         let refreshGeneration = refreshingGeneration
         let currentSearchGeneration = searchGeneration
-        isLoadingMoreContacts = true
-        defer { isLoadingMoreContacts = false }
+        let operation = UUID()
+        pageOperations[lane] = operation
+        defer { if pageOperations[lane] == operation { pageOperations[lane] = nil } }
         do {
             let page = try await loadProjectionPage(scope: scope, matching: query, before: cursor, revalidateProfiles: false)
             try Task.checkCancellation()
@@ -462,6 +687,13 @@ final class V2ContactsStore {
                       query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
                 else { return }
             }
+            let viewport = lane == .friends || lane == .search ? friendsViewport : requestsViewport
+            let anchorID = viewport.anchorID ?? laneItems(lane).last?.id
+            let values = laneItems(lane)
+            let existingIDs = Set(values.map(\.id))
+            let additions = Set(page.projections.map { $0.userID.rawValue }).subtracting(existingIDs).count
+            let removedCount = max(0, values.count + additions - windowLimit(lane))
+            if let activeID = viewport.anchorID, values.prefix(removedCount).contains(where: { $0.id == activeID }) { return }
             switch scope {
             case .friends where query != nil:
                 appendUnique(makeItems(page.projections), to: &friendSearchResults)
@@ -476,11 +708,72 @@ final class V2ContactsStore {
                 apply(page.projections, scope: .outgoingRequests, appending: true)
                 outgoingRequestsNextCursor = page.nextCursor
             }
+            let removed = trimWindow(lane)
             rebuildAllItems()
+            reconcileViewports()
+            if removed { viewport.restore(to: anchorID ?? laneItems(lane).first?.id) }
         } catch is CancellationError {
             return
         } catch {
+            guard refreshGeneration == refreshingGeneration,
+                  query == nil || (currentSearchGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { return }
             feedback = "无法加载更多联系人。"
+        }
+    }
+
+    private func trimWindow(_ lane: PageLane) -> Bool {
+        let excess = max(0, laneItems(lane).count - windowLimit(lane))
+        guard excess > 0 else { return false }
+        switch lane {
+        case .friends: friends.removeFirst(excess)
+        case .search: friendSearchResults.removeFirst(excess)
+        case .incoming: incomingRequests.removeFirst(excess)
+        case .outgoing: outgoingRequests.removeFirst(excess)
+        }
+        earlierLanes.insert(lane)
+        return true
+    }
+
+    private func loadEarlier(_ lane: PageLane, query: String? = nil) async {
+        guard let windowReader, earlierLanes.contains(lane), refreshOperation == nil, pageOperations[lane] == nil,
+              let first = laneItems(lane).first else { return }
+        if lane == .search { guard searchRefreshOperation == nil, loadedSearchQuery == query else { return } }
+        let operation = UUID(), generation = refreshingGeneration, queryGeneration = searchGeneration
+        let viewport = lane == .friends || lane == .search ? friendsViewport : requestsViewport
+        let capturedAnchorID = viewport.anchorID
+        pageOperations[lane] = operation
+        defer { if pageOperations[lane] == operation { pageOperations[lane] = nil } }
+        do {
+            let window = try await loadAnchoredWindow(reader: windowReader, lane: lane, query: query,
+                anchor: .init(updatedAt: first.updatedAt, targetUserID: first.userID), limit: windowLimit(lane),
+                precedingCount: windowLimit(lane) - 50, revalidateProfiles: false, includeTotalCount: false)
+            try Task.checkCancellation()
+            guard generation == refreshingGeneration,
+                  lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+            let otherRequestIDs: [String] = switch lane {
+            case .incoming: outgoingRequests.map(\.id)
+            case .outgoing: incomingRequests.map(\.id)
+            case .friends, .search: []
+            }
+            guard case let .ready(restorationID) = viewport.resolveRead(capturedAnchorID: capturedAnchorID,
+                returnedIDs: window.page.projections.map { $0.userID.rawValue } + otherRequestIDs,
+                fallback: window.page.projections.first?.userID.rawValue) else { return }
+            switch lane {
+            case .friends: friends = makeItems(window.page.projections); friendsNextCursor = window.page.nextCursor
+            case .search: friendSearchResults = makeItems(window.page.projections); friendSearchNextCursor = window.page.nextCursor
+            case .incoming: incomingRequests = makeItems(window.page.projections); incomingRequestsNextCursor = window.page.nextCursor
+            case .outgoing: outgoingRequests = makeItems(window.page.projections); outgoingRequestsNextCursor = window.page.nextCursor
+            }
+            setEarlier(window.hasEarlier, lane: lane)
+            rebuildAllItems()
+            reconcileViewports()
+            viewport.restore(to: restorationID)
+        } catch is CancellationError { return }
+        catch {
+            guard generation == refreshingGeneration,
+                  lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+            feedback = "无法加载前面的联系人。"
         }
     }
 
@@ -625,6 +918,12 @@ struct V2ContactsRootView: View {
             .accessibilityIdentifier("v2.contacts.requests")
 
             Section("我的好友") {
+                if store.hasEarlierFriends {
+                    Button("查看前面的好友") { Task { await store.loadEarlierFriends() } }
+                        .accessibilityIdentifier("v2.contacts.friends.load-earlier")
+                    Button("回到好友列表开头") { Task { await store.returnToFirstFriends() } }
+                        .accessibilityIdentifier("v2.contacts.friends.return-to-first")
+                }
                 if store.filteredFriends.isEmpty {
                     ContentUnavailableView(
                         store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "暂无好友" : "未找到联系人",
@@ -636,6 +935,8 @@ struct V2ContactsRootView: View {
                             V2ContactRow(item: item)
                         }
                         .accessibilityIdentifier("v2.contacts.friend.\(item.id)")
+                        .id(item.id)
+                        .modifier(V2ListViewportRow(viewport: store.friendsViewport, itemID: item.id, coordinateSpace: "v2.contacts.friends.viewport"))
                     }
                     if store.canLoadMoreFriends {
                         contactLoadMoreButton("加载更多好友") { await store.loadMoreFriends() }
@@ -654,6 +955,7 @@ struct V2ContactsRootView: View {
             await store.refreshFriendSearch()
         }
         .accessibilityIdentifier("v2.contacts.list")
+        .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
     }
 
     private func contactLoadMoreButton(
@@ -672,13 +974,17 @@ struct V2ContactsRootView: View {
     }
 }
 
-private struct V2FriendRequestsView: View {
+struct V2FriendRequestsView: View {
     @Bindable var store: V2ContactsStore
     @State private var actionTask: Task<Void, Never>?
 
     var body: some View {
         List {
             Section("收到的申请") {
+                if store.hasEarlierIncomingRequests {
+                    Button("查看前面的收到申请") { run { await store.loadEarlierIncomingRequests() } }
+                        .accessibilityIdentifier("v2.contacts.incoming.load-earlier")
+                }
                 if store.incomingRequests.isEmpty {
                     Text("暂无待处理申请").foregroundStyle(.secondary)
                 }
@@ -696,12 +1002,18 @@ private struct V2FriendRequestsView: View {
                                 .accessibilityIdentifier("v2.contacts.request.reject.\(item.id)")
                         }
                     }
+                    .id(item.id)
+                    .modifier(V2ListViewportRow(viewport: store.requestsViewport, itemID: item.id, coordinateSpace: "v2.contacts.requests.viewport"))
                 }
                 if store.incomingRequestsNextCursor != nil {
                     loadMoreButton("加载更多收到的申请") { await store.loadMoreIncomingRequests() }
                 }
             }
             Section("已发出的申请") {
+                if store.hasEarlierOutgoingRequests {
+                    Button("查看前面的已发申请") { run { await store.loadEarlierOutgoingRequests() } }
+                        .accessibilityIdentifier("v2.contacts.outgoing.load-earlier")
+                }
                 if store.outgoingRequests.isEmpty {
                     Text("暂无已发申请").foregroundStyle(.secondary)
                 }
@@ -713,6 +1025,8 @@ private struct V2FriendRequestsView: View {
                             .disabled(store.isUpdating(item))
                             .accessibilityIdentifier("v2.contacts.request.cancel.\(item.id)")
                     }
+                    .id(item.id)
+                    .modifier(V2ListViewportRow(viewport: store.requestsViewport, itemID: item.id, coordinateSpace: "v2.contacts.requests.viewport"))
                 }
                 if store.outgoingRequestsNextCursor != nil {
                     loadMoreButton("加载更多已发申请") { await store.loadMoreOutgoingRequests() }
@@ -722,6 +1036,7 @@ private struct V2FriendRequestsView: View {
                 Section { Text(feedback).foregroundStyle(.secondary) }
             }
         }
+        .modifier(V2ListViewportContainer(viewport: store.requestsViewport, coordinateSpace: "v2.contacts.requests.viewport"))
         .navigationTitle("新的朋友")
         .onDisappear { actionTask?.cancel() }
     }

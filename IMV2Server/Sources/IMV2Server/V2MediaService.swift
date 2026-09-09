@@ -32,7 +32,9 @@ public struct V2MediaService: Sendable {
         let instant = now()
         let command = try V2RequestMediaUploadCommand(actorUserID: actorUserID, operationID: operationID, mediaID: mediaID, contentType: contentType, byteCount: byteCount, limits: limits)
         let grant = try await store.requestUpload(command, deviceID: deviceID, expiresAt: instant.addingTimeInterval(limits.temporaryLifetime), now: instant)
-        guard grant.mediaID == mediaID, grant.expiresAt > instant else { throw V2MediaServiceError.invalidGrant }
+        // The store validates a new deadline after checking durable replay.
+        // Validate the persisted result using the clock after that await.
+        guard grant.mediaID == mediaID, v2PostgresTimestampPrecedes(now(), grant.expiresAt) else { throw V2MediaServiceError.invalidGrant }
         return grant
     }
 
@@ -53,14 +55,17 @@ public struct V2MediaService: Sendable {
     /// may exchange it for a provider-specific single-object target.
     public func requestDownload(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID) async throws -> V2MediaDownloadGrant {
         let instant = now()
+        guard let expiry = v2PostgresFutureTimestamp(now: instant, interval: downloadLimits.grantLifetime) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let grant = try await store.requestDownload(
             requesterUserID: actorUserID,
             deviceID: deviceID,
             mediaID: mediaID,
-            expiresAt: instant.addingTimeInterval(downloadLimits.grantLifetime),
+            expiresAt: expiry,
             now: instant
         )
-        guard grant.mediaID == mediaID, grant.expiresAt > instant else {
+        guard grant.mediaID == mediaID, v2PostgresTimestampPrecedes(now(), grant.expiresAt) else {
             throw V2MediaServiceError.invalidGrant
         }
         return grant

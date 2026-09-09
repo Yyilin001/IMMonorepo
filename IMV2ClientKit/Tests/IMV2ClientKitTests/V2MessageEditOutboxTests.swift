@@ -86,7 +86,7 @@ private actor EditTransport: V2ClientMessageEditTransport {
         switch results.removeFirst() {
         case .offline: throw V2RealtimeTransportError.unexpectedResponse
         case .conflict: throw V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 2)
-        case .accepted: return .init(roomID: roomID, messageID: messageID, text: text, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, messageID: messageID, text: text, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
         }
     }
     func operationIDs() -> [MessageEditOperationID] { received }

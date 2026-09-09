@@ -98,9 +98,11 @@ public struct V2GroupRoom: Equatable, Sendable {
     public let memberUserIDs: [UserID]
     public let createdAt: Date
 
-    public init(roomID: RoomID, ownerUserID: UserID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], memberCount: Int? = nil, createdAt: Date) {
+    public init(roomID: RoomID, ownerUserID: UserID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], memberCount: Int? = nil, createdAt: Date) throws {
         let resolvedMemberCount = memberCount ?? memberUserIDs.count
-        precondition(resolvedMemberCount >= memberUserIDs.count && resolvedMemberCount > 0)
+        guard resolvedMemberCount >= memberUserIDs.count, resolvedMemberCount > 0,
+              UInt32(exactly: resolvedMemberCount) != nil
+        else { throw V2GroupMessagingValidationError.invalidMemberCount }
         self.roomID = roomID
         self.ownerUserID = ownerUserID
         self.title = title
@@ -114,4 +116,5 @@ public struct V2GroupRoom: Equatable, Sendable {
 public enum V2GroupMessagingValidationError: Error, Equatable, Sendable {
     case invalidTitle
     case invalidInitialMembers
+    case invalidMemberCount
 }

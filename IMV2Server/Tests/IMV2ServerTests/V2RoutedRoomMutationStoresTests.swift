@@ -46,6 +46,7 @@ struct V2RoutedRoomMutationStoresTests {
         ) == .targetAlreadyMember)
         #expect(await first.membershipCommand() == nil)
         #expect(await second.membershipCommand() == command)
+        #expect(try await second.selectedRoute() == .init(shardID: "rooms-b", epoch: 4))
         #expect(await second.identitySnapshot() == .init(
             actorUserID: actor,
             targetUserID: target,
@@ -139,13 +140,15 @@ struct V2RoutedRoomMutationStoresTests {
 
         #expect(await first.messageMutationCount() == 0)
         #expect(await second.messageMutationCount() == 3)
+        #expect(try await second.selectedMessageRoutes() == Array(repeating: .init(shardID: "rooms-b", epoch: 9), count: 3))
         #expect(await router.requestedRooms() == [roomID, roomID, roomID])
     }
 
-    @Test("co-located logical shards bypass a route lookup")
-    func bypassesRouteWhenEveryShardSharesOnePhysicalStore() async throws {
+    @Test("co-located logical shards retain the selected epoch")
+    func retainsRouteWhenEveryShardSharesOnePhysicalStore() async throws {
         let store = RoutedMutationStoreSpy()
-        let router = RoutedMutationRouter(routes: [:])
+        let roomID = try RoomID("00000000-0000-0000-0000-00000000d021")
+        let router = RoutedMutationRouter(routes: [roomID: try .init(shardID: "rooms-a", epoch: 7)])
         let routed = try V2RoutedMessageEditStore(
             router: router,
             stores: ["rooms-a": store, "rooms-b": store],
@@ -178,7 +181,8 @@ struct V2RoutedRoomMutationStoresTests {
             planID: .init("00000000-0000-0000-0000-00000000d026"),
             now: .init(timeIntervalSince1970: 104)
         ) == .alreadyWithdrawn)
-        #expect(await router.requestedRooms().isEmpty)
+        #expect(await router.requestedRooms() == [roomID])
+        #expect(try await store.selectedMessageRoutes() == [.init(shardID: "rooms-a", epoch: 7)])
     }
 
     private func profile() throws -> V2CapacityProfile {
@@ -240,12 +244,14 @@ private actor RoutedMembershipIdentityValidator:
 
 private actor RoutedMutationStoreSpy:
     V2ControlValidatedRoomMembershipStore,
-    V2MessageEditStore,
-    V2MessageWithdrawalStore,
-    V2MessageReactionStore {
+    V2OwnerValidatedMessageEditStore,
+    V2OwnerValidatedMessageWithdrawalStore,
+    V2OwnerValidatedMessageReactionStore {
     private var membership: V2ChangeRoomMembershipCommand?
     private var snapshot: V2MembershipIdentitySnapshot?
+    private var route: V2RoomShardRoute?
     private var messageMutations = 0
+    private var messageRoutes: [V2RoomShardRoute] = []
 
     func change(
         command _: V2ChangeRoomMembershipCommand,
@@ -257,8 +263,11 @@ private actor RoutedMutationStoreSpy:
         throw V2RoomMembershipStoreError.corruptPersistenceState
     }
 
+    func selectedRoute() -> V2RoomShardRoute? { route }
+
     func changeControlValidated(
         command: V2ChangeRoomMembershipCommand,
+        ownerRoute: V2RoomShardRoute,
         identitySnapshot: V2MembershipIdentitySnapshot,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
@@ -266,44 +275,52 @@ private actor RoutedMutationStoreSpy:
         now _: Date
     ) -> V2RoomMembershipChangeOutcome {
         membership = command
+        route = ownerRoute
         snapshot = identitySnapshot
         return .targetAlreadyMember
     }
 
-    func edit(
+    func editOwnerValidated(
         command _: V2EditMessageCommand,
+        ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
         planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageEditOutcome {
         messageMutations += 1
+        messageRoutes.append(ownerRoute)
         return .alreadyWithdrawn
     }
 
-    func withdraw(
+    func withdrawOwnerValidated(
         command _: V2WithdrawMessageCommand,
+        ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
         planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageWithdrawalOutcome {
         messageMutations += 1
+        messageRoutes.append(ownerRoute)
         return .alreadyWithdrawn
     }
 
-    func change(
+    func changeOwnerValidated(
         command _: V2ChangeMessageReactionCommand,
+        ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
         planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageReactionOutcome {
         messageMutations += 1
+        messageRoutes.append(ownerRoute)
         return .alreadyInDesiredState
     }
 
     func membershipCommand() -> V2ChangeRoomMembershipCommand? { membership }
     func identitySnapshot() -> V2MembershipIdentitySnapshot? { snapshot }
     func messageMutationCount() -> Int { messageMutations }
+    func selectedMessageRoutes() -> [V2RoomShardRoute] { messageRoutes }
 }

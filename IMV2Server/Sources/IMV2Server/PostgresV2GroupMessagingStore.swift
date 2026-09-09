@@ -102,6 +102,7 @@ public struct PostgresV2GroupMessagingStore:
         page: V2GroupRoomCreationManifestPage,
         now: Date
     ) async throws {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
         let values = try GroupOwnerIntentValues(intent)
         let encodedMembers = try groupUUIDJSON(
             page.memberUserIDs.map { userID in
@@ -259,7 +260,7 @@ public struct PostgresV2GroupMessagingStore:
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
-        try await database.transaction { transaction in
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2GroupMessagingStoreError.corruptPersistenceState
             }
@@ -277,6 +278,9 @@ public struct PostgresV2GroupMessagingStore:
                 return .idempotent(try previous.group(ownerUserID: input.actorUserID))
             }
 
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2GroupMessagingStoreError.corruptPersistenceState
+            }
             switch (input.audience, identityValidation) {
             case (.inline, .controlDatabaseManifest):
                 // The routed coordinator can reach this capability only with
@@ -378,13 +382,18 @@ public struct PostgresV2GroupMessagingStore:
             let createdRoomID = try groupUUID(roomID)
             let createdEventID = try groupUUID(eventID)
             let createdPlanID = try groupUUID(planID)
-            try await sql.raw("""
+            // Responses and projections use the persisted precision. Other writes keep the original Date.
+            guard let timestamp = try await sql.raw("""
                 INSERT INTO im_v2.rooms
                     (room_id, room_kind, room_shard_id, room_sequence, membership_revision,
                      capacity_profile_id, delivery_mode, created_at)
                 VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1,
                         \(bind: capacityProfile.id), \(bind: input.deliveryMode.rawValue), \(bind: now))
-                """).run()
+                RETURNING created_at
+                """).first(decoding: GroupCommittedTimestampRow.self) else {
+                throw V2GroupMessagingStoreError.corruptPersistenceState
+            }
+            let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("""
                 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
                 VALUES (\(bind: createdRoomID), \(bind: input.actorID), \(bind: input.title), \(bind: now))
@@ -433,7 +442,7 @@ public struct PostgresV2GroupMessagingStore:
                                            'owner_user_id', \(bind: input.actorID.uuidString), 'title', \(bind: input.title),
                                            'delivery_mode', \(bind: input.deliveryMode.rawValue),
                                            'membership_revision', 1,
-                                           'created_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))),
+                                           'created_at_ms', \(bind: createdAtMilliseconds)),
                         1, \(bind: now))
                 """).run()
             try await sql.raw("""
@@ -589,13 +598,18 @@ public struct PostgresV2GroupMessagingStore:
                       AND operation_id = \(bind: input.operationID)
                     """).run()
             }
-            return .created(try input.group(roomID: roomID, createdAt: now))
+            return .created(try input.group(roomID: roomID, createdAt: timestamp.createdAt))
         }
     }
 }
 
 public enum V2GroupMessagingStoreError: Error, Equatable, Sendable {
     case corruptPersistenceState
+}
+
+private struct GroupCommittedTimestampRow: Decodable {
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
 }
 
 private enum GroupCreationAudience: Sendable {
@@ -632,7 +646,7 @@ private struct GroupCreationInput: Sendable {
         case .staged, .stagedControlManifest:
             materializedMembers = [actorUserID]
         }
-        return .init(
+        return try .init(
             roomID: roomID,
             ownerUserID: actorUserID,
             title: title,
@@ -816,7 +830,7 @@ private struct GroupOperationRow: Decodable {
     }
 
     func group(ownerUserID: UserID) throws -> V2GroupRoom {
-        guard initialMemberCount > 0 else {
+        guard initialMemberCount > 0, v2PostgresTimestampCanEncode(createdAt) else {
             throw V2GroupMessagingStoreError.corruptPersistenceState
         }
         let materializedMembers: [UserID]
@@ -831,7 +845,7 @@ private struct GroupOperationRow: Decodable {
         default:
             throw V2GroupMessagingStoreError.corruptPersistenceState
         }
-        return .init(
+        return try .init(
             roomID: try .init(roomID.uuidString),
             ownerUserID: ownerUserID,
             title: title,

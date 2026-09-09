@@ -90,6 +90,8 @@ public enum V2GroupRoomCreationFlushResult: Equatable, Sendable {
 /// from membership mutations because there is no existing room revision to
 /// fence during the atomic bootstrap transaction.
 public actor V2GroupRoomCommandOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2GroupRoomCreationFlushResult>()
+
     private let store: any V2LocalGroupRoomCommandStore
     private let transport: any V2ClientGroupMessagingTransport
     private let makeUUID: @Sendable () -> UUID
@@ -125,6 +127,10 @@ public actor V2GroupRoomCommandOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2GroupRoomCreationFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2GroupRoomCreationFlushResult {
         if let cancellation = try await store.nextReadyGroupRoomCreationCancellation(now: now()) {
             do {
                 try await transport.cancelGroupRoomCreation(operationID: cancellation.operationID)
@@ -144,10 +150,10 @@ public actor V2GroupRoomCommandOutboxEngine {
                     preparedOperations.remove(cancellation.operationID)
                     return .cancellationRefused(cancellation.operationID)
                 }
-                try await store.scheduleGroupRoomCreationRetry(operationID: cancellation.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+                try await store.scheduleGroupRoomCreationRetry(operationID: cancellation.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
                 return .retryScheduled(cancellation.operationID)
             } catch {
-                try await store.scheduleGroupRoomCreationRetry(operationID: cancellation.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+                try await store.scheduleGroupRoomCreationRetry(operationID: cancellation.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
                 return .retryScheduled(cancellation.operationID)
             }
         }
@@ -205,11 +211,16 @@ public actor V2GroupRoomCommandOutboxEngine {
                 return .rejected(command.operationID, code: code)
             }
             let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }()
-            try await store.scheduleGroupRoomCreationRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(delay))
+            try await store.scheduleGroupRoomCreationRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay))
             return .retryScheduled(command.operationID)
         } catch {
-            try await store.scheduleGroupRoomCreationRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleGroupRoomCreationRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2GroupRoomCommandOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

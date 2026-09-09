@@ -3,28 +3,35 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+public enum V2LiveActivityConfigurationError: Error, Equatable, Sendable {
+    case invalidOnlineLease
+}
+
 public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     private let database: any Database
     private let onlineLease: TimeInterval
 
-    public init(database: any Database, onlineLease: TimeInterval = 90) {
-        precondition(onlineLease > 0)
+    public init(database: any Database, onlineLease: TimeInterval = 90) throws {
+        guard onlineLease > 0, Int64(exactly: (onlineLease * 1_000_000).rounded(.up)) != nil else {
+            throw V2LiveActivityConfigurationError.invalidOnlineLease
+        }
         self.database = database
         self.onlineLease = onlineLease
     }
 
     public func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome {
-        try await database.transaction { transaction in
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let actor = try liveActivityUUID(command.actorUserID), operation = try liveActivityUUID(command.operationID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actor.uuidString + ":" + operation.uuidString), 0))").run()
             if let prior = try await sql.raw("SELECT allows_online_presence, allows_typing_indicators, updated_at FROM im_v2.user_live_activity_preference_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)").first(decoding: LiveActivityPreferenceRow.self) {
                 guard prior.allowsOnlinePresence == command.allowsOnlinePresence, prior.allowsTypingIndicators == command.allowsTypingIndicators else { return .idempotencyConflict }
-                return .idempotent(prior.preferences)
+                return .idempotent(try prior.validatedPreferences())
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_live_activity_preferences (user_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_online_presence = EXCLUDED.allows_online_presence, allows_typing_indicators = EXCLUDED.allows_typing_indicators, updated_at = EXCLUDED.updated_at").run()
-            try await sql.raw("INSERT INTO im_v2.user_live_activity_preference_operations (actor_user_id, operation_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: operation), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now))").run()
-            return .updated(.init(allowsOnlinePresence: command.allowsOnlinePresence, allowsTypingIndicators: command.allowsTypingIndicators, updatedAt: now))
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_live_activity_preference_operations (actor_user_id, operation_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: operation), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now)) RETURNING allows_online_presence, allows_typing_indicators, updated_at").first(decoding: LiveActivityPreferenceRow.self) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            return .updated(try persisted.validatedPreferences())
         }
     }
 
@@ -32,11 +39,14 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
         let user = try liveActivityUUID(userID)
         let preference = try await sql.raw("SELECT allows_online_presence, allows_typing_indicators, updated_at FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityPreferenceRow.self)
-        return preference?.preferences ?? .init(allowsOnlinePresence: true, allowsTypingIndicators: true, updatedAt: now)
+        if let preference { return try preference.validatedPreferences() }
+        guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        return .init(allowsOnlinePresence: true, allowsTypingIndicators: true, updatedAt: now)
     }
 
     public func presence(roomID: RoomID, viewerUserID: UserID, now: Date) async throws -> V2PresenceState {
-        try await database.transaction { transaction in
+        guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let room = try liveActivityUUID(roomID), viewer = try liveActivityUUID(viewerUserID)
             guard let peer = try await sql.raw("SELECT CASE WHEN lower_user_id = \(bind: viewer) THEN higher_user_id ELSE lower_user_id END AS user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: room) AND (lower_user_id = \(bind: viewer) OR higher_user_id = \(bind: viewer))").first(decoding: LiveActivityUserRow.self) else { throw V2LiveActivityStoreError.notDirectRoom }
@@ -44,7 +54,9 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard !(try await usersAreBlocked(viewer, peer.userID, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
             let preference = try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: peer.userID)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
             let expiry = try await sql.raw("SELECT MAX(expires_at) AS expires_at FROM im_v2.user_live_presence_leases WHERE user_id = \(bind: peer.userID) AND expires_at > \(bind: now)").first(decoding: LiveActivityExpiryRow.self)?.expiresAt
-            return try .init(roomID: roomID, targetUserID: .init(peer.userID.uuidString), isOnline: preference && expiry != nil, expiresAt: preference ? (expiry ?? now) : now)
+            let responseExpiry = preference ? (expiry ?? now) : now
+            guard v2PostgresTimestampCanEncode(responseExpiry) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            return try .init(roomID: roomID, targetUserID: .init(peer.userID.uuidString), isOnline: preference && expiry != nil, expiresAt: responseExpiry)
         }
     }
 
@@ -80,13 +92,26 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
     }
 
+    private func validatedLeaseExpiry(now: Date) throws -> Date {
+        let expiry = now.addingTimeInterval(onlineLease)
+        // Wire truncation moves negative Unix timestamps toward the future.
+        // It cannot prove that the durable lease interval survived encoding.
+        guard v2PostgresTimestampPrecedes(now, expiry),
+              let milliseconds = try? v2GatewayMilliseconds(expiry),
+              Double(milliseconds) > now.timeIntervalSince1970 * 1_000 else {
+            throw V2LiveActivityStoreError.corruptPersistenceState
+        }
+        return expiry
+    }
+
     public func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
-        try await database.transaction { transaction in
+        let expiry = try validatedLeaseExpiry(now: now)
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2LiveActivityStoreError.corruptPersistenceState
             }
@@ -117,21 +142,20 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard counts.deviceCount < policy.maximumConnectionsPerDevice,
                   counts.userCount < policy.maximumConnectionsPerUser
             else { return .rejected }
-            let expiry = now.addingTimeInterval(onlineLease)
-            guard try await sql.raw("""
+            guard let admitted = try await sql.raw("""
                 INSERT INTO im_v2.user_live_presence_leases
                     (user_id, device_id, connection_id, expires_at, updated_at)
                 VALUES
                     (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now))
                 ON CONFLICT (connection_id) DO UPDATE
-                SET expires_at = EXCLUDED.expires_at,
-                    updated_at = EXCLUDED.updated_at
+                SET expires_at = GREATEST(im_v2.user_live_presence_leases.expires_at, EXCLUDED.expires_at),
+                    updated_at = GREATEST(im_v2.user_live_presence_leases.updated_at, EXCLUDED.updated_at)
                 WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
                   AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
-                RETURNING connection_id
-                """).first(decoding: LiveActivityConnectionIDRow.self) != nil
+                RETURNING expires_at
+                """).first(decoding: LiveActivityExpiryRow.self), let acceptedExpiry = admitted.expiresAt
             else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            return .accepted(expiresAt: expiry)
+            return .accepted(expiresAt: acceptedExpiry)
         }
     }
 
@@ -140,22 +164,24 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         connectionID: UUID,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
+        let expiry = try validatedLeaseExpiry(now: now)
         guard let sql = database as? any SQLDatabase else {
             throw V2LiveActivityStoreError.corruptPersistenceState
         }
         let user = try liveActivityUUID(identity.userID)
         let device = try liveActivityUUID(identity.deviceID)
-        let expiry = now.addingTimeInterval(onlineLease)
         let renewed = try await sql.raw("""
             UPDATE im_v2.user_live_presence_leases
-            SET expires_at = \(bind: expiry), updated_at = \(bind: now)
+            SET expires_at = GREATEST(expires_at, \(bind: expiry)), updated_at = GREATEST(updated_at, \(bind: now))
             WHERE connection_id = \(bind: connectionID)
               AND user_id = \(bind: user)
               AND device_id = \(bind: device)
               AND expires_at > \(bind: now)
-            RETURNING connection_id
-            """).first(decoding: LiveActivityConnectionIDRow.self)
-        return renewed == nil ? .rejected : .accepted(expiresAt: expiry)
+            RETURNING expires_at
+            """).first(decoding: LiveActivityExpiryRow.self)
+        guard let renewed else { return .rejected }
+        guard let acceptedExpiry = renewed.expiresAt else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        return .accepted(expiresAt: acceptedExpiry)
     }
 
     public func renewConnections(
@@ -170,42 +196,42 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         // caller races duplicate heartbeats, the newest observed time wins.
         var unique: [UUID: V2LivePresenceLeaseRenewalRequest] = [:]
         unique.reserveCapacity(requests.count)
+        var rejected: [UUID: V2LivePresenceLeaseRefresh] = [:]
         for request in requests {
-            if (unique[request.connectionID]?.now ?? .distantPast) <= request.now {
-                unique[request.connectionID] = request
+            guard (try? validatedLeaseExpiry(now: request.now)) != nil else {
+                rejected[request.connectionID] = .init(outcome: .rejected, allowsOnlinePresence: false)
+                continue
             }
+            if let previous = unique[request.connectionID], previous.now > request.now { continue }
+            unique[request.connectionID] = request
         }
+        guard !unique.isEmpty else { return rejected }
         let rows = try unique.values.map { request in
             LiveActivityLeaseRenewalInput(
                 connectionID: request.connectionID,
                 userID: try liveActivityUUID(request.identity.userID),
                 deviceID: try liveActivityUUID(request.identity.deviceID),
-                expiresAtUnixSeconds: request.now.addingTimeInterval(onlineLease).timeIntervalSince1970,
-                updatedAtUnixSeconds: request.now.timeIntervalSince1970
+                expiresAt: request.now.addingTimeInterval(onlineLease),
+                updatedAt: request.now
             )
         }
-        let encodedRows = try JSONEncoder().encode(rows)
-        guard let encodedRowsJSON = String(data: encodedRows, encoding: .utf8) else {
-            throw V2LiveActivityStoreError.corruptPersistenceState
-        }
+        // Native Date arrays use the same microsecond encoding as scalar
+        // renewals. Converting floating Unix seconds with to_timestamp can
+        // round across a lease's strict expiry boundary.
         let query: SQLQueryString = """
             WITH requested AS MATERIALIZED (
-                SELECT input.connection_id,
-                       input.user_id,
-                       input.device_id,
-                       to_timestamp(input.expires_at_unix_seconds) AS expires_at,
-                       to_timestamp(input.updated_at_unix_seconds) AS updated_at
-                FROM jsonb_to_recordset(\(bind: encodedRowsJSON)::jsonb) AS input(
-                    connection_id uuid,
-                    user_id uuid,
-                    device_id uuid,
-                    expires_at_unix_seconds double precision,
-                    updated_at_unix_seconds double precision
-                )
+                SELECT *
+                FROM unnest(
+                    \(bind: rows.map(\.connectionID))::uuid[],
+                    \(bind: rows.map(\.userID))::uuid[],
+                    \(bind: rows.map(\.deviceID))::uuid[],
+                    \(bind: rows.map(\.expiresAt))::timestamptz[],
+                    \(bind: rows.map(\.updatedAt))::timestamptz[]
+                ) AS input(connection_id, user_id, device_id, expires_at, updated_at)
             ), renewed AS (
                 UPDATE im_v2.user_live_presence_leases AS lease
-                SET expires_at = requested.expires_at,
-                    updated_at = requested.updated_at
+                SET expires_at = GREATEST(lease.expires_at, requested.expires_at),
+                    updated_at = GREATEST(lease.updated_at, requested.updated_at)
                 FROM requested
                 WHERE lease.connection_id = requested.connection_id
                   AND lease.user_id = requested.user_id
@@ -223,7 +249,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             """
 
         let resultRows = try await sql.raw(query).all(decoding: LiveActivityLeaseRefreshRow.self)
-        return Dictionary(uniqueKeysWithValues: resultRows.map { row in
+        let refreshed: [UUID: V2LivePresenceLeaseRefresh] = Dictionary(uniqueKeysWithValues: resultRows.map { row in
             let outcome: V2AuthenticatedConnectionLeaseOutcome = row.expiresAt.map {
                 .accepted(expiresAt: $0)
             } ?? .rejected
@@ -232,6 +258,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
                 .init(outcome: outcome, allowsOnlinePresence: row.allowsOnlinePresence)
             )
         })
+        return rejected.merging(refreshed) { _, valid in valid }
     }
 
     public func removePresence(
@@ -239,7 +266,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         connectionID: UUID,
         now: Date
     ) async throws -> Bool {
-        try await database.transaction { transaction in
+        guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let user = try liveActivityUUID(identity.userID)
             let device = try liveActivityUUID(identity.deviceID)
@@ -292,7 +320,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     }
 }
 
-private struct LiveActivityPreferenceRow: Decodable { let allowsOnlinePresence: Bool; let allowsTypingIndicators: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence", allowsTypingIndicators = "allows_typing_indicators", updatedAt = "updated_at" }; var preferences: V2LiveActivityPreferences { .init(allowsOnlinePresence: allowsOnlinePresence, allowsTypingIndicators: allowsTypingIndicators, updatedAt: updatedAt) } }
+private struct LiveActivityPreferenceRow: Decodable { let allowsOnlinePresence: Bool; let allowsTypingIndicators: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence", allowsTypingIndicators = "allows_typing_indicators", updatedAt = "updated_at" }; func validatedPreferences() throws -> V2LiveActivityPreferences { guard v2PostgresTimestampCanEncode(updatedAt) else { throw V2LiveActivityStoreError.corruptPersistenceState }; return .init(allowsOnlinePresence: allowsOnlinePresence, allowsTypingIndicators: allowsTypingIndicators, updatedAt: updatedAt) } }
 private struct LiveActivityLeaseRefreshRow: Decodable {
     let connectionID: UUID
     let expiresAt: Date?
@@ -303,19 +331,12 @@ private struct LiveActivityLeaseRefreshRow: Decodable {
         case allowsOnlinePresence = "allows_online_presence"
     }
 }
-private struct LiveActivityLeaseRenewalInput: Encodable {
+private struct LiveActivityLeaseRenewalInput {
     let connectionID: UUID
     let userID: UUID
     let deviceID: UUID
-    let expiresAtUnixSeconds: TimeInterval
-    let updatedAtUnixSeconds: TimeInterval
-    enum CodingKeys: String, CodingKey {
-        case connectionID = "connection_id"
-        case userID = "user_id"
-        case deviceID = "device_id"
-        case expiresAtUnixSeconds = "expires_at_unix_seconds"
-        case updatedAtUnixSeconds = "updated_at_unix_seconds"
-    }
+    let expiresAt: Date
+    let updatedAt: Date
 }
 private struct LiveActivityOnlinePreferenceRow: Decodable { let allowsOnlinePresence: Bool; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence" } }
 private struct LiveActivityTypingPreferenceRow: Decodable { let allowsTypingIndicators: Bool; enum CodingKeys: String, CodingKey { case allowsTypingIndicators = "allows_typing_indicators" } }

@@ -246,9 +246,8 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
                   case .messageAccepted(let response)? = envelope.body,
                   response.roomID == roomID.rawValue,
                   response.roomSequence > 0,
-                  response.mediaIds.isEmpty,
-                  response.mentionedUserIds.isEmpty,
-                  !response.mentionsEveryone,
+                  Int64(exactly: response.roomSequence) != nil,
+                  response.serverCreatedAtMs >= 0,
                   let messageID = try? MessageID(response.messageID)
             else { throw ProbeError.unexpectedResponse }
             finish(context: context, result: .success(.messageAccepted(roomID: roomID, messageID: messageID)), closeChannel: false)

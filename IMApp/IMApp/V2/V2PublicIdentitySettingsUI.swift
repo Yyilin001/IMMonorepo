@@ -120,18 +120,18 @@ final class V2PublicIdentitySettingsStore {
     /// Loads only a device-local copy obtained from the authenticated media
     /// edge, then decodes a bounded thumbnail away from MainActor. The view
     /// never retains the original compressed file or a full-resolution image.
-    func avatarPreviewImage() async -> UIImage? {
+    func avatarPreviewImage(cache: V2LocalMediaThumbnailCache) async -> UIImage? {
         do {
             let fileURL: URL
             if let stagedAvatar {
                 fileURL = stagedAvatar.fileURL
             } else if let currentAvatar, let mediaDownloader {
-                fileURL = try await mediaDownloader.download(.init(mediaID: currentAvatar.mediaID)).fileURL
+                fileURL = try await mediaDownloader.download(.init(mediaID: currentAvatar.mediaID), message: nil).fileURL
             } else {
                 return nil
             }
             try Task.checkCancellation()
-            let preview = await V2LocalMediaThumbnailCache.shared.thumbnail(
+            let preview = await cache.thumbnail(
                 fileURL: fileURL,
                 maximumPixelSize: 256
             )?.image
@@ -158,6 +158,7 @@ final class V2PublicIdentitySettingsStore {
 }
 
 struct V2PublicIdentitySettingsView: View {
+    @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
     @Bindable var store: V2PublicIdentitySettingsStore
     @State private var isImportingAvatar = false
     @State private var saveTask: Task<Void, Never>?
@@ -219,7 +220,8 @@ struct V2PublicIdentitySettingsView: View {
         .navigationTitle("我的资料")
         .task { await store.load() }
         .task(id: store.avatarPresentationKey) {
-            let preview = await store.avatarPreviewImage()
+            guard let thumbnailCache else { return }
+            let preview = await store.avatarPreviewImage(cache: thumbnailCache)
             guard !Task.isCancelled else { return }
             avatarPreviewImage = preview
         }

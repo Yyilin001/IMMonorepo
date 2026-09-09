@@ -47,7 +47,7 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
 /// server session and exchange it for a target; access tokens must stay inside
 /// that adapter rather than being copied into provider-target headers.
 public protocol V2ClientMediaDownloadTargetResolver: Sendable {
-    func resolveDownloadTarget(mediaID: MediaID) async throws -> V2ClientMediaTransferTarget
+    func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ClientMediaTransferTarget
 }
 
 /// The upload edge receives only validated metadata and returns a transient
@@ -129,7 +129,7 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
         self.transport = transport
     }
 
-    public func resolveDownloadTarget(mediaID: MediaID) async throws -> V2ClientMediaTransferTarget {
+    public func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation? = nil) async throws -> V2ClientMediaTransferTarget {
         try Task.checkCancellation()
         let edgeCredentials: V2ClientMediaEdgeCredentials
         do {
@@ -143,8 +143,17 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
               !edgeCredentials.accessToken.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
         else { throw V2ClientMediaTransferError.authorizationUnavailable }
 
+        guard var components = URLComponents(url: endpoint.appendingPathComponent(mediaID.rawValue, isDirectory: false), resolvingAgainstBaseURL: false) else {
+            throw V2ClientMediaTransferError.invalidMediaEdgeEndpoint
+        }
+        if let message {
+            components.queryItems = (components.queryItems ?? []).filter { $0.name != "room_id" && $0.name != "message_id" } + [
+                .init(name: "room_id", value: message.roomID.rawValue), .init(name: "message_id", value: message.messageID.rawValue)
+            ]
+        }
+        guard let requestURL = components.url else { throw V2ClientMediaTransferError.invalidMediaEdgeEndpoint }
         var request = URLRequest(
-            url: endpoint.appendingPathComponent(mediaID.rawValue, isDirectory: false),
+            url: requestURL,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
             timeoutInterval: 15
         )
@@ -442,10 +451,10 @@ public struct V2ClientMediaDownloadService: Sendable {
         self.now = now
     }
 
-    public func download(mediaID: MediaID, to destinationURL: URL) async throws {
+    public func download(mediaID: MediaID, message: V2MediaMessageLocation? = nil, to destinationURL: URL) async throws {
         let target: V2ClientMediaTransferTarget
         do {
-            target = try await targetResolver.resolveDownloadTarget(mediaID: mediaID)
+            target = try await targetResolver.resolveDownloadTarget(mediaID: mediaID, message: message)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as V2ClientMediaTransferError {
@@ -500,6 +509,7 @@ public struct V2ClientMediaUploadService: Sendable {
         contentType: String,
         byteCount: Int64
     ) async throws {
+        try Task.checkCancellation()
         guard byteCount > 0 else { throw V2ClientMediaTransferError.invalidUploadRequest }
         let target: V2ClientMediaTransferTarget
         do {
@@ -516,6 +526,7 @@ public struct V2ClientMediaUploadService: Sendable {
         } catch {
             throw V2ClientMediaTransferError.authorizationUnavailable
         }
+        try Task.checkCancellation()
         guard target.expiresAt > now(), target.expectedByteCount == byteCount else {
             if target.expiresAt > now() {
                 throw V2ClientMediaTransferError.byteCountMismatch
@@ -523,6 +534,7 @@ public struct V2ClientMediaUploadService: Sendable {
             throw V2ClientMediaTransferError.targetExpired
         }
         try await byteTransfer.upload(fileURL: fileURL, target: target)
+        try Task.checkCancellation()
         try await completer.completeUpload(mediaID: mediaID)
         try await awaitAvailability(of: mediaID)
     }
@@ -540,6 +552,7 @@ public struct V2ClientMediaUploadService: Sendable {
             } catch {
                 throw V2ClientMediaTransferError.networkFailure
             }
+            try Task.checkCancellation()
             switch state {
             case .available:
                 return

@@ -6,6 +6,13 @@ public enum V2SyncCycleResult: Equatable, Sendable {
     case resetPending(V2ClientResetRequired)
 }
 
+public struct V2IncrementalSyncResult: Equatable, Sendable {
+    public enum StopReason: Equatable, Sendable { case caughtUp, pageLimit, resetPending }
+    public let processedPageCount: Int
+    public let didCommitNewRecords: Bool
+    public let stopReason: StopReason
+}
+
 /// Owns the client sync state machine. The actor serializes pull/apply/ack so
 /// a reconnect cannot race a local transaction or ACK an unpersisted batch.
 public actor V2SyncEngine: V2SyncDriving {
@@ -13,19 +20,22 @@ public actor V2SyncEngine: V2SyncDriving {
     private let store: any V2LocalSyncStore
     private let maxRecords: Int
     private let capabilityProfile: String
+    private let operationGate: V2SyncOperationGate
     private var retiredSnapshotCleanupTask: Task<Void, Never>?
 
     public init(
         transport: any V2ClientSyncTransport,
         store: any V2LocalSyncStore,
         capabilityProfile: String,
-        maxRecords: Int = 500
+        maxRecords: Int = 500,
+        operationGate: V2SyncOperationGate = .init()
     ) {
         precondition(maxRecords > 0 && !capabilityProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         self.transport = transport
         self.store = store
         self.capabilityProfile = capabilityProfile
         self.maxRecords = maxRecords
+        self.operationGate = operationGate
     }
 
     deinit {
@@ -33,6 +43,38 @@ public actor V2SyncEngine: V2SyncDriving {
     }
 
     public func synchronizeOnce() async throws -> V2SyncCycleResult {
+        try await operationGate.run { try await self.performSyncCycle() }
+    }
+
+    /// Only incremental pages and their durable ACKs. Reset is recorded for
+    /// foreground recovery; this entry never downloads/imports a snapshot.
+    /// Callers own the deadline and cancellation of this bounded operation.
+    public func synchronizeIncrementally(maximumPages: Int) async throws -> V2IncrementalSyncResult {
+        precondition(maximumPages > 0)
+        var committed = false
+        for page in 1...maximumPages {
+            try Task.checkCancellation()
+            let (result, changed) = try await operationGate.run { try await self.performMeasuredSyncCycle() }
+            committed = committed || changed
+            switch result {
+            case .resetPending:
+                return .init(processedPageCount: page, didCommitNewRecords: committed, stopReason: .resetPending)
+            case .synchronized(_, hasMore: false):
+                return .init(processedPageCount: page, didCommitNewRecords: committed, stopReason: .caughtUp)
+            case .synchronized(_, hasMore: true): break
+            }
+        }
+        return .init(processedPageCount: maximumPages, didCommitNewRecords: committed, stopReason: .pageLimit)
+    }
+
+    private func performMeasuredSyncCycle() async throws -> (V2SyncCycleResult, Bool) {
+        let previous = try await store.cursor()?.appliedSequence ?? 0
+        let result = try await performSyncCycle()
+        guard case .synchronized(let sequence, _) = result else { return (result, false) }
+        return (result, sequence > previous)
+    }
+
+    private func performSyncCycle() async throws -> V2SyncCycleResult {
         try Task.checkCancellation()
         let cursorBeforePull = try await store.cursor()
         // A restart may happen after the server committed the snapshot ACK but
@@ -42,21 +84,25 @@ public actor V2SyncEngine: V2SyncDriving {
         if let cursorBeforePull, let reset = cursorBeforePull.pendingReset {
             return .resetPending(reset)
         }
+        let requireSnapshot = try await store.requiresSnapshotRebuild()
         let pull: V2ClientPullResult
         do {
             pull = try await transport.pull(
-                syncToken: cursorBeforePull?.syncToken,
-                maxRecords: maxRecords
+                syncToken: requireSnapshot ? nil : cursorBeforePull?.syncToken,
+                maxRecords: maxRecords,
+                requireSnapshot: requireSnapshot
             )
         } catch let error as V2RealtimeTransportError {
             guard case .server(code: "SYNC_TOKEN_INVALID", retryable: false, _, _) = error,
                   let cursorBeforePull
             else { throw error }
             try await store.discardSyncCapabilities(generation: cursorBeforePull.generation)
-            pull = try await transport.pull(syncToken: nil, maxRecords: maxRecords)
+            pull = try await transport.pull(syncToken: nil, maxRecords: maxRecords, requireSnapshot: requireSnapshot)
         }
+        try Task.checkCancellation()
         switch pull {
         case .ready(let batch):
+            guard !requireSnapshot else { throw V2ClientSyncError.snapshotRebuildRequired }
             guard batch.capabilityProfile == capabilityProfile else { throw V2ClientSyncError.unsupportedCapabilityProfile }
             let cursor = try await store.apply(batch)
             guard cursor.state == .ready else { throw V2ClientSyncError.resetPending }
@@ -88,6 +134,10 @@ public actor V2SyncEngine: V2SyncDriving {
     /// the live local projection is replaced, closing the otherwise unsafe
     /// activate-before-ACK crash window.
     public func completePendingReset() async throws {
+        try await operationGate.run { try await self.performPendingReset() }
+    }
+
+    private func performPendingReset() async throws {
         guard let cursor = try await store.cursor(), let reset = cursor.pendingReset else {
             throw V2ClientSyncError.noResetPending
         }

@@ -92,8 +92,8 @@ private actor ReceiptTransport: V2ClientReadReceiptTransport {
         received.append(operationID)
         switch results.removeFirst() {
         case .offline: throw V2RealtimeTransportError.unexpectedResponse
-        case .stale: return .init(roomID: roomID, userID: try! .init("00000000-0000-0000-0000-000000000983"), readThroughRoomSequence: readThroughRoomSequence - 1, recordedAt: .distantPast)
-        case .accepted: return .init(roomID: roomID, userID: try! .init("00000000-0000-0000-0000-000000000983"), readThroughRoomSequence: readThroughRoomSequence, recordedAt: .distantPast)
+        case .stale: return try .init(roomID: roomID, userID: try! .init("00000000-0000-0000-0000-000000000983"), readThroughRoomSequence: readThroughRoomSequence - 1, recordedAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, userID: try! .init("00000000-0000-0000-0000-000000000983"), readThroughRoomSequence: readThroughRoomSequence, recordedAt: .distantPast)
         }
     }
     func setReadReceiptPreferences(operationID _: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts _: Bool, allowsGroupReadReceipts _: Bool) throws -> V2ReadReceiptPreferences {

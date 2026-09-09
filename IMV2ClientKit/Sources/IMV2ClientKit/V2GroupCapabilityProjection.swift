@@ -36,9 +36,6 @@ public struct V2ClientGroupRolePolicy: Equatable, Sendable {
 /// fan-out, hybrid room-log pulls, and foreground previews.
 enum V2ClientGroupCapabilityProjection {
     struct Header: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
-    struct Pin: Decodable { let roomID: String; let messageID: String; let isPinned: Bool; let serverCreatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", isPinned = "is_pinned", serverCreatedAtMilliseconds = "server_created_at_ms" } }
-    struct Announcement: Decodable { let roomID: String; let body: String; let revision: UInt64; let serverCreatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case roomID = "room_id", body, revision, serverCreatedAtMilliseconds = "server_created_at_ms" } }
-    struct Permissions: Decodable { let roomID: String; let role: String; let permissions: [String]; let revision: UInt64; enum CodingKeys: String, CodingKey { case roomID = "room_id", role, permissions, revision } }
     struct MemberRole: Decodable { let roomID: String; let targetUserID: String; let role: String; let membershipRevision: UInt64; enum CodingKeys: String, CodingKey { case roomID = "room_id", targetUserID = "target_user_id", role, membershipRevision = "membership_revision" } }
 
     static func header(_ data: Data) throws -> Header { do { return try JSONDecoder().decode(Header.self, from: data) } catch { throw V2ClientProjectionError.invalidMessagePayload } }

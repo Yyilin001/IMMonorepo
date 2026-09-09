@@ -21,6 +21,17 @@ struct V2RoomMembershipDirectoryServiceTests {
         #expect(await store.request()?.pageSize == 2)
     }
 
+    @Test("returned membership revisions fit persistence", arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func returnedRevisionBounds(revision: UInt64) async throws {
+        let request = try V2RoomMembershipDirectoryRequest(roomID: .init("room"), actorUserID: .init("user"), cursor: nil, pageSize: 1)
+        let service = V2RoomMembershipDirectoryService(store: DirectoryRevisionStore(revision: revision))
+        if revision > UInt64(Int64.max) {
+            await #expect(throws: V2RoomMembershipDirectoryError.corruptPersistenceState) { try await service.list(request) }
+        } else {
+            #expect(try await service.list(request).membershipRevision == revision)
+        }
+    }
+
     @Test("rejects zero, oversized, and blank pagination inputs")
     func rejectsInvalidRequest() throws {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000801")
@@ -65,4 +76,11 @@ private actor DirectoryStoreSpy: V2RoomMembershipDirectoryStore {
     }
 
     func request() -> V2RoomMembershipDirectoryRequest? { captured }
+}
+
+private struct DirectoryRevisionStore: V2RoomMembershipDirectoryStore {
+    let revision: UInt64
+    func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
+        .init(roomID: request.roomID, membershipRevision: revision, actorRole: .owner, entries: [], nextCursor: nil)
+    }
 }

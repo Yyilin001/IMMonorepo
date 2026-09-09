@@ -23,6 +23,8 @@ public protocol V2LocalMessageEditStore: Sendable {
 public enum V2MessageEditFlushResult: Equatable, Sendable { case idle, acknowledged(MessageEditOperationID), retryScheduled(MessageEditOperationID), rejected(MessageEditOperationID, code: String) }
 
 public actor V2MessageEditOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2MessageEditFlushResult>()
+
     private let store: any V2LocalMessageEditStore; private let transport: any V2ClientMessageEditTransport
     private let makeUUID: @Sendable () -> UUID; private let now: @Sendable () -> Date; private let retryDelay: TimeInterval
     public init(store: any V2LocalMessageEditStore, transport: any V2ClientMessageEditTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) {
@@ -33,6 +35,10 @@ public actor V2MessageEditOutboxEngine {
         return try await store.enqueueOrReusePendingMessageEdit(command)
     }
     public func flushOnce() async throws -> V2MessageEditFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2MessageEditFlushResult {
         guard let command = try await store.nextReadyMessageEdit(now: now()) else { return .idle }
         do {
             let result = try await transport.editMessage(roomID: command.roomID, operationID: command.operationID, messageID: command.messageID, expectedMessageRevision: command.expectedMessageRevision, text: command.text)
@@ -47,7 +53,12 @@ public actor V2MessageEditOutboxEngine {
                 return .rejected(command.operationID, code: code)
             }
             let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }()
-            try await store.scheduleMessageEditRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(delay)); return .retryScheduled(command.operationID)
-        } catch { try await store.scheduleMessageEditRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(command.operationID) }
+            try await store.scheduleMessageEditRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(command.operationID)
+        } catch { try await store.scheduleMessageEditRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(command.operationID) }
     }
+}
+
+extension V2MessageEditOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

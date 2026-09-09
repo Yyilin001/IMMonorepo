@@ -114,4 +114,6 @@ private struct RefreshResponse: Encodable {
     let accessToken: String
     let accessTokenExpiresAtMilliseconds: Int64
     let refreshCredential: String
+    var revocationCredential = fixtureRevocationCredential
+    var revocationCredentialExpiresAtMilliseconds: Int64 = 4_102_444_800_000
 }

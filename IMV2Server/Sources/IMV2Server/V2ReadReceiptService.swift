@@ -201,6 +201,7 @@ public struct V2ReadReceiptService: Sendable {
 }
 
 public enum V2ReadReceiptStoreError: Error, Equatable, Sendable {
+    case ownerChanged
     case roomNotFound
     case messageNotFound
     case actorNotMember

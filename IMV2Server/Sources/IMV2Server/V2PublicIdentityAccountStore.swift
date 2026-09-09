@@ -95,7 +95,7 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
         }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase,
-                  let current = try await profile(sql: sql, userID: userUUID)
+                  let current = try await profile(sql: sql, userID: userUUID, forUpdate: true)
             else { throw V2PublicIdentityDirectoryError.unavailable }
             let validated: V2PublicIdentity
             do {
@@ -108,16 +108,24 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             } catch {
                 throw V2PublicIdentityDirectoryError.unavailable
             }
+            guard current.displayName != validated.displayName else { return current }
             let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt) else {
+                throw V2PublicIdentityDirectoryError.unavailable
+            }
             guard let updated = try await sql.raw("""
                 UPDATE im_v2.public_user_profiles
                 SET display_name = \(bind: validated.displayName), revision = revision + 1,
                     visibility_revision = visibility_revision + 1, updated_at = \(bind: changedAt)
                 WHERE user_id = \(bind: userUUID) AND state = 'active'
                   AND display_name IS DISTINCT FROM \(bind: validated.displayName)
+                  AND revision < \(bind: Int64.max)
+                  AND visibility_revision < \(bind: Int64.max)
                 RETURNING revision, updated_at
                 """).first(decoding: UpdatedPublicIdentityRow.self) else {
-                return current
+                // The row is locked and its name requires a change. A
+                // skipped update must not report the old identity as success.
+                throw V2PublicIdentityDirectoryError.unavailable
             }
             try await sql.raw("""
                 INSERT INTO im_v2.public_profile_update_outbox
@@ -132,7 +140,9 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
 
     private func consumeLookupBudget(sql: any SQLDatabase, actorUserID: UUID) async throws {
         let current = now()
-        let expiredBefore = current.addingTimeInterval(-policy.window)
+        guard let expiredBefore = v2PostgresPastTimestamp(now: current, interval: policy.window) else {
+            throw V2PublicIdentityDirectoryError.unavailable
+        }
         let saturatedCount = policy.maximumQueries + 1
         guard let row = try await sql.raw("""
             INSERT INTO im_v2.public_identity_lookup_rate_limits AS rate
@@ -154,15 +164,23 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             """).first(decoding: LookupRateLimitRow.self)
         else { throw V2PublicIdentityDirectoryError.unavailable }
         guard row.queryCount <= policy.maximumQueries else {
-            let elapsed = max(0, current.timeIntervalSince(row.windowStartedAt))
+            guard let retryAfter = v2RateLimitRetryAfterSeconds(
+                windowStartedAt: row.windowStartedAt, now: current, window: policy.window
+            ) else { throw V2PublicIdentityDirectoryError.unavailable }
             throw V2PublicIdentityDirectoryError.rateLimited(
-                retryAfterSeconds: max(1, Int(ceil(policy.window - elapsed)))
+                retryAfterSeconds: retryAfter
             )
         }
     }
 
-    private func profile(sql: any SQLDatabase, userID: UUID) async throws -> V2PublicIdentity? {
-        guard let row = try await sql.raw("SELECT user_id, public_handle, display_name, account_kind FROM im_v2.public_user_profiles WHERE user_id = \(bind: userID) AND state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID))").first(decoding: PublicIdentityRow.self),
+    private func profile(sql: any SQLDatabase, userID: UUID, forUpdate: Bool = false) async throws -> V2PublicIdentity? {
+        guard let row = try await sql.raw("""
+            SELECT user_id, public_handle, display_name, account_kind
+            FROM im_v2.public_user_profiles
+            WHERE user_id = \(bind: userID) AND state = 'active'
+              AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: userID))
+            \(unsafeRaw: forUpdate ? "FOR UPDATE" : "")
+            """).first(decoding: PublicIdentityRow.self),
               let profileUserID = try? UserID(row.userID.uuidString),
               let accountKind = V2AccountKind(rawValue: row.accountKind),
               let profile = try? V2PublicIdentity(
@@ -192,7 +210,7 @@ private struct PublicIdentityRow: Decodable {
 
 private struct UpdatedPublicIdentityRow: Decodable {
     let revision: Int64
-    let updatedAt: Date
+    let updatedAt: V2PostgresTimestamp
 
     enum CodingKeys: String, CodingKey {
         case revision
@@ -201,11 +219,11 @@ private struct UpdatedPublicIdentityRow: Decodable {
 }
 
 private struct LookupRateLimitRow: Decodable {
-    let windowStartedAt: Date
     let queryCount: Int
+    let windowStartedAt: V2PostgresTimestamp
 
     enum CodingKeys: String, CodingKey {
-        case windowStartedAt = "window_started_at"
         case queryCount = "query_count"
+        case windowStartedAt = "window_started_at"
     }
 }

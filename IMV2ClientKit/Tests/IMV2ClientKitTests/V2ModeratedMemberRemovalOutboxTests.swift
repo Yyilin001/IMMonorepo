@@ -69,7 +69,7 @@ private actor ScriptedRemovalTransport: V2ClientModeratedMemberRemovalTransport 
         received.append(operationID)
         switch results.removeFirst() {
         case .offline: throw V2RealtimeTransportError.unexpectedResponse
-        case .accepted: return .init(roomID: roomID, targetUserID: targetUserID, membershipRevision: 8, roomSequence: 9, createdAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, targetUserID: targetUserID, membershipRevision: 8, roomSequence: 9, createdAt: .distantPast)
         }
     }
 

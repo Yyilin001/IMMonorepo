@@ -5,25 +5,22 @@ import Vapor
 
 /// `POST /v2/account-auth/password/*` is deliberately a fallback surface.
 /// Both endpoints bind the returned assertion to the requested device, use
-/// `no-store`, and run bcrypt through Vapor's configured worker pool.
+/// `no-store`, and use the application-owned bounded password worker.
 public struct V2PasswordAccountRoutes: Sendable {
     private let store: any V2PasswordAccountStoring
     private let assertionIssuer: V2HMACAccountAssertionIssuer
-    private let dummyPasswordHash: String
+    private let passwords: any V2PasswordHashing
     private let loginAttemptLimiter: any V2PasswordLoginAttemptLimiting
 
-    /// `dummyPasswordHash` must be a valid bcrypt digest at the same cost as
-    /// the configured application password hasher. It equalizes unknown-handle
-    /// and wrong-password work without treating a missing account as success.
     public init(
         store: any V2PasswordAccountStoring,
         assertionIssuer: V2HMACAccountAssertionIssuer,
-        dummyPasswordHash: String,
+        passwords: any V2PasswordHashing,
         loginAttemptLimiter: any V2PasswordLoginAttemptLimiting
     ) {
         self.store = store
         self.assertionIssuer = assertionIssuer
-        self.dummyPasswordHash = dummyPasswordHash
+        self.passwords = passwords
         self.loginAttemptLimiter = loginAttemptLimiter
     }
 
@@ -34,7 +31,7 @@ public struct V2PasswordAccountRoutes: Sendable {
             do {
                 try validatePassword(input.password)
                 let registration = try validateRegistration(input)
-                let passwordHash = try await request.password.async.hash(input.password).get()
+                let passwordHash = try await passwords.hash(input.password)
                 let userID = try await store.register(
                     accountHandle: registration.accountHandle,
                     passwordHash: passwordHash,
@@ -51,6 +48,8 @@ public struct V2PasswordAccountRoutes: Sendable {
                 throw Abort(.badRequest)
             } catch V2PasswordAccountStoreError.invalidPublicIdentity {
                 throw Abort(.badRequest)
+            } catch V2PasswordHashError.busy {
+                return noStoreUnavailableResponse()
             } catch V2PasswordRouteError.invalidPassword {
                 throw Abort(.badRequest)
             } catch let abort as Abort {
@@ -72,8 +71,8 @@ public struct V2PasswordAccountRoutes: Sendable {
                     return noStoreRetryAfterResponse(seconds: retryAfter)
                 }
                 let credential = try await store.passwordCredential(for: input.accountHandle)
-                let candidateHash = credential?.passwordHash ?? dummyPasswordHash
-                let matches = try await request.password.async.verify(input.password, created: candidateHash).get()
+                let candidateHash = credential?.passwordHash ?? V2PasswordHashPolicy.dummyDigest
+                let matches = try await passwords.verify(input.password, created: candidateHash)
                 guard let credential, matches else {
                     try await loginAttemptLimiter.recordRejectedAttempt(
                         accountHandle: input.accountHandle,
@@ -82,16 +81,17 @@ public struct V2PasswordAccountRoutes: Sendable {
                     )
                     throw V2PasswordRouteError.rejected
                 }
-                try await loginAttemptLimiter.recordSuccessfulAttempt(
-                    accountHandle: input.accountHandle,
-                    userID: credential.userID,
-                    deviceID: deviceID
-                )
+                guard try await store.completeAuthentication(accountHandle: input.accountHandle,
+                    expected: credential, deviceID: deviceID) else {
+                    throw V2PasswordRouteError.rejected
+                }
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: credential.userID, deviceID: deviceID)))
             } catch V2PasswordRouteError.rejected {
                 throw Abort(.unauthorized)
             } catch V2PasswordAccountStoreError.invalidAccountHandle {
                 throw Abort(.badRequest)
+            } catch V2PasswordHashError.busy {
+                return noStoreUnavailableResponse()
             } catch V2PasswordRouteError.invalidPassword {
                 throw Abort(.badRequest)
             } catch {
@@ -106,7 +106,7 @@ public struct V2PasswordAccountRoutes: Sendable {
     }
 
     private func validatePassword(_ password: String) throws {
-        guard password.utf8.count >= 12, password.utf8.count <= 1_024 else { throw V2PasswordRouteError.invalidPassword }
+        guard V2PasswordHashPolicy.accepts(password) else { throw V2PasswordRouteError.invalidPassword }
     }
 
     private func validateRegistration(
@@ -136,6 +136,14 @@ public struct V2PasswordAccountRoutes: Sendable {
         headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         headers.replaceOrAdd(name: "Pragma", value: "no-cache")
         return .init(status: .ok, headers: headers, body: .init(data: data))
+    }
+
+    private func noStoreUnavailableResponse() -> Response {
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        headers.replaceOrAdd(name: "Retry-After", value: "1")
+        return .init(status: .serviceUnavailable, headers: headers)
     }
 
     private func noStoreRetryAfterResponse(seconds: Int) -> Response {

@@ -26,6 +26,23 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                 throw V2DurableWorkReplayStoreError.corruptPersistenceState
             }
 
+            func priorResult() async throws -> V2DurableWorkReplayResult? {
+                guard let prior = try await sql.raw("""
+                    SELECT operation_id, target_kind, source_event_id, target_user_id,
+                           projection_kind, reason_code, outcome
+                    FROM im_v2.durable_work_replay_audit
+                    WHERE operation_id = \(bind: command.operationID)
+                    FOR UPDATE
+                    """).first(decoding: DurableWorkReplayAuditRow.self)
+                else { return nil }
+                guard prior.matches(command, sourceEventID: sourceEventID, targetUserID: targetUserID),
+                      let outcome = V2DurableWorkReplayOutcome(rawValue: prior.outcome)
+                else { throw V2DurableWorkReplayStoreError.idempotencyConflict }
+                return .init(operationID: command.operationID, outcome: outcome, wasIdempotent: true)
+            }
+            if let prior = try await priorResult() { return prior }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2DurableWorkReplayStoreError.corruptPersistenceState }
+
             let inserted = try await sql.raw("""
                 INSERT INTO im_v2.durable_work_replay_audit
                     (operation_id, operator_principal, target_kind, source_event_id,
@@ -38,18 +55,8 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                 """).first(decoding: ReplayInsertRow.self) != nil
 
             if !inserted {
-                guard let prior = try await sql.raw("""
-                    SELECT operation_id, target_kind, source_event_id, target_user_id,
-                           projection_kind, reason_code, outcome
-                    FROM im_v2.durable_work_replay_audit
-                    WHERE operation_id = \(bind: command.operationID)
-                    FOR UPDATE
-                    """).first(decoding: DurableWorkReplayAuditRow.self)
-                else { throw V2DurableWorkReplayStoreError.corruptPersistenceState }
-                guard prior.matches(command, sourceEventID: sourceEventID, targetUserID: targetUserID),
-                      let outcome = V2DurableWorkReplayOutcome(rawValue: prior.outcome)
-                else { throw V2DurableWorkReplayStoreError.idempotencyConflict }
-                return .init(operationID: command.operationID, outcome: outcome, wasIdempotent: true)
+                guard let prior = try await priorResult() else { throw V2DurableWorkReplayStoreError.corruptPersistenceState }
+                return prior
             }
 
             let didRequeue: Bool

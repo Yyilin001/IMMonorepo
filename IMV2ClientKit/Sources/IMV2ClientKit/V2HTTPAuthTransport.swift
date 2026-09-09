@@ -88,6 +88,8 @@ public struct V2HTTPDeviceCredentialAuthTransport: V2AuthTransport, Sendable {
             (data, response) = try await transport.data(for: urlRequest)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as V2HTTPAuthTransportError {
             throw error
         } catch {
@@ -107,7 +109,9 @@ public struct V2HTTPDeviceCredentialAuthTransport: V2AuthTransport, Sendable {
                 deviceID: .init(body.deviceID),
                 accessToken: body.accessToken,
                 accessTokenExpiresAt: Date(timeIntervalSince1970: Double(body.accessTokenExpiresAtMilliseconds) / 1_000),
-                refreshCredential: body.refreshCredential
+                refreshCredential: body.refreshCredential,
+                revocationCredential: body.revocationCredential,
+                revocationCredentialExpiresAt: Date(timeIntervalSince1970: Double(body.revocationCredentialExpiresAtMilliseconds) / 1_000)
             )
         } catch let error as V2AuthSessionError {
             throw error
@@ -129,12 +133,14 @@ private struct V2DeviceCredentialRefreshHTTPBody: Encodable {
     let userID: String
     let deviceID: String
     let refreshCredential: String
+    let revocationCredential: V2DeviceRevocationCredential
     let operationID: UUID
 
     init(request: V2RefreshRequest) {
         userID = request.userID.rawValue
         deviceID = request.deviceID.rawValue
         refreshCredential = request.refreshCredential
+        revocationCredential = request.revocationCredential
         operationID = request.operationID
     }
 }
@@ -145,4 +151,6 @@ private struct V2DeviceCredentialRefreshHTTPResponse: Decodable {
     let accessToken: String
     let accessTokenExpiresAtMilliseconds: Int64
     let refreshCredential: String
+    let revocationCredential: V2DeviceRevocationCredential
+    let revocationCredentialExpiresAtMilliseconds: Int64
 }

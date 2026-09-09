@@ -5,6 +5,29 @@ import Testing
 
 @Suite("V2 APNs Push wake provider")
 struct V2APNSPushWakeProviderTests {
+    @Test("JWT timestamps reject overflow and nonfinite clocks", arguments: [
+        Double(Int64.max), Double.infinity, -Double.infinity, Double.nan, -1.0
+    ])
+    func rejectsUnrepresentableTimestamp(seconds: Double) throws {
+        let authorizer = try V2APNSJWTAuthorizer(teamID: "TEST", keyID: "TEST", privateKeyRawBase64: Data(repeating: 1, count: 32).base64EncodedString())
+        #expect(throws: V2APNSPushProviderError.invalidConfiguration) {
+            try authorizer.authorizationValue(now: Date(timeIntervalSince1970: seconds))
+        }
+    }
+
+    @Test("JWT issuance retains integral seconds", arguments: [0.0, 42.75, 1_750_000_000.999])
+    func preservesTimestamp(seconds: Double) throws {
+        let authorizer = try V2APNSJWTAuthorizer(teamID: "TEST", keyID: "TEST", privateKeyRawBase64: Data(repeating: 1, count: 32).base64EncodedString())
+        let token = try authorizer.authorizationValue(now: Date(timeIntervalSince1970: seconds))
+        let components = token.split(separator: ".")
+        #expect(components.count == 3)
+        var payload = String(components[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        let data = try #require(Data(base64Encoded: payload))
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect((json["iat"] as? NSNumber)?.int64Value == Int64(seconds))
+    }
+
     @Test("missing endpoint terminally suppresses a generic wake without an HTTP request")
     func missingEndpointSuppresses() async throws {
         let endpoints = RecordingEndpointStore(endpoint: nil)

@@ -4,7 +4,8 @@ import Foundation
 /// lanes. Each lane gets one quantum per round, so a retrying or heavily
 /// backlogged low-priority lane cannot indefinitely delay withdrawal,
 /// moderation, membership or receipt actions.
-public struct V2FairDurableCommandScheduler: Sendable {
+public actor V2FairDurableCommandScheduler: V2CommandFlushControlling {
+    private let flight = V2CommandFlushFlight<Int>()
     public struct Lane: Sendable {
         public let flushOne: @Sendable () async throws -> Bool
 
@@ -16,6 +17,7 @@ public struct V2FairDurableCommandScheduler: Sendable {
     }
 
     private let lanes: [Lane]
+    private var nextLaneIndex = 0
 
     public init(lanes: [Lane]) {
         precondition(!lanes.isEmpty)
@@ -25,12 +27,24 @@ public struct V2FairDurableCommandScheduler: Sendable {
     @discardableResult
     public func flush(maximumWorkItems: Int) async throws -> Int {
         precondition(maximumWorkItems > 0)
+        return try await flight.run { try await self.flushBatch(maximumWorkItems: maximumWorkItems) }
+    }
+
+    public func suspendCommandFlushing() async { await flight.suspend() }
+    public func resumeCommandFlushing() async { await flight.resume() }
+
+    private func flushBatch(maximumWorkItems: Int) async throws -> Int {
         var remaining = maximumWorkItems
         var completed = 0
         while remaining > 0 {
             var madeProgress = false
-            for lane in lanes where remaining > 0 {
+            for _ in lanes.indices {
+                guard remaining > 0 else { break }
                 try Task.checkCancellation()
+                let lane = lanes[nextLaneIndex]
+                // A bounded batch may end in the middle of a round. Keep
+                // the next position so repeated small batches remain fair.
+                nextLaneIndex = (nextLaneIndex + 1) % lanes.count
                 guard try await lane.flushOne() else { continue }
                 madeProgress = true
                 completed += 1

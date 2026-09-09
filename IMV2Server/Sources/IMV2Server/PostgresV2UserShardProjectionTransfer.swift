@@ -18,6 +18,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private let pageSize: Int
     private let payloadPageSize: Int
     private let fenceLifetime: TimeInterval
+    private let now: @Sendable () -> Date
 
     public init(
         source: any Database,
@@ -27,14 +28,15 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         sourceSchema: String = "im_v2",
         targetSchema: String = "im_v2",
         pageSize: Int = 1_000,
-        fenceLifetime: TimeInterval = 120
+        fenceLifetime: TimeInterval = 120,
+        now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         let normalizedSource = sourceBucket.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedTarget = targetBucket.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSource.isEmpty, !normalizedTarget.isEmpty,
               normalizedSource != normalizedTarget,
               Self.validSchema(sourceSchema), Self.validSchema(targetSchema),
-              (1 ... 1_000).contains(pageSize), fenceLifetime >= 30
+              (1 ... 1_000).contains(pageSize), fenceLifetime.isFinite, fenceLifetime >= 30
         else { throw V2UserShardProjectionTransferError.invalidConfiguration }
         self.source = source; self.target = target
         self.sourceBucket = normalizedSource; self.targetBucket = normalizedTarget
@@ -44,6 +46,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         // transfer batch bounded independently of the caller's row page size.
         payloadPageSize = min(pageSize, 64)
         self.fenceLifetime = fenceLifetime
+        self.now = now
     }
 
     public func copy(_ record: V2UserShardMigrationRecord) async throws {
@@ -181,7 +184,10 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     // MARK: - Fencing
 
     private func acquireFence(database: any Database, schema: String, userID: UUID, token: UUID) async throws {
-        let expiresAt = Date().addingTimeInterval(fenceLifetime)
+        let acquiredAt = try currentTimestamp()
+        guard let expiresAt = v2PostgresFutureTimestamp(now: acquiredAt, interval: fenceLifetime) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -190,22 +196,30 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 INSERT INTO \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema))
                     (user_id, projected_sequence, migration_fence_token,
                      migration_fence_expires_at, updated_at)
-                VALUES (\(bind: userID), 0, \(bind: token), \(bind: expiresAt), \(bind: Date()))
+                VALUES (\(bind: userID), 0, \(bind: token), \(bind: expiresAt), \(bind: acquiredAt))
                 ON CONFLICT (user_id) DO UPDATE SET
                     migration_fence_token = EXCLUDED.migration_fence_token,
-                    migration_fence_expires_at = EXCLUDED.migration_fence_expires_at
+                    migration_fence_expires_at = GREATEST(
+                        \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema)).migration_fence_expires_at,
+                        EXCLUDED.migration_fence_expires_at
+                    )
                 WHERE \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema)).migration_fence_token IS NULL
                    OR \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema)).migration_fence_expires_at <= now()
                    OR \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema)).migration_fence_token = EXCLUDED.migration_fence_token
                 """).run()
-            guard let fence = try await sql.raw("""
-                SELECT migration_fence_token, migration_fence_expires_at
+            // Workers evaluate the fence against database time. A lagging
+            // application clock must not authorize copying under a lease
+            // those workers already consider expired.
+            let fence = try await sql.raw("""
+                SELECT migration_fence_token, migration_fence_expires_at,
+                       COALESCE(migration_fence_expires_at > clock_timestamp(), FALSE) AS is_live
                 FROM \(unsafeRaw: qualifiedTable("user_projection_checkpoints", schema: schema))
                 WHERE user_id = \(bind: userID)
                 FOR UPDATE
-                """).first(decoding: ProjectionFenceRow.self),
-                let fenceExpiry = fence.expiresAt,
-                fence.token == token, fenceExpiry > Date()
+                """).first(decoding: ProjectionFenceRow.self)
+            let observedAt = try currentTimestamp()
+            guard let fence, let fenceExpiry = fence.expiresAt,
+                  fence.token == token, fence.isLive, fenceExpiry > observedAt
             else { throw V2UserShardProjectionTransferError.migrationFenceConflict }
             // An in-flight builder will fail its lease check before appending;
             // a new builder observes the checkpoint fence and skips this user.
@@ -410,12 +424,13 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
             if let sequence, let checkpoint,
                checkpoint.state == "ready",
                checkpoint.projectedSequence < sequence.nextSequence {
+                let updatedAt = try currentTimestamp()
                 let availableAt = checkpoint.nextAttemptAt ?? checkpoint.updatedAt
                 try await sql.raw("""
                     INSERT INTO \(unsafeRaw: targetTable("user_projection_ready"))
                         (user_id, available_at, enqueued_at, updated_at)
                     VALUES (\(bind: userID), \(bind: availableAt),
-                            \(bind: checkpoint.updatedAt), \(bind: Date()))
+                            \(bind: checkpoint.updatedAt), \(bind: updatedAt))
                     ON CONFLICT (user_id) DO UPDATE
                     SET available_at = EXCLUDED.available_at,
                         enqueued_at = EXCLUDED.enqueued_at,
@@ -457,7 +472,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                        CASE WHEN log.payload_storage = 'inline' THEN log.payload
                             ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json,
                        shared.payload::text AS shared_payload_json,
-                       log.payload_storage, shared.message_state_id, log.created_at
+                       log.payload_storage, shared.message_state_id, log.created_at, shared.created_at AS shared_created_at
                 FROM \(unsafeRaw: sourceTable("user_sync_log")) AS log
                 LEFT JOIN \(unsafeRaw: sourceTable("fanout_sync_payloads")) AS shared
                   ON shared.source_event_id = log.source_event_id
@@ -473,7 +488,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                 let shared = rows.filter { $0.payloadStorage == "fanout_shared" }
                 if !shared.isEmpty {
                     var query: SQLQueryString = "INSERT INTO \(unsafeRaw: targetTable("fanout_sync_payloads")) (source_event_id, projection_kind, payload, message_state_id, created_at) VALUES "
-                    query += shared.map { "(\(bind: $0.sourceEventID), \(bind: $0.projectionKind), \(bind: $0.sharedPayloadJSON)::jsonb, \(bind: $0.messageStateID), \(bind: $0.createdAt))" }.joined(separator: ",")
+                    query += shared.map { "(\(bind: $0.sourceEventID), \(bind: $0.projectionKind), \(bind: $0.sharedPayloadJSON)::jsonb, \(bind: $0.messageStateID), \(bind: $0.sharedCreatedAt))" }.joined(separator: ",")
                     query += " ON CONFLICT (source_event_id, projection_kind) DO UPDATE SET message_state_id = COALESCE(\(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id, EXCLUDED.message_state_id) WHERE \(unsafeRaw: targetTable("fanout_sync_payloads")).payload IS NOT DISTINCT FROM EXCLUDED.payload AND (\(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id IS NULL OR \(unsafeRaw: targetTable("fanout_sync_payloads")).message_state_id = EXCLUDED.message_state_id)"
                     try await sql.raw(query).run()
                 }
@@ -533,7 +548,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
                     // `persist` is intentionally insert-and-verify: an
                     // interrupted migration can retry, while an immutable
                     // state collision stops the cutover.
-                    try await targetRepository.persist(row.value, sql: sql)
+                    try await targetRepository.persist(row.value, persistedCreatedAt: row.createdAt, sql: sql)
                 }
             }
             after = rows.last?.stateID
@@ -728,6 +743,9 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
         userID: UUID,
         token: UUID
     ) async throws -> String {
+        // Forwarding may apply the same record at different local times.
+        // Inbox/log/checkpoint processing timestamps are copied faithfully,
+        // but do not determine equality of canonical data and sync deadlines.
         var hasher = SHA256(); var hasLine = false
         func append(_ line: String) {
             if hasLine { hasher.update(data: Data([0x0A])) }
@@ -781,7 +799,7 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
     private func fingerprintLog(sql: any SQLDatabase, schema: String, userID: UUID, renew: () async throws -> Void, append: (String) -> Void) async throws {
         var after: Int64 = 0
         while true {
-            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json, shared.payload::text AS shared_payload_json, log.payload_storage, shared.message_state_id, log.created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_state_values", schema: schema)) AS state ON state.state_id = shared.message_state_id WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
+            let rows = try await sql.raw("SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind, CASE WHEN log.payload_storage = 'inline' THEN log.payload ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json, shared.payload::text AS shared_payload_json, log.payload_storage, shared.message_state_id, log.created_at, shared.created_at AS shared_created_at FROM \(unsafeRaw: qualifiedTable("user_sync_log", schema: schema)) AS log LEFT JOIN \(unsafeRaw: qualifiedTable("fanout_sync_payloads", schema: schema)) AS shared ON shared.source_event_id = log.source_event_id AND shared.projection_kind = log.projection_kind LEFT JOIN \(unsafeRaw: qualifiedTable("message_projection_state_values", schema: schema)) AS state ON state.state_id = shared.message_state_id WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > \(bind: after) ORDER BY log.user_sync_sequence LIMIT \(bind: payloadPageSize)").all(decoding: ProjectionSyncLogRow.self)
             guard !rows.isEmpty else { return }; rows.forEach { append($0.line) }; after = rows[rows.count - 1].sequence
             try await renew()
         }
@@ -940,6 +958,14 @@ public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying
             throw V2UserShardProjectionTransferError.routeMismatch
         }
     }
+    private func currentTimestamp() throws -> Date {
+        let value = now()
+        guard v2PostgresTimestampCanEncode(value) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return value
+    }
+
     private func sourceTable(_ name: String) -> String { "\(sourceSchema).\(name)" }
     private func targetTable(_ name: String) -> String { "\(targetSchema).\(name)" }
     private func qualifiedTable(_ name: String, schema: String) -> String { "\(schema).\(name)" }
@@ -954,11 +980,18 @@ public enum V2UserShardProjectionTransferError: Error, Equatable, Sendable {
 
 private protocol ProjectionFingerprintRow: Decodable { var line: String { get } }
 private protocol ProjectionStringKeyedRow: ProjectionFingerprintRow { var stringKey: String { get } }
-private struct ProjectionFenceRow: Decodable { let token: UUID?; let expiresAt: Date?; enum CodingKeys: String, CodingKey { case token = "migration_fence_token", expiresAt = "migration_fence_expires_at" } }
+private struct ProjectionFenceRow: Decodable {
+    let token: UUID?
+    let expiresAt: Date?
+    let isLive: Bool
+    enum CodingKeys: String, CodingKey {
+        case token = "migration_fence_token", expiresAt = "migration_fence_expires_at", isLive = "is_live"
+    }
+}
 private struct ProjectionSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
 private struct ProjectionRetentionRow: Decodable {
     let compactedThroughSequence: Int64
-    let updatedAt: Date
+    let updatedAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case compactedThroughSequence = "compacted_through_sequence"
         case updatedAt = "updated_at"
@@ -970,10 +1003,10 @@ private struct ProjectionCheckpointRow: Decodable {
     let state: String
     let failureCount: Int64
     let failedSequence: Int64?
-    let nextAttemptAt: Date?
+    let nextAttemptAt: V2PostgresTimestamp?
     let lastFailureCode: String?
-    let pausedAt: Date?
-    let updatedAt: Date
+    let pausedAt: V2PostgresTimestamp?
+    let updatedAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case projectedSequence = "projected_sequence", state
         case failureCount = "failure_count", failedSequence = "failed_sequence"
@@ -985,20 +1018,22 @@ private struct ProjectionCheckpointRow: Decodable {
     }
 }
 private struct ProjectionInboxKey { let consumerName: String; let sourceEventID: UUID; let projectionKind: String }
-private struct ProjectionInboxRow: ProjectionFingerprintRow { let consumerName: String; let sourceEventID: UUID; let targetUserID: UUID; let projectionKind: String; let committedAt: Date; let userSyncSequence: Int64?; enum CodingKeys: String, CodingKey { case consumerName = "consumer_name", sourceEventID = "source_event_id", targetUserID = "target_user_id", projectionKind = "projection_kind", committedAt = "committed_at", userSyncSequence = "user_sync_sequence" }; var line: String { "inbox|\(consumerName)|\(sourceEventID)|\(targetUserID)|\(projectionKind)|\(projectionOptional(userSyncSequence))" } }
+private struct ProjectionInboxRow: ProjectionFingerprintRow { let consumerName: String; let sourceEventID: UUID; let targetUserID: UUID; let projectionKind: String; let committedAt: V2PostgresTimestamp; let userSyncSequence: Int64?; enum CodingKeys: String, CodingKey { case consumerName = "consumer_name", sourceEventID = "source_event_id", targetUserID = "target_user_id", projectionKind = "projection_kind", committedAt = "committed_at", userSyncSequence = "user_sync_sequence" }; var line: String { "inbox|\(consumerName)|\(sourceEventID)|\(targetUserID)|\(projectionKind)|\(projectionOptional(userSyncSequence))" } }
 private struct ProjectionSyncLogRow: ProjectionFingerprintRow {
     let sequence: Int64
     let sourceEventID: UUID
     let projectionKind: String
     let payloadJSON: String
     let sharedPayloadJSON: String?
+    let sharedCreatedAt: V2PostgresTimestamp?
     let payloadStorage: String
     let messageStateID: UUID?
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence", sourceEventID = "source_event_id"
         case projectionKind = "projection_kind", payloadJSON = "payload_json"
         case sharedPayloadJSON = "shared_payload_json"
+        case sharedCreatedAt = "shared_created_at"
         case payloadStorage = "payload_storage", messageStateID = "message_state_id"
         case createdAt = "created_at"
     }
@@ -1007,7 +1042,7 @@ private struct ProjectionSyncLogRow: ProjectionFingerprintRow {
     }
 }
 private struct ProjectionEffectKey { let sourceEventID: UUID; let projectionKind: String }
-private struct ProjectionEffectRow: ProjectionFingerprintRow { let sourceEventID: UUID; let projectionKind: String; let sequence: Int64; let payloadJSON: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", projectionKind = "projection_kind", sequence = "user_sync_sequence", payloadJSON = "payload_json", createdAt = "created_at" }; var line: String { "effect|\(sourceEventID)|\(projectionKind)|\(sequence)|\(payloadJSON)" } }
+private struct ProjectionEffectRow: ProjectionFingerprintRow { let sourceEventID: UUID; let projectionKind: String; let sequence: Int64; let payloadJSON: String; let createdAt: V2PostgresTimestamp; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", projectionKind = "projection_kind", sequence = "user_sync_sequence", payloadJSON = "payload_json", createdAt = "created_at" }; var line: String { "effect|\(sourceEventID)|\(projectionKind)|\(sequence)|\(payloadJSON)" } }
 private struct ProjectionVersionKey { let kind: String; let key: String; let sequence: Int64 }
 private struct ProjectionVersionRow: ProjectionFingerprintRow {
     let kind: String
@@ -1018,7 +1053,7 @@ private struct ProjectionVersionRow: ProjectionFingerprintRow {
     let sourceEventID: UUID
     let messageStateID: UUID?
     let payloadJSON: String?
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case kind = "projection_kind", key = "entity_key", roomID = "scope_room_id"
         case validFrom = "valid_from_sequence", validTo = "valid_to_sequence"
@@ -1040,7 +1075,7 @@ private struct ProjectionMessageStateRow: Decodable {
     let isWithdrawn: Bool
     let payloadSchemaVersion: Int16
     let payloadJSON: String
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case stateID = "state_id", messageID = "message_id", roomID = "room_id"
         case messageRevision = "message_revision", variantKey = "variant_key"
@@ -1054,18 +1089,18 @@ private struct ProjectionMessageStateRow: Decodable {
             messageRevision: messageRevision, variantKey: variantKey,
             originEventID: originEventID, stateEventID: stateEventID,
             isWithdrawn: isWithdrawn, payloadSchemaVersion: payloadSchemaVersion,
-            payloadJSON: payloadJSON, createdAt: createdAt
+            payloadJSON: payloadJSON, createdAt: createdAt.date
         )
     }
 }
-private struct ProjectionArtifactRow: ProjectionFingerprintRow { let snapshotID: UUID; let userID: UUID; let baseSequence: Int64; let projectedSequence: Int64; let schemaVersion: Int32; let capabilityProfile: String; let state: String; let afterKind: String?; let afterKey: String?; let nextPageIndex: Int; let rollingDigest: String; let rootDigest: String?; let pageCount: Int?; let itemCount: Int64; let totalBytes: Int64; let expiresAt: Date; let failureCode: String?; let createdAt: Date; let publishedAt: Date?; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", userID = "user_id", baseSequence = "base_user_sync_sequence", projectedSequence = "source_projected_sequence", schemaVersion = "schema_version", capabilityProfile = "capability_profile", state, afterKind = "after_projection_kind", afterKey = "after_entity_key", nextPageIndex = "next_page_index", rollingDigest = "rolling_digest", rootDigest = "root_digest", pageCount = "page_count", itemCount = "item_count", totalBytes = "total_bytes", expiresAt = "expires_at", failureCode = "failure_code", createdAt = "created_at", publishedAt = "published_at" }; var line: String { "artifact|\(snapshotID)|\(userID)|\(baseSequence)|\(projectedSequence)|\(schemaVersion)|\(capabilityProfile)|\(state)|\(projectionOptional(afterKind))|\(projectionOptional(afterKey))|\(nextPageIndex)|\(rollingDigest)|\(projectionOptional(rootDigest))|\(projectionOptional(pageCount))|\(itemCount)|\(totalBytes)|\(projectionDate(expiresAt))|\(projectionOptional(failureCode))|\(projectionDate(createdAt))|\(projectionOptionalDate(publishedAt))" } }
+private struct ProjectionArtifactRow: ProjectionFingerprintRow { let snapshotID: UUID; let userID: UUID; let baseSequence: Int64; let projectedSequence: Int64; let schemaVersion: Int32; let capabilityProfile: String; let state: String; let afterKind: String?; let afterKey: String?; let nextPageIndex: Int; let rollingDigest: String; let rootDigest: String?; let pageCount: Int?; let itemCount: Int64; let totalBytes: Int64; let expiresAt: V2PostgresTimestamp; let failureCode: String?; let createdAt: V2PostgresTimestamp; let publishedAt: V2PostgresTimestamp?; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", userID = "user_id", baseSequence = "base_user_sync_sequence", projectedSequence = "source_projected_sequence", schemaVersion = "schema_version", capabilityProfile = "capability_profile", state, afterKind = "after_projection_kind", afterKey = "after_entity_key", nextPageIndex = "next_page_index", rollingDigest = "rolling_digest", rootDigest = "root_digest", pageCount = "page_count", itemCount = "item_count", totalBytes = "total_bytes", expiresAt = "expires_at", failureCode = "failure_code", createdAt = "created_at", publishedAt = "published_at" }; var line: String { "artifact|\(snapshotID)|\(userID)|\(baseSequence)|\(projectedSequence)|\(schemaVersion)|\(capabilityProfile)|\(state)|\(projectionOptional(afterKind))|\(projectionOptional(afterKey))|\(nextPageIndex)|\(rollingDigest)|\(projectionOptional(rootDigest))|\(projectionOptional(pageCount))|\(itemCount)|\(totalBytes)|\(projectionDate(expiresAt))|\(projectionOptional(failureCode))|\(projectionDate(createdAt))|\(projectionOptionalDate(publishedAt))" } }
 private struct ProjectionPageKey { let snapshotID: UUID; let index: Int }
 private struct ProjectionPageRow: ProjectionFingerprintRow { let snapshotID: UUID; let index: Int; let firstKind: String; let firstKey: String; let lastKind: String; let lastKey: String; let itemCount: Int; let digest: String; let payload: Data; let byteCount: Int; enum CodingKeys: String, CodingKey { case snapshotID = "snapshot_id", index = "page_index", firstKind = "first_projection_kind", firstKey = "first_entity_key", lastKind = "last_projection_kind", lastKey = "last_entity_key", itemCount = "item_count", digest = "page_digest", payload, byteCount = "byte_count" }; var line: String { "page|\(snapshotID)|\(index)|\(firstKind)|\(firstKey)|\(lastKind)|\(lastKey)|\(itemCount)|\(digest)|\(payload.base64EncodedString())|\(byteCount)" } }
 private struct ProjectionResetKey { let deviceID: UUID; let generation: Int64 }
 private struct ProjectionRevokedDeviceTombstoneRow: ProjectionFingerprintRow {
     let userID: UUID
     let deviceID: UUID
-    let revokedAt: Date
+    let revokedAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case deviceID = "device_id"
@@ -1075,14 +1110,14 @@ private struct ProjectionRevokedDeviceTombstoneRow: ProjectionFingerprintRow {
         "revoked-device|\(userID)|\(deviceID)|\(projectionDate(revokedAt))"
     }
 }
-private struct ProjectionResetRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let generation: Int64; let snapshotID: UUID; let state: String; let nextToken: String; let receipt: String; let expiresAt: Date; let createdAt: Date; let acknowledgedAt: Date?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", generation = "reset_generation", snapshotID = "snapshot_id", state, nextToken = "next_sync_token", receipt = "snapshot_receipt", expiresAt = "expires_at", createdAt = "created_at", acknowledgedAt = "acknowledged_at" }; var line: String { "reset|\(userID)|\(deviceID)|\(generation)|\(snapshotID)|\(state)|\(nextToken)|\(receipt)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))|\(projectionOptionalDate(acknowledgedAt))" } }
-private struct ProjectionCursorRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let state: String; let generation: Int64; let acknowledgedSequence: Int64; let pendingSnapshotID: UUID?; let pendingBaseSequence: Int64?; let pendingExpiresAt: Date?; let completedSnapshotID: UUID?; let completedReceipt: String?; let completedGeneration: Int64?; let completedBaseSequence: Int64?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", state, generation = "reset_generation", acknowledgedSequence = "acknowledged_sequence", pendingSnapshotID = "pending_snapshot_id", pendingBaseSequence = "pending_base_sequence", pendingExpiresAt = "pending_snapshot_expires_at", completedSnapshotID = "completed_snapshot_id", completedReceipt = "completed_snapshot_ack_receipt", completedGeneration = "completed_snapshot_generation", completedBaseSequence = "completed_snapshot_base_sequence" }; var line: String { "cursor|\(userID)|\(deviceID)|\(state)|\(generation)|\(acknowledgedSequence)|\(projectionOptional(pendingSnapshotID))|\(projectionOptional(pendingBaseSequence))|\(projectionOptionalDate(pendingExpiresAt))|\(projectionOptional(completedSnapshotID))|\(projectionOptional(completedReceipt))|\(projectionOptional(completedGeneration))|\(projectionOptional(completedBaseSequence))" } }
-private struct ProjectionTokenRow: ProjectionStringKeyedRow { let token: String; let userID: UUID; let deviceID: UUID; let generation: Int64; let watermark: Int64; let expiresAt: Date; let createdAt: Date; enum CodingKeys: String, CodingKey { case token, userID = "user_id", deviceID = "device_id", generation = "reset_generation", watermark, expiresAt = "expires_at", createdAt = "created_at" }; var stringKey: String { token }; var line: String { "token|\(token)|\(userID)|\(deviceID)|\(generation)|\(watermark)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))" } }
-private struct ProjectionReceiptRow: ProjectionStringKeyedRow { let receipt: String; let userID: UUID; let deviceID: UUID; let generation: Int64; let firstSequence: Int64; let lastSequence: Int64; let expiresAt: Date; let createdAt: Date; enum CodingKeys: String, CodingKey { case receipt, userID = "user_id", deviceID = "device_id", generation = "reset_generation", firstSequence = "first_sequence", lastSequence = "last_sequence", expiresAt = "expires_at", createdAt = "created_at" }; var stringKey: String { receipt }; var line: String { "receipt|\(receipt)|\(userID)|\(deviceID)|\(generation)|\(firstSequence)|\(lastSequence)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))" } }
+private struct ProjectionResetRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let generation: Int64; let snapshotID: UUID; let state: String; let nextToken: String; let receipt: String; let expiresAt: V2PostgresTimestamp; let createdAt: V2PostgresTimestamp; let acknowledgedAt: V2PostgresTimestamp?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", generation = "reset_generation", snapshotID = "snapshot_id", state, nextToken = "next_sync_token", receipt = "snapshot_receipt", expiresAt = "expires_at", createdAt = "created_at", acknowledgedAt = "acknowledged_at" }; var line: String { "reset|\(userID)|\(deviceID)|\(generation)|\(snapshotID)|\(state)|\(nextToken)|\(receipt)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))|\(projectionOptionalDate(acknowledgedAt))" } }
+private struct ProjectionCursorRow: ProjectionFingerprintRow { let userID: UUID; let deviceID: UUID; let state: String; let generation: Int64; let acknowledgedSequence: Int64; let pendingSnapshotID: UUID?; let pendingBaseSequence: Int64?; let pendingExpiresAt: V2PostgresTimestamp?; let completedSnapshotID: UUID?; let completedReceipt: String?; let completedGeneration: Int64?; let completedBaseSequence: Int64?; enum CodingKeys: String, CodingKey { case userID = "user_id", deviceID = "device_id", state, generation = "reset_generation", acknowledgedSequence = "acknowledged_sequence", pendingSnapshotID = "pending_snapshot_id", pendingBaseSequence = "pending_base_sequence", pendingExpiresAt = "pending_snapshot_expires_at", completedSnapshotID = "completed_snapshot_id", completedReceipt = "completed_snapshot_ack_receipt", completedGeneration = "completed_snapshot_generation", completedBaseSequence = "completed_snapshot_base_sequence" }; var line: String { "cursor|\(userID)|\(deviceID)|\(state)|\(generation)|\(acknowledgedSequence)|\(projectionOptional(pendingSnapshotID))|\(projectionOptional(pendingBaseSequence))|\(projectionOptionalDate(pendingExpiresAt))|\(projectionOptional(completedSnapshotID))|\(projectionOptional(completedReceipt))|\(projectionOptional(completedGeneration))|\(projectionOptional(completedBaseSequence))" } }
+private struct ProjectionTokenRow: ProjectionStringKeyedRow { let token: String; let userID: UUID; let deviceID: UUID; let generation: Int64; let watermark: Int64; let expiresAt: V2PostgresTimestamp; let createdAt: V2PostgresTimestamp; enum CodingKeys: String, CodingKey { case token, userID = "user_id", deviceID = "device_id", generation = "reset_generation", watermark, expiresAt = "expires_at", createdAt = "created_at" }; var stringKey: String { token }; var line: String { "token|\(token)|\(userID)|\(deviceID)|\(generation)|\(watermark)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))" } }
+private struct ProjectionReceiptRow: ProjectionStringKeyedRow { let receipt: String; let userID: UUID; let deviceID: UUID; let generation: Int64; let firstSequence: Int64; let lastSequence: Int64; let expiresAt: V2PostgresTimestamp; let createdAt: V2PostgresTimestamp; enum CodingKeys: String, CodingKey { case receipt, userID = "user_id", deviceID = "device_id", generation = "reset_generation", firstSequence = "first_sequence", lastSequence = "last_sequence", expiresAt = "expires_at", createdAt = "created_at" }; var stringKey: String { receipt }; var line: String { "receipt|\(receipt)|\(userID)|\(deviceID)|\(generation)|\(firstSequence)|\(lastSequence)|\(projectionDate(expiresAt))|\(projectionDate(createdAt))" } }
 private struct ProjectionDeletedRow: Decodable { let value: Int }
 private struct ProjectionDeletedCountRow: Decodable { let value: Int64 }
 
 private func projectionUUID(_ userID: UserID) throws -> UUID { guard let value = UUID(uuidString: userID.rawValue) else { throw V2RoomWriteStoreError.corruptPersistenceState }; return value }
-private func projectionDate(_ value: Date) -> String { String(value.timeIntervalSinceReferenceDate) }
+private func projectionDate(_ value: V2PostgresTimestamp) -> String { String(value.microseconds) }
 private func projectionOptional<T>(_ value: T?) -> String { value.map { String(describing: $0) } ?? "<nil>" }
-private func projectionOptionalDate(_ value: Date?) -> String { value.map(projectionDate) ?? "<nil>" }
+private func projectionOptionalDate(_ value: V2PostgresTimestamp?) -> String { value.map(projectionDate) ?? "<nil>" }

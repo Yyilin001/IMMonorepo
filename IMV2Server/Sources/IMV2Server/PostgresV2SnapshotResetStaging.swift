@@ -23,6 +23,9 @@ struct PostgresV2SnapshotResetStager {
         now: Date,
         makeUUID: @Sendable () -> UUID
     ) async throws -> Result {
+        guard let assignmentExpiresAt = v2PostgresFutureTimestamp(now: now, interval: capabilityLifetime) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         guard currentGeneration > 0,
               retainedFloor >= 0,
               capabilityLifetime.isFinite,
@@ -48,7 +51,6 @@ struct PostgresV2SnapshotResetStager {
         guard retainedFloor <= checkpointBase else {
             throw V2SyncStoreError.snapshotCheckpointUnavailable
         }
-        let assignmentExpiresAt = now.addingTimeInterval(capabilityLifetime)
         // Serialize all automatic artifacts for one user/profile, not merely
         // one exact checkpoint. A still-valid older base at/above the retained
         // floor can serve a newly reconnecting device; normal incremental
@@ -57,7 +59,7 @@ struct PostgresV2SnapshotResetStager {
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: artifactLock), 0))").run()
         let artifact: SnapshotResetArtifactRow
         if let existing = try await sql.raw("""
-            SELECT snapshot_id, base_user_sync_sequence, state, expires_at
+            SELECT snapshot_id, base_user_sync_sequence, state
             FROM \(unsafeRaw: table(schema, "sync_snapshot_artifacts"))
             WHERE user_id = \(bind: userID)
               AND base_user_sync_sequence >= \(bind: retainedFloor)
@@ -75,19 +77,15 @@ struct PostgresV2SnapshotResetStager {
             // Keep the shared immutable payload alive for at least as long as
             // its newest assignment instead of inheriting the first device's
             // nearly-expired deadline.
-            if existing.expiresAt < assignmentExpiresAt {
-                try await sql.raw("""
-                    UPDATE \(unsafeRaw: table(schema, "sync_snapshot_artifacts"))
-                    SET expires_at = \(bind: assignmentExpiresAt)
-                    WHERE snapshot_id = \(bind: existing.snapshotID)
-                    """).run()
-            }
-            artifact = .init(
-                snapshotID: existing.snapshotID,
-                baseSequence: existing.baseSequence,
-                state: existing.state,
-                expiresAt: max(existing.expiresAt, assignmentExpiresAt)
-            )
+            // Compare native timestamps so Date decoding cannot hide an
+            // extension or round a longer existing deadline backwards.
+            try await sql.raw("""
+                UPDATE \(unsafeRaw: table(schema, "sync_snapshot_artifacts"))
+                SET expires_at = \(bind: assignmentExpiresAt)
+                WHERE snapshot_id = \(bind: existing.snapshotID)
+                  AND expires_at < \(bind: assignmentExpiresAt)
+                """).run()
+            artifact = existing
         } else {
             let snapshotID = makeUUID()
             let initialDigest = V2SnapshotV3Digest.initial(
@@ -107,8 +105,7 @@ struct PostgresV2SnapshotResetStager {
             artifact = .init(
                 snapshotID: snapshotID,
                 baseSequence: checkpointBase,
-                state: "building",
-                expiresAt: assignmentExpiresAt
+                state: "building"
             )
         }
         let resetState = artifact.state == "published" ? "ready" : "preparing"
@@ -152,12 +149,10 @@ private struct SnapshotResetArtifactRow: Decodable {
     let snapshotID: UUID
     let baseSequence: Int64
     let state: String
-    let expiresAt: Date
     enum CodingKeys: String, CodingKey {
         case snapshotID = "snapshot_id"
         case baseSequence = "base_user_sync_sequence"
         case state
-        case expiresAt = "expires_at"
     }
 }
 

@@ -29,6 +29,8 @@ public protocol V2LocalMemberMuteStore: Sendable {
 public enum V2MemberMuteFlushResult: Equatable, Sendable { case idle, acknowledged(ModerationOperationID), retryScheduled(ModerationOperationID), rejected(ModerationOperationID, code: String) }
 
 public actor V2MemberMuteOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2MemberMuteFlushResult>()
+
     private let store: any V2LocalMemberMuteStore
     private let transport: any V2ClientMemberMuteTransport
     private let makeUUID: @Sendable () -> UUID
@@ -43,7 +45,9 @@ public actor V2MemberMuteOutboxEngine {
         // The wire protocol carries milliseconds. Persist the canonical value
         // too, otherwise a sub-millisecond Date can never exactly match the
         // acknowledgement returned by the server.
-        let milliseconds = Int64(muteUntil.timeIntervalSince1970 * 1_000)
+        guard let milliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)) else {
+            throw V2ModerationValidationError.invalidMuteExpiry
+        }
         let normalizedMuteUntil = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
         let commandTime = now()
         guard normalizedMuteUntil > commandTime else { throw V2ModerationValidationError.invalidMuteExpiry }
@@ -52,6 +56,10 @@ public actor V2MemberMuteOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2MemberMuteFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2MemberMuteFlushResult {
         guard let command = try await store.nextReadyMemberMute(now: now()) else { return .idle }
         guard command.muteUntil > now() else {
             try await store.rejectMemberMute(operationID: command.operationID, code: "MUTE_EXPIRED")
@@ -66,12 +74,17 @@ public actor V2MemberMuteOutboxEngine {
         } catch is CancellationError { throw CancellationError() }
         catch let error as V2RealtimeTransportError {
             if case .server(let code, let retryable, let retryAfter, _) = error {
-                if retryable { try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1)))); return .retryScheduled(command.operationID) }
+                if retryable { try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: TimeInterval(max(retryAfter, 1)))); return .retryScheduled(command.operationID) }
                 try await store.rejectMemberMute(operationID: command.operationID, code: code); return .rejected(command.operationID, code: code)
             }
-            try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(command.operationID)
+            try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(command.operationID)
         } catch {
-            try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(command.operationID)
+            try await store.scheduleMemberMuteRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2MemberMuteOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

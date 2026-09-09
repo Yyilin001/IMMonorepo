@@ -57,7 +57,9 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     }
 
     public func runOnce(limit: Int) async throws -> V2ReadReceiptPreferencePropagationReport {
-        precondition(limit > 0)
+        guard limit > 0, limit < Int.max else {
+            throw V2ReadReceiptPreferencePropagationError.invalidLimit
+        }
         var remaining = limit
         var claimed = 0
         var projected = 0
@@ -134,6 +136,9 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
         guard let sql = database as? any SQLDatabase else {
             throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
         }
+        guard let expiresAt = v2PostgresFutureTimestamp(now: currentTime, interval: leaseDuration) else {
+            throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+        }
         let claimToken = makeUUID()
         return try await sql.raw("""
             WITH candidate AS (
@@ -147,14 +152,15 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
             )
             UPDATE im_v2.read_receipt_preference_propagation_outbox AS outbox
             SET state = 'claimed', claim_token = \(bind: claimToken),
-                lease_expires_at = \(bind: currentTime.addingTimeInterval(leaseDuration)),
+                lease_expires_at = \(bind: expiresAt),
                 next_attempt_at = NULL
             FROM candidate
             WHERE outbox.actor_user_id = candidate.actor_user_id
               AND outbox.operation_id = candidate.operation_id
             RETURNING outbox.actor_user_id, outbox.operation_id, outbox.recorded_at,
                       outbox.enumeration_checkpoint, outbox.claim_token,
-                      outbox.retry_count + 1 AS attempt
+                      CASE WHEN outbox.retry_count = 9223372036854775807
+                          THEN outbox.retry_count ELSE outbox.retry_count + 1 END AS attempt
             """).first(decoding: ReadReceiptPreferencePropagationLease.self)
     }
 
@@ -183,6 +189,9 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
         target: ReadReceiptPreferencePropagationTarget,
         lease: ReadReceiptPreferencePropagationLease
     ) async throws {
+        guard let recordedAtMilliseconds = try? v2GatewayMilliseconds(lease.recordedAt.date) else {
+            throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+        }
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
@@ -204,13 +213,12 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                 """).all(decoding: ExistingReadReceiptTombstone.self)
             if !existing.isEmpty {
                 guard existing.count == 2,
-                      existing.allSatisfy({ $0.matches(target: target, lease: lease) })
+                      existing.allSatisfy({ $0.matches(target: target, lease: lease, recordedAtMilliseconds: recordedAtMilliseconds) })
                 else { throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState }
                 return
             }
 
-            let recordedAtMilliseconds = Int64(lease.recordedAt.timeIntervalSince1970 * 1_000)
-            try await sql.raw("""
+            let inserted = try await sql.raw("""
                 WITH recipients(user_id, reader_user_id) AS (
                     VALUES
                         (\(bind: target.peerUserID), \(bind: lease.actorUserID)),
@@ -220,6 +228,7 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                     SELECT user_id, 1 FROM recipients ORDER BY user_id
                     ON CONFLICT (user_id) DO UPDATE
                     SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
+                    WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max)
                     RETURNING user_id, next_sequence
                 )
                 INSERT INTO im_v2.user_sync_log
@@ -236,7 +245,13 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                        \(bind: lease.recordedAt)
                 FROM allocated
                 INNER JOIN recipients USING (user_id)
-                """).run()
+                RETURNING user_id
+                """).all()
+            // Both recipients form one effect. Roll back the other allocation
+            // as well if either recipient has exhausted its sequence space.
+            guard inserted.count == 2 else {
+                throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+            }
         }
     }
 
@@ -250,6 +265,9 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
             throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
         }
         if completed {
+            guard v2PostgresTimestampCanEncode(currentTime) else {
+                throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.read_receipt_preference_propagation_outbox
                 SET state = 'completed', claim_token = NULL, lease_expires_at = NULL,
@@ -285,6 +303,11 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
         }
         switch disposition {
         case .retry(let nextAttemptAt):
+            guard v2PostgresFutureTimestamp(
+                now: currentTime, interval: nextAttemptAt.timeIntervalSince(currentTime)
+            ) != nil else {
+                throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.read_receipt_preference_propagation_outbox
                 SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -295,6 +318,9 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                   AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(currentTime) else {
+                throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.read_receipt_preference_propagation_outbox
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
@@ -309,6 +335,7 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
 }
 
 public enum V2ReadReceiptPreferencePropagationError: Error, Equatable, Sendable {
+    case invalidLimit
     case corruptPersistenceState
     case missingControlProjection
 }
@@ -316,7 +343,7 @@ public enum V2ReadReceiptPreferencePropagationError: Error, Equatable, Sendable 
 private struct ReadReceiptPreferencePropagationLease: Decodable, Sendable {
     let actorUserID: UUID
     let operationID: UUID
-    let recordedAt: Date
+    let recordedAt: V2PostgresTimestamp
     let enumerationCheckpoint: UUID?
     let claimToken: UUID
     let attempt: Int
@@ -360,14 +387,15 @@ private struct ExistingReadReceiptTombstone: Decodable {
 
     func matches(
         target: ReadReceiptPreferencePropagationTarget,
-        lease: ReadReceiptPreferencePropagationLease
+        lease: ReadReceiptPreferencePropagationLease,
+        recordedAtMilliseconds expectedRecordedAtMilliseconds: Int64
     ) -> Bool {
         let expectedReader = userID == lease.actorUserID ? target.peerUserID : lease.actorUserID
         return (userID == lease.actorUserID || userID == target.peerUserID)
             && roomID == target.roomID.uuidString
             && readerUserID == expectedReader.uuidString
             && readThroughRoomSequence == 1
-            && recordedAtMilliseconds == Int64(lease.recordedAt.timeIntervalSince1970 * 1_000)
+            && recordedAtMilliseconds == expectedRecordedAtMilliseconds
             && !isVisible
     }
 }

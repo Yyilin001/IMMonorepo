@@ -66,8 +66,11 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
             throw V2GatewayAuthenticationError.unauthenticated
         }
         let observedAt = now()
+        guard v2PostgresTimestampCanEncode(observedAt) else {
+            throw V2GatewayAuthenticationError.corruptPersistenceState
+        }
         guard let row = try await database.raw("""
-            SELECT token.user_id, token.expires_at
+            SELECT token.user_id, LEAST(token.expires_at, device.session_expires_at) AS expires_at
             FROM im_v2.device_access_tokens AS token
             JOIN im_v2.auth_devices AS device
               ON device.user_id = token.user_id AND device.device_id = token.device_id
@@ -76,6 +79,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               AND token.expires_at > \(bind: observedAt)
               AND token.revoked_at IS NULL
               AND device.revoked_at IS NULL
+              AND device.session_expires_at > \(bind: observedAt)
               AND NOT EXISTS (
                   SELECT 1
                   FROM im_v2.special_accounts AS special
@@ -84,20 +88,27 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               )
             """).first(decoding: V2AuthenticatedSessionRow.self)
         else { throw V2GatewayAuthenticationError.unauthenticated }
+        let completedAt = now()
+        guard v2PostgresTimestampCanEncode(completedAt),
+              v2PostgresTimestampCanEncode(row.expiresAt) else {
+            throw V2GatewayAuthenticationError.corruptPersistenceState
+        }
+        guard row.expiresAt > completedAt else { throw V2GatewayAuthenticationError.unauthenticated }
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
         // This timestamp is presentation metadata, not authentication state.
         // The local gate removes repeated no-op UPDATE round trips; PostgreSQL's
         // predicate remains the cross-replica correctness boundary.
-        if await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
+        if let activityCutoff = v2PostgresPastTimestamp(now: observedAt, interval: 60),
+           await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
             try? await database.raw("""
                 UPDATE im_v2.auth_devices
                 SET last_active_at = \(bind: observedAt)
                 WHERE user_id = \(bind: row.userID)
                   AND device_id = \(bind: deviceUUID)
                   AND (last_active_at IS NULL
-                       OR last_active_at < \(bind: observedAt.addingTimeInterval(-60)))
+                       OR last_active_at < \(bind: activityCutoff))
                 """).run()
         }
         return .init(userID: userID, expiresAt: row.expiresAt)
@@ -116,10 +127,15 @@ public actor V2DeviceActivityWriteGate {
     }
 
     public func shouldWrite(deviceID: DeviceID, at now: Date) -> Bool {
+        // A broken clock must not replace the next eligible write with an
+        // unusable deadline that continues suppressing activity after recovery.
+        guard let nextWriteAt = v2PostgresFutureTimestamp(now: now, interval: interval) else {
+            return false
+        }
         if let nextEligible = nextEligibleAt[deviceID], nextEligible > now {
             return false
         }
-        nextEligibleAt[deviceID] = now.addingTimeInterval(interval)
+        nextEligibleAt[deviceID] = nextWriteAt
         acceptedWrites += 1
         if acceptedWrites.isMultiple(of: 1_024) {
             nextEligibleAt = nextEligibleAt.filter { $0.value > now }

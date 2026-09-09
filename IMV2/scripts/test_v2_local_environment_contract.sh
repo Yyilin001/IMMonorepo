@@ -11,7 +11,6 @@ cleanup() {
 trap cleanup EXIT
 
 base64_key="$(openssl rand -base64 32 | tr -d '\n')"
-bcrypt_suffix="$(printf '%053d' 0 | tr '0' '.')"
 
 write_valid_environment() {
   local destination="$1"
@@ -23,10 +22,10 @@ write_valid_environment() {
     printf 'IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=%s\n' "${base64_key}"
     printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${base64_key}"
     printf 'IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64=%s\n' "${base64_key}"
+    printf 'IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=%s\n' "${base64_key}"
     printf 'IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64=%s\n' "${base64_key}"
     printf 'IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64=%s\n' "${base64_key}"
     printf 'IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64=%s\n' "${base64_key}"
-    printf 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH=$$2b$$12$$%s\n' "${bcrypt_suffix}"
   } > "${destination}"
   chmod 600 "${destination}"
 }
@@ -85,7 +84,7 @@ expect_rejected short-key "${short_key_path}"
 
 bcrypt_path="${temporary_directory}/bcrypt.env"
 write_valid_environment "${bcrypt_path}"
-replace_value "${bcrypt_path}" IM_V2_PASSWORD_DUMMY_BCRYPT_HASH '$2b$10$invalid'
+printf 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH=obsolete\n' >> "${bcrypt_path}"
 expect_rejected bcrypt "${bcrypt_path}"
 
 permissions_path="${temporary_directory}/permissions.env"

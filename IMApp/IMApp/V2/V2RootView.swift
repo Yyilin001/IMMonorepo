@@ -3,6 +3,8 @@ import UIKit
 
 struct V2RootView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var inheritedTypeSize
+    @Environment(\.layoutDirection) private var inheritedDirection
     private let appPushDelegate: V2AppPushDelegate
     private let initialPasswordMode: V2AppStore.PasswordMode
     private let initialLocalE2ETestAccountHandle: String?
@@ -12,23 +14,19 @@ struct V2RootView: View {
     private let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     @State private var store: V2AppStore
     @State private var protectedDataRetryTask: Task<Void, Never>?
+    @State private var pendingGroupInvitationURL: URL?
+    #if DEBUG
+    private let revocationVisualAccessibility: Bool
+    @State private var revocationVisualFixture: V2DeviceRevocationPresentation?
+    #endif
 
     init(appPushDelegate: V2AppPushDelegate) {
         self.appPushDelegate = appPushDelegate
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
-        let startupMode: V2AppStore.StartupMode
-        if arguments.contains("-v2-ui-testing-live-local-account") {
-            startupMode = arguments.contains("-v2-ui-testing-cleanup-local-account")
-                ? .uiTestingLiveLocalAccountCleanup
-                : arguments.contains("-v2-ui-testing-restore-local-account")
-                    ? .uiTestingLiveLocalAccountRestore
-                    : .uiTestingLiveLocalAccount
-        } else if arguments.contains("-v2-ui-testing-signed-out") {
-            startupMode = .uiTestingSignedOut
-        } else {
-            startupMode = .production
-        }
+        let startupMode = appPushDelegate.store.startupMode
+        revocationVisualAccessibility = startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-accessibility")
+        _revocationVisualFixture = State(initialValue: startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-paused") ? .paused : nil)
         initialPasswordMode = arguments.contains("-v2-ui-testing-password-register") ? .register : .signIn
         initialLocalE2ETestAccountHandle = startupMode == .uiTestingLiveLocalAccount
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-account-handle")
@@ -51,28 +49,15 @@ struct V2RootView: View {
                 initialGroupMemberHandles: Self.launchArgumentValue(arguments, named: "-v2-ui-testing-group-members")
             )
             : nil
-        let liveLocalAccountE2ETestScope = startupMode.usesLiveLocalAccountE2ETestScope
-            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-e2e-scope").flatMap(V2LiveLocalAccountE2ETestScope.init(rawValue:))
-            : nil
-        let debugForcesUnavailableRealtimeForLiveLocalAccountE2E = startupMode.usesLiveLocalAccountE2ETestScope
-            && arguments.contains("-v2-ui-testing-unavailable-realtime")
         #else
-        let startupMode: V2AppStore.StartupMode = .production
         initialPasswordMode = .signIn
         initialLocalE2ETestAccountHandle = nil
         initialLocalE2ETestPassword = nil
         initialLocalE2ETestPublicHandle = nil
         initialLocalE2ETestDisplayName = nil
         localE2EConversationLaunchFixture = nil
-        let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil
-        let debugForcesUnavailableRealtimeForLiveLocalAccountE2E = false
         #endif
-        _store = State(initialValue: V2AppStore(
-            startupMode: startupMode,
-            liveLocalAccountE2ETestScope: liveLocalAccountE2ETestScope,
-            debugForcesUnavailableRealtimeForLiveLocalAccountE2E: debugForcesUnavailableRealtimeForLiveLocalAccountE2E,
-            remoteNotificationRegistrar: appPushDelegate
-        ))
+        _store = State(initialValue: appPushDelegate.store)
     }
 
     var body: some View {
@@ -105,9 +90,11 @@ struct V2RootView: View {
                             publicIdentitySettingsStore: store.publicIdentitySettingsStore,
                             pushWakeSettingsStore: store.pushWakeSettingsStore,
                             deviceSessionsStore: store.deviceSessionsStore,
+                            groupInvitationStore: store.groupInvitationStore,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             signOut: { await store.signOut() }
                         )
+                        .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                     } else {
                         ProgressView("正在打开本地会话…")
                     }
@@ -132,7 +119,7 @@ struct V2RootView: View {
                         ContentUnavailableView(
                             "正在完成退出登录",
                             systemImage: "lock.trianglebadge.exclamationmark",
-                            description: Text("请联网并解锁设备后重试，以移除后台唤醒端点并删除受保护凭据。")
+                            description: Text("请解锁设备后重试，以保存退出任务并删除本机登录凭据。")
                         )
                         Button("重试") {
                             protectedDataRetryTask?.cancel()
@@ -144,6 +131,14 @@ struct V2RootView: View {
                     ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
                 }
             }
+            .safeAreaInset(edge: .bottom) {
+                V2DeviceRevocationStatusView(state: revocationPresentation) {
+                    #if DEBUG
+                    if revocationVisualFixture != nil { revocationVisualFixture = .pending; return }
+                    #endif
+                    await store.retryDeviceRevocation()
+                }
+            }
 
             if scenePhase != .active {
                 V2PrivacyShieldView()
@@ -152,10 +147,8 @@ struct V2RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
-        .onAppear {
-            appPushDelegate.tokenReceiver = store
-            appPushDelegate.wakeHandler = store
-        }
+        .environment(\.dynamicTypeSize, revocationTypeSize)
+        .environment(\.layoutDirection, revocationDirection)
         .onDisappear { protectedDataRetryTask?.cancel() }
         .task { await store.restore() }
         .task(id: scenePhase) {
@@ -170,6 +163,44 @@ struct V2RootView: View {
                 break
             }
         }
+        .onOpenURL { url in
+            guard url.scheme?.lowercased() == "iim", url.host == "group-invite" else { return }
+            pendingGroupInvitationURL = url
+            openPendingGroupInvitationIfPossible()
+        }
+        .onChange(of: store.groupInvitationStore != nil) { _, isAvailable in
+            guard isAvailable else { return }
+            openPendingGroupInvitationIfPossible()
+        }
+    }
+
+    private var revocationTypeSize: DynamicTypeSize {
+        #if DEBUG
+        if revocationVisualAccessibility { return .accessibility5 }
+        #endif
+        return inheritedTypeSize
+    }
+
+    private var revocationDirection: LayoutDirection {
+        #if DEBUG
+        if revocationVisualAccessibility { return .rightToLeft }
+        #endif
+        return inheritedDirection
+    }
+
+    private var revocationPresentation: V2DeviceRevocationPresentation {
+        #if DEBUG
+        if let revocationVisualFixture { return revocationVisualFixture }
+        #endif
+        return store.deviceRevocationPresentation
+    }
+
+    private func openPendingGroupInvitationIfPossible() {
+        guard let url = pendingGroupInvitationURL,
+              let invitations = store.groupInvitationStore
+        else { return }
+        pendingGroupInvitationURL = nil
+        Task { await invitations.open(url.absoluteString) }
     }
 
     #if DEBUG
@@ -339,6 +370,7 @@ private struct V2SignedInRootView: View {
     let publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
     let deviceSessionsStore: V2DeviceSessionsStore?
+    let groupInvitationStore: V2GroupInvitationStore?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
@@ -366,7 +398,8 @@ private struct V2SignedInRootView: View {
                         }
                     }
                 ),
-                rootNavigation: rootNavigation
+                rootNavigation: rootNavigation,
+                groupInvitationStore: groupInvitationStore
             )
             .tabItem { Label("消息", systemImage: "message") }
             .tag(V2RootNavigationStore.Tab.conversations)

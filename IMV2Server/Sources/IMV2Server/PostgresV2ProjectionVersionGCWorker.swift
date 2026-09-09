@@ -19,6 +19,7 @@ public struct PostgresV2ProjectionVersionGCWorker: Sendable {
     public func runOnce(now: Date = Date(), limit: Int = 500) async throws -> Int {
         guard limit > 0 else { throw V2ProjectionVersionGCError.invalidLimit }
         try Task.checkCancellation()
+        guard v2PostgresTimestampCanEncode(now) else { throw V2ProjectionVersionGCError.corruptPersistence }
         guard let sql = database as? any SQLDatabase else {
             throw V2ProjectionVersionGCError.corruptPersistence
         }

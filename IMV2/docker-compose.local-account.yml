@@ -54,9 +54,21 @@ services:
       IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS: 2592000
       IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES: 30
       IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS: 60
+      IM_V2_CAPACITY_PROFILE_ID: standard
+      IM_V2_MAX_ELIGIBLE_MEMBERS: 100000
+      IM_V2_MAX_COMMANDS_PER_WINDOW: 1000
+      IM_V2_MAX_FANOUT_UNITS_PER_WINDOW: 100000
+      IM_V2_MAX_OUTSTANDING_FANOUT_UNITS: 1000000
+      IM_V2_MAX_OUTSTANDING_PLANS: 10000
+      IM_V2_MAX_ENUMERATION_PAGE_SIZE: 1000
+      IM_V2_MAX_PLANNER_CONCURRENCY: 8
+      IM_V2_MAX_DELIVERY_CONCURRENCY: 16
+      IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS: 3
       # Explicit local-only filesystem substitute for an object store. The
       # signed targets still traverse Caddy over HTTPS, so the iOS upload and
       # download path exercises the same client boundary as production.
+      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
+      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
       IM_V2_LOCAL_MEDIA_MODE: filesystem
       IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
       IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
@@ -88,6 +100,11 @@ services:
     env_file:
       - .env.local
     environment:
+      IM_V2_LOCAL_MEDIA_MODE: filesystem
+      IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
+      IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
+      IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL: https://localhost:8443
+      IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
       # The gateway has foreground command/sync work plus durable fan-out in
       # one process. One connection per event loop can deadlock that mix.
@@ -151,6 +168,7 @@ services:
       IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED: "true"
       IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE: 10
       IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS: 250
+      IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND: 20
       IM_V2_MESSAGE_PROJECTION_WRITE_MODE: dual
       IM_V2_MESSAGE_PROJECTION_READ_MODE: prefer_shared
       IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS: 604800
@@ -211,6 +229,7 @@ services:
       - "127.0.0.1:7443:7443"
     volumes:
       - v2-local-caddy-data:/caddy:ro
+      - v2-local-media-objects:/var/lib/im-v2-local-media
     restart: on-failure:5
     mem_limit: 2g
     pids_limit: 256
@@ -240,6 +259,7 @@ services:
       IM_V2_OPERATOR_REPLAY_PRINCIPAL: local-operator-replay
       IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL: local-account-safety
       IM_V2_CAPABILITY_PROFILE: base
+      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
       IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
     depends_on:
       postgres:

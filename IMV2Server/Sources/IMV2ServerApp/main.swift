@@ -10,6 +10,7 @@ enum IMV2ServerApp {
     static func main() async throws {
         V2ProcessTerminationSignal.install()
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
@@ -463,6 +464,8 @@ enum IMV2ServerApp {
                     ownerStores: groupEventWakeStoresByPhysicalLocation
                 )
             }
+            var forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore] = [:]
+            let forwardMessages: any V2ForwardMessagesHandling
             let roomWriteStore: any V2AtomicRoomWriteBatchStore
             let directMessagingStore: any V2DirectMessagingStore
             let groupEventLogStore: any V2GroupEventLogStore
@@ -476,12 +479,12 @@ enum IMV2ServerApp {
             if singleRoomOwnerIsControlDatabase
                 && configuration.groupRoomShardIDs.count == 1
             {
-                // Preserve the original single-owner hot path exactly. In
-                // particular, its command-credit pools are shared with the
+                // Preserve the send-message command-credit actors shared with the
                 // Gateway's pressure metrics and append batcher; creating a
                 // second actor over the same PostgreSQL rows changes credit
-                // refill/heat coordination without adding isolation.
-                roomWriteStore = PostgresV2RoomWriteStore(
+                // refill/heat coordination without adding isolation. Membership
+                // separately retains route/epoch checks even on this local path.
+                let localRoomWriteStore = PostgresV2RoomWriteStore(
                     database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     shadowForwarder: userShardShadowForwarder,
@@ -495,74 +498,98 @@ enum IMV2ServerApp {
                     roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
                     appendStageMetrics: directRoomLogAppendStageMetrics
                 )
+                // Direct and group shard IDs may differ even on one database.
+                // Register every configured owner while sharing the same actors.
+                func localStores<Store>(_ store: Store) -> [String: Store] {
+                    Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map {
+                        ($0.shardID, store)
+                    })
+                }
+                roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter,
+                    stores: localStores(localRoomWriteStore),
+                    physicalStoreKeyByShard: localStores("control"))
+                forwardTargetWritesByShard = localStores(localRoomWriteStore)
+                forwardMessages = try V2RoutedForwardMessagesService(router: roomShardRouter,
+                    owners: localStores(V2ForwardMessagesService(database: database, writeStore: localRoomWriteStore,
+                        capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)),
+                    physicalStoreKeyByShard: localStores("control"))
                 directMessagingStore = PostgresV2DirectMessagingStore(
                     database: database, shadowForwarder: userShardShadowForwarder
                 )
                 groupEventLogStore = PostgresV2GroupEventLogStore(
                     database: database, directRoomLogEventCache: directRoomLogEventCache
                 )
-                membershipStore = PostgresV2RoomMembershipStore(
-                    database: database
+                membershipStore = try V2RoutedRoomMembershipStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2RoomMembershipStore(database: database)),
+                    identities: V2PostgresMembershipIdentitySnapshotValidator(database: database)
                 )
-                withdrawalStore = PostgresV2MessageWithdrawalStore(
-                    database: database
+                withdrawalStore = try V2RoutedMessageWithdrawalStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2MessageWithdrawalStore(database: database))
                 )
-                reactionStore = PostgresV2MessageReactionStore(
-                    database: database
+                reactionStore = try V2RoutedMessageReactionStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2MessageReactionStore(database: database))
                 )
-                editStore = PostgresV2MessageEditStore(
-                    database: database,
-                    contentReviewMode: configuration.contentReviewMode
+                editStore = try V2RoutedMessageEditStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2MessageEditStore(database: database, contentReviewMode: configuration.contentReviewMode))
                 )
-                groupCapabilitiesStore = PostgresV2GroupCapabilitiesStore(
-                    database: database
+                groupCapabilitiesStore = try V2RoutedGroupCapabilitiesStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2GroupCapabilitiesStore(database: database))
                 )
-                moderationStore = PostgresV2ModerationStore(
-                    database: database
+                moderationStore = try V2RoutedModerationStore(
+                    router: roomShardRouter,
+                    stores: localStores(PostgresV2ModerationStore(database: database))
                 )
-                readReceiptStore = PostgresV2ReadReceiptStore(
-                    database: database,
-                    shadowForwarder: userShardShadowForwarder
+                let localReadReceiptStore = PostgresV2ReadReceiptStore(database: database, shadowForwarder: userShardShadowForwarder)
+                readReceiptStore = try V2RoutedReadReceiptStore(
+                    router: roomShardRouter,
+                    ownerStores: localStores(localReadReceiptStore),
+                    controlStore: localReadReceiptStore,
+                    physicalStoreKeyByShard: localStores("control")
                 )
             } else {
-                var roomWriteStoresByShard: [String: any V2AtomicRoomWriteBatchStore] = [:]
+                var forwardServicesByShard: [String: any V2OwnerValidatedForwardMessagesHandling] = [:]
+                var roomWriteStoresByShard: [String: any V2OwnerValidatedRoomWriteStore] = [:]
                 var directMessagingStoresByShard: [String: any V2DirectMessagingStore] = [:]
                 var groupEventLogStoresByShard: [String: any V2GroupEventLogStore] = [:]
                 var membershipStoresByShard:
                     [String: any V2ControlValidatedRoomMembershipStore] = [:]
                 var withdrawalStoresByShard:
-                    [String: any V2MessageWithdrawalStore] = [:]
+                    [String: any V2OwnerValidatedMessageWithdrawalStore] = [:]
                 var reactionStoresByShard:
-                    [String: any V2MessageReactionStore] = [:]
+                    [String: any V2OwnerValidatedMessageReactionStore] = [:]
                 var editStoresByShard:
-                    [String: any V2MessageEditStore] = [:]
+                    [String: any V2OwnerValidatedMessageEditStore] = [:]
                 var groupCapabilitiesStoresByShard:
-                    [String: any V2GroupCapabilitiesStore] = [:]
+                    [String: any V2OwnerValidatedGroupCapabilitiesStore] = [:]
                 var moderationStoresByShard:
-                    [String: any V2RoutedModerationOwnerStore] = [:]
+                    [String: any V2OwnerValidatedModerationStore] = [:]
                 var readReceiptStoresByShard:
-                    [String: any V2GroupReadReceiptOwnerStore] = [:]
+                    [String: any V2OwnerValidatedReadReceiptStore] = [:]
                 var roomStoreKeyByShard: [String: String] = [:]
-                var roomWriteStoresByPhysicalLocation: [String: any V2AtomicRoomWriteBatchStore] = [:]
+                var roomWriteStoresByPhysicalLocation: [String: PostgresV2RoomWriteStore] = [:]
                 var directMessagingStoresByPhysicalLocation: [String: any V2DirectMessagingStore] = [:]
                 var groupEventLogStoresByPhysicalLocation: [String: any V2GroupEventLogStore] = [:]
                 var membershipStoresByPhysicalLocation:
                     [String: any V2ControlValidatedRoomMembershipStore] = [:]
                 var withdrawalStoresByPhysicalLocation:
-                    [String: any V2MessageWithdrawalStore] = [:]
+                    [String: any V2OwnerValidatedMessageWithdrawalStore] = [:]
                 var reactionStoresByPhysicalLocation:
-                    [String: any V2MessageReactionStore] = [:]
+                    [String: any V2OwnerValidatedMessageReactionStore] = [:]
                 var editStoresByPhysicalLocation:
-                    [String: any V2MessageEditStore] = [:]
+                    [String: any V2OwnerValidatedMessageEditStore] = [:]
                 var groupCapabilitiesStoresByPhysicalLocation:
-                    [String: any V2GroupCapabilitiesStore] = [:]
+                    [String: any V2OwnerValidatedGroupCapabilitiesStore] = [:]
                 var moderationStoresByPhysicalLocation:
-                    [String: any V2RoutedModerationOwnerStore] = [:]
+                    [String: any V2OwnerValidatedModerationStore] = [:]
                 var readReceiptStoresByPhysicalLocation:
-                    [String: any V2GroupReadReceiptOwnerStore] = [:]
-                let groupOwnerShardIDs = Set(configuration.groupRoomShardIDs)
-                for storage in configuration.roomShardStorage
-                where groupOwnerShardIDs.contains(storage.shardID) {
+                    [String: any V2OwnerValidatedReadReceiptStore] = [:]
+                // Shared room operations include direct as well as group owners.
+                for storage in configuration.roomShardStorage {
                     guard let ownerDatabase = roomShardDatabases[storage.shardID] else {
                         throw V2RoomWriteStoreError.corruptPersistenceState
                     }
@@ -578,6 +605,11 @@ enum IMV2ServerApp {
                        let existingGroupCapabilities = groupCapabilitiesStoresByPhysicalLocation[physicalLocationKey],
                        let existingModeration = moderationStoresByPhysicalLocation[physicalLocationKey],
                        let existingReadReceipt = readReceiptStoresByPhysicalLocation[physicalLocationKey] {
+                        forwardServicesByShard[storage.shardID] = V2ForwardMessagesService(
+                            database: ownerDatabase, writeStore: existingWrite,
+                            capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits
+                        )
+                        forwardTargetWritesByShard[storage.shardID] = existingWrite
                         roomWriteStoresByShard[storage.shardID] = existingWrite
                         directMessagingStoresByShard[storage.shardID] = existingDirect
                         groupEventLogStoresByShard[storage.shardID] = existingEvents
@@ -615,7 +647,8 @@ enum IMV2ServerApp {
                     )
                     let edit = PostgresV2MessageEditStore(
                         database: ownerDatabase,
-                        contentReviewMode: configuration.contentReviewMode
+                        contentReviewMode: configuration.contentReviewMode,
+                        identities: V2PostgresMembershipIdentitySnapshotValidator(database: database)
                     )
                     let groupCapabilities = PostgresV2GroupCapabilitiesStore(
                         database: ownerDatabase
@@ -641,6 +674,11 @@ enum IMV2ServerApp {
                         moderation
                     readReceiptStoresByPhysicalLocation[physicalLocationKey] =
                         readReceipt
+                    forwardServicesByShard[storage.shardID] = V2ForwardMessagesService(
+                        database: ownerDatabase, writeStore: write,
+                        capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits
+                    )
+                    forwardTargetWritesByShard[storage.shardID] = write
                     roomWriteStoresByShard[storage.shardID] = write
                     directMessagingStoresByShard[storage.shardID] = direct
                     groupEventLogStoresByShard[storage.shardID] = events
@@ -653,6 +691,15 @@ enum IMV2ServerApp {
                     moderationStoresByShard[storage.shardID] = moderation
                     readReceiptStoresByShard[storage.shardID] = readReceipt
                 }
+                let forwardSources = try Dictionary(uniqueKeysWithValues: forwardServicesByShard.keys.map { shardID in
+                    guard let source = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    return (shardID, V2ForwardSourceEndpoint(exports: .init(database: source), receipts: .init(database: source), jobs: .init(database: source)))
+                })
+                forwardMessages = try V2RoutedForwardMessagesService(
+                    router: roomShardRouter, owners: forwardServicesByShard,
+                    physicalStoreKeyByShard: roomStoreKeyByShard,
+                    crossOwner: V2CrossOwnerForwardService(sources: forwardSources)
+                )
                 roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter, stores: roomWriteStoresByShard, physicalStoreKeyByShard: roomStoreKeyByShard)
                 directMessagingStore = try V2RoutedDirectMessagingStore(router: roomShardRouter, ownerStores: directMessagingStoresByShard, controlStore: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder))
                 groupEventLogStore = try V2RoutedGroupEventLogStore(router: roomShardRouter, stores: groupEventLogStoresByShard)
@@ -1051,29 +1098,16 @@ enum IMV2ServerApp {
                 store: groupCapabilitiesStore,
                 capacityProfile: configuration.capacityProfile
             )
-            let forwardMessages = V2ForwardMessagesService(
-                database: database,
-                writeStore: PostgresV2RoomWriteStore(
-                    database: database,
-                    strangerMessagePolicy: configuration.strangerMessagePolicy,
-                    shadowForwarder: userShardShadowForwarder,
-                    contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
-                    directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode,
-                    directSendPolicyCache: directSendPolicyCache,
-                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
-                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
-                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
-                    appendStageMetrics: directRoomLogAppendStageMetrics
-                ),
-                capacityProfile: configuration.capacityProfile,
-                limits: configuration.messageLimits
-            )
-            let liveActivityStore = PostgresV2LiveActivityStore(database: database)
+            let liveActivityStore = try PostgresV2LiveActivityStore(database: database)
             let liveActivity = V2LiveActivityService(store: liveActivityStore)
             await connectionRegistry.configureLivePresenceLeases(liveActivityStore)
             await connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
+            var rolePolicyBaselinesByShard: [String: any V2GroupRolePolicyBaselineReading] = [:]
+            for shardID in configuration.groupRoomShardIDs {
+                guard let ownerDatabase = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                rolePolicyBaselinesByShard[shardID] = PostgresV2GroupRolePolicyBaselineStore(database: ownerDatabase)
+            }
+            let rolePolicyBaselines = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: database, stores: rolePolicyBaselinesByShard)
             let handler = V2GatewayDomainCommandHandler(
                 sendMessage: sendMessage,
                 membership: membership,
@@ -1091,6 +1125,7 @@ enum IMV2ServerApp {
                 moderation: moderation,
                 conversationCapabilities: conversationCapabilities,
                 groupCapabilities: groupCapabilities,
+                groupRolePolicyBaseline: rolePolicyBaselines,
                 forwardMessages: forwardMessages,
                 sync: .init(store: V2RoutedSyncStore(
                     registry: syncUserShardStorage, routeFence: syncUserShardRouter,
@@ -1320,6 +1355,41 @@ enum IMV2ServerApp {
             // at zero on first deployment. This closes the outage window in
             // which no gateway existed to observe a historical revocation.
             try await revokedDeviceProjectionCleanupWorker.initializeForStartup()
+            let forwardLogger = app.logger
+            // Local-only byte adapter: the account edge and Gateway must share
+            // this configured object root. Do not call prepare() here because
+            // the edge owns startup cleanup of active upload staging files.
+            let forwardMediaProvider: V2LocalFilesystemMediaProvider?
+            if let localMediaConfiguration {
+                forwardMediaProvider = try .init(rootDirectory: localMediaConfiguration.rootDirectory,
+                    targetBaseURL: localMediaConfiguration.publicBaseURL, signingKey: localMediaConfiguration.signingKey)
+            } else { forwardMediaProvider = nil }
+            var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
+            var forwardBackgroundDatabases: [String: any Database] = [:]
+            for storage in configuration.roomShardStorage {
+                guard let configuredWrite = forwardTargetWritesByShard[storage.shardID]
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                guard let ownerDatabase = databaseForRole(for: .delivery, url: storage.databaseURL)
+                else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                forwardBackgroundDatabases[storage.shardID] = ownerDatabase
+                let mediaWorker: V2ForwardMediaImportWorker?
+                if let forwardMediaProvider, let localMediaConfiguration {
+                    let sources = Dictionary(uniqueKeysWithValues: forwardTargetWritesByShard.keys.map { ($0, forwardMediaProvider) })
+                    mediaWorker = try .init(store: .init(database: ownerDatabase),
+                        copier: V2LocalFilesystemForwardMediaCopier(sources: sources, target: forwardMediaProvider, maximumBytes: localMediaConfiguration.maximumBytes),
+                        scanner: V2LocalEICARMediaScanner(provider: forwardMediaProvider))
+                } else { mediaWorker = nil }
+                forwardTargetEndpoints[storage.shardID] = V2ForwardImportEndpoint(inbox: .init(database: ownerDatabase),
+                    write: configuredWrite.usingWorkloadDatabase(ownerDatabase), media: mediaWorker,
+                    capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)
+            }
+            let forwardTransport = try V2ConfiguredForwardExportDelivery(targets: forwardTargetEndpoints)
+            let forwardWorkers = try Dictionary(uniqueKeysWithValues: forwardBackgroundDatabases.map { shardID, ownerDatabase in
+                (shardID, try V2ForwardDeliveryWorker(store: .init(database: ownerDatabase), receipts: .init(database: ownerDatabase), target: forwardTransport))
+            })
+            let forwardRuntime = try V2ForwardDeliveryRuntime(workers: forwardWorkers,
+                minimumPollMilliseconds: configuration.workerPollIntervalMilliseconds,
+                onFailure: { _ in forwardLogger.error("IM V2 forward delivery worker failed; retrying") })
             try await server.bind()
             app.logger.notice("IM V2 TLS gateway bound", metadata: ["host": "\(configuration.tls.host)", "port": "\(configuration.tls.port)"])
             do {
@@ -1330,6 +1400,7 @@ enum IMV2ServerApp {
             }
             app.logger.notice("IM V2 metrics listener bound", metadata: ["host": "\(configuration.metrics.host)", "port": "\(configuration.metrics.port)"])
             let logger = app.logger
+            let forwardDeliveryTask = Task { await forwardRuntime.run() }
             let maintenanceCadence = try V2MaintenanceCadence(
                 intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
             )
@@ -1859,7 +1930,7 @@ enum IMV2ServerApp {
                 }
             }
             let maintenanceTask = Task {
-                var nextMaintenanceAt: Date?
+                var nextMaintenanceAt: ContinuousClock.Instant?
                 var cadence = V2AdaptiveWorkerCadence(
                     minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
                 )
@@ -1899,7 +1970,7 @@ enum IMV2ServerApp {
                     } catch {
                         logger.error("IM V2 device revocation worker failed; retrying")
                     }
-                    let maintenanceNow = Date()
+                    let maintenanceNow = ContinuousClock.now
                     if maintenanceCadence.isDue(now: maintenanceNow, nextScheduledAt: nextMaintenanceAt) {
                         do {
                             _ = try await moderationAuditRetentionWorker.runOnce(limit: configuration.workerBatchSize)
@@ -2001,6 +2072,7 @@ enum IMV2ServerApp {
             messageProjectionBackfillTasks.forEach { $0.cancel() }
             messageProjectionStateBodyCompactionTasks.forEach { $0.cancel() }
             fanoutPayloadReferenceBackfillTasks.forEach { $0.cancel() }
+            forwardDeliveryTask.cancel()
             fanoutPlanningTask.cancel()
             groupEventWakeTask.cancel()
             fanoutDeliveryTask.cancel()
@@ -2023,6 +2095,7 @@ enum IMV2ServerApp {
             serviceTasks.append(contentsOf: messageProjectionStateBodyCompactionTasks)
             serviceTasks.append(contentsOf: fanoutPayloadReferenceBackfillTasks)
             serviceTasks.append(contentsOf: [
+                forwardDeliveryTask,
                 fanoutPlanningTask,
                 groupEventWakeTask,
                 fanoutDeliveryTask,

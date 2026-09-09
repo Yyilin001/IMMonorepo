@@ -52,6 +52,8 @@ public enum V2SocialCommandFlushResult: Equatable, Sendable { case idle, acknowl
 /// command acceptance; the independently delivered sync projection remains
 /// the source of truth for the local read model.
 public actor V2SocialCommandOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2SocialCommandFlushResult>()
+
     private let store: any V2LocalSocialCommandStore
     private let socialTransport: any V2ClientSocialRelationshipTransport
     private let directTransport: any V2ClientDirectMessagingTransport
@@ -79,13 +81,23 @@ public actor V2SocialCommandOutboxEngine {
     /// earlier queued social command remains ahead of it; callers then report
     /// a queued state rather than misattributing that earlier result.
     public func flushIfReady(operationID: String) async throws -> V2SocialCommandFlushResult? {
-        guard let command = try await store.nextReadySocialCommand(now: now()),
-              command.operationID == operationID
-        else { return nil }
-        return try await flush(command)
+        let result = try await flushFlight.run {
+            guard let command = try await self.store.nextReadySocialCommand(now: self.now()),
+                  command.operationID == operationID else { return .idle }
+            return try await self.flush(command)
+        }
+        switch result {
+        case .idle: return nil
+        case .acknowledged(let id), .retryScheduled(let id), .rejected(let id, _):
+            return id == operationID ? result : nil
+        }
     }
 
     public func flushOnce() async throws -> V2SocialCommandFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2SocialCommandFlushResult {
         guard let command = try await store.nextReadySocialCommand(now: now()) else { return .idle }
         return try await flush(command)
     }
@@ -110,9 +122,14 @@ public actor V2SocialCommandOutboxEngine {
                 try await store.rejectSocialCommand(operationID: command.operationID, code: code); return .rejected(command.operationID, code: code)
             }
             let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }()
-            try await store.scheduleSocialCommandRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(delay)); return .retryScheduled(command.operationID)
+            try await store.scheduleSocialCommandRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(command.operationID)
         } catch {
-            try await store.scheduleSocialCommandRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(command.operationID)
+            try await store.scheduleSocialCommandRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2SocialCommandOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

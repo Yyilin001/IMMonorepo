@@ -16,10 +16,12 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
     }
 
     public func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2GroupEventLogPage {
+        guard let cursor = try? V2RoomCursor(afterRoomSequence),
+              (1 ... V2GroupEventLogService.maximumPageSize).contains(pageSize)
+        else { throw V2GroupEventLogError.invalidRequest }
         guard let sql = database as? any SQLDatabase,
               let roomUUID = UUID(uuidString: roomID.rawValue),
-              let actorUUID = UUID(uuidString: actorUserID.rawValue),
-              afterRoomSequence <= UInt64(Int64.max)
+              let actorUUID = UUID(uuidString: actorUserID.rawValue)
         else { throw V2GroupEventLogError.corruptPersistenceState }
 
         // Inspect only local coverage before spending a database round trip on
@@ -51,6 +53,10 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             }
         }
 
+        let acceptedDelivery = v2MessageAcceptedDeliveryQuery(
+            messageID: "CASE WHEN event.event_type IN ('message.edited', 'message.withdrawn', 'message.reaction_changed') THEN (event.payload->>'message_id')::uuid ELSE NULL END",
+            roomID: "event.room_id"
+        )
         let rows = try await sql.raw("""
             WITH room AS MATERIALIZED (
                 SELECT rooms.room_sequence, rooms.room_kind,
@@ -74,7 +80,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                   -- is logically identical to the visibility fence below,
                   -- but prevents a recovery miss from materializing the
                   -- room's complete legacy-event history before filtering.
-                  AND event.room_sequence > \(bind: Int64(afterRoomSequence))
+                  AND event.room_sequence > \(bind: cursor.signedValue)
 
                 UNION ALL
 
@@ -93,15 +99,18 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                   -- timeline sequence.  Keep the cursor predicate on the
                   -- existing unique `(room_id, timeline_sequence)` index so
                   -- direct event pulls do not need a second write index.
-                  AND message.timeline_sequence > \(bind: Int64(afterRoomSequence))
+                  AND message.timeline_sequence > \(bind: cursor.signedValue)
             ), visible_events AS MATERIALIZED (
                 SELECT event.event_id, event.room_sequence, event.event_type,
-                       event.payload, event.message_id, event.is_message_row
+                       event.payload, event.message_id, event.is_message_row,
+                       (event.event_type NOT IN ('message.edited', 'message.withdrawn', 'message.reaction_changed')
+                        OR accepted.message_id IS NOT NULL) AS authority_complete
                 FROM room
                 JOIN visible_event_candidates AS event ON TRUE
+                LEFT JOIN LATERAL (\(acceptedDelivery)) AS accepted ON TRUE
                 WHERE room.room_kind IN ('group', 'direct')
                   AND room.actor_is_active_member
-                  AND event.room_sequence > \(bind: Int64(afterRoomSequence))
+                  AND event.room_sequence > \(bind: cursor.signedValue)
                   AND EXISTS (
                       SELECT 1 FROM im_v2.room_memberships AS membership
                       WHERE membership.room_id = event.room_id
@@ -109,10 +118,25 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                         AND membership.joined_revision <= event.committed_membership_revision
                         AND (membership.left_revision IS NULL OR membership.left_revision > event.committed_membership_revision)
                   )
+                  AND (
+                      event.event_type NOT IN ('message.edited', 'message.withdrawn', 'message.reaction_changed')
+                      -- Keep unknown authority as an incomplete row: fail the
+                      -- page instead of silently skipping its cursor range.
+                      OR accepted.message_id IS NULL
+                      OR EXISTS (
+                          SELECT 1 FROM im_v2.room_memberships AS original_membership
+                          WHERE original_membership.room_id = event.room_id
+                            AND original_membership.user_id = \(bind: actorUUID)
+                            AND original_membership.joined_revision <= accepted.accepted_membership_revision
+                            AND (original_membership.left_revision IS NULL
+                                 OR original_membership.left_revision > accepted.accepted_membership_revision)
+                      )
+                  )
                 ORDER BY event.room_sequence
                 LIMIT \(bind: pageSize + 1)
             )
             SELECT room.room_kind, room.actor_is_active_member,
+                   room.room_sequence AS scanned_through_room_sequence,
                    event.event_id, event.room_sequence, event.event_type,
                    CASE
                        WHEN event.is_message_row
@@ -160,7 +184,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                        )
                        ELSE event.payload
                    END::text AS payload_json,
-                   CASE
+                   (CASE
                        WHEN event.is_message_row
                        THEN message.message_id IS NOT NULL
                             AND (snapshot.message_id IS NOT NULL
@@ -173,7 +197,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                                 OR message.content_revision = (event.payload->>'message_revision')::bigint
                             )
                        ELSE TRUE
-                   END AS payload_is_complete
+                   END) AND COALESCE(event.authority_complete, TRUE) AS payload_is_complete
             FROM room
             LEFT JOIN visible_events AS event ON TRUE
             LEFT JOIN im_v2.messages AS message
@@ -208,15 +232,20 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                   row.payloadIsComplete,
                   let payload = payloadJSON.data(using: .utf8)
             else { throw V2GroupEventLogError.corruptPersistenceState }
-            return V2GroupEventLogEntry(
+            return try V2GroupEventLogEntry(
                 sourceEventID: try EventID(eventID.uuidString),
                 roomSequence: try groupEventUnsigned(roomSequence),
                 projectionKind: groupEventProjectionKind(for: eventType),
                 payload: payload
             )
         }
-        let next = entries.last?.roomSequence ?? afterRoomSequence
-        return V2GroupEventLogPage(roomID: roomID, events: entries, nextRoomSequence: next, hasMore: hasMore)
+        // An exhausted snapshot has checked the complete tail, including
+        // authorized sequence gaps. Never advertise that tail as consumed
+        // while another visible (or incomplete-authority) row remains.
+        let next = hasMore
+            ? (entries.last?.roomSequence ?? afterRoomSequence)
+            : max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
+        return try V2GroupEventLogPage(roomID: roomID, events: entries, nextRoomSequence: next, hasMore: hasMore)
     }
 
     func pullPrepared(
@@ -226,6 +255,9 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         pageSize: Int,
         context: V2PreparedGroupEventPageEncodingContext
     ) async throws -> V2PreparedGroupEventPullResult {
+        guard (try? V2RoomCursor(afterRoomSequence)) != nil,
+              (1 ... V2GroupEventLogService.maximumPageSize).contains(pageSize)
+        else { throw V2GroupEventLogError.invalidRequest }
         guard let sql = database as? any SQLDatabase,
               let roomUUID = UUID(uuidString: roomID.rawValue),
               let actorUUID = UUID(uuidString: actorUserID.rawValue),
@@ -290,7 +322,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             throw V2GroupEventLogError.corruptPersistenceState
         }
         let room = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
-        return .init(
+        return try .init(
             roomID: roomID,
             highWatermark: try groupEventUnsigned(room.roomSequence),
             membershipRevision: try groupEventUnsigned(room.membershipRevision)
@@ -383,6 +415,7 @@ private struct DirectRoomCacheAccessRow: Decodable {
 }
 
 private struct GroupEventLogRow: Decodable {
+    let scannedThroughRoomSequence: Int64
     let roomKind: String
     let actorIsActiveMember: Bool
     let eventID: UUID?
@@ -391,6 +424,7 @@ private struct GroupEventLogRow: Decodable {
     let payloadJSON: String?
     let payloadIsComplete: Bool
     enum CodingKeys: String, CodingKey {
+        case scannedThroughRoomSequence = "scanned_through_room_sequence"
         case roomKind = "room_kind"
         case actorIsActiveMember = "actor_is_active_member"
         case eventID = "event_id"

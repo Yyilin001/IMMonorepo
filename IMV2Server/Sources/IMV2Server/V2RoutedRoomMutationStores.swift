@@ -36,6 +36,7 @@ public protocol V2ControlValidatedRoomMembershipStore:
     V2RoomMembershipStore {
     func changeControlValidated(
         command: V2ChangeRoomMembershipCommand,
+        ownerRoute: V2RoomShardRoute,
         identitySnapshot: V2MembershipIdentitySnapshot,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
@@ -109,13 +110,15 @@ public struct V2RoutedRoomMembershipStore: V2RoomMembershipStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2RoomMembershipChangeOutcome {
-        async let selectedStore = selector.store(for: command.roomID)
+        async let selectedOwner = selector.owner(for: command.roomID)
         async let identitySnapshot = identities.snapshot(
             actorUserID: command.actorUserID,
             targetUserID: command.targetUserID
         )
-        return try await selectedStore.changeControlValidated(
+        let selected = try await selectedOwner
+        return try await selected.store.changeControlValidated(
             command: command,
+            ownerRoute: selected.route,
             identitySnapshot: identitySnapshot,
             capacityProfile: capacityProfile,
             eventID: eventID,
@@ -127,11 +130,11 @@ public struct V2RoutedRoomMembershipStore: V2RoomMembershipStore {
 
 public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
     private let selector:
-        V2RoomOwnerStoreSelector<any V2MessageWithdrawalStore>
+        V2RoomOwnerStoreSelector<any V2OwnerValidatedMessageWithdrawalStore>
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2MessageWithdrawalStore],
+        stores: [String: any V2OwnerValidatedMessageWithdrawalStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         selector = try .init(
@@ -148,8 +151,10 @@ public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageWithdrawalOutcome {
-        try await selector.store(for: command.roomID).withdraw(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.withdrawOwnerValidated(
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -160,11 +165,11 @@ public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
 
 public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
     private let selector:
-        V2RoomOwnerStoreSelector<any V2MessageReactionStore>
+        V2RoomOwnerStoreSelector<any V2OwnerValidatedMessageReactionStore>
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2MessageReactionStore],
+        stores: [String: any V2OwnerValidatedMessageReactionStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         selector = try .init(
@@ -181,8 +186,10 @@ public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageReactionOutcome {
-        try await selector.store(for: command.roomID).change(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.changeOwnerValidated(
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -192,11 +199,11 @@ public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
 }
 
 public struct V2RoutedMessageEditStore: V2MessageEditStore {
-    private let selector: V2RoomOwnerStoreSelector<any V2MessageEditStore>
+    private let selector: V2RoomOwnerStoreSelector<any V2OwnerValidatedMessageEditStore>
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2MessageEditStore],
+        stores: [String: any V2OwnerValidatedMessageEditStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         selector = try .init(
@@ -213,8 +220,10 @@ public struct V2RoutedMessageEditStore: V2MessageEditStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageEditOutcome {
-        try await selector.store(for: command.roomID).edit(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.editOwnerValidated(
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -225,11 +234,11 @@ public struct V2RoutedMessageEditStore: V2MessageEditStore {
 
 public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     private let selector:
-        V2RoomOwnerStoreSelector<any V2GroupCapabilitiesStore>
+        V2RoomOwnerStoreSelector<any V2OwnerValidatedGroupCapabilitiesStore>
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2GroupCapabilitiesStore],
+        stores: [String: any V2OwnerValidatedGroupCapabilitiesStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         selector = try .init(
@@ -247,9 +256,11 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
-        try await selector.store(for: command.roomID).setPinnedMessage(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.setPinnedMessageOwnerValidated(
             actorUserID: actorUserID,
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -265,9 +276,11 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
-        try await selector.store(for: command.roomID).setAnnouncement(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.setAnnouncementOwnerValidated(
             actorUserID: actorUserID,
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -285,9 +298,11 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     ) async throws -> V2GroupCapabilitiesOutcome<
         V2GroupRolePermissionsChange
     > {
-        try await selector.store(for: command.roomID).setRolePermissions(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.setRolePermissionsOwnerValidated(
             actorUserID: actorUserID,
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -303,9 +318,11 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
-        try await selector.store(for: command.roomID).changeMemberRole(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.changeMemberRoleOwnerValidated(
             actorUserID: actorUserID,
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -318,11 +335,11 @@ public struct V2RoutedModerationStore:
     V2ModerationStore,
     V2TrustedSafetyModerationStore {
     private let selector:
-        V2RoomOwnerStoreSelector<any V2RoutedModerationOwnerStore>
+        V2RoomOwnerStoreSelector<any V2OwnerValidatedModerationStore>
 
     public init(
         router: any V2RoomShardRouting,
-        stores: [String: any V2RoutedModerationOwnerStore],
+        stores: [String: any V2OwnerValidatedModerationStore],
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
         selector = try .init(
@@ -339,8 +356,10 @@ public struct V2RoutedModerationStore:
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2ModerationOutcome {
-        try await selector.store(for: command.roomID).apply(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.applyOwnerValidated(
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -355,8 +374,10 @@ public struct V2RoutedModerationStore:
         planID: FanoutPlanID,
         now: Date
     ) async throws -> V2ModerationOutcome {
-        try await selector.store(for: command.roomID).applyTrustedSafety(
+        let selected = try await selector.owner(for: command.roomID)
+        return try await selected.store.applyTrustedSafetyOwnerValidated(
             command: command,
+            ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
             planID: planID,
@@ -375,7 +396,6 @@ extension V2RoutedModerationStore: V2RoutedModerationOwnerStore {}
 private struct V2RoomOwnerStoreSelector<Store: Sendable>: Sendable {
     private let router: any V2RoomShardRouting
     private let stores: [String: Store]
-    private let singlePhysicalStore: Store?
 
     init(
         router: any V2RoomShardRouting,
@@ -397,18 +417,16 @@ private struct V2RoomOwnerStoreSelector<Store: Sendable>: Sendable {
         else { throw V2RoomShardStorageRegistryError.invalidLocation }
         self.router = router
         self.stores = stores
-        singlePhysicalStore = Set(keys.values).count == 1
-            ? stores.values.first
-            : nil
     }
 
-    func store(for roomID: RoomID) async throws -> Store {
-        if let singlePhysicalStore { return singlePhysicalStore }
+    // Callers enforcing ownership must retain the epoch even if every logical
+    // shard currently shares a database. Topology alone is not an owner fence.
+    func owner(for roomID: RoomID) async throws -> (route: V2RoomShardRoute, store: Store) {
         let route = try await router.route(for: roomID)
         guard let store = stores[route.shardID] else {
             throw V2RoomShardStorageRegistryError.unknownShardID
         }
-        return store
+        return (route, store)
     }
 }
 

@@ -35,11 +35,14 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ProfileUpdateError.corruptPersistenceState
             }
+            // Serialize both the ledger read and the mutation on this row.
+            // A concurrent retry must see the operation committed by the
+            // writer it waited for, before checking revisions or the clock.
+            let current = try await activeProfile(userID: actorID, sql: sql)
             if let operation = try await operation(actorID: actorID, operationID: operationID, sql: sql) {
                 guard operation.matches(command: command) else {
                     throw V2ProfileUpdateError.operationPayloadMismatch
                 }
-                let view = try await activeProfile(userID: actorID, sql: sql)
                 guard operation.resultRevision > 0 else {
                     throw V2ProfileUpdateError.corruptPersistenceState
                 }
@@ -47,10 +50,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                 // Returning that current authoritative view is safer than
                 // replaying the old state, while the operation ledger still
                 // guarantees this retry creates no second source event.
-                return .idempotent(view)
+                return .idempotent(current)
             }
 
-            let current = try await activeProfile(userID: actorID, sql: sql)
             guard current.revision == command.expectedRevision else {
                 throw V2ProfileUpdateError.revisionConflict(current: current.revision)
             }
@@ -65,9 +67,13 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
             }
 
             let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfileUpdateError.corruptPersistenceState }
             let changed = current.publicIdentity?.displayName != command.displayName || current.avatar != command.avatar
             let result: V2ProfileView
             if changed {
+                guard current.revision.rawValue < UInt64(Int64.max),
+                      current.visibilityRevision.rawValue < UInt64(Int64.max)
+                else { throw V2ProfileUpdateError.corruptPersistenceState }
                 guard let updated = try await sql.raw("""
                     UPDATE im_v2.public_user_profiles
                     SET display_name = \(bind: command.displayName),
@@ -89,7 +95,7 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                     INSERT INTO im_v2.public_profile_update_outbox
                     (source_event_id, source_user_id, public_handle, display_name, account_kind, profile_state, revision, profile_updated_at, created_at)
                     VALUES (\(bind: makeUUID()), \(bind: actorID), \(bind: identity.handle.rawValue),
-                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 'active', \(bind: result.revision.rawValue), \(bind: changedAt), \(bind: changedAt))
+                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 'active', \(bind: result.revision.signedValue), \(bind: changedAt), \(bind: changedAt))
                     """).run()
             } else {
                 result = current
@@ -98,9 +104,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                 INSERT INTO im_v2.public_profile_update_operations
                     (actor_user_id, operation_id, expected_revision, requested_display_name,
                      requested_avatar_media_id, result_revision, created_at)
-                VALUES (\(bind: actorID), \(bind: operationID), \(bind: command.expectedRevision.rawValue),
+                VALUES (\(bind: actorID), \(bind: operationID), \(bind: command.expectedRevision.signedValue),
                         \(bind: command.displayName), \(bind: requestedAvatarID),
-                        \(bind: result.revision.rawValue), \(bind: changedAt))
+                        \(bind: result.revision.signedValue), \(bind: changedAt))
                 """).run()
             return .updated(result)
         }
@@ -174,8 +180,12 @@ private struct ProfileOperationRow: Decodable {
     }
 
     func matches(command: V2ProfileUpdateCommand) -> Bool {
-        expectedRevision > 0 && UInt64(expectedRevision) == command.expectedRevision.rawValue &&
-            requestedDisplayName == command.displayName &&
+        // Older writers validated the normalized name but recorded raw input.
+        // Keep those operations replayable under the same name semantics.
+        let normalizedName = requestedDisplayName.precomposedStringWithCanonicalMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return expectedRevision > 0 && UInt64(expectedRevision) == command.expectedRevision.rawValue &&
+            normalizedName == command.displayName &&
             requestedAvatarMediaID?.uuidString == command.avatar?.mediaID.rawValue
     }
 }

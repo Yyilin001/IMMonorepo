@@ -35,7 +35,7 @@ require_command() {
   }
 }
 
-for command in curl jq openssl uuidgen docker; do
+for command in curl jq openssl uuidgen docker python3; do
   require_command "${command}"
 done
 
@@ -178,14 +178,18 @@ grep -Eiq '^retry-after:[[:space:]]*[1-9][0-9]*' "${rate_limit_headers}" || {
 }
 
 phase="device credential issuance"
+cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
+  "${device_id}" "${operation_id}" "${v2_dir}/local-ca/registration-recovery")"
 issued_credentials="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"accountAssertion\":\"${assertion}\",\"deviceID\":\"${device_id}\",\"operationID\":\"${operation_id}\"}" \
+  --data "{\"accountAssertion\":\"${assertion}\",\"deviceID\":\"${device_id}\",\"operationID\":\"${operation_id}\",\"cancellation\":${cancellation}}" \
   https://localhost:8443/v2/device-credentials)"
 access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
+revocation_credential="$(printf '%s' "${issued_credentials}" | jq -er '.revocationCredential')"
+printf '%s' "${issued_credentials}" | jq -e --argjson expected "${cancellation}" '.registrationCancellation == $expected' > /dev/null
 user_id="$(printf '%s' "${issued_credentials}" | jq -er '.userID')"
 
 # Register an independent recipient. It gives the gateway probe a real direct
@@ -205,13 +209,16 @@ peer_assertion="$(curl --silent --show-error --fail \
   https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
 
 phase="peer device credential issuance"
+peer_cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
+  "${peer_device_id}" "${peer_operation_id}" "${v2_dir}/local-ca/registration-recovery")"
 peer_issued_credentials="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"accountAssertion\":\"${peer_assertion}\",\"deviceID\":\"${peer_device_id}\",\"operationID\":\"${peer_operation_id}\"}" \
+  --data "{\"accountAssertion\":\"${peer_assertion}\",\"deviceID\":\"${peer_device_id}\",\"operationID\":\"${peer_operation_id}\",\"cancellation\":${peer_cancellation}}" \
   https://localhost:8443/v2/device-credentials)"
 peer_access_token="$(printf '%s' "${peer_issued_credentials}" | jq -er '.accessToken')"
+printf '%s' "${peer_issued_credentials}" | jq -e --argjson expected "${peer_cancellation}" '.registrationCancellation == $expected' > /dev/null
 peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 
 # Exercise the real framed gateway protocol after the HTTPS account issuer has
@@ -344,7 +351,7 @@ disabled_refresh_status="$(curl --silent --show-error --output /dev/null --write
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"userID\":\"${user_id}\",\"deviceID\":\"${device_id}\",\"refreshCredential\":\"${refresh_credential}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
+  --data "{\"userID\":\"${user_id}\",\"deviceID\":\"${device_id}\",\"refreshCredential\":\"${refresh_credential}\",\"revocationCredential\":\"${revocation_credential}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
   https://localhost:8443/v2/device-credentials/refresh)"
 test "${disabled_refresh_status}" = '401' || {
   printf 'disabled refresh credential was unexpectedly accepted: %s\n' "${disabled_refresh_status}" >&2
@@ -352,11 +359,14 @@ test "${disabled_refresh_status}" = '401' || {
 }
 
 phase="disabled account assertion rejection"
+pre_disable_operation_id="$(uuidgen)"
+pre_disable_cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
+  "${pre_disable_device_id}" "${pre_disable_operation_id}" "${v2_dir}/local-ca/registration-recovery")"
 disabled_assertion_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "{\"accountAssertion\":\"${pre_disable_assertion}\",\"deviceID\":\"${pre_disable_device_id}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
+  --data "{\"accountAssertion\":\"${pre_disable_assertion}\",\"deviceID\":\"${pre_disable_device_id}\",\"operationID\":\"${pre_disable_operation_id}\",\"cancellation\":${pre_disable_cancellation}}" \
   https://localhost:8443/v2/device-credentials)"
 test "${disabled_assertion_status}" = '403' || {
   printf 'disabled account assertion was unexpectedly allowed to issue a credential: %s\n' "${disabled_assertion_status}" >&2

@@ -238,33 +238,41 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let minimumRefreshInterval: TimeInterval
     private let maximumRefreshDuration: Duration
     private let now: @Sendable () -> Date
-    private var cached: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: Date)?
-    private var lastKnownGood: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: Date)?
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
+    private var cached: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: ContinuousClock.Instant)?
+    private var lastKnownGood: (snapshot: V2DurableWorkMetricsSnapshot, loadedAt: ContinuousClock.Instant)?
     private var refreshTask: Task<V2DurableWorkMetricsSnapshot, Never>?
 
     public init(
         source: any V2DurableWorkMetricsSource,
         minimumRefreshInterval: TimeInterval = 5,
         maximumRefreshDuration: TimeInterval = 4,
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         precondition(minimumRefreshInterval.isFinite && minimumRefreshInterval > 0)
-        precondition(
-            maximumRefreshDuration.isFinite &&
-            maximumRefreshDuration > 0 &&
-            maximumRefreshDuration <= 86_400
-        )
+        guard maximumRefreshDuration <= 86_400,
+              let refreshNanoseconds = v2TimeoutNanoseconds(maximumRefreshDuration) else {
+            preconditionFailure("Refresh timeout must be finite, positive and at most one day")
+        }
         self.source = source
         self.minimumRefreshInterval = minimumRefreshInterval
-        self.maximumRefreshDuration = .milliseconds(Int64(maximumRefreshDuration * 1_000))
+        self.maximumRefreshDuration = .nanoseconds(refreshNanoseconds)
         self.now = now
+        self.monotonicNow = monotonicNow
     }
 
     public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
         let requestedAt = now()
+        // Preserve the server-clock availability contract without allowing
+        // wall-clock corrections to change cache or fallback elapsed ages.
+        guard requestedAt.timeIntervalSince1970.isFinite else { return .unavailable }
+        let requestedInstant = monotonicNow()
         if let cached {
-            let age = requestedAt.timeIntervalSince(cached.loadedAt)
-            if age >= 0, age < minimumRefreshInterval {
+            let elapsed = cached.loadedAt.duration(to: requestedInstant)
+            let components = elapsed.components
+            let age = Double(components.seconds) + Double(components.attoseconds) / 1e18
+            if elapsed >= .zero, age < minimumRefreshInterval {
                 return cached.snapshot
             }
         }
@@ -274,6 +282,7 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
         let maximumRefreshDuration = maximumRefreshDuration
         let fallback = lastKnownGood
         let now = now
+        let monotonicNow = monotonicNow
         let task = Task {
             let refreshed: V2DurableWorkMetricsSnapshot
             switch await v2LoadDurableWorkMetrics(
@@ -287,18 +296,28 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
             guard let fallback else {
                 return refreshed.reportingUnavailable(lastSuccessfulRefreshAgeSeconds: nil)
             }
+            let elapsed = fallback.loadedAt.duration(to: monotonicNow())
+            guard now().timeIntervalSince1970.isFinite, elapsed >= .zero,
+                  let age = Int(exactly: elapsed.components.seconds) else {
+                // Do not advertise stale values as fresh by clamping an
+                // unrepresentable age to zero or to an arbitrary maximum.
+                return refreshed.reportingUnavailable(lastSuccessfulRefreshAgeSeconds: nil)
+            }
             return fallback.snapshot.reportingUnavailable(
-                lastSuccessfulRefreshAgeSeconds: Int(max(
-                    0,
-                    now().timeIntervalSince(fallback.loadedAt)
-                ))
+                lastSuccessfulRefreshAgeSeconds: age
             )
         }
         refreshTask = task
         let snapshot = await task.value
-        let loadedAt = now()
-        if snapshot.isAvailable { lastKnownGood = (snapshot, loadedAt) }
-        cached = (snapshot, loadedAt)
+        if now().timeIntervalSince1970.isFinite {
+            let loadedAt = monotonicNow()
+            if snapshot.isAvailable { lastKnownGood = (snapshot, loadedAt) }
+            cached = (snapshot, loadedAt)
+        } else {
+            // Recovery may land inside the old cache's interval. Force a new
+            // refresh instead of presenting that older success after failure.
+            cached = nil
+        }
         refreshTask = nil
         return snapshot
     }

@@ -5,6 +5,22 @@ import Testing
 
 @Suite("V2 media purge worker")
 struct V2MediaPurgeWorkerTests {
+    @Test("Invalid retry clocks keep the media lease unreleased", arguments: Array(0...8))
+    func invalidRetryClockDoesNotRelease(_ boundary: Int) async throws {
+        let clock = V2WorkerRetryClockFixture(boundary)
+        let lease = try V2MediaPurgeLease(mediaID: .init("media"), reason: .unreferencedExpired, claimToken: UUID())
+        let store = RecordingMediaPurgeStore(leases: [lease])
+        let worker = try V2MediaPurgeWorker(store: store, provider: FailingMediaPurgeProvider(), retryPolicy: clock.policy, now: { clock.now() })
+        await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
+        #expect(await store.retries().isEmpty)
+        #expect(await store.completedLeases().isEmpty)
+        let recoveredAt = Date(timeIntervalSince1970: 1_750_000_010)
+        let recovered = try V2MediaPurgeWorker(store: store, provider: FailingMediaPurgeProvider(),
+            retryPolicy: .init(initialDelay: 0.5, maximumDelay: 0.5, maximumAttempts: 3, jitterFraction: 0), now: { recoveredAt })
+        #expect(try await recovered.runOnce(limit: 1).releasedCount == 1)
+        #expect(await store.retries().map(\.disposition) == [.retry(at: recoveredAt.addingTimeInterval(0.5))])
+    }
+
     @Test("provider failure releases only the cleanup work for retry")
     func providerFailureIsRetryable() async throws {
         let lease = try V2MediaPurgeLease(mediaID: .init("media"), reason: .withdrawnRetentionElapsed, claimToken: UUID())

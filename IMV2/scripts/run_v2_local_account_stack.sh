@@ -28,7 +28,6 @@ require_command() {
 
 require_command docker
 require_command openssl
-require_command htpasswd
 require_command rsync
 require_command uuidgen
 
@@ -50,14 +49,10 @@ if [[ ! -f "${env_file}" ]]; then
   edge_authorization_secret="$(openssl rand -base64 32 | tr -d '\n')"
   edge_client_rate_limit_key="$(openssl rand -base64 32 | tr -d '\n')"
   assertion_key="$(openssl rand -base64 32 | tr -d '\n')"
+  group_invite_key="$(openssl rand -base64 32 | tr -d '\n')"
   local_media_signing_key="$(openssl rand -base64 32 | tr -d '\n')"
   operator_replay_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
   operator_account_disable_bearer_token="$(openssl rand -base64 32 | tr -d '\n')"
-  dummy_hash="$(htpasswd -bnBC 12 '' 'v2-local-dummy-password' | tr -d ':\n')"
-  # Compose interpolates `$name` even in an env file. Double each dollar so
-  # the container receives the original bcrypt digest verbatim.
-  dummy_hash_for_compose="${dummy_hash//$/\$\$}"
-
   umask 077
   {
     printf 'IM_V2_LOCAL_POSTGRES_PASSWORD=%s\n' "${postgres_password}"
@@ -67,12 +62,20 @@ if [[ ! -f "${env_file}" ]]; then
     printf 'IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64=%s\n' "${edge_authorization_secret}"
     printf 'IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64=%s\n' "${edge_client_rate_limit_key}"
     printf 'IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64=%s\n' "${assertion_key}"
+    printf 'IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=%s\n' "${group_invite_key}"
     printf 'IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64=%s\n' "${local_media_signing_key}"
     printf 'IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64=%s\n' "${operator_replay_bearer_token}"
     printf 'IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64=%s\n' "${operator_account_disable_bearer_token}"
-    printf 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH=%s\n' "${dummy_hash_for_compose}"
   } > "${env_file}"
   printf 'created local-only secret configuration: %s\n' "${env_file}"
+fi
+
+# Existing local stacks predate group invitations. Add only the new dedicated
+# secret without rotating any credential or edge keys already in use.
+if ! grep -q '^IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=' "${env_file}"; then
+  group_invite_key="$(openssl rand -base64 32 | tr -d '\n')"
+  umask 077
+  printf 'IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=%s\n' "${group_invite_key}" >> "${env_file}"
 fi
 
 "${script_dir}/validate_v2_local_environment.sh" "${env_file}"

@@ -73,8 +73,8 @@ struct V2MediaTransferTests {
         }
     }
 
-    @Test("HTTPS edge resolver keeps gateway authorization separate from the provider target")
-    func edgeResolverBuildsNoStoreRequestAndMapsEnvelope() async throws {
+    @Test("HTTPS edge resolver keeps gateway authorization separate from the provider target", arguments: [false, true])
+    func edgeResolverBuildsNoStoreRequestAndMapsEnvelope(scoped: Bool) async throws {
         let expiry = Date(timeIntervalSince1970: 1_750_000_020)
         let envelope = try V2MediaDownloadTargetEnvelope(
             url: #require(URL(string: "https://provider.invalid/object")),
@@ -103,14 +103,17 @@ struct V2MediaTransferTests {
             transport: transport
         )
 
-        let target = try await resolver.resolveDownloadTarget(mediaID: .init("media"))
+        let location = try V2MediaMessageLocation(roomID: .init("room-value_1"), messageID: .init("message-value_1"))
+        let target = try await resolver.resolveDownloadTarget(mediaID: .init("media"), message: scoped ? location : nil)
 
         #expect(target.url == providerURL)
         #expect(target.headers == ["x-oss-meta-provider": "opaque"])
         #expect(target.expectedByteCount == 9)
         let request = try #require(await transport.lastRequest())
         #expect(request.httpMethod == "GET")
-        #expect(request.url?.absoluteString == "https://edge.invalid/v2/media/media")
+        #expect(request.url?.path == "/v2/media/media")
+        let query = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        #expect(query == (scoped ? [.init(name: "room_id", value: location.roomID.rawValue), .init(name: "message_id", value: location.messageID.rawValue)] : nil))
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
         #expect(request.value(forHTTPHeaderField: "X-IM-Device-ID") == "device")
         #expect(request.value(forHTTPHeaderField: "Cache-Control") == "no-store")
@@ -248,7 +251,7 @@ private actor RecordingTargetResolver: V2ClientMediaDownloadTargetResolver {
     private var requests: [MediaID] = []
 
     init(result: Result<V2ClientMediaTransferTarget, Error>) { self.result = result }
-    func resolveDownloadTarget(mediaID: MediaID) throws -> V2ClientMediaTransferTarget {
+    func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ClientMediaTransferTarget {
         requests.append(mediaID)
         return try result.get()
     }

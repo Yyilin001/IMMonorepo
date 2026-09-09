@@ -95,6 +95,10 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
               projectionEffectRetention.isFinite,
               projectionEffectRetention >= V2IdempotencyPolicy.minimumServerRetention
         else { throw V2SyncHousekeepingError.invalidLimit }
+        let effectCutoff = now.addingTimeInterval(-projectionEffectRetention)
+        guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(effectCutoff) else {
+            throw V2SyncHousekeepingError.corruptPersistenceState
+        }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2SyncHousekeepingError.corruptPersistenceState
@@ -115,7 +119,7 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 now: now,
                 limit: limit
             )
-            let expiredSnapshots = try await sql.raw("""
+            var resetCandidates = try await sql.raw("""
                 SELECT snapshot_id
                 FROM \(unsafeRaw: table("sync_snapshot_artifacts"))
                 WHERE state IN ('building', 'published') AND expires_at <= \(bind: now)
@@ -129,31 +133,77 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 FOR UPDATE SKIP LOCKED
                 """).all(decoding: SyncHousekeepingSnapshotRow.self).map(\.snapshotID)
 
+            // A later device can extend the shared artifact's lifetime without
+            // extending an earlier device's assignment. Recover that device at
+            // its own deadline while retaining the payload for other devices.
+            // Lock artifacts first, as the builder and expired-artifact path do.
+            let remaining = limit - resetCandidates.count
+            if remaining > 0 {
+                let sharedSnapshots = try await sql.raw("""
+                    SELECT artifact.snapshot_id
+                    FROM \(unsafeRaw: table("device_snapshot_resets")) AS reset
+                    JOIN \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
+                      ON artifact.snapshot_id = reset.snapshot_id AND artifact.user_id = reset.user_id
+                    WHERE reset.state IN ('preparing', 'ready') AND reset.expires_at <= \(bind: now)
+                      AND artifact.state IN ('building', 'published') AND artifact.expires_at > \(bind: now)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
+                          WHERE checkpoint.user_id = artifact.user_id
+                            AND checkpoint.migration_fence_expires_at > \(bind: now)
+                      )
+                      AND EXISTS (
+                          SELECT 1 FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                          WHERE cursor.user_id = reset.user_id AND cursor.device_id = reset.device_id
+                            AND cursor.reset_generation = reset.reset_generation
+                            AND cursor.pending_snapshot_id = reset.snapshot_id
+                            AND cursor.state IN ('reset_preparing', 'reset_pending')
+                      )
+                    ORDER BY reset.expires_at, reset.user_id, reset.device_id
+                    LIMIT \(bind: remaining)
+                    FOR UPDATE OF artifact SKIP LOCKED
+                    """).all(decoding: SyncHousekeepingSnapshotRow.self).map(\.snapshotID)
+                resetCandidates.append(contentsOf: sharedSnapshots)
+            }
+
             var recovered = 0
-            if !expiredSnapshots.isEmpty {
-                let ids = expiredSnapshots.map { $0.uuidString.lowercased() }
+            if !resetCandidates.isEmpty {
+                let ids = resetCandidates.map { $0.uuidString.lowercased() }
                 recovered = try await sql.raw("""
                     UPDATE \(unsafeRaw: table("device_sync_cursors")) AS cursor
                     SET state = 'ready', reset_generation = cursor.reset_generation - 1,
                         pending_snapshot_id = NULL,
                         pending_base_sequence = NULL, pending_snapshot_expires_at = NULL
-                    WHERE cursor.state IN ('reset_preparing', 'reset_pending')
-                      AND cursor.pending_snapshot_id::text IN (SELECT jsonb_array_elements_text(\(bind: try json(ids))::jsonb))
+                    FROM \(unsafeRaw: table("device_snapshot_resets")) AS reset
+                    JOIN \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
+                      ON artifact.snapshot_id = reset.snapshot_id AND artifact.user_id = reset.user_id
+                    WHERE reset.snapshot_id::text IN (SELECT jsonb_array_elements_text(\(bind: try json(ids))::jsonb))
+                      AND reset.state IN ('preparing', 'ready')
+                      AND (reset.expires_at <= \(bind: now) OR artifact.expires_at <= \(bind: now))
+                      AND cursor.user_id = reset.user_id AND cursor.device_id = reset.device_id
+                      AND cursor.reset_generation = reset.reset_generation
+                      AND cursor.pending_snapshot_id = reset.snapshot_id
+                      AND cursor.state IN ('reset_preparing', 'reset_pending')
                     RETURNING cursor.device_id
                     """).all(decoding: SyncHousekeepingDeviceRow.self).count
                 try await sql.raw("""
                     DELETE FROM \(unsafeRaw: table("sync_tokens")) AS token
                     USING \(unsafeRaw: table("device_snapshot_resets")) AS reset
+                    JOIN \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
+                      ON artifact.snapshot_id = reset.snapshot_id AND artifact.user_id = reset.user_id
                     WHERE reset.snapshot_id::text IN (SELECT jsonb_array_elements_text(\(bind: try json(ids))::jsonb))
-                      AND reset.state IN ('preparing', 'ready') AND reset.expires_at <= \(bind: now)
+                      AND reset.state IN ('preparing', 'ready')
+                      AND (reset.expires_at <= \(bind: now) OR artifact.expires_at <= \(bind: now))
                       AND token.token = reset.next_sync_token
                       AND token.user_id = reset.user_id AND token.device_id = reset.device_id
                       AND token.reset_generation = reset.reset_generation
                     """).run()
                 try await sql.raw("""
-                    DELETE FROM \(unsafeRaw: table("device_snapshot_resets"))
-                    WHERE snapshot_id::text IN (SELECT jsonb_array_elements_text(\(bind: try json(ids))::jsonb))
-                      AND state IN ('preparing', 'ready') AND expires_at <= \(bind: now)
+                    DELETE FROM \(unsafeRaw: table("device_snapshot_resets")) AS reset
+                    USING \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
+                    WHERE artifact.snapshot_id = reset.snapshot_id AND artifact.user_id = reset.user_id
+                      AND reset.snapshot_id::text IN (SELECT jsonb_array_elements_text(\(bind: try json(ids))::jsonb))
+                      AND reset.state IN ('preparing', 'ready')
+                      AND (reset.expires_at <= \(bind: now) OR artifact.expires_at <= \(bind: now))
                     """).run()
                 try await sql.raw("""
                     UPDATE \(unsafeRaw: table("sync_snapshot_artifacts"))
@@ -199,7 +249,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
             // it, incremental replay no longer retains the source row, and no
             // migration fence can still be copying this user's idempotency
             // state. The current projection version remains authoritative.
-            let effectCutoff = now.addingTimeInterval(-projectionEffectRetention)
             let projectionEffects = try await sql.raw("""
                 WITH candidates AS (
                     SELECT effect.ctid

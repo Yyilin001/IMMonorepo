@@ -7,7 +7,7 @@ import Testing
 struct V2ProtobufFrameCodecTests {
     @Test("sync record byte budgeting matches the protobuf repeated field")
     func sizesSyncBatchRecordExactly() throws {
-        let record = V2SyncRecord(
+        let record = try V2SyncRecord(
             sequence: 16_384,
             sourceEventID: try .init("00000000-0000-0000-0000-000000000123"),
             projectionKind: "message",

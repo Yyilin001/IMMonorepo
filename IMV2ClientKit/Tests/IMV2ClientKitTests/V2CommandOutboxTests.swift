@@ -1,10 +1,276 @@
 import Foundation
+import Synchronization
+import GRDB
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
 
 @Suite("V2 local command outbox")
 struct V2CommandOutboxTests {
+    @Test("invalid query clocks neither hide nor prematurely send pending messages", arguments: [Double.nan, .infinity, -.infinity, 999, 1_000, 1_001])
+    func dueQueryClockBounds(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-query-clock-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let normal = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await normal.enqueueMessage(roomID: .init(uuid: UUID()), text: "query clock recovery")
+            let candidate = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: seconds) })
+            if seconds.isFinite {
+                #expect(try await candidate.flushOnce() == (seconds < 1_000 ? .idle : .accepted(command.clientMessageID)))
+            } else {
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await candidate.flushOnce() }
+            }
+            if !seconds.isFinite || seconds < 1_000 {
+                #expect(await transport.clientMessageIDs().isEmpty)
+                #expect(try await store.pendingMessageCommands() == [command])
+                #expect(try await normal.flushOnce() == .accepted(command.clientMessageID))
+            }
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("retry counters remain exact and reject corruption or overflow without altering intent", arguments: [Int64.min, -1, 0, 1, Int64.max - 1, Int64.max])
+    func retryCounterBounds(count: Int64) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-retry-count-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "counter recovery")
+            let pool = await store.databasePool
+            try await pool.write { db in
+                try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
+                defer { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") }
+                try db.execute(sql: "UPDATE v2_pending_message_commands SET attempt_count = ?", arguments: [count])
+            }
+            if count < 0 {
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await store.pendingMessageCommands() }
+            } else {
+                #expect(try await store.pendingMessageCommands().first?.attemptCount == Int(count))
+            }
+            let invalid = count < 0 || count == Int64.max
+            if invalid {
+                await #expect(throws: V2ClientCommandError.commandConflict) {
+                    try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 2_000))
+                }
+            } else {
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 2_000))
+            }
+            let expected = invalid ? count : count + 1
+            #expect(try await pool.read { try String.fetchOne($0, sql: "SELECT CAST(attempt_count AS TEXT) FROM v2_pending_message_commands") } == String(expected))
+            #expect(try await pool.read { try String.fetchOne($0, sql: "SELECT typeof(attempt_count) FROM v2_pending_message_commands") } == "integer")
+            #expect(try await pool.read { try Double.fetchOne($0, sql: "SELECT next_attempt_at FROM v2_pending_message_commands") } == (invalid ? 1_000 : 2_000))
+            try await pool.write { try $0.execute(sql: "UPDATE v2_pending_message_commands SET attempt_count = 0, next_attempt_at = 1000") }
+            #expect(try await engine.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("restored noninteger retry counters fail safely and can resume after data repair", arguments: [1.5, Double(Int64.max)])
+    func nonintegerRetryCounter(count: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-retry-real-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "restored counter")
+            let pool = await store.databasePool
+            try await pool.write { try $0.execute(sql: "UPDATE v2_pending_message_commands SET attempt_count = ?", arguments: [count]) }
+            #expect(try await pool.read { try String.fetchOne($0, sql: "SELECT typeof(attempt_count) FROM v2_pending_message_commands") } == "real")
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await store.pendingMessageCommands() }
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await engine.flushOnce() }
+            await #expect(throws: V2ClientCommandError.commandConflict) {
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 2_000))
+            }
+            #expect(await transport.clientMessageIDs().isEmpty)
+            #expect(try await pool.read { try Double.fetchOne($0, sql: "SELECT attempt_count FROM v2_pending_message_commands") } == count)
+            #expect(try await pool.read { try Double.fetchOne($0, sql: "SELECT next_attempt_at FROM v2_pending_message_commands") } == 1_000)
+            try await pool.write { try $0.execute(sql: "UPDATE v2_pending_message_commands SET attempt_count = 0") }
+            #expect(try await engine.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("retry persistence rejects nonfinite dates without advancing counters", arguments: [Double.nan, .infinity, -.infinity, -1, 0, 2_000, Double.greatestFiniteMagnitude])
+    func retryPersistenceDateBounds(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-retry-date-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "retry date recovery")
+            let date = Date(timeIntervalSince1970: seconds)
+            if seconds.isFinite {
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: date)
+                let updated = try #require(try await store.pendingMessageCommands().first)
+                #expect(updated.clientMessageID == command.clientMessageID)
+                #expect(updated.attemptCount == 1)
+                #expect(updated.nextAttemptAt == date)
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 1_000))
+            } else {
+                await #expect(throws: V2ClientCommandError.commandConflict) {
+                    try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: date)
+                }
+                #expect(try await store.pendingMessageCommands() == [command])
+            }
+            #expect(try await engine.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("reopening rejects nonfinite stored retry dates and preserves the original command", arguments: [Double.infinity, -.infinity])
+    func restoredRetryDateBounds(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-restored-date-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "state.sqlite")
+        var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let originalEngine = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await originalEngine.enqueueMessage(roomID: .init(uuid: UUID()), text: "restored date")
+            let originalPool = await store.databasePool
+            try await originalPool.write { try $0.execute(sql: "UPDATE v2_pending_message_commands SET next_attempt_at = ?", arguments: [seconds]) }
+            try await store.close()
+            store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await store.pendingMessageCommands() }
+            let pool = await store.databasePool
+            #expect(try await pool.read { try Double.fetchOne($0, sql: "SELECT next_attempt_at FROM v2_pending_message_commands") } == seconds)
+            #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT attempt_count FROM v2_pending_message_commands") } == 0)
+            try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 1_000))
+            let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            #expect(try await engine.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("initial enqueue rejects invalid clock values without leaving an unreadable command", arguments: [Double.nan, .infinity, -.infinity, -1, 0, 2_000, Double.greatestFiniteMagnitude])
+    func enqueueClockBounds(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-command-enqueue-date-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.accepted])
+            let identifier = UUID(), room = RoomID(uuid: UUID())
+            let engine = V2CommandOutboxEngine(store: store, transport: transport, makeUUID: { identifier }, now: { Date(timeIntervalSince1970: seconds) })
+            if seconds.isFinite {
+                let command = try await engine.enqueueMessage(roomID: room, text: "enqueue clock recovery")
+                #expect(command.nextAttemptAt == Date(timeIntervalSince1970: seconds))
+                #expect(try await store.pendingMessageCommands() == [command])
+                try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date(timeIntervalSince1970: 1_000))
+            } else {
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await engine.enqueueMessage(roomID: room, text: "enqueue clock recovery") }
+                let pool = await store.databasePool
+                #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_pending_message_commands") } == 0)
+            }
+            let recovered = V2CommandOutboxEngine(store: store, transport: transport, makeUUID: { identifier }, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await recovered.enqueueMessage(roomID: room, text: "enqueue clock recovery")
+            #expect(try await recovered.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("invalid retry clocks preserve the pending message and its idempotency key", arguments: [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude])
+    func retryClockBounds(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-message-retry-clock-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        do {
+            let transport = ScriptedMessageTransport(results: [.retryableFailure, .accepted])
+            let normal = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await normal.enqueueMessage(roomID: .init(uuid: UUID()), text: "retry after clock recovery")
+            let reads = Mutex(0)
+            let invalid = V2CommandOutboxEngine(store: store, transport: transport, now: {
+                reads.withLock { count in
+                    defer { count += 1 }
+                    return Date(timeIntervalSince1970: count == 0 ? 1_000 : seconds)
+                }
+            })
+            await #expect(throws: V2CommandRetrySchedulerError.invalidDate) { try await invalid.flushOnce() }
+            #expect(try await store.pendingMessageCommands() == [command])
+            #expect(try await normal.flushOnce() == .accepted(command.clientMessageID))
+            #expect(await transport.clientMessageIDs() == [command.clientMessageID, command.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("canonical acceptance can complete twice but cannot change or become pending again")
+    func repeatedCanonicalAcceptanceIsIdempotent() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryOutboxDatabaseURL(), installationBinding: testInstallationBinding)
+        let engine = V2CommandOutboxEngine(store: store, transport: ScriptedMessageTransport(results: [.accepted]))
+        let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "same completion")
+        let messageID = MessageID(uuid: UUID())
+        try await store.markMessageAccepted(clientMessageID: command.clientMessageID, messageID: messageID, roomSequence: 1)
+        try await store.markMessageAccepted(clientMessageID: command.clientMessageID, messageID: messageID, roomSequence: 1)
+        await #expect(throws: V2ClientCommandError.commandConflict) {
+            try await store.markMessageAccepted(clientMessageID: command.clientMessageID, messageID: messageID, roomSequence: 2)
+        }
+        await #expect(throws: V2ClientCommandError.commandNotPending) {
+            try await store.scheduleMessageRetry(clientMessageID: command.clientMessageID, nextAttemptAt: Date())
+        }
+        let row = try #require(await store.pendingMessageCommands().first)
+        #expect(row.state == .accepted)
+        #expect(row.acceptedRoomSequence == 1)
+    }
+
+    @Test("twenty concurrent flush calls share one send even when one UI waiter cancels")
+    func concurrentFlushesShareOneSend() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryOutboxDatabaseURL(), installationBinding: testInstallationBinding)
+        let transport = LateSuccessMessageTransport()
+        let engine = V2CommandOutboxEngine(store: store, transport: transport)
+        let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "one durable send")
+        let first = Task { try await engine.flushOnce() }
+        await transport.waitUntilResponseIsPending()
+        let callers = (0..<19).map { _ in Task { try await engine.flushOnce() } }
+        first.cancel()
+        await transport.resumeAccepted()
+        await #expect(throws: CancellationError.self) { try await first.value }
+        for caller in callers { _ = try await caller.value }
+        #expect(await transport.sendCalls == 1)
+        let completed = try #require(await store.pendingMessageCommands().first)
+        #expect(completed.state == .accepted)
+        #expect(completed.clientMessageID == command.clientMessageID)
+        #expect(try await engine.flushOnce() == .idle)
+    }
+
     @Test("network retry survives store restart and preserves the original client message ID")
     func retrySurvivesRestart() async throws {
         let url = temporaryOutboxDatabaseURL()
@@ -145,7 +411,7 @@ struct V2CommandOutboxTests {
         #expect(await transport.receivedMentions() == [[mention], [mention]])
     }
 
-    @Test("取消后忽略非协作传输的迟到成功，保留同一 durable 命令")
+    @Test("runtime 停止后忽略非协作传输的迟到成功，保留同一 durable 命令")
     func cancellationAfterLateTransportSuccessDoesNotPersistAcceptance() async throws {
         let store = try GRDBV2LocalSyncStore(
             databaseURL: temporaryOutboxDatabaseURL(),
@@ -160,7 +426,7 @@ struct V2CommandOutboxTests {
 
         let flush = Task { try await engine.flushOnce() }
         await transport.waitUntilResponseIsPending()
-        flush.cancel()
+        await engine.suspendCommandFlushing()
         await transport.resumeAccepted()
 
         await #expect(throws: CancellationError.self) {
@@ -213,6 +479,7 @@ private actor ScriptedMessageTransport: V2ClientMessageTransport {
 /// received a valid remote response. The outbox must fence its local write at
 /// that boundary and preserve the original idempotency key for the next run.
 private actor LateSuccessMessageTransport: V2ClientMessageTransport {
+    private(set) var sendCalls = 0
     private var responseWaiter: CheckedContinuation<V2ClientMessageAcceptance, Never>?
     private var responseReadyWaiter: CheckedContinuation<Void, Never>?
     private var pendingAcceptance: V2ClientMessageAcceptance?
@@ -226,6 +493,7 @@ private actor LateSuccessMessageTransport: V2ClientMessageTransport {
         entities _: [V2MessageEntity],
         replyTo _: V2MessageReplyReference?
     ) async throws -> V2ClientMessageAcceptance {
+        sendCalls += 1
         let acceptance = try V2ClientMessageAcceptance(
             messageID: .init("00000000-0000-0000-0000-000000000514"),
             roomID: roomID,

@@ -38,12 +38,14 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     public func updateContactAlias(ownerUserID: UserID, targetUserID: UserID, operationID: ContactAliasOperationID, expectedRevision: V2ProfileRevision?, remarkName: String?) async throws -> V2ContactAlias {
         let validated = try V2ContactAlias(ownerUserID: ownerUserID, targetUserID: targetUserID, remarkName: remarkName, revision: .init(rawValue: 1)!)
         let normalizedRemarkName = validated.remarkName
+        let expectedSignedRevision = try signed(expectedRevision)
         let owner = try uuid(ownerUserID), target = try uuid(targetUserID), operation = try uuid(operationID)
         return try await database.transaction { transaction -> V2ContactAlias in
             guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
+            try await presentationLock(scope: owner.uuidString + ":alias-operation:" + operation.uuidString, sql: sql)
             try await presentationLock(scope: owner.uuidString + ":alias:" + target.uuidString, sql: sql)
             if let saved = try await aliasOperation(owner: owner, operation: operation, sql: sql) {
-                guard saved.target == target, saved.expectedRevision == signed(expectedRevision), saved.remarkName == normalizedRemarkName,
+                guard saved.target == target, saved.expectedRevision == expectedSignedRevision, saved.remarkName == normalizedRemarkName,
                       saved.resultRevision > 0,
                       let revision = V2ProfileRevision(rawValue: UInt64(saved.resultRevision))
                 else { throw V2ProfilePresentationError.operationPayloadMismatch }
@@ -51,11 +53,12 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
             }
             guard try await relationshipExists(owner: owner, target: target, sql: sql) else { throw V2ProfilePresentationError.forbidden }
             let current = try await aliasRow(owner: owner, target: target, sql: sql)
-            guard current?.revision == signed(expectedRevision) else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
-            let revision = current?.remarkName == normalizedRemarkName ? (current?.revision ?? 1) : (current.map { $0.revision + 1 } ?? 1)
+            guard current?.revision == expectedSignedRevision else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
+            let revision = try nextPresentationRevision(current: current?.revision, unchanged: current?.remarkName == normalizedRemarkName)
             let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfilePresentationError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_contact_aliases (owner_user_id, target_user_id, remark_name, revision, updated_at) VALUES (\(bind: owner), \(bind: target), \(bind: normalizedRemarkName), \(bind: revision), \(bind: changedAt)) ON CONFLICT (owner_user_id, target_user_id) DO UPDATE SET remark_name = EXCLUDED.remark_name, revision = EXCLUDED.revision, updated_at = EXCLUDED.updated_at").run()
-            try await sql.raw("INSERT INTO im_v2.user_contact_alias_operations (owner_user_id, operation_id, target_user_id, expected_revision, requested_remark_name, result_revision, created_at) VALUES (\(bind: owner), \(bind: operation), \(bind: target), \(bind: expectedRevision?.rawValue), \(bind: normalizedRemarkName), \(bind: revision), \(bind: changedAt))").run()
+            try await sql.raw("INSERT INTO im_v2.user_contact_alias_operations (owner_user_id, operation_id, target_user_id, expected_revision, requested_remark_name, result_revision, created_at) VALUES (\(bind: owner), \(bind: operation), \(bind: target), \(bind: expectedSignedRevision), \(bind: normalizedRemarkName), \(bind: revision), \(bind: changedAt))").run()
             return try V2ContactAlias(ownerUserID: ownerUserID, targetUserID: targetUserID, remarkName: normalizedRemarkName, revision: .init(rawValue: UInt64(revision))!)
         }
     }
@@ -117,12 +120,14 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     public func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) async throws -> V2GroupMemberPresentation {
         let validated = try V2GroupMemberPresentation(roomID: roomID, userID: actorUserID, groupNickname: nickname, revision: .init(rawValue: 1)!)
         let normalizedNickname = validated.groupNickname
+        let expectedSignedRevision = try signed(expectedRevision)
         let actor = try uuid(actorUserID), room = try uuid(roomID), operation = try uuid(operationID)
         return try await database.transaction { transaction -> V2GroupMemberPresentation in
             guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
+            try await presentationLock(scope: actor.uuidString + ":nickname-operation:" + operation.uuidString, sql: sql)
             try await presentationLock(scope: room.uuidString + ":nickname:" + actor.uuidString, sql: sql)
             if let saved = try await nicknameOperation(actor: actor, operation: operation, sql: sql) {
-                guard saved.room == room, saved.expectedRevision == signed(expectedRevision), saved.nickname == normalizedNickname,
+                guard saved.room == room, saved.expectedRevision == expectedSignedRevision, saved.nickname == normalizedNickname,
                       saved.resultRevision > 0,
                       let revision = V2ProfileRevision(rawValue: UInt64(saved.resultRevision))
                 else { throw V2ProfilePresentationError.operationPayloadMismatch }
@@ -130,11 +135,12 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
             }
             guard try await activeMember(userID: actor, roomID: room, sql: sql) else { throw V2ProfilePresentationError.forbidden }
             let current = try await nicknameRow(room: room, user: actor, sql: sql)
-            guard current?.revision == signed(expectedRevision) else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
-            let revision = current?.nickname == normalizedNickname ? (current?.revision ?? 1) : (current.map { $0.revision + 1 } ?? 1)
+            guard current?.revision == expectedSignedRevision else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
+            let revision = try nextPresentationRevision(current: current?.revision, unchanged: current?.nickname == normalizedNickname)
             let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfilePresentationError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.room_member_nicknames (room_id, user_id, nickname, revision, updated_at) VALUES (\(bind: room), \(bind: actor), \(bind: normalizedNickname), \(bind: revision), \(bind: changedAt)) ON CONFLICT (room_id, user_id) DO UPDATE SET nickname = EXCLUDED.nickname, revision = EXCLUDED.revision, updated_at = EXCLUDED.updated_at").run()
-            try await sql.raw("INSERT INTO im_v2.room_member_nickname_operations (actor_user_id, operation_id, room_id, expected_revision, requested_nickname, result_revision, created_at) VALUES (\(bind: actor), \(bind: operation), \(bind: room), \(bind: expectedRevision?.rawValue), \(bind: normalizedNickname), \(bind: revision), \(bind: changedAt))").run()
+            try await sql.raw("INSERT INTO im_v2.room_member_nickname_operations (actor_user_id, operation_id, room_id, expected_revision, requested_nickname, result_revision, created_at) VALUES (\(bind: actor), \(bind: operation), \(bind: room), \(bind: expectedSignedRevision), \(bind: normalizedNickname), \(bind: revision), \(bind: changedAt))").run()
             return try V2GroupMemberPresentation(roomID: roomID, userID: actorUserID, groupNickname: normalizedNickname, revision: .init(rawValue: UInt64(revision))!)
         }
     }
@@ -175,7 +181,18 @@ private struct AuthorizedNicknameRow: Decodable {
 private struct AliasOperationRow: Decodable { let target: UUID; let expectedRevision: Int64?; let remarkName: String?; let resultRevision: Int64; enum CodingKeys: String, CodingKey { case target = "target_user_id"; case expectedRevision = "expected_revision"; case remarkName = "requested_remark_name"; case resultRevision = "result_revision" } }
 private struct NicknameOperationRow: Decodable { let room: UUID; let expectedRevision: Int64?; let nickname: String?; let resultRevision: Int64; enum CodingKeys: String, CodingKey { case room = "room_id"; case expectedRevision = "expected_revision"; case nickname = "requested_nickname"; case resultRevision = "result_revision" } }
 private func uuid<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: value.rawValue) else { throw V2ProfilePresentationError.corruptPersistenceState }; return result }
-private func signed(_ value: V2ProfileRevision?) -> Int64? { value.flatMap { Int64(exactly: $0.rawValue) } }
+private func signed(_ value: V2ProfileRevision?) throws -> Int64? {
+    guard let value else { return nil }
+    guard let signed = Int64(exactly: value.rawValue), signed > 0 else { throw V2ProfilePresentationError.invalidPresentation }
+    return signed
+}
+private func nextPresentationRevision(current: Int64?, unchanged: Bool) throws -> Int64 {
+    guard let current else { return 1 }
+    guard current > 0 else { throw V2ProfilePresentationError.corruptPersistenceState }
+    if unchanged { return current }
+    guard current < Int64.max else { throw V2ProfilePresentationError.corruptPersistenceState }
+    return current + 1
+}
 private func presentationLock(scope: String, sql: any SQLDatabase) async throws {
     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: scope), 0))").run()
 }

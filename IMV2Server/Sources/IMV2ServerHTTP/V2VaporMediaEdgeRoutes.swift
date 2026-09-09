@@ -28,13 +28,15 @@ public struct V2VaporMediaEdgeRoutes: Sendable {
                 target = try await handler.downloadTarget(
                     actorUserID: identity.userID,
                     deviceID: identity.deviceID,
-                    rawMediaID: rawMediaID
+                    rawMediaID: rawMediaID,
+                    rawRoomID: request.query[String.self, at: "room_id"],
+                    rawMessageID: request.query[String.self, at: "message_id"]
                 )
             } catch let error as V2MediaEdgeHTTPHandlerError {
                 switch error {
-                case .invalidMediaID:
+                case .invalidMediaID, .invalidMessageLocation:
                     throw Abort(.badRequest)
-                case .invalidProviderTarget:
+                case .invalidProviderTarget, .messageOwnerUnavailable:
                     throw Abort(.serviceUnavailable)
                 }
             } catch is V2MediaStoreError {

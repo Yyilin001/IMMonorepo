@@ -29,7 +29,7 @@ private actor ReactionStoreSpy: V2MessageReactionStore {
     private var captured: V2ChangeMessageReactionCommand?
     func change(command: V2ChangeMessageReactionCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageReactionOutcome {
         captured = command
-        return .changed(.init(roomID: command.roomID, messageID: command.messageID, actorUserID: command.actorUserID, reaction: command.reaction, action: command.action, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .changed(try .init(roomID: command.roomID, messageID: command.messageID, actorUserID: command.actorUserID, reaction: command.reaction, action: command.action, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
     }
     func command() -> V2ChangeMessageReactionCommand? { captured }
 }

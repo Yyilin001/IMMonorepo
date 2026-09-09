@@ -562,6 +562,7 @@ struct V2NATSGroupEventWakeBrokerTests {
     @Test("an early durable wake is covered by live fanout during deferral")
     func earlyWakeIsCoveredDuringDeferral() async throws {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000917")
+        let instant = ContinuousClock().now
         let recorder = V2NATSNotificationDispatchRecorder()
         let deferred = Atomic<Int>(0)
         let suppressed = Atomic<Int>(0)
@@ -574,6 +575,7 @@ struct V2NATSGroupEventWakeBrokerTests {
                 _ = suppressed.wrappingAdd(1, ordering: .relaxed)
             },
             wakeDeferralDelay: .milliseconds(80),
+            monotonicNow: { instant },
             wakeDeferredObserver: {
                 _ = deferred.wrappingAdd(1, ordering: .relaxed)
             },
@@ -588,6 +590,9 @@ struct V2NATSGroupEventWakeBrokerTests {
             highWatermark: 11
         ))
         try await waitForAtomic(deferred, toReach: 1)
+        // Simulate a delayed test task without advancing the deferral clock.
+        // Coverage before the deadline must not depend on CPU scheduling.
+        try await Task.sleep(for: .milliseconds(120))
         dispatcher.submit(try natsGroupPayload(
             roomID: roomID,
             sequence: 11,
@@ -598,6 +603,47 @@ struct V2NATSGroupEventWakeBrokerTests {
         try await waitForAtomic(suppressed, toReach: 1)
         #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
         #expect(delivered.load(ordering: .relaxed) == 0)
+    }
+
+    @Test("a deferred wake waits for its monotonic deadline and delivers exactly at it")
+    func deferredWakeMonotonicDeadline() async throws {
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000918")
+        let otherRoomID = try RoomID("00000000-0000-0000-0000-000000000919")
+        let instant = ContinuousClock().now
+        let clock = Mutex(instant)
+        let recorder = V2NATSNotificationDispatchRecorder()
+        let deferred = Atomic<Int>(0)
+        let delivered = Atomic<Int>(0)
+        let dispatcher = V2NATSGroupNotificationDispatcher(
+            laneCount: 1,
+            capacityPerLane: 8,
+            reorderingDelay: .zero,
+            wakeDeferralDelay: .milliseconds(20),
+            monotonicNow: { clock.withLock { $0 } },
+            wakeDeferredObserver: {
+                _ = deferred.wrappingAdd(1, ordering: .relaxed)
+            },
+            deferredWakeDeliveredObserver: {
+                _ = delivered.wrappingAdd(1, ordering: .relaxed)
+            },
+            receiveNotification: { recorder.record($0) }
+        )
+        dispatcher.submit(try natsWakePayload(roomID: roomID, highWatermark: 12))
+        try await waitForAtomic(deferred, toReach: 1)
+        // Real timer signals cannot expire a deadline on a frozen clock.
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(recorder.wakeHighWatermarks(for: roomID).isEmpty)
+        #expect(delivered.load(ordering: .relaxed) == 0)
+
+        clock.withLock { $0 = instant.advanced(by: .milliseconds(20)) }
+        // Wake the lane independently of the real timer so the exact
+        // deadline boundary is checked even if that timer already fired.
+        dispatcher.submit(try natsGroupPayload(roomID: otherRoomID, sequence: 1, revision: 17))
+        try await recorder.waitForWakeCount(1)
+        try await waitForAtomic(delivered, toReach: 1)
+        #expect(recorder.wakeHighWatermarks(for: roomID) == [12])
+        #expect(delivered.load(ordering: .relaxed) == 1)
+        #expect(deferred.load(ordering: .relaxed) == 1)
     }
 
     @Test("live watermark advances only after local fanout returns")

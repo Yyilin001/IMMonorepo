@@ -40,7 +40,7 @@ actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
         guard capacityProfileIDs[command.roomID] == capacityProfile.id else {
             throw V2RoomWriteStoreError.capacityProfileMismatch
         }
-        let dedupe = V2CommandDeduplicationKey(senderUserID: command.senderUserID, clientMessageID: command.clientMessageID)
+        let dedupe = V2CommandDeduplicationKey(roomID: command.roomID, senderUserID: command.senderUserID, clientMessageID: command.clientMessageID)
         if room.acceptedCommands[dedupe] != nil {
             return try reduce(command: command, room: room, shard: shard, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
         }
@@ -77,7 +77,7 @@ actor InMemoryV2RoomWriteStore: V2RoomWriteStore {
         case .idempotent(let message):
             return .idempotent(message.materialized(
                 mediaPresentations: try mediaPresentationResolver(message.media)
-            ))
+            ).receipt)
         case .idempotencyConflict:
             return .idempotencyConflict
         case .rateLimited(let seconds):

@@ -30,8 +30,11 @@ public struct SyncPosition: Equatable, Sendable {
     public let sequence: UInt64
 
     public init(generation: UInt64, sequence: UInt64) throws {
-        guard generation > 0 else {
+        guard generation > 0, generation <= UInt64(Int64.max) else {
             throw V2CoreError.invalidGeneration
+        }
+        guard sequence <= UInt64(Int64.max) else {
+            throw V2RevisionValidationError.outOfRange
         }
         self.generation = generation
         self.sequence = sequence

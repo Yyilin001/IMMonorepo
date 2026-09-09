@@ -83,6 +83,30 @@ enum IMV2OperatorServerApp {
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
+            var forwardReplayStores: [String: any V2ForwardWorkReplayStore] = [:]
+            var approvalRecoveryStores: [String: any V2GroupApprovalRecoveryStore] = [:]
+            var inviteImportLocations: [V2RoomShardStorageLocation] = []
+            for storage in configuration.roomShardStorage {
+                let ownerDatabase: any Database
+                if let existing = shardDatabasesByURL[storage.databaseURL] {
+                    ownerDatabase = existing
+                } else {
+                    let identifier = DatabaseID(string: "room-owner-pool-\(shardDatabasesByURL.count)")
+                    app.databases.use(try postgresDatabaseConfiguration(url: storage.databaseURL, policy: configuration.databasePolicy), as: identifier)
+                    let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: databaseEventLoops)
+                    for member in pool.eventLoopDatabases {
+                        try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+                    }
+                    ownerDatabase = pool.database
+                    shardDatabasesByURL[storage.databaseURL] = ownerDatabase
+                }
+                try await V2SchemaReadiness.verify(database: ownerDatabase)
+                forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
+                approvalRecoveryStores[storage.shardID] = PostgresV2GroupApprovalRecoveryStore(database: ownerDatabase)
+                inviteImportLocations.append(try .init(shardID: storage.shardID, database: ownerDatabase, schema: storage.schema))
+            }
+            let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
+                operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
                 storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
             })
@@ -101,6 +125,13 @@ enum IMV2OperatorServerApp {
                     operatorPrincipal: configuration.operatorPrincipal
                 )
             ).register(on: app)
+            V2VaporForwardWorkOperatorReplayRoutes(authenticator: configuration.authenticator, service: forwardReplay).register(on: app)
+            V2VaporGroupApprovalRecoveryRoutes(authenticator: configuration.authenticator,
+                service: try .init(stores: approvalRecoveryStores, operatorPrincipal: configuration.operatorPrincipal)).register(on: app)
+            V2VaporGroupInviteDirectoryImportRoutes(authenticator: configuration.authenticator,
+                service: try PostgresV2GroupInviteDirectoryImporter(controlDatabase: database,
+                    owners: V2StaticRoomShardStorageRegistry(locations: inviteImportLocations),
+                    operatorPrincipal: configuration.operatorPrincipal)).register(on: app)
             V2VaporUserShardRouteOperatorRoutes(
                 authenticator: configuration.authenticator,
                 control: V2PostgresUserShardRouteControl(

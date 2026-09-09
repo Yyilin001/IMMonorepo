@@ -5,6 +5,23 @@ import Testing
 
 @Suite("V2 outbox relay")
 struct V2OutboxRelayTests {
+    @Test("Invalid retry clocks preserve scalar and batch outbox leases", arguments: [false, true], Array(0...8))
+    func invalidRetryClockDoesNotRelease(batch: Bool, boundary: Int) async throws {
+        let clock = V2WorkerRetryClockFixture(boundary)
+        let triggers = try (0..<(batch ? 2 : 1)).map { _ in
+            try makeTrigger(event: UUID().uuidString, plan: UUID().uuidString)
+        }
+        let store = RetryBoundaryOutboxStore(triggers: triggers)
+        let relay = V2OutboxRelay(store: store, publisher: RetryBoundaryPublisher(), retryPolicy: clock.policy, now: { clock.now() })
+        await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await relay.runOnce(limit: 2) }
+        #expect(await store.recorded.isEmpty)
+        let recoveredAt = Date(timeIntervalSince1970: 1_750_000_010)
+        let recovered = V2OutboxRelay(store: store, publisher: RetryBoundaryPublisher(),
+            retryPolicy: .init(initialDelay: 0.5, maximumDelay: 0.5, maximumAttempts: 3, jitterFraction: 0), now: { recoveredAt })
+        #expect(try await recovered.runOnce(limit: 2).releasedCount == triggers.count)
+        #expect(await store.recorded == Array(repeating: .retry(at: recoveredAt.addingTimeInterval(0.5)), count: triggers.count))
+    }
+
     @Test("successful publication marks the exact durable lease published")
     func successfulPublication() async throws {
         let trigger = try makeTrigger(event: "00000000-0000-0000-0000-000000000101", plan: "00000000-0000-0000-0000-000000000102")
@@ -190,4 +207,19 @@ private actor PausingOutboxStore: V2RoomOutboxStore {
 
 private func makeTrigger(event: String, plan: String) throws -> V2FanoutPlanTrigger {
     try .init(sourceEventID: .init(event), planID: .init(plan))
+}
+
+private actor RetryBoundaryOutboxStore: V2RoomOutboxStore {
+    let leases: [V2OutboxLease]
+    private(set) var recorded: [V2DurableRetryDisposition] = []
+    init(triggers: [V2FanoutPlanTrigger]) { leases = triggers.map { .init(trigger: $0, claimToken: UUID()) } }
+    func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2OutboxLease] { Array(leases.prefix(limit)) }
+    func markPublished(_ lease: V2OutboxLease) { Issue.record("Failed publication cannot be acknowledged") }
+    func release(_ lease: V2OutboxLease) { Issue.record("Failure must use the retry policy") }
+    func scheduleRetry(_ lease: V2OutboxLease, disposition: V2DurableRetryDisposition, now: Date) { recorded.append(disposition) }
+}
+private struct RetryBoundaryPublisher: V2BatchFanoutPlanPublisher {
+    enum Failure: Error { case unavailable }
+    func publish(_ trigger: V2FanoutPlanTrigger) throws { throw Failure.unavailable }
+    func publishBatch(_ triggers: [V2FanoutPlanTrigger]) throws { throw Failure.unavailable }
 }

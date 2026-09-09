@@ -101,6 +101,9 @@ public actor V2ShardAdmissionCommandCreditPool {
     else {
       throw V2ShardAdmissionCommandCreditError.corruptShardState
     }
+    guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(lease.validUntil) else {
+      throw V2ShardAdmissionCommandCreditError.corruptShardState
+    }
     guard lease.validUntil > now else {
       return .unavailable(.expiredShardLease)
     }
@@ -134,6 +137,14 @@ public actor V2ShardAdmissionCommandCreditPool {
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
+    // Reject every invalid clock before a prefix can reserve credits or a
+    // cleanup pass can discard a different request's live reservation.
+    guard requests.allSatisfy({ request in
+      v2PostgresTimestampCanEncode(request.now)
+        && request.shardState.lease.map { v2PostgresTimestampCanEncode($0.validUntil) } == true
+    }) else {
+      throw V2ShardAdmissionCommandCreditError.corruptShardState
+    }
     if let cleanupTime = requests.map(\.now).max() {
       discardExpiredCredits(now: cleanupTime)
     }
@@ -213,12 +224,18 @@ public actor V2ShardAdmissionCommandCreditPool {
       var entry = credits[token.key]
     else { return }
     entry.inFlight.remove(token.id)
-    if entry.validUntil > now {
+    if !v2PostgresTimestampCanEncode(now) {
+      // The transaction already rolled back. Without a usable clock, retire
+      // only its token and leave unrelated credits for a later valid check.
+      expiredCreditsDiscarded += 1
+      credits[token.key] = entry
+    } else if entry.validUntil > now {
       entry.available += 1
       returnedCredits += 1
       credits[token.key] = entry
     } else {
-      expiredCreditsDiscarded += 1
+      expiredCreditsDiscarded += 1 + entry.available + entry.inFlight.count
+      for tokenID in entry.inFlight { tokenKeys.removeValue(forKey: tokenID) }
       credits.removeValue(forKey: token.key)
     }
   }

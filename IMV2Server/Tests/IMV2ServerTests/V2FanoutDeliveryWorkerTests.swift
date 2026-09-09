@@ -5,6 +5,22 @@ import Testing
 
 @Suite("V2 fan-out delivery worker")
 struct V2FanoutDeliveryWorkerTests {
+    @Test("Invalid retry clocks keep failed delivery leases unreleased", arguments: Array(0...8))
+    func invalidRetryClockDoesNotRelease(_ boundary: Int) async throws {
+        let clock = V2WorkerRetryClockFixture(boundary)
+        let store = DeliveryStore(lease: try fixtureLease(), failure: true)
+        let worker = V2FanoutDeliveryWorker(store: store, retryPolicy: clock.policy, now: { clock.now() })
+        await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
+        #expect(await store.releaseCount() == 0)
+        #expect(await store.scheduledDispositions().isEmpty)
+        await store.expireClaimForRecovery()
+        let recoveredAt = Date(timeIntervalSince1970: 1_750_000_010)
+        let recovered = V2FanoutDeliveryWorker(store: store,
+            retryPolicy: .init(initialDelay: 0.5, maximumDelay: 0.5, maximumAttempts: 3, jitterFraction: 0), now: { recoveredAt })
+        #expect(try await recovered.runOnce(limit: 1).releasedCount == 1)
+        #expect(await store.scheduledDispositions() == [.retry(at: recoveredAt.addingTimeInterval(0.5))])
+    }
+
     @Test("claim scheduler reserves bounded recovery-first turns and alternates recovery classes")
     func schedulesFreshAndRecoveryLanesFairly() async {
         let scheduler = V2FanoutDeliveryClaimScheduler(freshBurstPasses: 2)
@@ -507,6 +523,7 @@ private actor DeliveryStore: V2FanoutDeliveryStore {
 
     func releaseCount() -> Int { releases }
     func scheduledDispositions() -> [V2DurableRetryDisposition] { scheduled }
+    func expireClaimForRecovery() { claimed = false }
     func claimedBucket() -> String? { bucket }
     func handoffs() -> [V2UserShardRoute] { routed }
 }

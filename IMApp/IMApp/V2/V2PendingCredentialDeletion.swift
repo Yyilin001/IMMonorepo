@@ -1,31 +1,63 @@
 import Foundation
+import CryptoKit
 
-/// Records only the user's non-sensitive intent to finish deleting a local
-/// credential. Tokens and account identifiers remain exclusively in Keychain.
-/// The marker is namespaced by the Keychain service so a DEBUG E2E scope and a
-/// production session can never affect one another.
+/// Only non-sensitive intent is persisted, never tokens or account identity.
+/// Failure to read or commit the marker must not be treated as signed out.
 protocol V2PendingCredentialDeletionStoring: Sendable {
-    func isPending() async -> Bool
-    func markPending() async
-    func clearPending() async
+    func isPending() async throws -> Bool
+    func markPending() async throws
+    func clearPending() async throws
 }
 
-actor V2UserDefaultsPendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
+enum V2PendingCredentialDeletionError: Error { case invalidRecord }
+
+/// Atomic file replacement and an explicit flush finish before the caller
+/// may delete credentials. A cleared record remains authoritative over an
+/// old UserDefaults flag, including when preference removal has not flushed.
+actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
+    static func fileURL(databaseURL: URL, legacyKey: String) -> URL {
+        let serviceHash = SHA256.hash(data: Data(legacyKey.utf8)).map { String(format: "%02x", $0) }.joined()
+        return databaseURL.appendingPathExtension("credential-deletion-" + serviceHash + ".json")
+    }
+    private struct Record: Codable {
+        let version: Int
+        let pending: Bool
+    }
+    private let url: URL
     private let defaults: UserDefaults
-    private let key: String
+    private let legacyKey: String
 
-    init(defaults: UserDefaults = .standard, key: String) {
+    init(url: URL, defaults: UserDefaults = .standard, legacyKey: String) {
+        self.url = url
         self.defaults = defaults
-        self.key = key
+        self.legacyKey = legacyKey
     }
 
-    func isPending() -> Bool { defaults.bool(forKey: key) }
-
-    func markPending() {
-        defaults.set(true, forKey: key)
+    func isPending() throws -> Bool {
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch CocoaError.fileReadNoSuchFile {
+            guard defaults.bool(forKey: legacyKey) else { return false }
+            try markPending()
+            return true
+        }
+        let record: Record
+        do { record = try JSONDecoder().decode(Record.self, from: data) }
+        catch { throw V2PendingCredentialDeletionError.invalidRecord }
+        guard record.version == 1 else { throw V2PendingCredentialDeletionError.invalidRecord }
+        return record.pending
     }
 
-    func clearPending() {
-        defaults.removeObject(forKey: key)
+    func markPending() throws { try write(pending: true) }
+    func clearPending() throws { try write(pending: false) }
+
+    private func write(pending: Bool) throws {
+        _ = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(url.deletingLastPathComponent())
+        try JSONEncoder().encode(Record(version: 1, pending: pending)).write(to: url, options: .atomic)
+        try V2DeviceLocalStoragePolicy.applyToManagedFile(url)
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+        try file.synchronize()
+        defaults.removeObject(forKey: legacyKey)
     }
 }

@@ -13,6 +13,7 @@ enum V2PasswordAuthenticationAuditOutcome: String, Sendable {
 
 enum V2PasswordAuthenticationAuditError: Error, Equatable, Sendable {
     case invalidIdentifier
+    case invalidTimestamp
 }
 
 func recordPasswordAuthenticationAudit(
@@ -20,6 +21,20 @@ func recordPasswordAuthenticationAudit(
     userID: UserID?,
     deviceID: DeviceID,
     occurredAt: Date,
+    on sql: any SQLDatabase
+) async throws {
+    guard let timestamp = try? V2PostgresTimestamp(date: occurredAt) else {
+        throw V2PasswordAuthenticationAuditError.invalidTimestamp
+    }
+    try await recordPasswordAuthenticationAudit(outcome: outcome, userID: userID,
+        deviceID: deviceID, occurredAt: timestamp, on: sql)
+}
+
+func recordPasswordAuthenticationAudit(
+    outcome: V2PasswordAuthenticationAuditOutcome,
+    userID: UserID?,
+    deviceID: DeviceID,
+    occurredAt: V2PostgresTimestamp,
     on sql: any SQLDatabase
 ) async throws {
     guard let deviceUUID = UUID(uuidString: deviceID.rawValue) else {
@@ -30,6 +45,9 @@ func recordPasswordAuthenticationAudit(
             throw V2PasswordAuthenticationAuditError.invalidIdentifier
         }
         return value
+    }
+    guard v2PostgresTimestampMicrosecondsCanEncode(occurredAt.microseconds) else {
+        throw V2PasswordAuthenticationAuditError.invalidTimestamp
     }
     try await sql.raw("""
         INSERT INTO im_v2.account_password_authentication_audit

@@ -114,7 +114,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
         ) -> V2GroupEventLogPage? {
             guard afterRoomSequence <= currentHighWatermark else { return nil }
             if afterRoomSequence == currentHighWatermark {
-                return .init(
+                return try? .init(
                     roomID: roomID,
                     events: [],
                     nextRoomSequence: afterRoomSequence,
@@ -139,7 +139,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
             // same events through the substantially heavier durable query.
             // An empty candidate while the room has advanced is still
             // rejected above because it cannot move the caller's cursor.
-            return .init(
+            return try? .init(
                 roomID: roomID,
                 events: events.map(\.entry),
                 nextRoomSequence: last.entry.roomSequence,
@@ -465,9 +465,9 @@ public final class V2DirectRoomLogEventCache: Sendable {
               let membershipRevision = message.acceptedMembershipRevision,
               let payload = V2DirectRoomLogPayloadCodec.encode(message)
         else { return nil }
-        return .init(
+        return try? .init(
             roomID: message.roomID,
-            entry: .init(
+            entry: try .init(
                 sourceEventID: sourceEventID,
                 roomSequence: message.roomSequence,
                 projectionKind: "message",
@@ -482,9 +482,9 @@ public final class V2DirectRoomLogEventCache: Sendable {
         guard event.projectionKind == "message",
               let membershipRevision = event.acceptedMembershipRevision
         else { return nil }
-        return .init(
+        return try? .init(
             roomID: event.roomID,
-            entry: .init(
+            entry: try .init(
                 sourceEventID: event.sourceEventID,
                 roomSequence: event.roomSequence,
                 projectionKind: event.projectionKind,

@@ -20,6 +20,8 @@ public protocol V2LocalReadReceiptStore: Sendable {
 }
 public enum V2ReadReceiptFlushResult: Equatable, Sendable { case idle, acknowledged(ReadReceiptOperationID), retryScheduled(ReadReceiptOperationID), rejected(ReadReceiptOperationID, code: String) }
 public actor V2ReadReceiptOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2ReadReceiptFlushResult>()
+
     private let store: any V2LocalReadReceiptStore; private let transport: any V2ClientReadReceiptTransport
     private let makeUUID: @Sendable () -> UUID; private let now: @Sendable () -> Date; private let retryDelay: TimeInterval
     public init(store: any V2LocalReadReceiptStore, transport: any V2ClientReadReceiptTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) { precondition(retryDelay > 0); self.store = store; self.transport = transport; self.makeUUID = makeUUID; self.now = now; self.retryDelay = retryDelay }
@@ -55,6 +57,10 @@ public actor V2ReadReceiptOutboxEngine {
         return try await store.enqueueIfReadReceiptAdvances(command) ? command : nil
     }
     public func flushOnce() async throws -> V2ReadReceiptFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2ReadReceiptFlushResult {
         guard let command = try await store.nextReadyReadReceipt(now: now()) else { return .idle }
         do {
             let result = try await transport.recordReadReceipt(roomID: command.roomID, operationID: command.operationID, readThroughRoomSequence: command.readThroughRoomSequence)
@@ -68,7 +74,12 @@ public actor V2ReadReceiptOutboxEngine {
         catch let error as V2RealtimeTransportError {
             if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectReadReceipt(operationID: command.operationID, code: code); return .rejected(command.operationID, code: code) }
             let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }()
-            try await store.scheduleReadReceiptRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(delay)); return .retryScheduled(command.operationID)
-        } catch { try await store.scheduleReadReceiptRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(command.operationID) }
+            try await store.scheduleReadReceiptRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(command.operationID)
+        } catch { try await store.scheduleReadReceiptRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(command.operationID) }
     }
+}
+
+extension V2ReadReceiptOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

@@ -43,6 +43,9 @@ public struct V2FanoutMessageProjectionState: Equatable, Sendable {
     public let payloadSchemaVersion: Int16
     public let payloadJSON: String
     public let createdAt: Date
+    // Database-originated states retain their native timestamp alongside the
+    // Date API, including values that Date cannot represent exactly.
+    private(set) var persistedCreatedAt: V2PostgresTimestamp?
 
     public init(
         stateID: UUID,
@@ -68,9 +71,10 @@ public struct V2FanoutMessageProjectionState: Equatable, Sendable {
         self.payloadSchemaVersion = payloadSchemaVersion
         self.payloadJSON = payloadJSON
         self.createdAt = createdAt
+        self.persistedCreatedAt = try? V2PostgresTimestamp(date: createdAt)
     }
 
-    init(_ value: V2StoredMessageProjectionState) {
+    init(_ value: V2StoredMessageProjectionState, persistedCreatedAt: V2PostgresTimestamp? = nil) {
         self.init(
             stateID: value.stateID,
             messageID: value.messageID,
@@ -84,6 +88,7 @@ public struct V2FanoutMessageProjectionState: Equatable, Sendable {
             payloadJSON: value.payloadJSON,
             createdAt: value.createdAt
         )
+        if let persistedCreatedAt { self.persistedCreatedAt = persistedCreatedAt }
     }
 
     var stored: V2StoredMessageProjectionState {
@@ -181,6 +186,9 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
     }
 
     public func project(_ input: V2FanoutProjectionInput, now: Date) async throws -> UInt64 {
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         guard let sourceEventID = UUID(uuidString: input.sourceEventID.rawValue),
               let targetUserID = UUID(uuidString: input.targetUserID.rawValue)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -211,6 +219,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 VALUES (\(bind: targetUserID), 1)
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = \(unsafeRaw: table("user_sync_sequences")).next_sequence + 1
+                WHERE \(unsafeRaw: table("user_sync_sequences")).next_sequence < \(bind: Int64.max)
                 RETURNING next_sequence AS user_sync_sequence
                 """).first(decoding: CrossStoreSequenceRow.self)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -219,7 +228,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 try await PostgresV2MessageProjectionStateRepository(schema: schema)
-                    .persist(messageState.stored, sql: sql)
+                    .persist(messageState.stored, persistedCreatedAt: messageState.persistedCreatedAt, sql: sql)
             }
             try await sql.raw("""
                 INSERT INTO \(unsafeRaw: table("fanout_sync_payloads"))
@@ -298,6 +307,9 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
     /// needlessly consume wire, JSON parsing and PostgreSQL memory.
     public func projectBatch(_ inputs: [V2FanoutProjectionInput], now: Date) async throws -> [UInt64] {
         guard !inputs.isEmpty else { return [] }
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         var payloadIndexes: [String: Int] = [:]
         var uniquePayloads: [String] = []
         var messageStatesByID: [UUID: V2FanoutMessageProjectionState] = [:]
@@ -362,18 +374,23 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 SELECT state_id, message_id, room_id, message_revision, variant_key,
                        origin_event_id, state_event_id, is_withdrawn,
                        payload_schema_version, payload_json::jsonb,
-                       to_timestamp((created_at_microseconds / 1000000)::double precision)
-                         + (created_at_microseconds % 1000000)
-                           * INTERVAL '1 microsecond'
+                       (TIMESTAMP '2000-01-01 00:00:00'
+                         + (created_at_postgres_microseconds / 86400000000) * INTERVAL '1 day'
+                         + (created_at_postgres_microseconds % 86400000000) * INTERVAL '1 microsecond')
+                         AT TIME ZONE 'UTC'
                 FROM jsonb_to_recordset(\(bind: messageStateJSON)::jsonb) AS value(
                     state_id uuid, message_id uuid, room_id uuid,
                     message_revision bigint, variant_key smallint,
                     origin_event_id uuid, state_event_id uuid,
                     is_withdrawn boolean, payload_schema_version smallint,
-                    payload_json text, created_at_microseconds bigint
+                    payload_json text, created_at_postgres_microseconds bigint
                 )
                 ON CONFLICT DO NOTHING
                 """).run()
+            // Match the scalar repository's canonical-content fence. The
+            // first persisted creation time remains unchanged; it is not part
+            // of state identity. Older batches used Unix-epoch flooring and
+            // may differ by a microsecond from the native Date representation.
             guard let stateVerification = try await sql.raw("""
                 SELECT COUNT(*)::bigint AS value
                 FROM jsonb_to_recordset(\(bind: messageStateJSON)::jsonb) AS value(
@@ -381,7 +398,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     message_revision bigint, variant_key smallint,
                     origin_event_id uuid, state_event_id uuid,
                     is_withdrawn boolean, payload_schema_version smallint,
-                    payload_json text, created_at_microseconds bigint
+                    payload_json text, created_at_postgres_microseconds bigint
                 )
                 JOIN \(unsafeRaw: table("message_projection_state_values")) AS stored
                   ON stored.state_id = value.state_id
@@ -394,12 +411,6 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                  AND stored.is_withdrawn = value.is_withdrawn
                  AND stored.payload_schema_version = value.payload_schema_version
                  AND stored.payload = value.payload_json::jsonb
-                 AND stored.created_at =
-                     to_timestamp(
-                         (value.created_at_microseconds / 1000000)::double precision
-                     )
-                     + (value.created_at_microseconds % 1000000)
-                       * INTERVAL '1 microsecond'
                 """).first(decoding: CrossStoreCountRow.self),
                   stateVerification.value == expectedMessageStateCount
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -523,6 +534,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                     ORDER BY user_id
                     ON CONFLICT (user_id)
                     DO UPDATE SET next_sequence = sequence.next_sequence + EXCLUDED.next_sequence
+                    WHERE sequence.next_sequence <= \(bind: Int64.max) - EXCLUDED.next_sequence
                     RETURNING user_id, next_sequence
                 ), numbered AS (
                     SELECT input.ordinal, input.source_event_id, input.target_user_id,
@@ -588,6 +600,8 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 FROM conflict_outcomes
                 ORDER BY ordinal
                 """).all(decoding: CrossStoreBatchProjectionOutcomeRow.self)
+            // Missing allocations include exhausted sequence ranges. Roll back
+            // all new inbox/log writes instead of returning a partial batch.
             guard rows.count == inputs.count else { throw V2RoomWriteStoreError.corruptPersistenceState }
             var sequences = Array<UInt64?>(repeating: nil, count: inputs.count)
             for row in rows {
@@ -606,6 +620,13 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
     /// sequence collision with a different record is persistence corruption,
     /// not a conflict to overwrite during migration.
     public func mirror(_ record: V2UserSyncProjectionMirror) async throws -> UInt64 {
+        try await mirror(record, persistedCreatedAt: nil)
+    }
+
+    func mirror(
+        _ record: V2UserSyncProjectionMirror,
+        persistedCreatedAt: V2PostgresTimestamp?
+    ) async throws -> UInt64 {
         guard let userID = UUID(uuidString: record.userID.rawValue),
               let sourceEventID = UUID(uuidString: record.sourceEventID.rawValue),
               let sequence = Int64(exactly: record.sequence), sequence > 0
@@ -623,6 +644,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 }
                 return try crossStoreUnsigned(existing.userSyncSequence)
             }
+            let createdAt = try persistedCreatedAt ?? V2PostgresTimestamp(date: record.createdAt)
             if let occupying = try await sql.raw("""
                 SELECT source_event_id, projection_kind
                 FROM \(unsafeRaw: table("user_sync_log"))
@@ -641,7 +663,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 INSERT INTO \(unsafeRaw: table("user_sync_log"))
                     (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
                 VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), \(bind: record.projectionKind),
-                        \(bind: record.payloadJSON)::jsonb, \(bind: record.createdAt))
+                        \(bind: record.payloadJSON)::jsonb, \(bind: createdAt))
                 ON CONFLICT DO NOTHING
                 """).run()
             // The ordered row may already have been compacted after a prior
@@ -671,6 +693,18 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         payloadJSON: String,
         createdAt: Date
     ) async throws -> UInt64 {
+        try await projectAllocated(userID: userID, sourceEventID: sourceEventID,
+            projectionKind: projectionKind, payloadJSON: payloadJSON, createdAt: createdAt, persistedCreatedAt: nil)
+    }
+
+    func projectAllocated(
+        userID: UserID,
+        sourceEventID: EventID,
+        projectionKind: String,
+        payloadJSON: String,
+        createdAt: Date,
+        persistedCreatedAt: V2PostgresTimestamp?
+    ) async throws -> UInt64 {
         guard let userUUID = UUID(uuidString: userID.rawValue),
               let eventUUID = UUID(uuidString: sourceEventID.rawValue)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -685,11 +719,13 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 guard existing.payloadJSON == payloadJSON else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 return try crossStoreUnsigned(existing.userSyncSequence)
             }
+            let timestamp = try persistedCreatedAt ?? V2PostgresTimestamp(date: createdAt)
             guard let sequence = try await sql.raw("""
                 INSERT INTO \(unsafeRaw: table("user_sync_sequences")) (user_id, next_sequence)
                 VALUES (\(bind: userUUID), 1)
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = \(unsafeRaw: table("user_sync_sequences")).next_sequence + 1
+                WHERE \(unsafeRaw: table("user_sync_sequences")).next_sequence < \(bind: Int64.max)
                 RETURNING next_sequence AS user_sync_sequence
                 """).first(decoding: CrossStoreSequenceRow.self)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -697,7 +733,7 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
                 INSERT INTO \(unsafeRaw: table("user_sync_log"))
                     (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
                 VALUES (\(bind: userUUID), \(bind: sequence.userSyncSequence), \(bind: eventUUID), \(bind: projectionKind),
-                        \(bind: payloadJSON)::jsonb, \(bind: createdAt))
+                        \(bind: payloadJSON)::jsonb, \(bind: timestamp))
                 """).run()
             return try crossStoreUnsigned(sequence.userSyncSequence)
         }
@@ -914,11 +950,11 @@ public struct V2CrossStoreFanoutDeliveryStore:
         let grouped = Dictionary(grouping: leases.enumerated(), by: { $0.element.observedRoute.bucket })
         for bucket in grouped.keys.sorted() {
             guard let items = grouped[bucket] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let batchStartedAt = Date()
+            let batchStartedAt = ContinuousClock.now
             let location = try registry.location(for: bucket)
-            let migrationReadStartedAt = Date()
+            let migrationReadStartedAt = ContinuousClock.now
             let migrationRecords = try await migrations.load(userIDs: Array(Set(items.map(\.element.targetUserID))).sorted())
-            let migrationReadMilliseconds = v2CrossStoreElapsedMilliseconds(since: migrationReadStartedAt)
+            let migrationReadMilliseconds = v2CrossStoreElapsedMilliseconds(migrationReadStartedAt.duration(to: .now))
             var batch: [(index: Int, lease: V2FanoutDeliveryLease, input: V2FanoutProjectionInput)] = []
             var candidates: [(index: Int, lease: V2FanoutDeliveryLease)] = []
             var fallback: [(index: Int, lease: V2FanoutDeliveryLease)] = []
@@ -963,16 +999,16 @@ public struct V2CrossStoreFanoutDeliveryStore:
                     database: location.database, schema: location.schema,
                     payloadWriteMode: payloadWriteMode
                 )
-                let targetProjectionStartedAt = Date()
+                let targetProjectionStartedAt = ContinuousClock.now
                 let sequences = try await projector.projectBatch(batch.map(\.input), now: now)
-                let targetProjectionMilliseconds = v2CrossStoreElapsedMilliseconds(since: targetProjectionStartedAt)
+                let targetProjectionMilliseconds = v2CrossStoreElapsedMilliseconds(targetProjectionStartedAt.duration(to: .now))
                 guard sequences.count == batch.count else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 let acknowledgements = zip(batch, sequences).map {
                     V2ExternalFanoutDeliveryAcknowledgement(lease: $0.lease, userSyncSequence: $1)
                 }
-                let controlCompletionStartedAt = Date()
+                let controlCompletionStartedAt = ContinuousClock.now
                 let completions = try await control.completeExternalBatch(acknowledgements, now: now)
-                let controlCompletionMilliseconds = v2CrossStoreElapsedMilliseconds(since: controlCompletionStartedAt)
+                let controlCompletionMilliseconds = v2CrossStoreElapsedMilliseconds(controlCompletionStartedAt.duration(to: .now))
                 guard completions.count == batch.count else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 for (item, completion) in zip(batch, completions) {
                     results[item.index] = completion
@@ -982,7 +1018,7 @@ public struct V2CrossStoreFanoutDeliveryStore:
                     migrationReadMilliseconds: migrationReadMilliseconds,
                     targetProjectionMilliseconds: targetProjectionMilliseconds,
                     controlCompletionMilliseconds: controlCompletionMilliseconds,
-                    totalMilliseconds: v2CrossStoreElapsedMilliseconds(since: batchStartedAt)
+                    totalMilliseconds: v2CrossStoreElapsedMilliseconds(batchStartedAt.duration(to: .now))
                 ))
             }
             for item in fallback {
@@ -1054,14 +1090,10 @@ private struct CrossStoreMessageStateInput: Encodable {
     let isWithdrawn: Bool
     let payloadSchemaVersion: Int16
     let payloadJSON: String
-    let createdAtMicroseconds: Int64
+    let createdAtPostgresMicroseconds: Int64
 
     init(_ value: V2FanoutMessageProjectionState) throws {
-        let microseconds = (value.createdAt.timeIntervalSince1970 * 1_000_000).rounded(.down)
-        guard microseconds.isFinite,
-              microseconds >= Double(Int64.min),
-              microseconds <= Double(Int64.max)
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let timestamp = try value.persistedCreatedAt ?? V2PostgresTimestamp(date: value.createdAt)
         stateID = value.stateID
         messageID = value.messageID
         roomID = value.roomID
@@ -1072,7 +1104,7 @@ private struct CrossStoreMessageStateInput: Encodable {
         isWithdrawn = value.isWithdrawn
         payloadSchemaVersion = value.payloadSchemaVersion
         payloadJSON = value.payloadJSON
-        createdAtMicroseconds = Int64(microseconds)
+        createdAtPostgresMicroseconds = timestamp.microseconds
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1086,7 +1118,7 @@ private struct CrossStoreMessageStateInput: Encodable {
         case isWithdrawn = "is_withdrawn"
         case payloadSchemaVersion = "payload_schema_version"
         case payloadJSON = "payload_json"
-        case createdAtMicroseconds = "created_at_microseconds"
+        case createdAtPostgresMicroseconds = "created_at_postgres_microseconds"
     }
 }
 private struct CrossStoreBatchProjectionOutcomeRow: Decodable {
@@ -1115,6 +1147,15 @@ private func crossStoreBatchJSON<T: Encodable>(_ value: T) throws -> String {
     return json
 }
 
-private func v2CrossStoreElapsedMilliseconds(since startedAt: Date, now: Date = Date()) -> Int {
-    max(0, Int((now.timeIntervalSince(startedAt) * 1_000).rounded()))
+/// Timing must not depend on wall-clock corrections or trap while reporting
+/// an already committed batch. Preserve nearest-millisecond rounding.
+func v2CrossStoreElapsedMilliseconds(_ duration: Duration) -> Int {
+    guard duration > .zero else { return 0 }
+    let components = duration.components
+    let seconds = components.seconds.multipliedReportingOverflow(by: 1_000)
+    let fractionalMilliseconds = (components.attoseconds + 500_000_000_000_000) / 1_000_000_000_000_000
+    let result = seconds.partialValue.addingReportingOverflow(fractionalMilliseconds)
+    guard !seconds.overflow, !result.overflow,
+          let milliseconds = Int(exactly: result.partialValue) else { return 0 }
+    return milliseconds
 }

@@ -5,6 +5,51 @@ import Testing
 
 @Suite("Direct room-log fast append cache")
 struct V2DirectRoomLogFastAppendCacheTests {
+    @Test("Append counters preserve ordinary totals and saturate without disturbing cached policies", arguments: ["attempt", "committed", "fallback"])
+    func counterIntegerBoundaries(kind: String) async throws {
+        let cache = V2DirectRoomLogFastAppendCache(capacity: 1)
+        let key = V2DirectRoomLogFastAppendCache.Key(roomID: UUID(), senderID: UUID())
+        let entry = try makeEntry(sequence: 1)
+        await cache.insert(entry, for: key)
+        @Sendable func record(_ count: Int) async {
+            switch kind {
+            case "attempt": await cache.recordAttempt(count: count)
+            case "committed": await cache.recordCommitted(count: count)
+            default: await cache.recordFallback(count: count)
+            }
+        }
+        func verify(_ expected: Int64) async {
+            let snapshot = await cache.snapshot()
+            #expect(snapshot.attemptedAppends == (kind == "attempt" ? expected : 0))
+            #expect(snapshot.committedAppends == (kind == "committed" ? expected : 0))
+            #expect(snapshot.fallbackAppends == (kind == "fallback" ? expected : 0))
+            #expect(snapshot.entries == 1)
+        }
+        for count in [Int.min, -1, 0] { await record(count) }
+        await verify(0)
+        await record(1)
+        await record(2)
+        await verify(3)
+        await record(Int.max - 3)
+        await verify(.max)
+        await record(1)
+        await verify(.max)
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 { group.addTask { await record(Int.max) } }
+        }
+        await verify(.max)
+        #expect(await cache.value(for: key) == entry)
+        let replacement = try makeEntry(sequence: 2, directPairRevision: 2)
+        await cache.insert(replacement, for: key)
+        #expect(await cache.value(for: key) == replacement)
+        await cache.invalidate(key)
+        #expect(await cache.value(for: key) == nil)
+        let final = await cache.snapshot()
+        #expect(final.entries == 0)
+        #expect(final.lookupHits == 2)
+        #expect(final.lookupMisses == 1)
+    }
+
     @Test("capacity evicts the least recently used entry in constant time")
     func evictsLeastRecentlyUsedEntry() async throws {
         let cache = V2DirectRoomLogFastAppendCache(capacity: 2)

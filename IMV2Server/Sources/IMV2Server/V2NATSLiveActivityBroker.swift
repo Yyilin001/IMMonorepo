@@ -354,7 +354,7 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
     }
 
     private var acknowledgementTimeout: TimeAmount {
-        .nanoseconds(Int64(configuration.acknowledgementTimeout * 1_000_000_000))
+        .nanoseconds(configuration.acknowledgementTimeoutNanoseconds)
     }
 
     private static func openConnection(

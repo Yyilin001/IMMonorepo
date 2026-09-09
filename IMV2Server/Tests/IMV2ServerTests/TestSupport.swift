@@ -1,7 +1,19 @@
 import Fluent
 import Foundation
 import IMV2Core
+import Synchronization
 @testable import IMV2Server
+
+final class V2TelemetryTestClock: Sendable {
+    private let wall = Mutex(Date(timeIntervalSince1970: 1_750_000_000))
+    private let instant = Mutex(ContinuousClock.now)
+    func now() -> Date { wall.withLock { $0 } }
+    func monotonicNow() -> ContinuousClock.Instant { instant.withLock { $0 } }
+    func advance(by duration: Duration, wallShift: Double) {
+        instant.withLock { $0 = $0.advanced(by: duration) }
+        wall.withLock { $0 = $0.addingTimeInterval(wallShift) }
+    }
+}
 
 struct V2DictionaryRuntimeEnvironment: V2RuntimeEnvironment, Sendable {
     private let values: [String: String]
@@ -63,6 +75,7 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     V2GatewayModerationHandling,
     V2GatewayConversationCapabilitiesHandling,
     V2GatewayGroupCapabilitiesHandling,
+    V2GroupRolePolicyBaselineReading,
     V2GatewayForwardMessagesHandling
 {
     func change(_: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome { throw self }
@@ -95,6 +108,7 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     func setAnnouncement(actorUserID _: UserID, command _: V2GroupAnnouncementCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> { throw self }
     func setRolePermissions(actorUserID _: UserID, command _: V2GroupRolePermissionsCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> { throw self }
     func changeMemberRole(actorUserID _: UserID, command _: V2GroupMemberRoleCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { throw self }
+    func readRolePolicyBaseline(roomID _: RoomID, actorUserID _: UserID) async throws -> V2GroupRolePolicyBaseline { throw self }
     func forward(actorUserID _: UserID, command _: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] { throw self }
 }
 
@@ -115,12 +129,14 @@ func makeGatewayDomainCommandHandler(
     moderation: V2ModerationService? = nil,
     conversationCapabilities: V2ConversationCapabilitiesService? = nil,
     groupCapabilities: V2GroupCapabilitiesService? = nil,
-    forwardMessages: V2ForwardMessagesService? = nil,
+    groupRolePolicyBaseline: (any V2GroupRolePolicyBaselineReading)? = nil,
+    forwardMessages: (any V2ForwardMessagesHandling)? = nil,
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
     databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
     maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
-    now: @escaping @Sendable () -> Date = Date.init
+    now: @escaping @Sendable () -> Date = Date.init,
+    monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
 ) -> V2GatewayDomainCommandHandler {
     let unsupported = V2UnsupportedGatewayTestDependency()
     return V2GatewayDomainCommandHandler(
@@ -140,12 +156,14 @@ func makeGatewayDomainCommandHandler(
         moderationHandler: moderation.map { $0 as any V2GatewayModerationHandling } ?? unsupported,
         conversationCapabilitiesHandler: conversationCapabilities.map { $0 as any V2GatewayConversationCapabilitiesHandling } ?? unsupported,
         groupCapabilitiesHandler: groupCapabilities.map { $0 as any V2GatewayGroupCapabilitiesHandling } ?? unsupported,
+        groupRolePolicyBaseline: groupRolePolicyBaseline ?? unsupported,
         forwardMessagesHandler: forwardMessages.map { $0 as any V2GatewayForwardMessagesHandling } ?? unsupported,
         sync: sync,
         telemetry: telemetry,
         databaseWorkAdmission: databaseWorkAdmission,
         maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
-        now: now
+        now: now,
+        monotonicNow: monotonicNow
     )
 }
 

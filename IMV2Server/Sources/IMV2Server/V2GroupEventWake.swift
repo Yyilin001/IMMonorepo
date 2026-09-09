@@ -712,9 +712,15 @@ public struct V2GroupEventWakeRelay: Sendable {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                let exponent = min(max(lease.attempt - 1, 0), 5)
+                guard lease.attempt > 0 else {
+                    throw V2GroupEventWakeStoreError.corruptPersistenceState
+                }
+                let exponent = min(lease.attempt - 1, 5)
                 let delay = min(retryMaximumDelay, pow(2, Double(exponent)))
-                try await store.scheduleRetry(lease, nextAttemptAt: now().addingTimeInterval(delay))
+                guard let nextAttemptAt = v2PostgresFutureTimestamp(now: now(), interval: delay) else {
+                    throw V2GroupEventWakeStoreError.corruptPersistenceState
+                }
+                try await store.scheduleRetry(lease, nextAttemptAt: nextAttemptAt)
                 retryScheduled += 1
             }
         }

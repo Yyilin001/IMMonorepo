@@ -22,7 +22,7 @@ public struct V2PasswordCredential: Equatable, Sendable {
 }
 
 /// Persistence boundary for the password fallback. Plaintext password work
-/// belongs to the HTTP adapter's worker pool; this capability only accepts a
+/// belongs to the bounded application worker pool; this capability only accepts a
 /// completed password digest and returns domain identities/credentials.
 public protocol V2PasswordAccountStoring: Sendable {
     func register(
@@ -33,6 +33,9 @@ public protocol V2PasswordAccountStoring: Sendable {
         deviceID: DeviceID
     ) async throws -> UserID
     func passwordCredential(for accountHandle: String) async throws -> V2PasswordCredential?
+    /// Recheck the exact credential after KDF work, then commit success audit
+    /// and failure-window reset together. A concurrent reset must win cleanly.
+    func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool
 }
 
 public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable {
@@ -64,12 +67,11 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
         } catch {
             throw V2PasswordAccountStoreError.invalidPublicIdentity
         }
-        guard !passwordHash.isEmpty else { throw V2PasswordAccountStoreError.unavailable }
+        guard V2PasswordHashPolicy.supports(passwordHash) else { throw V2PasswordAccountStoreError.unavailable }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2PasswordAccountStoreError.unavailable
             }
-            let current = now()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-account:" + handle), 0))").run()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-public-handle:" + identity.handle.rawValue), 0))").run()
             guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE account_handle = \(bind: handle)").first() == nil else {
@@ -78,6 +80,8 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
             guard try await sql.raw("SELECT 1 FROM im_v2.public_user_profiles WHERE public_handle = \(bind: identity.handle.rawValue)").first() == nil else {
                 throw V2PasswordAccountStoreError.publicHandleAlreadyExists
             }
+            let current = now()
+            guard v2PostgresTimestampCanEncode(current) else { throw V2PasswordAccountStoreError.unavailable }
             try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES (\(bind: handle), \(bind: userUUID), \(bind: passwordHash), \(bind: current))").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, account_kind, revision, created_at, updated_at) VALUES (\(bind: userUUID), \(bind: identity.handle.rawValue), \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 1, \(bind: current), \(bind: current))").run()
             try await recordPasswordAuthenticationAudit(
@@ -88,6 +92,24 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
                 on: sql
             )
             return identity.userID
+        }
+    }
+
+    public func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool {
+        let handle = try canonicalAccountHandle(accountHandle)
+        guard V2PasswordHashPolicy.supports(expected.passwordHash) else { return false }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2PasswordAccountStoreError.unavailable }
+            try await v2LockPasswordAttempts(sql, handle: handle)
+            guard let row = try await sql.raw("SELECT user_id, password_hash FROM im_v2.account_password_credentials WHERE account_handle=\(bind: handle) FOR SHARE").first(decoding: PasswordCredentialRow.self),
+                  row.userID == expected.userID.uuidValue, row.passwordHash == expected.passwordHash,
+                  try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id=\(bind: row.userID)").first() == nil else { return false }
+            let current = now()
+            guard v2PostgresTimestampCanEncode(current) else { throw V2PasswordAccountStoreError.unavailable }
+            try await sql.raw("DELETE FROM im_v2.account_password_login_rate_limits WHERE account_handle=\(bind: handle)").run()
+            try await recordPasswordAuthenticationAudit(outcome: .assertionSucceeded, userID: expected.userID,
+                deviceID: deviceID, occurredAt: current, on: sql)
+            return true
         }
     }
 

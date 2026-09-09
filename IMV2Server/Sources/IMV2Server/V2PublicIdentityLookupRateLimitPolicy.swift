@@ -9,8 +9,7 @@ public struct V2PublicIdentityLookupRateLimitPolicy: Equatable, Sendable {
         // one value above the budget as the saturated/denied sentinel.
         guard maximumQueries > 0,
               maximumQueries < Int(Int32.max),
-              window > 0,
-              window.isFinite
+              v2RateLimitDurationIsRepresentable(window)
         else { throw V2PublicIdentityLookupRateLimitError.invalidPolicy }
         self.maximumQueries = maximumQueries
         self.window = window

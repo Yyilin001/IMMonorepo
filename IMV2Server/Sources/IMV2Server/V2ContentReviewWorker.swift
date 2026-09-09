@@ -148,7 +148,7 @@ public struct V2ContentReviewWorker: Sendable {
     private let now: @Sendable () -> Date
 
     public init(store: any V2ContentReviewStore, reviewer: any V2ContentReviewing, moderation: V2TrustedSafetyModerationService, leaseDuration: TimeInterval = 30, retryPolicy: V2DurableRetryPolicy = .standard, now: @escaping @Sendable () -> Date = Date.init) throws {
-        guard leaseDuration > 0 else { throw V2ContentReviewWorkerError.invalidLeaseDuration }
+        guard leaseDuration.isFinite, leaseDuration > 0 else { throw V2ContentReviewWorkerError.invalidLeaseDuration }
         self.store = store
         self.reviewer = reviewer
         self.moderation = moderation
@@ -163,6 +163,7 @@ public struct V2ContentReviewWorker: Sendable {
         var resolved = 0
         var redacted = 0
         var released = 0
+        var retryFailure: (any Error)?
         for lease in leases {
             do {
                 let verdict: V2ContentReviewVerdict
@@ -223,10 +224,20 @@ public struct V2ContentReviewWorker: Sendable {
                     claimToken: lease.claimToken,
                     now: failureTime
                 )
-                try? await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
-                released += 1
+                do {
+                    if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
+                    released += 1
+                } catch {
+                    // Continue the bounded batch, but do not report a failed
+                    // persistence operation as a successfully released lease.
+                    retryFailure = retryFailure ?? error
+                }
             }
         }
+        if let retryFailure { throw retryFailure }
         return .init(claimedCount: leases.count, resolvedCount: resolved, redactedCount: redacted, releasedCount: released)
     }
 
@@ -264,8 +275,10 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2ContentReviewLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
+        guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let expiresAt = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows = try await sql.raw("""
@@ -280,7 +293,9 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
                 )
                 UPDATE im_v2.content_review_jobs AS job
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt),
-                    next_attempt_at = NULL, paused_at = NULL, retry_count = job.retry_count + 1
+                    next_attempt_at = NULL, paused_at = NULL,
+                    retry_count = CASE WHEN job.retry_count = 2147483647
+                        THEN job.retry_count ELSE job.retry_count + 1 END
                 FROM candidates
                 WHERE job.message_id = candidates.message_id
                 RETURNING job.message_id, job.room_id, job.expected_content_revision,
@@ -323,17 +338,19 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
 
     public func validateAndRenew(_ lease: V2ContentReviewLease, now: Date, leaseDuration: TimeInterval) async throws -> V2ContentReviewLeaseValidation {
         guard leaseDuration > 0 else { throw V2ContentReviewWorkerError.invalidLeaseDuration }
+        guard let renewedUntil = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let messageID = try contentReviewUUID(lease.input.messageID)
         let roomID = try contentReviewRoomUUID(lease.input.roomID)
         let expected = try contentReviewSigned(lease.input.contentRevision)
         guard expected < Int64.max else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let enforcedRevision = expected + 1
-        let renewedUntil = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let renewed = try await sql.raw("""
                 UPDATE im_v2.content_review_jobs AS job
-                SET lease_expires_at = \(bind: renewedUntil)
+                SET lease_expires_at = GREATEST(job.lease_expires_at, \(bind: renewedUntil))
                 FROM im_v2.messages AS message
                 WHERE job.message_id = \(bind: messageID)
                   AND job.state = 'claimed' AND job.claim_token = \(bind: lease.claimToken)
@@ -374,6 +391,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
     }
 
     public func resolve(_ lease: V2ContentReviewLease, verdict: V2ContentReviewVerdict, now: Date) async throws -> Bool {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let messageID = try contentReviewUUID(lease.input.messageID)
         let data = contentReviewData(verdict)
         return try await database.transaction { transaction in
@@ -429,6 +447,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         let messageID = try contentReviewUUID(lease.input.messageID)
         switch disposition {
         case .retry(let retryAt):
+            guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.content_review_jobs
                 SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -437,6 +456,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
                   AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.content_review_jobs
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,

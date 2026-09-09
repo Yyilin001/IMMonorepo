@@ -8,7 +8,7 @@ env_file="${1:-${v2_dir}/.env.local}"
 fail_contract() {
   printf 'local V2 environment does not match the current contract: %s\n' "${env_file}" >&2
   printf '%s\n' "$1" >&2
-  printf 'Move or remove this file, then rerun run_v2_local_account_stack.sh to generate a complete current configuration.\n' >&2
+  printf 'Correct the listed fields while preserving existing secrets. For obsolete IM_V2_PASSWORD_DUMMY_BCRYPT_HASH, remove only that key. Fresh disposable stacks may generate a new file with run_v2_local_account_stack.sh.\n' >&2
   exit 1
 }
 
@@ -37,10 +37,10 @@ required_env_keys=(
   IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64
   IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64
   IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64
+  IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64
   IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64
   IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64
   IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64
-  IM_V2_PASSWORD_DUMMY_BCRYPT_HASH
 )
 
 invalid_lines="$(awk '!/^[A-Z0-9_]+=[^[:space:]]+$/ { print NR }' "${env_file}")"
@@ -67,6 +67,7 @@ base64_keys=(
   IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64
   IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64
   IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64
+  IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64
   IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64
   IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64
   IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64
@@ -80,8 +81,5 @@ for key in "${base64_keys[@]}"; do
   [[ "${decoded_bytes}" == '32' ]] || fail_contract "${key} must decode to exactly 32 bytes"
 done
 
-bcrypt_hash="$(value_for_key IM_V2_PASSWORD_DUMMY_BCRYPT_HASH)"
-printf '%s\n' "${bcrypt_hash}" | grep -Eq '^\$\$2[aby]\$\$12\$\$[./A-Za-z0-9]{53}$' ||
-  fail_contract 'IM_V2_PASSWORD_DUMMY_BCRYPT_HASH must be a Compose-escaped bcrypt cost-12 digest'
 
 printf 'V2 local environment contract verified: %s\n' "${env_file}"

@@ -112,8 +112,10 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     }
 
     private func claim(now: Date) async throws -> BuildClaim? {
+        guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2SnapshotArtifactBuilderError.corruptPersistence
+        }
         let token = makeUUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2SnapshotArtifactBuilderError.corruptPersistence

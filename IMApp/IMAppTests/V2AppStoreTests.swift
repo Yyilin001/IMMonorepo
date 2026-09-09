@@ -55,22 +55,6 @@ struct V2AppStoreTests {
         #expect(gate.matchesCurrentGeneration(second))
     }
 
-    @Test("后台推送完成后只停止仍处于后台的运行时")
-    func backgroundPushWakeDoesNotStopForegroundRuntime() {
-        #expect(V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
-            startedWhileApplicationInactive: true,
-            isApplicationActive: false
-        ))
-        #expect(!V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
-            startedWhileApplicationInactive: true,
-            isApplicationActive: true
-        ))
-        #expect(!V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
-            startedWhileApplicationInactive: false,
-            isApplicationActive: false
-        ))
-    }
-
     @Test("退出登录只允许一个端点删除与凭据清理流程")
     func signOutIsSingleFlight() {
         var gate = V2SignOutAttemptGate()

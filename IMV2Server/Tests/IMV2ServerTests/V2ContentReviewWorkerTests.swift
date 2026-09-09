@@ -2,9 +2,45 @@ import Foundation
 import IMV2Core
 @testable import IMV2Server
 import Testing
+import Synchronization
 
 @Suite("V2 content review worker")
 struct V2ContentReviewWorkerTests {
+    @Test("retry persistence failures are surfaced after later leases finish", arguments: ["clock", "small-delay", "large-delay", "storage"])
+    func retryFailureDoesNotStarveLaterLeases(mode: String) async throws {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let invalidTimes: [Double] = mode == "clock" ? [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12] : [base.timeIntervalSince1970]
+        for seconds in invalidTimes {
+            let failing = V2ContentReviewInput(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), contentRevision: 1, text: "retry", mediaCount: 0)
+            let succeeding = V2ContentReviewInput(messageID: .init(uuid: UUID()), roomID: failing.roomID, contentRevision: 1, text: "clear", mediaCount: 0)
+            let store = RecordingContentReviewStore(leases: [.init(input: failing, claimToken: UUID()), .init(input: succeeding, claimToken: UUID())], retryFailure: mode == "storage" ? .unavailable : nil)
+            let delay: Double = mode == "small-delay" ? .leastNonzeroMagnitude : (mode == "large-delay" ? .greatestFiniteMagnitude : 1)
+            let clock = ContentReviewBoundaryClock([base, Date(timeIntervalSince1970: seconds), base, base])
+            let moderationStore = RecordingTrustedModerationStore()
+            let moderation = V2TrustedSafetyModerationService(store: moderationStore, safetyActorUserID: .init(uuid: UUID()), capacityProfile: try reviewTestProfile())
+            let worker = try V2ContentReviewWorker(store: store, reviewer: SelectiveContentReviewer(failingMessageID: failing.messageID), moderation: moderation, retryPolicy: .init(initialDelay: delay, maximumDelay: delay, maximumAttempts: 10, jitterFraction: 0), now: { clock.now() })
+            if mode == "storage" {
+                await #expect(throws: ReviewRetryFailure.unavailable) { try await worker.runOnce(limit: 2) }
+            } else {
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await worker.runOnce(limit: 2) }
+            }
+            #expect(await store.resolvedVerdicts() == [.clear])
+            #expect(await store.retryDispositions().isEmpty)
+            #expect(await store.stagedFindings().isEmpty)
+            #expect(await moderationStore.command() == nil)
+        }
+    }
+
+    @Test("content review requires a finite positive lease")
+    func invalidLeaseDuration() async throws {
+        let moderation = V2TrustedSafetyModerationService(store: RecordingTrustedModerationStore(), safetyActorUserID: .init(uuid: UUID()), capacityProfile: try reviewTestProfile())
+        for duration in [Double.nan, .infinity, -.infinity, 0, -1] {
+            #expect(throws: V2ContentReviewWorkerError.invalidLeaseDuration) {
+                try V2ContentReviewWorker(store: RecordingContentReviewStore(leases: []), reviewer: V2ConfiguredContentReviewer(), moderation: moderation, leaseDuration: duration)
+            }
+        }
+    }
+
     @Test("trusted room control forwards once to the privileged moderation store")
     func trustedRoomControlForwardsWithoutRecursion() async throws {
         let moderationStore = RecordingTrustedModerationStore()
@@ -64,6 +100,23 @@ struct V2ContentReviewWorkerTests {
         #expect(command.operationID.rawValue == input.messageID.rawValue)
         #expect(await reviewStore.stagedFindings() == [try .init(category: "configured_policy", severity: 4, confidence: 1)])
         #expect(await reviewStore.resolvedVerdicts() == [try V2ContentReviewVerdict.violation(.init(category: "configured_policy", severity: 4, confidence: 1))])
+    }
+
+    @Test("owner fence failure retains review work for retry or explicit recovery", arguments: [1, 2])
+    func ownerFenceFailureDoesNotResolveReview(_ attempt: Int) async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let input = V2ContentReviewInput(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), contentRevision: 1, text: "blocked", mediaCount: 0)
+        let reviewStore = RecordingContentReviewStore(leases: [.init(input: input, claimToken: UUID(), attempt: attempt)])
+        let moderationStore = RecordingTrustedModerationStore(failure: .ownerChanged)
+        let service = V2TrustedSafetyModerationService(store: moderationStore, safetyActorUserID: .init(uuid: UUID()), capacityProfile: try reviewTestProfile(), now: { now })
+        let worker = try V2ContentReviewWorker(store: reviewStore,
+            reviewer: V2ConfiguredContentReviewer(violatingTerms: ["blocked"]), moderation: service,
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0), now: { now })
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 0, redactedCount: 0, releasedCount: 1))
+        #expect(await moderationStore.command()?.operationID.rawValue == input.messageID.rawValue)
+        #expect(await reviewStore.resolvedVerdicts().isEmpty)
+        #expect(await reviewStore.stagedFindings().count == 1)
+        #expect(await reviewStore.retryDispositions() == [attempt == 1 ? .retry(at: now.addingTimeInterval(1)) : .pause])
     }
 
     @Test("a stale content revision is superseded without calling moderation")
@@ -268,11 +321,14 @@ private actor RecordingContentReviewStore: V2ContentReviewStore {
     private var resolved: [V2ContentReviewVerdict] = []
     private var staged: [V2ContentReviewFinding] = []
     private var scheduledRetries: [V2DurableRetryDisposition] = []
-    init(leases: [V2ContentReviewLease], current: Bool = true) {
+    private let retryFailure: ReviewRetryFailure?
+    init(leases: [V2ContentReviewLease], current: Bool = true, retryFailure: ReviewRetryFailure? = nil) {
+        self.retryFailure = retryFailure
         self.leases = leases
         self.validationResults = [current ? .current : .superseded]
     }
     init(leases: [V2ContentReviewLease], currentResults: [Bool]) {
+        self.retryFailure = nil
         self.leases = leases
         self.validationResults = currentResults.map { $0 ? .current : .superseded }
     }
@@ -290,7 +346,10 @@ private actor RecordingContentReviewStore: V2ContentReviewStore {
         staged.append(finding)
         return true
     }
-    func scheduleRetry(_: V2ContentReviewLease, disposition: V2DurableRetryDisposition, now _: Date) { scheduledRetries.append(disposition) }
+    func scheduleRetry(_: V2ContentReviewLease, disposition: V2DurableRetryDisposition, now _: Date) throws {
+        if let retryFailure { throw retryFailure }
+        scheduledRetries.append(disposition)
+    }
     func resolvedVerdicts() -> [V2ContentReviewVerdict] { resolved }
     func stagedFindings() -> [V2ContentReviewFinding] { staged }
     func retryDispositions() -> [V2DurableRetryDisposition] { scheduledRetries }
@@ -316,19 +375,36 @@ private struct SelectiveContentReviewer: V2ContentReviewing {
 private actor RecordingTrustedModerationStore: V2TrustedSafetyModerationStore {
     private var received: V2ModerationCommand?
     private let outcome: V2ModerationOutcome?
+    private let failure: V2RoomOwnerFenceError?
 
-    init(outcome: V2ModerationOutcome? = nil) {
+    init(outcome: V2ModerationOutcome? = nil, failure: V2RoomOwnerFenceError? = nil) {
+        self.failure = failure
         self.outcome = outcome
     }
 
-    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) -> V2ModerationOutcome {
+    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
         received = command
+        if let failure { throw failure }
         if let outcome { return outcome }
-        return .applied(.init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: command.messageID, messageRevision: 2, muteUntil: nil, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: command.messageID, messageRevision: 2, muteUntil: nil, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
     }
     func command() -> V2ModerationCommand? { received }
 }
 
 private func reviewTestProfile() throws -> V2CapacityProfile {
     try .init(id: "standard", limits: .init(maxEligibleMembers: 16, maxCommandsPerWindow: 32, maxFanoutUnitsPerWindow: 32, maxOutstandingFanoutUnits: 64, maxOutstandingPlans: 16, maxEnumerationPageSize: 16, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
+}
+
+private enum ReviewRetryFailure: Error { case unavailable }
+
+private final class ContentReviewBoundaryClock: Sendable {
+    private let state: Mutex<([Date], Int)>
+    init(_ dates: [Date]) { state = Mutex((dates, 0)) }
+    func now() -> Date {
+        state.withLock { state in
+            let date = state.0[min(state.1, state.0.count - 1)]
+            state.1 += 1
+            return date
+        }
+    }
 }

@@ -14,8 +14,10 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2MediaScanLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
+        guard let leaseExpiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let leaseExpiresAt = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows = try await sql.raw("""
@@ -30,7 +32,9 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
                 )
                 UPDATE im_v2.media_scan_outbox AS outbox
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: leaseExpiresAt),
-                    next_attempt_at = NULL, paused_at = NULL, retry_count = outbox.retry_count + 1
+                    next_attempt_at = NULL, paused_at = NULL,
+                    retry_count = CASE WHEN outbox.retry_count = 9223372036854775807
+                        THEN outbox.retry_count ELSE outbox.retry_count + 1 END
                 FROM candidates
                 WHERE outbox.media_id = candidates.media_id
                 RETURNING outbox.media_id, outbox.retry_count
@@ -58,7 +62,8 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
                 WHERE media_id = \(bind: mediaID) AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 FOR UPDATE
                 """).first(decoding: MediaScanRow.self) else { return }
-            guard let media = try await sql.raw("SELECT state, expires_at FROM im_v2.media_objects WHERE media_id = \(bind: scan.mediaID) FOR UPDATE").first(decoding: MediaScanObjectRow.self), media.expiresAt > now, media.state == "scanning" else {
+            let currentTime = try V2PostgresTimestamp(date: now)
+            guard let media = try await sql.raw("SELECT state, expires_at FROM im_v2.media_objects WHERE media_id = \(bind: scan.mediaID) FOR UPDATE").first(decoding: MediaScanObjectRow.self), media.expiresAt.microseconds > currentTime.microseconds, media.state == "scanning" else {
                 try await sql.raw("""
                     UPDATE im_v2.media_scan_outbox
                     SET state = 'completed', completed_at = \(bind: now), claim_token = NULL,
@@ -82,6 +87,7 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
         let mediaID = try mediaScanUUID(lease.mediaID)
         switch disposition {
         case .retry(let retryAt):
+            guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.media_scan_outbox
                 SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -90,6 +96,7 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
                   AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.media_scan_outbox
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
@@ -106,5 +113,5 @@ private struct MediaScanRow: Decodable {
     let retryCount: Int64
     enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case retryCount = "retry_count" }
 }
-private struct MediaScanObjectRow: Decodable { let state: String; let expiresAt: Date; enum CodingKeys: String, CodingKey { case state; case expiresAt = "expires_at" } }
+private struct MediaScanObjectRow: Decodable { let state: String; let expiresAt: V2PostgresTimestamp; enum CodingKeys: String, CodingKey { case state; case expiresAt = "expires_at" } }
 private func mediaScanUUID(_ identifier: MediaID) throws -> UUID { guard let uuid = UUID(uuidString: identifier.rawValue) else { throw V2RoomWriteStoreError.corruptPersistenceState }; return uuid }

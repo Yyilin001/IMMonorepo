@@ -6,6 +6,45 @@ final class IMAppLaunchUITests: XCTestCase {
     }
 
     @MainActor
+    func testPausedRevocationRecoveryRemainsAccessible() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-revocation-paused"]
+        app.launch()
+        let retry = app.buttons["v2.revocation.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertTrue(retry.isHittable)
+        XCTAssertTrue(app.textFields["v2.password.account-handle"].isHittable)
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.lifetime = .keepAlways
+        add(image)
+        try app.performAccessibilityAudit(for: [.elementDetection, .hitRegion, .sufficientElementDescription, .textClipped, .trait])
+        retry.tap()
+        XCTAssertTrue(app.staticTexts["v2.revocation.status"].exists)
+        XCTAssertFalse(retry.exists)
+        XCTAssertTrue(app.buttons["v2.password.submit"].isHittable)
+    }
+
+    @MainActor
+    func testPausedRevocationAtLargestTextInRTL() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-revocation-paused", "-v2-ui-testing-revocation-accessibility",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
+            "-AppleLanguages", "(ar)", "-AppleLocale", "ar_SA"]
+        app.launch()
+        XCTAssertTrue(app.buttons["v2.revocation.retry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["v2.revocation.retry"].isHittable)
+        XCTAssertTrue(app.textFields["v2.password.account-handle"].isHittable)
+        let submit = app.buttons["v2.password.submit"]
+        for _ in 0..<3 where !submit.isHittable { app.swipeUp() }
+        XCTAssertTrue(submit.isHittable)
+        XCTAssertTrue(app.buttons["v2.revocation.retry"].isHittable)
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.lifetime = .keepAlways
+        add(image)
+        try app.performAccessibilityAudit(for: [.elementDetection, .hitRegion, .sufficientElementDescription, .textClipped, .trait])
+    }
+
+    @MainActor
     func testFreshLaunchShowsOnlySupportedPasswordControls() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-v2-ui-testing-signed-out"]

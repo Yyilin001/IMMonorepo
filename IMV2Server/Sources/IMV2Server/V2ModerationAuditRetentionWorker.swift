@@ -23,7 +23,7 @@ public struct V2ModerationAuditRetentionWorker: Sendable {
 
     @discardableResult
     public func runOnce(limit: Int) async throws -> Int {
-        precondition(limit > 0)
+        guard limit > 0 else { throw V2ModerationStoreError.corruptPersistenceState }
         return try await store.deleteExpiredAuditEntries(now: now(), limit: limit)
     }
 }
@@ -34,7 +34,7 @@ public struct PostgresV2ModerationAuditRetentionStore: V2ModerationAuditRetentio
     public init(database: any Database) { self.database = database }
 
     public func deleteExpiredAuditEntries(now: Date, limit: Int) async throws -> Int {
-        guard limit > 0 else { throw V2ModerationStoreError.corruptPersistenceState }
+        guard limit > 0, v2PostgresTimestampCanEncode(now) else { throw V2ModerationStoreError.corruptPersistenceState }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             guard let row = try await sql.raw("""

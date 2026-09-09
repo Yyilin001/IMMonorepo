@@ -4,7 +4,7 @@ import IMV2Core
 
 /// One immutable, self-contained message value suitable for Snapshot V3.
 ///
-/// Incremental room events remain transport deltas. This value is the durable
+/// Explicit complete edit events also carry this value. It is the durable
 /// folded state shared by every recipient projection for the same message
 /// revision. Keeping the fold typed and side-effect free prevents each user
 /// projector from independently mutating an unvalidated JSON dictionary.
@@ -34,11 +34,8 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
         forwardedFromMessageID: MessageID?,
         forwardedFromUserID: UserID?
     ) throws {
-        let milliseconds = (message.createdAt.timeIntervalSince1970 * 1_000).rounded(.down)
-        guard milliseconds.isFinite,
-              milliseconds >= Double(Int64.min),
-              milliseconds <= Double(Int64.max),
-              (forwardedFromMessageID == nil) == (forwardedFromUserID == nil)
+        let signedMilliseconds = try v2MessageProjectionMilliseconds(message)
+        guard (forwardedFromMessageID == nil) == (forwardedFromUserID == nil)
         else { throw V2MessageProjectionStateError.invalidPayload }
         try self.init(
             messageID: message.messageID,
@@ -46,7 +43,7 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
             acceptedRoomSequence: message.roomSequence,
             timelineSequence: message.timelineSequence,
             senderUserID: message.senderUserID,
-            acceptedAtUnixMilliseconds: Int64(milliseconds),
+            acceptedAtUnixMilliseconds: signedMilliseconds,
             messageRevision: 1,
             text: message.text,
             mediaIDs: message.media.map(\.mediaID),
@@ -377,4 +374,19 @@ private struct MediaPresentationWire: Codable {
         case contentType = "content_type"
         case byteCount = "byte_count"
     }
+}
+
+// The immutable projection format uses floor rounding, including before 1970.
+// SQL event writers share this conversion so their payload cannot disagree
+// with the typed projection and falsely fail the immutable-content fence.
+func v2MessageProjectionMilliseconds(_ message: V2AcceptedMessage) throws -> Int64 {
+    let dateMilliseconds = try v2MessageProjectionMilliseconds(message.createdAt)
+    return message.projectionCreatedAtUnixMilliseconds ?? dateMilliseconds
+}
+
+func v2MessageProjectionMilliseconds(_ date: Date) throws -> Int64 {
+    guard let value = Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.down)) else {
+        throw V2MessageProjectionStateError.invalidPayload
+    }
+    return value
 }

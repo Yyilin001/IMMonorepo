@@ -6,6 +6,62 @@ import Testing
 
 @Suite("V2 terminal command retention")
 struct V2TerminalCommandRetentionTests {
+    @Test("expiration rejects a clock that cannot represent the retry age", arguments: [Double.greatestFiniteMagnitude, -Double.greatestFiniteMagnitude])
+    func unrepresentableRetryWindow(seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-retention-window-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: terminalRetentionInstallationBinding)
+        do {
+            let command = try pendingMessage(roomID: .init(uuid: UUID()), clientMessageID: UUID().uuidString, createdAt: 100)
+            try await store.enqueue(command)
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await store.expireStalePendingCommands(now: Date(timeIntervalSince1970: seconds)) }
+            #expect(try await store.pendingMessageCommands() == [command])
+            try await store.expireStalePendingCommands(now: Date(timeIntervalSince1970: 1_000))
+            #expect(try await store.pendingMessageCommands() == [command])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("invalid cleanup clocks preserve pending and terminal commands", arguments: ["expire", "prune"], [Double.nan, .infinity, -.infinity])
+    func cleanupClockBounds(stage: String, seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-retention-clock-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: terminalRetentionInstallationBinding)
+        do {
+            let room = RoomID(uuid: UUID())
+            let old = try pendingMessage(roomID: room, clientMessageID: UUID().uuidString, createdAt: 100)
+            let recent = try pendingMessage(roomID: room, clientMessageID: UUID().uuidString, createdAt: 1_100)
+            let terminal = try pendingMessage(roomID: room, clientMessageID: UUID().uuidString, createdAt: 50)
+            for command in [old, recent, terminal] { try await store.enqueue(command) }
+            try await store.rejectMessage(clientMessageID: terminal.clientMessageID, code: "TEST_REJECTED")
+            let pool = await store.databasePool
+            try await pool.write { try $0.execute(sql: "UPDATE v2_pending_message_commands SET terminal_at = 200 WHERE client_message_id = ?", arguments: [terminal.clientMessageID.rawValue]) }
+            let before = try await store.pendingMessageCommands()
+            await #expect(throws: V2ClientCommandError.commandConflict) {
+                if stage == "expire" { try await store.expireStalePendingCommands(now: Date(timeIntervalSince1970: seconds)) }
+                else { try await store.pruneTerminalCommands(olderThan: Date(timeIntervalSince1970: seconds)) }
+            }
+            #expect(try await store.pendingMessageCommands() == before)
+            try await store.expireStalePendingCommands(now: Date(timeIntervalSince1970: 1_000 + V2IdempotencyPolicy.maximumClientRetryAge))
+            let expired = try await store.pendingMessageCommands()
+            #expect(expired.first { $0.clientMessageID == old.clientMessageID }?.state == .rejected)
+            #expect(expired.first { $0.clientMessageID == recent.clientMessageID }?.state == .pending)
+            try await store.pruneTerminalCommands(olderThan: Date(timeIntervalSince1970: 199))
+            #expect(try await store.pendingMessageCommands().count == 3)
+            try await store.pruneTerminalCommands(olderThan: Date(timeIntervalSince1970: 200))
+            #expect(try await store.pendingMessageCommands().map(\.clientMessageID) == [old.clientMessageID, recent.clientMessageID])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
     @Test("stale pending commands become visible terminal failures before replay")
     func expiresPendingCommandsAtTheProtocolWindow() async throws {
         let store = try GRDBV2LocalSyncStore(
@@ -179,11 +235,11 @@ struct V2TerminalCommandRetentionTests {
             totalForwardCount: 1,
             succeededCount: 0,
             failedCount: 0,
-            state: .active
+            state: .active, terminalCode: nil
         )
         _ = try await store.enqueueForwardPlan(
             plan,
-            sourceMessageIDs: [sourceID],
+            sources: [try testForwardReference(sourceID)],
             targetRoomIDs: [roomID],
             now: Date(timeIntervalSince1970: 100)
         )

@@ -5,6 +5,59 @@ import Testing
 
 @Suite("Routed group messaging store")
 struct V2RoutedGroupMessagingStoreTests {
+    @Test("Malformed manifest pages are rejected before owner writes and can resume with the original prefix",
+          arguments: ["empty", "over-count", "early-final", "extra-page", "duplicate", "oversized", "repeated", "overlap"])
+    func rejectsMalformedManifestPages(scenario: String) async throws {
+        let expectedCount = scenario == "oversized" ? 600 : 3
+        let members = try (1...max(4, expectedCount)).map { try UserID(String(format: "00000000-0000-0000-0000-%012x", $0)) }
+        let intentStore = GroupCreationIntentStoreFake()
+        let owner = GroupCreationOwnerStoreFake()
+        let routed = try V2RoutedGroupMessagingStore(intentStore: intentStore, ownerStores: ["rooms-a": owner])
+        let command = try V2StagedGroupRoomCommand(actorUserID: members[0], operationID: .init(uuid: UUID()),
+            title: "manifest", deliveryMode: .standardFanout, stagedMemberCount: expectedCount - 1)
+        let ids = try groupCreationIDs(suffix: "e")
+        var slices: [V2GroupRoomCreationManifestSlice]
+        switch scenario {
+        case "empty": slices = [.init(memberUserIDs: [], hasMore: false)]
+        case "over-count": slices = [.init(memberUserIDs: members, hasMore: false)]
+        case "early-final": slices = [.init(memberUserIDs: [members[0]], hasMore: false)]
+        case "extra-page": slices = [.init(memberUserIDs: Array(members.prefix(3)), hasMore: true)]
+        case "duplicate": slices = [.init(memberUserIDs: [members[0], members[0]], hasMore: true)]
+        case "oversized": slices = [.init(memberUserIDs: Array(members.prefix(513)), hasMore: true)]
+        case "repeated": slices = [.init(memberUserIDs: [members[0]], hasMore: true), .init(memberUserIDs: [members[0]], hasMore: true)]
+        default: slices = [.init(memberUserIDs: [members[0]], hasMore: true), .init(memberUserIDs: [members[0], members[2]], hasMore: false)]
+        }
+        await intentStore.configureSlices(slices)
+        let profile = try groupCreationProfile(maxMembers: 1_000)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        await #expect(throws: V2GroupRoomCreationIntentStoreError.corruptPersistenceState) {
+            try await routed.createStaged(command: command, capacityProfile: profile, roomShardID: "ignored",
+                roomID: ids.roomID, eventID: ids.eventID, planID: ids.planID, now: now)
+        }
+        let prefixCount = scenario == "repeated" || scenario == "overlap" ? 1 : 0
+        #expect(await owner.stagedPages().count == prefixCount)
+        #expect(await intentStore.sliceReadCount() == prefixCount + 1)
+        #expect(await intentStore.finalizedRoomIDs().isEmpty)
+        // Retry preserves any already transferred page and the original IDs.
+        if prefixCount == 1 {
+            slices = [.init(memberUserIDs: [members[0]], hasMore: true), .init(memberUserIDs: [members[1], members[2]], hasMore: false)]
+        } else if scenario == "oversized" {
+            slices = [.init(memberUserIDs: Array(members.prefix(512)), hasMore: true), .init(memberUserIDs: Array(members.dropFirst(512)), hasMore: false)]
+        } else {
+            slices = [.init(memberUserIDs: Array(members.prefix(3)), hasMore: false)]
+        }
+        await intentStore.configureSlices(slices)
+        let recovered = try await routed.createStaged(command: command, capacityProfile: profile, roomShardID: "ignored",
+            roomID: ids.roomID, eventID: ids.eventID, planID: ids.planID, now: now)
+        guard case .created(let group) = recovered else { throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState }
+        #expect(group.roomID == ids.roomID && group.memberCount == expectedCount)
+        #expect(await intentStore.finalizedRoomIDs() == [ids.roomID])
+        if prefixCount == 1 {
+            let pages = await owner.stagedPages()
+            #expect(pages.count == 3 && pages[0] == pages[1] && pages[2].isFinal)
+        }
+    }
+
     @Test("a retry reuses its durable owner and generated identifiers")
     func retryReusesDurableIntent() async throws {
         let intentStore = GroupCreationIntentStoreFake()
@@ -150,6 +203,11 @@ struct V2RoutedGroupMessagingStoreTests {
 private actor GroupCreationIntentStoreFake: V2GroupRoomCreationIntentStore {
     private var intent: V2GroupRoomCreationIntent?
     private var finalized: [RoomID] = []
+    private var scriptedSlices: [V2GroupRoomCreationManifestSlice]?
+    private var reads = 0
+
+    func configureSlices(_ slices: [V2GroupRoomCreationManifestSlice]) { scriptedSlices = slices; reads = 0 }
+    func sliceReadCount() -> Int { reads }
 
     func prepare(
         _ candidate: V2GroupRoomCreationIntent,
@@ -195,6 +253,13 @@ private actor GroupCreationIntentStoreFake: V2GroupRoomCreationIntentStore {
         afterUserID: UserID?,
         limit: Int
     ) -> V2GroupRoomCreationManifestSlice {
+        reads += 1
+        if var slices = scriptedSlices {
+            guard !slices.isEmpty else { return .init(memberUserIDs: [], hasMore: false) }
+            let first = slices.removeFirst()
+            scriptedSlices = slices
+            return first
+        }
         let remaining = members.filter { userID in
             afterUserID.map { userID > $0 } ?? true
         }
@@ -250,8 +315,8 @@ private actor GroupCreationOwnerStoreFake:
         eventID: EventID,
         planID: FanoutPlanID,
         now: Date
-    ) -> V2CreateGroupRoomOutcome {
-        record(
+    ) throws -> V2CreateGroupRoomOutcome {
+        try record(
             command: command,
             roomShardID: roomShardID,
             roomID: roomID,
@@ -270,11 +335,11 @@ private actor GroupCreationOwnerStoreFake:
         eventID: EventID,
         planID: FanoutPlanID,
         now: Date
-    ) -> V2CreateGroupRoomOutcome {
+    ) throws -> V2CreateGroupRoomOutcome {
         guard validatedMemberUserIDs == command.allMemberUserIDs else {
             return .invalidMembers
         }
-        return record(
+        return try record(
             command: command,
             roomShardID: roomShardID,
             roomID: roomID,
@@ -298,9 +363,9 @@ private actor GroupCreationOwnerStoreFake:
         intent: V2GroupRoomCreationIntent,
         capacityProfile _: V2CapacityProfile,
         now: Date
-    ) -> V2CreateGroupRoomOutcome {
+    ) throws -> V2CreateGroupRoomOutcome {
         guard stagedIntent == intent else { return .unavailable }
-        return .created(.init(
+        return .created(try .init(
             roomID: intent.roomID,
             ownerUserID: command.actorUserID,
             title: command.title,
@@ -320,14 +385,14 @@ private actor GroupCreationOwnerStoreFake:
         eventID: EventID,
         planID: FanoutPlanID,
         now: Date
-    ) -> V2CreateGroupRoomOutcome {
+    ) throws -> V2CreateGroupRoomOutcome {
         recorded.append(.init(
             roomID: roomID,
             eventID: eventID,
             planID: planID,
             roomShardID: roomShardID
         ))
-        return .created(.init(
+        return .created(try .init(
             roomID: roomID,
             ownerUserID: command.actorUserID,
             title: command.title,

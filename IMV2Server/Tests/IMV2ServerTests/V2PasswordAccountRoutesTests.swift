@@ -7,8 +7,68 @@ import Testing
 import Vapor
 import VaporTesting
 
-@Suite("V2 password fallback routes")
+@Suite("V2 password fallback routes", .serialized)
 struct V2PasswordAccountRoutesTests {
+    @Test("password fallback preserves all accepted UTF-8 bytes", arguments: [71, 72, 73, 1024])
+    func passwordFullInput(_ bytes: Int) async throws {
+        let app = try await Application.make(.testing)
+        let store = PasswordAccountStoreFake(userID: .init(uuid: UUID()))
+        let issuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 4, count: 32))
+        V2PasswordAccountRoutes(store: store, assertionIssuer: issuer,
+            passwords: testPasswordWorker(on: app),
+            loginAttemptLimiter: AllowedPasswordAttemptLimiter()).register(on: app)
+        do {
+            let password = String(repeating: "a", count: bytes - 1) + "x"
+            let device = UUID().uuidString
+            try await app.testing().test(.POST, "v2/account-auth/password/register", beforeRequest: { request in
+                try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "length-test", password: password, deviceID: device, publicHandle: "length_test", displayName: "Length test"))
+            }) { response async in #expect(response.status == .ok) }
+            #expect(await store.persistedPasswordHash()?.hasPrefix("$argon2id$v=19$") == true)
+            for (candidate, expected) in [(password, HTTPStatus.ok), (String(password.dropLast()) + "y", HTTPStatus.unauthorized)] {
+                try await app.testing().test(.POST, "v2/account-auth/password/assertion", beforeRequest: { request in
+                    try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "length-test", password: candidate, deviceID: device))
+                }) { response async in #expect(response.status == expected) }
+            }
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
+    @Test("password fallback rejects embedded NUL before persistence", arguments: ["register", "assertion"])
+    func passwordRejectsNUL(_ endpoint: String) async throws {
+        let app = try await Application.make(.testing)
+        let store = PasswordAccountStoreFake(userID: .init(uuid: UUID()))
+        V2PasswordAccountRoutes(store: store,
+            assertionIssuer: try .init(rawKey: Data(repeating: 5, count: 32)),
+            passwords: testPasswordWorker(on: app),
+            loginAttemptLimiter: AllowedPasswordAttemptLimiter()).register(on: app)
+        do {
+            try await app.testing().test(.POST, "v2/account-auth/password/\(endpoint)", beforeRequest: { request in
+                try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "nul-test", password: "twelve-bytes-before\u{0}ignored", deviceID: UUID().uuidString, publicHandle: "nul_test", displayName: "NUL test"))
+            }) { response async in #expect(response.status == .badRequest) }
+            #expect(await store.persistedPasswordHash() == nil)
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
+    @Test("saturated password work returns no-store 503 with a bounded retry", arguments: ["register", "assertion"])
+    func passwordWorkOverload(_ endpoint: String) async throws {
+        let app = try await Application.make(.testing)
+        let store = PasswordAccountStoreFake(userID: .init(uuid: UUID()))
+        V2PasswordAccountRoutes(store: store, assertionIssuer: try .init(rawKey: Data(repeating: 6, count: 32)),
+            passwords: BusyPasswordHasher(), loginAttemptLimiter: AllowedPasswordAttemptLimiter()).register(on: app)
+        do {
+            try await app.testing().test(.POST, "v2/account-auth/password/\(endpoint)", beforeRequest: { request in
+                try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "busy-test", password: "valid-password", deviceID: UUID().uuidString, publicHandle: "busy_test", displayName: "Busy test"))
+            }) { response async in
+                #expect(response.status == .serviceUnavailable)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                #expect(response.headers.first(name: "Retry-After") == "1")
+            }
+            #expect(await store.persistedPasswordHash() == nil)
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
     @Test("account routes reject a direct caller without the edge proof")
     func accountEdgeProofIsRequired() async throws {
         let app = try await Application.make(.testing)
@@ -94,7 +154,7 @@ struct V2PasswordAccountRoutesTests {
         V2PasswordAccountRoutes(
             store: V2PostgresPasswordAccountStore(database: app.db(.psql)),
             assertionIssuer: assertionIssuer,
-            dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            passwords: testPasswordWorker(on: app),
             loginAttemptLimiter: BlockedPasswordAttemptLimiter(retryAfterSeconds: 47)
         ).register(on: app)
 
@@ -119,7 +179,6 @@ struct V2PasswordAccountRoutesTests {
         let app = try await Application.make(.testing)
         defer { Task { try? await app.asyncShutdown() } }
         let passwordHasher = RecordingPasswordHasher()
-        app.passwords.use { _ in passwordHasher }
         app.databases.use(
             try .postgres(url: "postgres://im_v2_test:im_v2_test@127.0.0.1:1/im_v2_test"),
             as: .psql,
@@ -129,7 +188,7 @@ struct V2PasswordAccountRoutesTests {
         V2PasswordAccountRoutes(
             store: V2PostgresPasswordAccountStore(database: app.db(.psql)),
             assertionIssuer: assertionIssuer,
-            dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            passwords: passwordHasher,
             loginAttemptLimiter: BlockedPasswordAttemptLimiter(retryAfterSeconds: 1)
         ).register(on: app)
 
@@ -143,7 +202,7 @@ struct V2PasswordAccountRoutesTests {
         }) { response async in
             #expect(response.status == .badRequest)
         }
-        #expect(passwordHasher.hashCallCount == 0)
+        #expect(await passwordHasher.hashCallCount == 0)
     }
 
     @Test("password transport depends on a store capability and never passes plaintext to persistence")
@@ -156,7 +215,7 @@ struct V2PasswordAccountRoutesTests {
         V2PasswordAccountRoutes(
             store: store,
             assertionIssuer: assertionIssuer,
-            dummyPasswordHash: "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            passwords: testPasswordWorker(on: app),
             loginAttemptLimiter: AllowedPasswordAttemptLimiter()
         ).register(on: app)
 
@@ -176,7 +235,7 @@ struct V2PasswordAccountRoutesTests {
         }
 
         let persistedHash = await store.persistedPasswordHash()
-        #expect(persistedHash?.hasPrefix("$2") == true)
+        #expect(persistedHash?.hasPrefix("$argon2id$v=19$") == true)
         #expect(persistedHash != plaintext)
     }
 }
@@ -195,29 +254,20 @@ private struct AllowedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
     func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
 }
 
-private final class RecordingPasswordHasher: PasswordHasher, @unchecked Sendable {
-    private let lock = NSLock()
-    private var hashCalls = 0
+private actor RecordingPasswordHasher: V2PasswordHashing {
+    private(set) var hashCallCount = 0
+    func hash(_ password: String) async throws -> String { hashCallCount += 1; return "unused" }
+    func verify(_ password: String, created digest: String) async throws -> Bool { false }
+}
 
-    var hashCallCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return hashCalls
-    }
-
-    func hash<Password>(_ password: Password) throws -> [UInt8] where Password: DataProtocol {
-        lock.lock()
-        hashCalls += 1
-        lock.unlock()
-        return Array("unused-digest".utf8)
-    }
-
-    func verify<Password, Digest>(
-        _ password: Password,
-        created digest: Digest
-    ) throws -> Bool where Password: DataProtocol, Digest: DataProtocol {
-        false
-    }
+private func testPasswordWorker(on app: Application) -> V2PasswordHashWorker {
+    let worker = V2PasswordHashWorker()
+    app.lifecycle.use(TestPasswordWorkerLifecycle(worker: worker))
+    return worker
+}
+private struct TestPasswordWorkerLifecycle: LifecycleHandler {
+    let worker: V2PasswordHashWorker
+    func shutdownAsync(_ application: Application) async { try? await worker.shutdown() }
 }
 
 private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
@@ -239,7 +289,12 @@ private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
         return userID
     }
 
-    func passwordCredential(for _: String) async throws -> V2PasswordCredential? { nil }
+    func passwordCredential(for _: String) async throws -> V2PasswordCredential? { passwordHash.map { .init(userID: userID, passwordHash: $0) } }
+
+    func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool {
+        expected.userID == userID && expected.passwordHash == passwordHash
+    }
+    func seedPasswordHash(_ digest: String) { passwordHash = digest }
 
     func persistedPasswordHash() -> String? { passwordHash }
 }
@@ -254,4 +309,9 @@ private struct AllowedEdgeClientLimiter: V2AccountEdgeClientRateLimiting {
     func consume(address _: V2AccountEdgeClientAddress) async throws -> V2AccountEdgeClientRateLimitResult {
         .allowed
     }
+}
+
+private struct BusyPasswordHasher: V2PasswordHashing {
+    func hash(_ password: String) async throws -> String { throw V2PasswordHashError.busy }
+    func verify(_ password: String, created digest: String) async throws -> Bool { throw V2PasswordHashError.busy }
 }

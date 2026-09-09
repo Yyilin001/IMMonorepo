@@ -31,16 +31,21 @@ public struct V2ClientDeviceRegistrationMetadata: Equatable, Sendable {
     public static let unknown = Self(deviceName: "This device", platform: "Unknown")
 }
 
-/// The operation is not a credential, but must be device-local and durable:
-/// it is the only way to retrieve the exact registration result after a
-/// response is lost before credentials reach `V2AuthSession`.
+/// Persist before issuance. The purpose-limited cancellation proof must remain
+/// available even when the server's entire credential response is lost.
 public struct V2PendingDeviceCredentialRegistration: Codable, Equatable, Sendable {
-    public let deviceID: DeviceID
-    public let operationID: UUID
+    public let cancellation: V2DeviceRegistrationCancellation
+    public var deviceID: DeviceID { cancellation.deviceID }
+    public var operationID: UUID { cancellation.operationID }
 
-    public init(deviceID: DeviceID, operationID: UUID) {
-        self.deviceID = deviceID
-        self.operationID = operationID
+    public init(cancellation: V2DeviceRegistrationCancellation) { self.cancellation = cancellation }
+
+    public static func prepare(deviceID: DeviceID, operationID: UUID, now: Date = Date()) throws -> Self {
+        guard let cutoff = Int64(exactly: (now.addingTimeInterval(600).timeIntervalSince1970 * 1_000).rounded(.down)) else {
+            throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord
+        }
+        return try .init(cancellation: .init(deviceID: deviceID, operationID: operationID,
+            proof: .generate(), issueBeforeMilliseconds: cutoff))
     }
 }
 
@@ -48,6 +53,7 @@ public enum V2DeviceCredentialRegistrationOperationStoreError: Error, Equatable,
     case unavailable
     case malformedRecord
     case permanentlyInvalidated
+    case capacityExceeded
     case unexpectedStatus(Int32)
 }
 
@@ -64,6 +70,7 @@ public enum V2AccountAssertionCredentialProviderError: Error, Equatable, Sendabl
     case registrationOperationUnavailable
     case assertionRejected
     case registrationConflict
+    case registrationExpired
     case unexpectedResponse
     case issuedCredentialMismatch
     case noIssuedCredentialToFinalize
@@ -79,9 +86,11 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
     private let assertionProvider: any V2DeviceBoundAccountAssertionProvider
     private let deviceIdentityProvider: any V2DeviceIdentityProvider
     private let operationStore: any V2DeviceCredentialRegistrationOperationStore
+    private let recovery: any V2IssuedCredentialRecovering
     private let registrationMetadata: V2ClientDeviceRegistrationMetadata
     private let transport: any V2AuthHTTPTransport
     private let makeUUID: @Sendable () -> UUID
+    private let now: @Sendable () -> Date
     private var issuedRegistration: IssuedRegistration?
 
     public init(
@@ -89,9 +98,11 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         assertionProvider: any V2DeviceBoundAccountAssertionProvider,
         deviceIdentityProvider: any V2DeviceIdentityProvider,
         operationStore: any V2DeviceCredentialRegistrationOperationStore,
+        recovery: any V2IssuedCredentialRecovering,
         registrationMetadata: V2ClientDeviceRegistrationMetadata = .unknown,
         transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport(),
-        makeUUID: @escaping @Sendable () -> UUID = { UUID() }
+        makeUUID: @escaping @Sendable () -> UUID = { UUID() },
+        now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         guard issueEndpoint.scheme?.lowercased() == "https", issueEndpoint.host != nil else {
             throw V2HTTPAuthTransportError.invalidEndpoint
@@ -100,9 +111,11 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         self.assertionProvider = assertionProvider
         self.deviceIdentityProvider = deviceIdentityProvider
         self.operationStore = operationStore
+        self.recovery = recovery
         self.registrationMetadata = registrationMetadata
         self.transport = transport
         self.makeUUID = makeUUID
+        self.now = now
     }
 
     public func issueDeviceCredentials() async throws -> V2AuthCredentials {
@@ -111,6 +124,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         do { deviceID = try await deviceIdentityProvider.deviceID() }
         catch is CancellationError { throw CancellationError() }
         catch { throw V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable }
+        try Task.checkCancellation()
 
         let assertion: String
         do { assertion = try await assertionProvider.accountAssertion(for: deviceID) }
@@ -119,16 +133,23 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         // any device credential is requested. Preserve those errors for the
         // app instead of presenting a misleading generic assertion failure.
         catch let error as V2AccountAuthenticationError { throw error }
+        catch let error as V2LegacyRegistrationCancellationError { throw error }
+        catch let error as V2DeviceCredentialRegistrationOperationStoreError { throw error }
         catch { throw V2AccountAssertionCredentialProviderError.assertionUnavailable }
+        try Task.checkCancellation()
         guard isValidAssertion(assertion) else { throw V2AccountAssertionCredentialProviderError.invalidAssertion }
 
         let pending = try await pendingRegistration(for: deviceID)
+        try Task.checkCancellation()
+        guard pending.cancellation.issueBefore > now() else { throw V2AccountAssertionCredentialProviderError.registrationExpired }
         let request = try makeRequest(assertion: assertion, pending: pending)
         let data: Data
         let response: HTTPURLResponse
         do {
             (data, response) = try await transport.data(for: request)
         } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch let error as V2HTTPAuthTransportError {
             throw error
@@ -144,14 +165,18 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         }
 
         let credentials: V2AuthCredentials
+        let confirmedCancellation: V2DeviceRegistrationCancellation?
         do {
             let body = try JSONDecoder().decode(IssueResponse.self, from: data)
+            confirmedCancellation = (try? JSONDecoder().decode(CancellationConfirmation.self, from: data))?.registrationCancellation
             credentials = try .init(
                 userID: .init(body.userID),
                 deviceID: .init(body.deviceID),
                 accessToken: body.accessToken,
                 accessTokenExpiresAt: Date(timeIntervalSince1970: Double(body.accessTokenExpiresAtMilliseconds) / 1_000),
-                refreshCredential: body.refreshCredential
+                refreshCredential: body.refreshCredential,
+                revocationCredential: body.revocationCredential,
+                revocationCredentialExpiresAt: Date(timeIntervalSince1970: Double(body.revocationCredentialExpiresAtMilliseconds) / 1_000)
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -161,7 +186,16 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         guard credentials.deviceID == deviceID else {
             throw V2AccountAssertionCredentialProviderError.issuedCredentialMismatch
         }
-        issuedRegistration = .init(pending: pending, credentials: credentials)
+        // Persist purpose-limited authority before returning, including when
+        // a transport delivers a successful response after cancellation.
+        let receipt = try await recovery.receive(credentials, operationID: pending.operationID)
+        issuedRegistration = .init(pending: pending, credentials: credentials, receipt: receipt)
+        guard confirmedCancellation == pending.cancellation else {
+            // A stale/mismatched server response is still received authority.
+            // Relinquish it durably before rejecting the unsupported binding.
+            try await discardIssuedDeviceCredentials(credentials)
+            throw V2AccountAssertionCredentialProviderError.issuedCredentialMismatch
+        }
         return credentials
     }
 
@@ -176,15 +210,27 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         } catch {
             throw V2AccountAssertionCredentialProviderError.registrationOperationUnavailable
         }
+        try await recovery.adopt(issuedRegistration.receipt)
+        self.issuedRegistration = nil
+    }
+
+    public func discardIssuedDeviceCredentials(_ credentials: V2AuthCredentials) async throws {
+        guard let issuedRegistration, issuedRegistration.credentials == credentials else {
+            throw V2AccountAssertionCredentialProviderError.noIssuedCredentialToFinalize
+        }
+        try await recovery.abandon(issuedRegistration.receipt)
+        try await operationStore.delete()
         self.issuedRegistration = nil
     }
 
     private func pendingRegistration(for deviceID: DeviceID) async throws -> V2PendingDeviceCredentialRegistration {
         do {
-            if let existing = try await operationStore.load(), existing.deviceID == deviceID {
+            let existing = try await operationStore.load()
+            try Task.checkCancellation()
+            if let existing, existing.deviceID == deviceID {
                 return existing
             }
-            let pending = V2PendingDeviceCredentialRegistration(deviceID: deviceID, operationID: makeUUID())
+            let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: deviceID, operationID: makeUUID(), now: now())
             try await operationStore.save(pending)
             return pending
         } catch is CancellationError {
@@ -210,6 +256,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
                 accountAssertion: assertion,
                 deviceID: pending.deviceID.rawValue,
                 operationID: pending.operationID,
+                cancellation: pending.cancellation,
                 deviceName: registrationMetadata.deviceName,
                 platform: registrationMetadata.platform
             ))
@@ -228,12 +275,14 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
 private struct IssuedRegistration: Equatable, Sendable {
     let pending: V2PendingDeviceCredentialRegistration
     let credentials: V2AuthCredentials
+    let receipt: V2DeviceRevocationIntent
 }
 
 private struct IssueRequest: Encodable {
     let accountAssertion: String
     let deviceID: String
     let operationID: UUID
+    let cancellation: V2DeviceRegistrationCancellation
     let deviceName: String
     let platform: String
 }
@@ -244,4 +293,10 @@ private struct IssueResponse: Decodable {
     let accessToken: String
     let accessTokenExpiresAtMilliseconds: Int64
     let refreshCredential: String
+    let revocationCredential: V2DeviceRevocationCredential
+    let revocationCredentialExpiresAtMilliseconds: Int64
+}
+
+private struct CancellationConfirmation: Decodable {
+    let registrationCancellation: V2DeviceRegistrationCancellation
 }

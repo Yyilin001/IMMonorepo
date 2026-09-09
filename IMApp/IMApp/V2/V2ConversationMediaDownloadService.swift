@@ -16,7 +16,7 @@ struct V2DownloadedConversationMedia: Hashable, Identifiable, Sendable {
 protocol V2ConversationMediaDownloading: Sendable {
     /// Re-authorizes and replaces the local cache entry before returning a
     /// shareable local file. It must not return a provider target.
-    func download(_ media: V2MediaReference) async throws -> V2DownloadedConversationMedia
+    func download(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia
 }
 
 /// Optional local-cache capability. Kept separate from download so existing
@@ -107,6 +107,8 @@ enum V2DeviceLocalStoragePolicy {
 /// a cached file is replaced. The cache filename is a one-way digest of the
 /// opaque media ID and never exposes an identifier or provider URL on disk.
 actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
+    private var isClosed = false
+    private var transfers: [UUID: Task<V2DownloadedConversationMedia, Error>] = [:]
     private let downloader: V2ClientMediaDownloadService
     private let directory: URL
     private let fileManager: FileManager
@@ -130,15 +132,47 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         self.now = now
     }
 
-    func download(_ media: V2MediaReference) async throws -> V2DownloadedConversationMedia {
+    func download(_ media: V2MediaReference, message: V2MediaMessageLocation? = nil) async throws -> V2DownloadedConversationMedia {
         try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
+        let id = UUID()
+        // The account owns and drains the transfer; caller cancellation is
+        // explicitly forwarded to this shared lifetime boundary.
+        let task = Task { try await self.performDownload(media, message: message) }
+        transfers[id] = task
+        defer { transfers.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler {
+            let result = try await task.value
+            try Task.checkCancellation()
+            guard !isClosed else { throw CancellationError() }
+            return result
+        } onCancel: { task.cancel() }
+    }
+
+    /// Terminal for this downloader. Do not erase the directory until even
+    /// a transfer that ignores cancellation has returned and removed partials.
+    func close() async throws {
+        isClosed = true
+        let pending = Array(transfers.values)
+        for task in pending { task.cancel() }
+        for task in pending { _ = await task.result }
+        if fileManager.fileExists(atPath: directory.path) {
+            do { try fileManager.removeItem(at: directory) }
+            catch { throw V2DeviceLocalStorageError.fileSystemFailure }
+        }
+    }
+
+    private func performDownload(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia {
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
         let destination = cacheURL(for: media.mediaID)
         let temporary = directory
             .appendingPathComponent("." + makeUUID().uuidString + ".partial", isDirectory: false)
         defer { try? fileManager.removeItem(at: temporary) }
 
-        try await downloader.download(mediaID: media.mediaID, to: temporary)
+        try await downloader.download(mediaID: media.mediaID, message: message, to: temporary)
         try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
 
         do {
             // Apply the complete protection policy before the commit. Once

@@ -1,14 +1,29 @@
 import Foundation
 
 /// Effects that are valid only after the realtime handshake has completed.
-/// `synchronizeAfterConnection` owns the initial durable catch-up; the two
+/// `synchronizeAfterConnection` owns the initial durable catch-up; the runtime
 /// loops are long-lived, best-effort triggers and are cancelled together when
 /// the runtime stops.
 public protocol V2ClientRuntimeActivity: Sendable {
     func synchronizeAfterConnection() async throws
     func flushDurableCommands() async throws
+    func resumeDurableCommands() async
+    func suspendDurableCommands() async
     func runAvailabilityLoop() async throws
     func runHeartbeatLoop() async throws
+    func runCommandRetryLoop() async throws
+    func runRoomSubscriptionLoop(connectionID: UUID?) async throws
+    func runRoomCatchUpLoop() async throws
+    func runPolicyRecoveryLoop() async throws
+}
+
+extension V2ClientRuntimeActivity {
+    public func runCommandRetryLoop() async throws {}
+    public func runRoomCatchUpLoop() async throws {}
+    public func runPolicyRecoveryLoop() async throws {}
+    public func runRoomSubscriptionLoop(connectionID: UUID?) async throws {}
+    public func resumeDurableCommands() async {}
+    public func suspendDurableCommands() async {}
 }
 
 /// Default V2 activity composition. A reset is completely materialized and
@@ -20,9 +35,14 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
     private let availabilityRunner: V2AvailabilityDrivenSyncRunner
     private let heartbeatScheduler: V2HeartbeatScheduler
     private let commandOutbox: (any V2ClientCommandFlushing)?
+    private let commandRetrySchedule: V2CommandRetrySchedule?
+    private let commandLifecycles: [any V2CommandFlushControlling]
     private let maximumInitialCommandFlushes: Int
     private let flushAdditionalDurableCommands: @Sendable () async throws -> Void
     private let afterDurableSynchronization: @Sendable () async throws -> Void
+    private let roomSubscriptionLoop: @Sendable (UUID?) async throws -> Void
+    private let roomCatchUpLoop: @Sendable () async throws -> Void
+    private let policyRecoveryLoop: @Sendable () async throws -> Void
     private let onProjectionSynchronized: @Sendable () async -> Void
 
     public init(
@@ -32,8 +52,13 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         heartbeatInterval: Duration,
         commandOutbox: (any V2ClientCommandFlushing)? = nil,
         maximumInitialCommandFlushes: Int = 256,
+        commandLifecycles: [any V2CommandFlushControlling] = [],
+        commandRetrySchedule: V2CommandRetrySchedule? = nil,
         flushAdditionalDurableCommands: @escaping @Sendable () async throws -> Void = {},
         afterDurableSynchronization: @escaping @Sendable () async throws -> Void = {},
+        roomSubscriptionLoop: @escaping @Sendable (UUID?) async throws -> Void = { _ in },
+        roomCatchUpLoop: @escaping @Sendable () async throws -> Void = {},
+        policyRecoveryLoop: @escaping @Sendable () async throws -> Void = {},
         onProjectionSynchronized: @escaping @Sendable () async -> Void = {}
     ) {
         precondition(maximumInitialCommandFlushes > 0)
@@ -53,10 +78,23 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         )
         self.heartbeatScheduler = .init(sender: heartbeatSender, interval: heartbeatInterval)
         self.commandOutbox = commandOutbox
+        self.commandLifecycles = commandLifecycles
+        self.commandRetrySchedule = commandRetrySchedule
         self.maximumInitialCommandFlushes = maximumInitialCommandFlushes
         self.flushAdditionalDurableCommands = flushAdditionalDurableCommands
         self.afterDurableSynchronization = afterDurableSynchronization
+        self.roomCatchUpLoop = roomCatchUpLoop
+        self.policyRecoveryLoop = policyRecoveryLoop
+        self.roomSubscriptionLoop = roomSubscriptionLoop
         self.onProjectionSynchronized = onProjectionSynchronized
+    }
+
+    public func resumeDurableCommands() async {
+        for lane in commandLifecycles { await lane.resumeCommandFlushing() }
+    }
+
+    public func suspendDurableCommands() async {
+        for lane in commandLifecycles { await lane.suspendCommandFlushing() }
     }
 
     public func synchronizeAfterConnection() async throws {
@@ -95,12 +133,34 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         try await flushAdditionalDurableCommands()
     }
 
+    public func runCommandRetryLoop() async throws {
+        guard let commandRetrySchedule else { return }
+        try await V2CommandRetryScheduler(schedule: commandRetrySchedule, flush: {
+            try await Self.flush(
+                commandOutbox: commandOutbox,
+                maximumFlushes: maximumInitialCommandFlushes,
+                flushAdditionalDurableCommands: flushAdditionalDurableCommands
+            )
+            await onProjectionSynchronized()
+        }).run()
+    }
+
     public func runAvailabilityLoop() async throws {
         try await availabilityRunner.run()
     }
 
     public func runHeartbeatLoop() async throws {
         try await heartbeatScheduler.run()
+    }
+
+    public func runPolicyRecoveryLoop() async throws { try await policyRecoveryLoop() }
+
+    public func runRoomCatchUpLoop() async throws {
+        try await roomCatchUpLoop()
+    }
+
+    public func runRoomSubscriptionLoop(connectionID: UUID?) async throws {
+        try await roomSubscriptionLoop(connectionID)
     }
 }
 
@@ -110,8 +170,8 @@ public enum V2ClientRuntimeState: Equatable, Sendable {
     case running(V2AuthenticatedClientSession)
 }
 
-/// Owns foreground realtime lifecycle. It has one start attempt and exactly
-/// two owned background tasks. A failing availability/heartbeat loop closes
+/// Owns foreground realtime lifecycle, its single start attempt, and all live
+/// synchronization, retry and subscription tasks. A failing live loop closes
 /// the connection so the app can make an explicit retry decision; it never
 /// silently treats a wake signal as durable delivery.
 public actor V2ClientRuntime {
@@ -122,6 +182,10 @@ public actor V2ClientRuntime {
     private var startAttempt: StartAttempt?
     private var availabilityTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var commandRetryTask: Task<Void, Never>?
+    private var roomCatchUpTask: Task<Void, Never>?
+    private var roomSubscriptionTask: Task<Void, Never>?
+    private var policyRecoveryTask: Task<Void, Never>?
     private var stopWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     public init(connection: any V2RealtimeSessionConnecting, activity: any V2ClientRuntimeActivity) {
@@ -167,6 +231,8 @@ public actor V2ClientRuntime {
             let task = Task { [connection, activity] in
                 let session = try await connection.connect()
                 try Task.checkCancellation()
+                await activity.resumeDurableCommands()
+                try Task.checkCancellation()
                 try await activity.synchronizeAfterConnection()
                 try Task.checkCancellation()
                 try await activity.flushDurableCommands()
@@ -189,10 +255,11 @@ public actor V2ClientRuntime {
         switch result {
         case .success(let session):
             state = .running(session)
-            startBackgroundTasks(for: attempt.generation)
+            startBackgroundTasks(for: attempt.generation, connectionID: session.connectionID)
             return session
         case .failure(let error):
             state = .stopped
+            await activity.suspendDurableCommands()
             await connection.disconnect()
             throw error
         }
@@ -201,24 +268,62 @@ public actor V2ClientRuntime {
     /// The app calls this on backgrounding or logout. It is idempotent and
     /// fences late completion of a previously suspended start attempt.
     public func stop() async {
-        guard state != .stopped || startAttempt != nil || availabilityTask != nil || heartbeatTask != nil else {
+        guard state != .stopped || startAttempt != nil || availabilityTask != nil || heartbeatTask != nil || commandRetryTask != nil || roomCatchUpTask != nil || roomSubscriptionTask != nil || policyRecoveryTask != nil else {
+            await activity.suspendDurableCommands()
             return
         }
         generation &+= 1
+        let starting = startAttempt?.task
+        let ownedLoops = [availabilityTask, heartbeatTask, commandRetryTask, roomCatchUpTask, roomSubscriptionTask, policyRecoveryTask].compactMap { $0 }
         startAttempt?.task.cancel()
         startAttempt = nil
         availabilityTask?.cancel()
         availabilityTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        commandRetryTask?.cancel()
+        commandRetryTask = nil
+        roomCatchUpTask?.cancel()
+        roomCatchUpTask = nil
+        roomSubscriptionTask?.cancel()
+        roomSubscriptionTask = nil
+        policyRecoveryTask?.cancel()
+        policyRecoveryTask = nil
         state = .stopped
         resumeStopWaiters()
+        await activity.suspendDurableCommands()
         await connection.disconnect()
+        _ = await starting?.result
+        for loop in ownedLoops { await loop.value }
     }
 
-    private func startBackgroundTasks(for taskGeneration: UInt64) {
+    private func startBackgroundTasks(for taskGeneration: UInt64, connectionID: UUID?) {
+        policyRecoveryTask?.cancel()
+        policyRecoveryTask = Task { [weak self, activity] in
+            do { try await activity.runPolicyRecoveryLoop() }
+            catch is CancellationError { return }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+        }
+        roomSubscriptionTask?.cancel()
+        roomSubscriptionTask = Task { [weak self, activity] in
+            do { try await activity.runRoomSubscriptionLoop(connectionID: connectionID) }
+            catch is CancellationError { return }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+        }
         availabilityTask?.cancel()
         heartbeatTask?.cancel()
+        commandRetryTask?.cancel()
+        roomCatchUpTask?.cancel()
+        roomCatchUpTask = Task { [weak self, activity] in
+            do { try await activity.runRoomCatchUpLoop() }
+            catch is CancellationError { return }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+        }
+        commandRetryTask = Task { [weak self, activity] in
+            do { try await activity.runCommandRetryLoop() }
+            catch is CancellationError { return }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+        }
         availabilityTask = Task { [weak self, activity] in
             do {
                 try await activity.runAvailabilityLoop()
@@ -246,8 +351,17 @@ public actor V2ClientRuntime {
         availabilityTask = nil
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        commandRetryTask?.cancel()
+        commandRetryTask = nil
+        roomCatchUpTask?.cancel()
+        roomCatchUpTask = nil
+        roomSubscriptionTask?.cancel()
+        roomSubscriptionTask = nil
+        policyRecoveryTask?.cancel()
+        policyRecoveryTask = nil
         state = .stopped
         resumeStopWaiters()
+        await activity.suspendDurableCommands()
         await connection.disconnect()
     }
 

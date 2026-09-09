@@ -14,8 +14,10 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2MediaPurgeLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
+        guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let expiresAt = now.addingTimeInterval(leaseDuration)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let rows = try await sql.raw("""
@@ -30,7 +32,9 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
                 )
                 UPDATE im_v2.media_purge_outbox AS outbox
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt),
-                    next_attempt_at = NULL, paused_at = NULL, retry_count = outbox.retry_count + 1
+                    next_attempt_at = NULL, paused_at = NULL,
+                    retry_count = CASE WHEN outbox.retry_count = 9223372036854775807
+                        THEN outbox.retry_count ELSE outbox.retry_count + 1 END
                 FROM candidates
                 WHERE outbox.media_id = candidates.media_id
                 RETURNING outbox.media_id, outbox.reason, outbox.retry_count
@@ -51,7 +55,8 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
     }
 
     public func markCompleted(_ lease: V2MediaPurgeLease, now: Date) async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard v2PostgresTimestampCanEncode(now),
+              let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
             UPDATE im_v2.media_purge_outbox
             SET state = 'completed', completed_at = \(bind: now), claim_token = NULL,
@@ -67,6 +72,7 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
         let mediaID = try mediaPurgeUUID(lease.mediaID)
         switch disposition {
         case .retry(let retryAt):
+            guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.media_purge_outbox
                 SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -75,6 +81,7 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
                   AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await sql.raw("""
                 UPDATE im_v2.media_purge_outbox
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,

@@ -5,6 +5,56 @@ import Testing
 
 @Suite("V2 group messaging service")
 struct V2GroupMessagingServiceTests {
+    @Test("Staged command counts reserve room for the owner without overflowing",
+          arguments: [Int.min, -1, 0, 99_999, Int.max - 1, Int.max])
+    func stagedCommandCountBounds(count: Int) throws {
+        let owner = UserID(uuid: UUID()), operation = GroupRoomOperationID(uuid: UUID())
+        if count < 0 || count == Int.max {
+            #expect(throws: V2GroupMessagingPolicyError.invalidInitialMembership) {
+                try V2StagedGroupRoomCommand(actorUserID: owner, operationID: operation,
+                    title: "boundary", deliveryMode: .largeGroupHybrid, stagedMemberCount: count)
+            }
+        } else {
+            let command = try V2StagedGroupRoomCommand(actorUserID: owner, operationID: operation,
+                title: "boundary", deliveryMode: .largeGroupHybrid, stagedMemberCount: count)
+            #expect(command.allMemberCount == count + 1)
+        }
+    }
+
+    @Test("Staged service rejects malformed and oversized counts before persistence",
+          arguments: [Int.min, -1, 100_000, Int.max - 1, Int.max])
+    func stagedServiceCountBounds(count: Int) async throws {
+        let store = GroupStoreSpy()
+        let service = try V2GroupMessagingService(store: store,
+            capacityProfile: profile(maxMembers: 100_000), roomShardID: "rooms-primary")
+        if count < 0 {
+            await #expect(throws: V2GroupMessagingPolicyError.invalidInitialMembership) {
+                try await service.createStaged(actorUserID: .init(uuid: UUID()),
+                    operationID: .init(uuid: UUID()), title: "boundary", stagedMemberCount: count)
+            }
+        } else {
+            #expect(try await service.createStaged(actorUserID: .init(uuid: UUID()),
+                operationID: .init(uuid: UUID()), title: "boundary", stagedMemberCount: count) == .memberLimitReached)
+        }
+        #expect(await store.command() == nil)
+    }
+
+    @Test("Manifest page numbers fit the PostgreSQL integer column",
+          arguments: [Int.min, -1, 0, Int(Int32.max), Int(Int32.max) + 1, Int.max])
+    func manifestPageNumberBounds(number: Int) throws {
+        let members = [UserID(uuid: UUID())]
+        if number < 0 || number > Int(Int32.max) {
+            #expect(throws: V2GroupRoomCreationIntentStoreError.invalidIntent) {
+                try V2GroupRoomCreationManifestPage(pageNumber: number, memberUserIDs: members, isFinal: true)
+            }
+        } else {
+            let page = try V2GroupRoomCreationManifestPage(pageNumber: number, memberUserIDs: members, isFinal: true)
+            #expect(page.pageNumber == number)
+            #expect(page.digest.count == 32)
+            #expect(page == (try V2GroupRoomCreationManifestPage(pageNumber: number, memberUserIDs: members, isFinal: true)))
+        }
+    }
+
     @Test("forwards an atomic, canonical group creation command")
     func forwardsCreation() async throws {
         let store = GroupStoreSpy()
@@ -95,9 +145,9 @@ struct V2GroupMessagingServiceTests {
 private actor GroupStoreSpy: V2GroupMessagingStore {
     private var captured: V2CreateGroupRoomCommand?
 
-    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) -> V2CreateGroupRoomOutcome {
+    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) throws -> V2CreateGroupRoomOutcome {
         captured = command
-        return .created(.init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
+        return .created(try .init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
     }
 
     func command() -> V2CreateGroupRoomCommand? {

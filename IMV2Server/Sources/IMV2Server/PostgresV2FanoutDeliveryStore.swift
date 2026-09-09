@@ -175,8 +175,10 @@ public struct PostgresV2FanoutDeliveryStore:
         freshSelection: FreshSelection = .automatic
     ) async throws -> [V2FanoutDeliveryLease] {
         guard leaseDuration > 0, limit > 0 else { return [] }
+        guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let token = makeUUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
         let eligibility = lane.sqlEligibilityPredicate(now: now)
         let ordering = lane.sqlOrdering
         let selectsDirectRecovery = freshSelection == .directOnly
@@ -221,7 +223,7 @@ public struct PostgresV2FanoutDeliveryStore:
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                         ), claimed AS (
                             UPDATE im_v2.fanout_deliveries AS delivery
-                            SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = delivery.retry_count + 1
+                            SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = CASE WHEN delivery.retry_count = 9223372036854775807 THEN delivery.retry_count ELSE delivery.retry_count + 1 END
                             FROM candidates
                             WHERE delivery.source_event_id = candidates.source_event_id
                               AND delivery.target_user_id = candidates.target_user_id
@@ -267,7 +269,7 @@ public struct PostgresV2FanoutDeliveryStore:
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     )
                     UPDATE im_v2.fanout_deliveries AS delivery
-                    SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = delivery.retry_count + 1
+                    SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = CASE WHEN delivery.retry_count = 9223372036854775807 THEN delivery.retry_count ELSE delivery.retry_count + 1 END
                     FROM candidates
                     WHERE delivery.source_event_id = candidates.source_event_id
                       AND delivery.target_user_id = candidates.target_user_id
@@ -292,7 +294,7 @@ public struct PostgresV2FanoutDeliveryStore:
                             LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                         ), claimed AS (
                             UPDATE im_v2.fanout_deliveries AS delivery
-                            SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = delivery.retry_count + 1
+                            SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = CASE WHEN delivery.retry_count = 9223372036854775807 THEN delivery.retry_count ELSE delivery.retry_count + 1 END
                             FROM candidates
                             WHERE delivery.source_event_id = candidates.source_event_id
                               AND delivery.target_user_id = candidates.target_user_id
@@ -338,7 +340,7 @@ public struct PostgresV2FanoutDeliveryStore:
                         LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     )
                     UPDATE im_v2.fanout_deliveries AS delivery
-                    SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = delivery.retry_count + 1
+                    SET claim_token = \(bind: token), lease_expires_at = \(bind: expiry), retry_count = CASE WHEN delivery.retry_count = 9223372036854775807 THEN delivery.retry_count ELSE delivery.retry_count + 1 END
                     FROM candidates
                     WHERE delivery.source_event_id = candidates.source_event_id
                       AND delivery.target_user_id = candidates.target_user_id
@@ -374,6 +376,9 @@ public struct PostgresV2FanoutDeliveryStore:
         now: Date, limit: Int
     ) async throws -> [V2FreshDirectFanoutDeliveryCommit] {
         guard limit > 0 else { return [] }
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         var mayRetryConcurrentPayloadMaterialization = true
         while true {
             do {
@@ -637,6 +642,9 @@ public struct PostgresV2FanoutDeliveryStore:
     }
 
     public func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit {
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return try await commit(sql: sql, lease: lease, now: now)
@@ -667,6 +675,9 @@ public struct PostgresV2FanoutDeliveryStore:
         _ leases: [V2FanoutDeliveryLease], fenceCurrentRoutes: Bool, now: Date
     ) async throws -> [V2FanoutDeliveryCommit] {
         guard !leases.isEmpty else { return [] }
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         let ordered = try leases.enumerated().map { index, lease in
             BatchFanoutDeliveryLease(index: index, lease: lease, key: try deliveryKey(for: lease))
         }.sorted { lhs, rhs in
@@ -1086,6 +1097,9 @@ public struct PostgresV2FanoutDeliveryStore:
         let targetUserID = try uuid(lease.targetUserID)
         switch disposition {
         case .retry(let retryAt):
+            guard v2PostgresTimestampCanEncode(retryAt) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.fanout_deliveries
                 SET claim_token = NULL, lease_expires_at = NULL,
@@ -1097,6 +1111,9 @@ public struct PostgresV2FanoutDeliveryStore:
                   AND state = 'pending' AND claim_token = \(bind: lease.claimToken)
                 """).run()
         case .pause:
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.fanout_deliveries
                 SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
@@ -1182,6 +1199,7 @@ public struct PostgresV2FanoutDeliveryStore:
             VALUES (\(bind: targetUserID), 1)
             ON CONFLICT (user_id)
             DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
+            WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max)
             RETURNING next_sequence
             """).first(decoding: SyncSequenceRow.self)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -1325,6 +1343,7 @@ public struct PostgresV2FanoutDeliveryStore:
                 ORDER BY target_user_id
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = sequence.next_sequence + 1
+                WHERE sequence.next_sequence < 9223372036854775807
                 RETURNING user_id, next_sequence
             ), numbered AS (
                 SELECT claimed.ordinal, claimed.source_event_id, claimed.target_user_id,
@@ -1346,6 +1365,7 @@ public struct PostgresV2FanoutDeliveryStore:
                 ORDER BY user_id
                 ON CONFLICT (user_id)
                 DO UPDATE SET next_sequence = sequence.next_sequence + EXCLUDED.next_sequence
+                WHERE sequence.next_sequence <= 9223372036854775807 - EXCLUDED.next_sequence
                 RETURNING user_id, next_sequence
             ), numbered AS (
                 SELECT claimed.ordinal, claimed.source_event_id, claimed.target_user_id,
@@ -1458,8 +1478,11 @@ public struct PostgresV2FanoutDeliveryStore:
                 UNION ALL
                 SELECT claimed.ordinal, claimed.source_event_id, claimed.target_user_id,
                        claimed.projection_kind, claimed.completion_unit_id, NULL::bigint,
-                       'inbox_conflict'::text AS outcome
+                       CASE WHEN reserved_sequence.user_id IS NULL
+                            THEN 'sequence_exhausted' ELSE 'inbox_conflict' END AS outcome
                 FROM claimed
+                LEFT JOIN reserved_sequence
+                  ON reserved_sequence.user_id = claimed.target_user_id
                 LEFT JOIN recorded_inbox
                   USING (source_event_id, target_user_id, projection_kind)
                 WHERE recorded_inbox.source_event_id IS NULL
@@ -1474,6 +1497,11 @@ public struct PostgresV2FanoutDeliveryStore:
         prepared.reserveCapacity(rows.count)
         for row in rows {
             guard ordered.indices.contains(row.ordinal) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            // A failed reservation must roll back the entire batch, including
+            // allocations and terminal updates for users that still had room.
+            guard row.outcome != "sequence_exhausted" else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard row.outcome == "committed" else { throw V2FanoutDeliveryError.inboxAlreadyCommitted }
@@ -1726,6 +1754,9 @@ public struct PostgresV2FanoutDeliveryStore:
         limit: Int
     ) async throws -> V2FanoutCompletionReleaseReport {
         precondition(limit > 0)
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         return try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -2312,7 +2343,7 @@ private struct ProjectionInputRow: Decodable {
     let isWithdrawn: Bool?
     let payloadSchemaVersion: Int16?
     let statePayloadJSON: String?
-    let stateCreatedAt: Date?
+    let stateCreatedAt: V2PostgresTimestamp?
 
     func messageState(projectionKind: String) throws -> V2FanoutMessageProjectionState? {
         try fanoutMessageState(
@@ -2375,7 +2406,7 @@ private struct LeasedProjectionInputRow: Decodable {
     let isWithdrawn: Bool?
     let payloadSchemaVersion: Int16?
     let statePayloadJSON: String?
-    let stateCreatedAt: Date?
+    let stateCreatedAt: V2PostgresTimestamp?
 
     func messageState(projectionKind: String) throws -> V2FanoutMessageProjectionState? {
         try fanoutMessageState(
@@ -2424,7 +2455,7 @@ private func fanoutMessageState(
     isWithdrawn: Bool?,
     payloadSchemaVersion: Int16?,
     statePayloadJSON: String?,
-    stateCreatedAt: Date?
+    stateCreatedAt: V2PostgresTimestamp?
 ) throws -> V2FanoutMessageProjectionState? {
     let values: [Any?] = [
         stateID, messageID, roomID, messageRevision, variantKey,
@@ -2439,7 +2470,7 @@ private func fanoutMessageState(
           let variantKey, let originEventID, let isWithdrawn,
           let payloadSchemaVersion, let statePayloadJSON, let stateCreatedAt
     else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return .init(
+    return .init(.init(
         stateID: stateID,
         messageID: messageID,
         roomID: roomID,
@@ -2450,8 +2481,8 @@ private func fanoutMessageState(
         isWithdrawn: isWithdrawn,
         payloadSchemaVersion: payloadSchemaVersion,
         payloadJSON: statePayloadJSON,
-        createdAt: stateCreatedAt
-    )
+        createdAt: stateCreatedAt.date
+    ), persistedCreatedAt: stateCreatedAt)
 }
 private struct InboxInsertRow: Decodable { let sourceEventID: UUID; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" } }
 private struct SyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }

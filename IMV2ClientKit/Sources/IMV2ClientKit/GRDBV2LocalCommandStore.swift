@@ -36,7 +36,7 @@ extension GRDBV2LocalSyncStore {
                     (client_message_id, room_id, text, media_ids, mention_targets, entities, reply_to_message_id, state, attempt_count, next_attempt_at, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
-                arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, entities, replyToMessageID, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970]
+                arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, entities, replyToMessageID, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)]
             )
         }
     }
@@ -47,7 +47,7 @@ extension GRDBV2LocalSyncStore {
                 SELECT * FROM v2_pending_message_commands
                 WHERE state = 'pending' AND next_attempt_at <= ?
                 ORDER BY created_at, client_message_id LIMIT 1
-                """, arguments: [now.timeIntervalSince1970]) else { return nil }
+                """, arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingCommand(row)
         }
     }
@@ -55,7 +55,7 @@ extension GRDBV2LocalSyncStore {
     public func markMessageAccepted(clientMessageID: ClientMessageID, messageID: MessageID, roomSequence: UInt64) throws {
         guard roomSequence > 0 else { throw V2ClientCommandError.commandConflict }
         try databasePool.write { db in
-            try Self.requirePendingCommand(clientMessageID, db: db)
+            if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_commands", keyColumn: "client_message_id", key: clientMessageID.rawValue, completedState: "accepted", canonicalValues: ["accepted_message_id": messageID.rawValue.databaseValue, "accepted_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }
             try db.execute(sql: """
                 UPDATE v2_pending_message_commands
                 SET state = 'accepted', accepted_message_id = ?, accepted_room_sequence = ?, terminal_code = NULL
@@ -67,11 +67,7 @@ extension GRDBV2LocalSyncStore {
     public func scheduleMessageRetry(clientMessageID: ClientMessageID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             try Self.requirePendingCommand(clientMessageID, db: db)
-            try db.execute(sql: """
-                UPDATE v2_pending_message_commands
-                SET attempt_count = attempt_count + 1, next_attempt_at = ?
-                WHERE client_message_id = ?
-                """, arguments: [nextAttemptAt.timeIntervalSince1970, clientMessageID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_pending_message_commands", keyColumn: "client_message_id", key: clientMessageID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
@@ -98,7 +94,7 @@ extension GRDBV2LocalSyncStore {
     /// eligible for this cleanup.
     public func pruneTerminalCommands(olderThan cutoff: Date) throws {
         try databasePool.write { db in
-            let cutoffValue = cutoff.timeIntervalSince1970
+            let cutoffValue = try Self.commandRetryTimestamp(cutoff)
             for table in Self.terminalCommandTables where table != "v2_pending_group_room_creations" {
                 try db.execute(
                     sql: "DELETE FROM \(table) WHERE state <> 'pending' AND terminal_at <= ?",
@@ -134,8 +130,10 @@ extension GRDBV2LocalSyncStore {
     /// diagnosis instead of silently deleting user intent.
     public func expireStalePendingCommands(now: Date) throws {
         try databasePool.write { db in
+            let nowValue = try Self.commandRetryTimestamp(now)
             let cutoff = now.addingTimeInterval(-V2IdempotencyPolicy.maximumClientRetryAge)
-            let cutoffValue = cutoff.timeIntervalSince1970
+            let cutoffValue = try Self.commandRetryTimestamp(cutoff)
+            guard cutoffValue < nowValue else { throw V2ClientCommandError.commandConflict }
             for table in Self.terminalCommandTables {
                 try db.execute(
                     sql: "UPDATE \(table) SET state = 'rejected', terminal_code = ?, terminal_at = ? WHERE state = 'pending' AND created_at <= ?",
@@ -193,7 +191,7 @@ extension GRDBV2LocalSyncStore {
                 """,
                 arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue,
                             command.action.rawValue, try Self.commandStorageInteger(command.expectedMembershipRevision),
-                            command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970]
+                            try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)]
             )
         }
     }
@@ -255,8 +253,8 @@ extension GRDBV2LocalSyncStore {
                     command.targetUserID.rawValue,
                     command.action.rawValue,
                     expectedRevision,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -269,14 +267,14 @@ extension GRDBV2LocalSyncStore {
                 SELECT * FROM v2_pending_membership_commands
                 WHERE state = 'pending' AND next_attempt_at <= ?
                 ORDER BY created_at, operation_id LIMIT 1
-                """, arguments: [now.timeIntervalSince1970]) else { return nil }
+                """, arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingMembershipCommand(row)
         }
     }
 
     public func markMembershipAcknowledged(operationID: MembershipOperationID, membershipRevision: UInt64, roomSequence: UInt64) throws {
         try databasePool.write { db in
-            try Self.requirePendingMembershipCommand(operationID, db: db)
+            if try Self.acceptsRepeatedCompletion(table: "v2_pending_membership_commands", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_membership_revision": try Self.commandStorageInteger(membershipRevision).databaseValue, "resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }
             try db.execute(sql: """
                 UPDATE v2_pending_membership_commands
                 SET state = 'acknowledged', resulting_membership_revision = ?, resulting_room_sequence = ?, terminal_code = NULL
@@ -288,11 +286,7 @@ extension GRDBV2LocalSyncStore {
     public func scheduleMembershipRetry(operationID: MembershipOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             try Self.requirePendingMembershipCommand(operationID, db: db)
-            try db.execute(sql: """
-                UPDATE v2_pending_membership_commands
-                SET attempt_count = attempt_count + 1, next_attempt_at = ?
-                WHERE operation_id = ?
-                """, arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_pending_membership_commands", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
@@ -329,7 +323,7 @@ extension GRDBV2LocalSyncStore {
                 INSERT INTO v2_pending_message_withdrawals
                     (operation_id, room_id, message_id, expected_message_revision, state, attempt_count, next_attempt_at, created_at)
                 VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
-                """, arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+                """, arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -383,8 +377,8 @@ extension GRDBV2LocalSyncStore {
                     command.roomID.rawValue,
                     command.messageID.rawValue,
                     expectedRevision,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -393,14 +387,14 @@ extension GRDBV2LocalSyncStore {
 
     public func nextReadyMessageWithdrawal(now: Date) throws -> V2PendingMessageWithdrawal? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_withdrawals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_withdrawals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingMessageWithdrawal(row)
         }
     }
 
     public func markMessageWithdrawalAcknowledged(operationID: MessageWithdrawalOperationID, messageRevision: UInt64, roomSequence: UInt64) throws {
         try databasePool.write { db in
-            try Self.requirePendingMessageWithdrawal(operationID, db: db)
+            if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_withdrawals", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_message_revision": try Self.commandStorageInteger(messageRevision).databaseValue, "resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }
             try db.execute(sql: "UPDATE v2_pending_message_withdrawals SET state = 'acknowledged', resulting_message_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(messageRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue])
         }
     }
@@ -408,7 +402,7 @@ extension GRDBV2LocalSyncStore {
     public func scheduleMessageWithdrawalRetry(operationID: MessageWithdrawalOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             try Self.requirePendingMessageWithdrawal(operationID, db: db)
-            try db.execute(sql: "UPDATE v2_pending_message_withdrawals SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_pending_message_withdrawals", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
@@ -439,7 +433,7 @@ extension GRDBV2LocalSyncStore {
                 else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_message_redactions (operation_id, room_id, message_id, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.reasonCode.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_message_redactions (operation_id, room_id, message_id, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.reasonCode.rawValue, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -495,8 +489,8 @@ extension GRDBV2LocalSyncStore {
                     command.roomID.rawValue,
                     command.messageID.rawValue,
                     command.reasonCode.rawValue,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -505,7 +499,7 @@ extension GRDBV2LocalSyncStore {
 
     public func nextReadyMessageRedaction(now: Date) throws -> V2PendingMessageRedaction? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_redactions WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_redactions WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingMessageRedaction(row)
         }
     }
@@ -513,7 +507,7 @@ extension GRDBV2LocalSyncStore {
     public func markMessageRedactionAcknowledged(operationID: ModerationOperationID, messageRevision: UInt64, roomSequence: UInt64) throws {
         guard messageRevision > 1, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }
         try databasePool.write { db in
-            try Self.requirePendingMessageRedaction(operationID, db: db)
+            if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_redactions", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_message_revision": try Self.commandStorageInteger(messageRevision).databaseValue, "resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }
             try db.execute(sql: "UPDATE v2_pending_message_redactions SET state = 'acknowledged', resulting_message_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(messageRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue])
         }
     }
@@ -521,7 +515,7 @@ extension GRDBV2LocalSyncStore {
     public func scheduleMessageRedactionRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             try Self.requirePendingMessageRedaction(operationID, db: db)
-            try db.execute(sql: "UPDATE v2_pending_message_redactions SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_pending_message_redactions", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
@@ -542,7 +536,7 @@ extension GRDBV2LocalSyncStore {
     public func enqueue(_ command: V2PendingMemberMute) throws { try databasePool.write { db in
         guard command.muteUntil > command.nextAttemptAt, command.state == .pending, command.attemptCount == 0, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         if let row = try Row.fetchOne(db, sql: "SELECT room_id, target_user_id, mute_until, reason_code FROM v2_pending_member_mutes WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], target: String = row["target_user_id"], until: Double = row["mute_until"], reason: String = row["reason_code"]; guard room == command.roomID.rawValue, target == command.targetUserID.rawValue, until == command.muteUntil.timeIntervalSince1970, reason == command.reasonCode.rawValue else { throw V2ClientCommandError.commandConflict }; return }
-        try db.execute(sql: "INSERT INTO v2_pending_member_mutes (operation_id, room_id, target_user_id, mute_until, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.muteUntil.timeIntervalSince1970, command.reasonCode.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_member_mutes (operation_id, room_id, target_user_id, mute_until, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.muteUntil.timeIntervalSince1970, command.reasonCode.rawValue, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
     } }
 
     public func enqueueOrReusePendingMemberMute(
@@ -600,16 +594,16 @@ extension GRDBV2LocalSyncStore {
                     command.targetUserID.rawValue,
                     command.muteUntil.timeIntervalSince1970,
                     command.reasonCode.rawValue,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
         }
     }
-    public func nextReadyMemberMute(now: Date) throws -> V2PendingMemberMute? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_member_mutes WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMemberMute(row) } }
-    public func markMemberMuteAcknowledged(operationID: ModerationOperationID, roomSequence: UInt64) throws { guard roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_member_mutes SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
-    public func scheduleMemberMuteRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_member_mutes SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyMemberMute(now: Date) throws -> V2PendingMemberMute? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_member_mutes WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingMemberMute(row) } }
+    public func markMemberMuteAcknowledged(operationID: ModerationOperationID, roomSequence: UInt64) throws { guard roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_member_mutes", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_member_mutes SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
+    public func scheduleMemberMuteRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_member_mutes", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectMemberMute(operationID: ModerationOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMemberMute(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_member_mutes SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
 
     public func pendingMemberMutes() throws -> [V2PendingMemberMute] {
@@ -621,7 +615,7 @@ extension GRDBV2LocalSyncStore {
     public func enqueue(_ command: V2PendingModeratedMemberRemoval) throws { try databasePool.write { db in
         guard command.state == .pending, command.attemptCount == 0, command.resultingMembershipRevision == nil, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         if let row = try Row.fetchOne(db, sql: "SELECT room_id, target_user_id, reason_code FROM v2_pending_moderated_member_removals WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], target: String = row["target_user_id"], reason: String = row["reason_code"]; guard room == command.roomID.rawValue, target == command.targetUserID.rawValue, reason == command.reasonCode.rawValue else { throw V2ClientCommandError.commandConflict }; return }
-        try db.execute(sql: "INSERT INTO v2_pending_moderated_member_removals (operation_id, room_id, target_user_id, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.reasonCode.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_moderated_member_removals (operation_id, room_id, target_user_id, reason_code, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.targetUserID.rawValue, command.reasonCode.rawValue, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
     } }
 
     public func enqueueOrReusePendingModeratedMemberRemoval(
@@ -676,16 +670,16 @@ extension GRDBV2LocalSyncStore {
                     command.roomID.rawValue,
                     command.targetUserID.rawValue,
                     command.reasonCode.rawValue,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
         }
     }
-    public func nextReadyModeratedMemberRemoval(now: Date) throws -> V2PendingModeratedMemberRemoval? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_moderated_member_removals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingModeratedMemberRemoval(row) } }
-    public func markModeratedMemberRemovalAcknowledged(operationID: ModerationOperationID, membershipRevision: UInt64, roomSequence: UInt64) throws { guard membershipRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET state = 'acknowledged', resulting_membership_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(membershipRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
-    public func scheduleModeratedMemberRemovalRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyModeratedMemberRemoval(now: Date) throws -> V2PendingModeratedMemberRemoval? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_moderated_member_removals WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingModeratedMemberRemoval(row) } }
+    public func markModeratedMemberRemovalAcknowledged(operationID: ModerationOperationID, membershipRevision: UInt64, roomSequence: UInt64) throws { guard membershipRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_moderated_member_removals", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_membership_revision": try Self.commandStorageInteger(membershipRevision).databaseValue, "resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET state = 'acknowledged', resulting_membership_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(membershipRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
+    public func scheduleModeratedMemberRemovalRetry(operationID: ModerationOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_moderated_member_removals", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectModeratedMemberRemoval(operationID: ModerationOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingModeratedMemberRemoval(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_moderated_member_removals SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
     public func pendingModeratedMemberRemovals() throws -> [V2PendingModeratedMemberRemoval] { try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_moderated_member_removals ORDER BY created_at, operation_id").map(Self.decodePendingModeratedMemberRemoval) } }
 
@@ -696,7 +690,7 @@ extension GRDBV2LocalSyncStore {
                 let room: String = row["room_id"], message: String = row["message_id"], revision: Int64 = row["expected_message_revision"], text: String = row["text_body"]
                 guard room == command.roomID.rawValue, message == command.messageID.rawValue, revision == (try Self.commandStorageInteger(command.expectedMessageRevision)), text == command.text else { throw V2ClientCommandError.commandConflict }; return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_message_edits (operation_id, room_id, message_id, expected_message_revision, text_body, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), command.text, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_message_edits (operation_id, room_id, message_id, expected_message_revision, text_body, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), command.text, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -759,16 +753,16 @@ extension GRDBV2LocalSyncStore {
                     command.messageID.rawValue,
                     expectedRevision,
                     command.text,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
         }
     }
-    public func nextReadyMessageEdit(now: Date) throws -> V2PendingMessageEdit? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_edits WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMessageEdit(row) } }
-    public func markMessageEditAcknowledged(operationID: MessageEditOperationID, messageRevision: UInt64, roomSequence: UInt64) throws { guard messageRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_edits SET state = 'acknowledged', resulting_message_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(messageRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
-    public func scheduleMessageEditRetry(operationID: MessageEditOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_edits SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyMessageEdit(now: Date) throws -> V2PendingMessageEdit? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_edits WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingMessageEdit(row) } }
+    public func markMessageEditAcknowledged(operationID: MessageEditOperationID, messageRevision: UInt64, roomSequence: UInt64) throws { guard messageRevision > 0, roomSequence > 0 else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_edits", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_message_revision": try Self.commandStorageInteger(messageRevision).databaseValue, "resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_message_edits SET state = 'acknowledged', resulting_message_revision = ?, resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(messageRevision), try Self.commandStorageInteger(roomSequence), operationID.rawValue]) } }
+    public func scheduleMessageEditRetry(operationID: MessageEditOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_message_edits", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectMessageEdit(operationID: MessageEditOperationID, code: String, currentRevision: UInt64?) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMessageEdit(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_edits SET state = 'rejected', terminal_code = ?, terminal_current_revision = ? WHERE operation_id = ?", arguments: [code, try currentRevision.map(Self.commandStorageInteger), operationID.rawValue]) } }
     public func pendingMessageEdits() throws -> [V2PendingMessageEdit] { try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_message_edits ORDER BY created_at, operation_id").map(Self.decodePendingMessageEdit) } }
 
@@ -776,7 +770,7 @@ extension GRDBV2LocalSyncStore {
         guard command.readThroughRoomSequence > 0, command.readThroughRoomSequence <= UInt64(Int64.max), command.state == .pending, command.attemptCount == 0, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         let requestedSequence = Int64(command.readThroughRoomSequence)
         if let row = try Row.fetchOne(db, sql: "SELECT room_id, read_through_room_sequence FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], sequence: Int64 = row["read_through_room_sequence"]; guard room == command.roomID.rawValue, sequence == requestedSequence else { throw V2ClientCommandError.commandConflict }; return }
-        try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
     } }
     public func enqueueIfReadReceiptAdvances(_ command: V2PendingReadReceipt) throws -> Bool { try databasePool.write { db in
         guard command.readThroughRoomSequence > 0, command.readThroughRoomSequence <= UInt64(Int64.max), command.state == .pending, command.attemptCount == 0, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
@@ -787,12 +781,12 @@ extension GRDBV2LocalSyncStore {
             arguments: [command.roomID.rawValue]
         ) ?? 0
         guard requestedSequence > currentHighWater else { return false }
-        try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         return true
     } }
-    public func nextReadyReadReceipt(now: Date) throws -> V2PendingReadReceipt? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_read_receipts WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingReadReceipt(row) } }
-    public func markReadReceiptAcknowledged(operationID: ReadReceiptOperationID, roomSequence: UInt64) throws { guard roomSequence > 0, roomSequence <= UInt64(Int64.max) else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingReadReceipt(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_read_receipts SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [Int64(roomSequence), operationID.rawValue]) } }
-    public func scheduleReadReceiptRetry(operationID: ReadReceiptOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingReadReceipt(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_read_receipts SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyReadReceipt(now: Date) throws -> V2PendingReadReceipt? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_read_receipts WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingReadReceipt(row) } }
+    public func markReadReceiptAcknowledged(operationID: ReadReceiptOperationID, roomSequence: UInt64) throws { guard roomSequence > 0, roomSequence <= UInt64(Int64.max) else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_read_receipts", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_read_receipts SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [Int64(roomSequence), operationID.rawValue]) } }
+    public func scheduleReadReceiptRetry(operationID: ReadReceiptOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingReadReceipt(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_read_receipts", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectReadReceipt(operationID: ReadReceiptOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingReadReceipt(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_read_receipts SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
     public func pendingReadReceipts() throws -> [V2PendingReadReceipt] { try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_read_receipts ORDER BY created_at, operation_id").map(Self.decodePendingReadReceipt) } }
 
@@ -804,7 +798,7 @@ extension GRDBV2LocalSyncStore {
                 guard room == command.roomID.rawValue, message == command.messageID.rawValue, reaction == command.reaction, action == command.action.rawValue else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_message_reactions (operation_id, room_id, message_id, reaction, action, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.reaction, command.action.rawValue, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_message_reactions (operation_id, room_id, message_id, reaction, action, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.reaction, command.action.rawValue, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -862,8 +856,8 @@ extension GRDBV2LocalSyncStore {
                     command.messageID.rawValue,
                     command.reaction,
                     command.action.rawValue,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -871,14 +865,14 @@ extension GRDBV2LocalSyncStore {
     }
 
     public func nextReadyMessageReaction(now: Date) throws -> V2PendingMessageReaction? {
-        try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_reactions WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMessageReaction(row) }
+        try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_reactions WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingMessageReaction(row) }
     }
     public func markMessageReactionAcknowledged(operationID: MessageReactionOperationID, roomSequence: UInt64) throws {
         guard roomSequence > 0 else { throw V2ClientCommandError.commandConflict }
-        try databasePool.write { db in try Self.requirePendingMessageReaction(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_reactions SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(roomSequence), operationID.rawValue]) }
+        try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_reactions", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["resulting_room_sequence": try Self.commandStorageInteger(roomSequence).databaseValue], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_message_reactions SET state = 'acknowledged', resulting_room_sequence = ? WHERE operation_id = ?", arguments: [try Self.commandStorageInteger(roomSequence), operationID.rawValue]) }
     }
     public func scheduleMessageReactionRetry(operationID: MessageReactionOperationID, nextAttemptAt: Date) throws {
-        try databasePool.write { db in try Self.requirePendingMessageReaction(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_reactions SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) }
+        try databasePool.write { db in try Self.requirePendingMessageReaction(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_message_reactions", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) }
     }
     public func rejectMessageReaction(operationID: MessageReactionOperationID, code: String) throws {
         guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }
@@ -897,12 +891,12 @@ extension GRDBV2LocalSyncStore {
             guard existing.command == command, existing.state == .pending else { throw V2ClientCommandError.commandConflict }; return existing
         }
         if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE room_id = ? AND is_pinned = ? AND is_archived = ? AND mute_until = ? AND state = 'pending' ORDER BY created_at, operation_id LIMIT 1", arguments: [command.roomID.rawValue, command.isPinned, command.isArchived, command.muteUntil?.timeIntervalSince1970 ?? 0]) { return try Self.decodePendingConversationState(row) }
-        try db.execute(sql: "INSERT INTO v2_pending_conversation_states (operation_id, room_id, is_pinned, is_archived, mute_until, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.isPinned, command.isArchived, command.muteUntil?.timeIntervalSince1970 ?? 0, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_conversation_states (operation_id, room_id, is_pinned, is_archived, mute_until, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.isPinned, command.isArchived, command.muteUntil?.timeIntervalSince1970 ?? 0, try Self.commandRetryTimestamp(pending.nextAttemptAt), try Self.commandRetryTimestamp(pending.nextAttemptAt)])
         return pending
     } }
-    public func nextReadyConversationState(now: Date) throws -> V2PendingConversationStateCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingConversationState(row) } }
-    public func markConversationStateAcknowledged(operationID: ConversationPreferenceOperationID) throws { try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
-    public func scheduleConversationStateRetry(operationID: ConversationPreferenceOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyConversationState(now: Date) throws -> V2PendingConversationStateCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_conversation_states WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingConversationState(row) } }
+    public func markConversationStateAcknowledged(operationID: ConversationPreferenceOperationID) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_conversation_states", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_conversation_states SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleConversationStateRetry(operationID: ConversationPreferenceOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_conversation_states", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectConversationState(operationID: ConversationPreferenceOperationID, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingConversationState(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_conversation_states SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
 
     public func enqueueOrReuseMessageFavorite(_ pending: V2PendingMessageFavoriteCommand) throws -> V2PendingMessageFavoriteCommand { try databasePool.write { db in
@@ -910,48 +904,76 @@ extension GRDBV2LocalSyncStore {
         let command = pending.command
         if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let existing = try Self.decodePendingMessageFavorite(row); guard existing.command == command, existing.state == .pending else { throw V2ClientCommandError.commandConflict }; return existing }
         if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE room_id = ? AND message_id = ? AND is_favorited = ? AND state = 'pending' ORDER BY created_at, operation_id LIMIT 1", arguments: [command.roomID.rawValue, command.messageID.rawValue, command.isFavorited]) { return try Self.decodePendingMessageFavorite(row) }
-        try db.execute(sql: "INSERT INTO v2_pending_message_favorites (operation_id, room_id, message_id, is_favorited, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.isFavorited, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970]); return pending
+        try db.execute(sql: "INSERT INTO v2_pending_message_favorites (operation_id, room_id, message_id, is_favorited, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, command.isFavorited, try Self.commandRetryTimestamp(pending.nextAttemptAt), try Self.commandRetryTimestamp(pending.nextAttemptAt)]); return pending
     } }
-    public func nextReadyMessageFavorite(now: Date) throws -> V2PendingMessageFavoriteCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingMessageFavorite(row) } }
-    public func markMessageFavoriteAcknowledged(operationID: MessageFavoriteOperationID) throws { try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
-    public func scheduleMessageFavoriteRetry(operationID: MessageFavoriteOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func nextReadyMessageFavorite(now: Date) throws -> V2PendingMessageFavoriteCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_message_favorites WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingMessageFavorite(row) } }
+    public func markMessageFavoriteAcknowledged(operationID: MessageFavoriteOperationID) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_message_favorites", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_message_favorites SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleMessageFavoriteRetry(operationID: MessageFavoriteOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_message_favorites", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectMessageFavorite(operationID: MessageFavoriteOperationID, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingMessageFavorite(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_message_favorites SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
 
     public func enqueueOrReuseGroupCapability(_ command: V2PendingGroupCapabilityCommand) throws -> V2PendingGroupCapabilityCommand { try databasePool.write { db in
         guard command.state == .pending, command.attemptCount == 0, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_capabilities WHERE operation_id = ?", arguments: [command.operationID]) { let existing = try Self.decodePendingGroupCapability(row); guard existing == command else { throw V2ClientCommandError.commandConflict }; return existing }
         let permissions = String(decoding: try JSONEncoder().encode(command.permissions.map(\.rawValue).sorted()), as: UTF8.self)
-        try db.execute(sql: "INSERT INTO v2_pending_group_capabilities (operation_id, kind, room_id, message_id, is_pinned, body, role, permissions, target_user_id, expected_revision, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.roomID.rawValue, command.messageID?.rawValue, command.isPinned, command.body, command.role?.rawValue, permissions, command.targetUserID?.rawValue, try Self.storageInteger(command.expectedRevision), command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO v2_pending_group_capabilities (operation_id, kind, room_id, message_id, is_pinned, body, role, permissions, target_user_id, expected_revision, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.roomID.rawValue, command.messageID?.rawValue, command.isPinned, command.body, command.role?.rawValue, permissions, command.targetUserID?.rawValue, try Self.storageInteger(command.expectedRevision), try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         return command
     } }
-    public func nextReadyGroupCapability(now: Date) throws -> V2PendingGroupCapabilityCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_capabilities WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingGroupCapability(row) } }
-    public func markGroupCapabilityAcknowledged(operationID: String) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID]) } }
-    public func scheduleGroupCapabilityRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID]) } }
+    public func nextReadyGroupCapability(now: Date) throws -> V2PendingGroupCapabilityCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_capabilities WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingGroupCapability(row) } }
+    public func markGroupCapabilityAcknowledged(operationID: String) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_group_capabilities", keyColumn: "operation_id", key: operationID, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID]) } }
+    public func scheduleGroupCapabilityRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try Self.scheduleCommandRetry(table: "v2_pending_group_capabilities", keyColumn: "operation_id", key: operationID, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectGroupCapability(operationID: String, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID]) } }
 
-    public func enqueueOrReuseForwardMessages(_ pending: V2PendingForwardMessagesCommand) throws -> V2PendingForwardMessagesCommand { try databasePool.write { db in let command = pending.command; if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let existing = try Self.decodePendingForwardMessages(row); guard existing.command == command else { throw V2ClientCommandError.commandConflict }; return existing }; let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self); let targets = String(decoding: try JSONEncoder().encode(command.targetRoomIDs.map(\.rawValue)), as: UTF8.self); try db.execute(sql: "INSERT INTO v2_pending_forward_messages (operation_id, source_message_ids, target_room_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, sources, targets, pending.nextAttemptAt.timeIntervalSince1970, pending.nextAttemptAt.timeIntervalSince1970]); return pending } }
-    public func nextReadyForwardMessages(now: Date) throws -> V2PendingForwardMessagesCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingForwardMessages(row) } }
-    public func markForwardMessagesAcknowledged(operationID: MessageForwardOperationID) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
-    public func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue]) } }
+    public func enqueueOrReuseForwardMessages(_ pending: V2PendingForwardMessagesCommand) throws -> V2PendingForwardMessagesCommand {
+        try databasePool.write { db in
+            let command = pending.command
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
+                let existing = try Self.decodePendingForwardMessages(row)
+                guard existing.command == command else { throw V2ClientCommandError.commandConflict }
+                return existing
+            }
+            let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
+            let references = String(decoding: try JSONEncoder().encode(command.sources), as: UTF8.self)
+            let targets = String(decoding: try JSONEncoder().encode(command.targetRoomIDs.map(\.rawValue)), as: UTF8.self)
+            try db.execute(sql: "INSERT INTO v2_pending_forward_messages (operation_id, source_message_ids, source_references, target_room_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, sources, references, targets, try Self.commandRetryTimestamp(pending.nextAttemptAt), try Self.commandRetryTimestamp(pending.nextAttemptAt)])
+            return pending
+        }
+    }
+    public func nextReadyForwardMessages(now: Date) throws -> V2PendingForwardMessagesCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingForwardMessages(row) } }
+    public func markForwardMessagesAcknowledged(operationID: MessageForwardOperationID) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_forward_messages", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
+    public func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_forward_messages", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectForwardMessages(operationID: MessageForwardOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
 
-    public func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sourceMessageIDs: [MessageID], targetRoomIDs: [RoomID], now: Date) throws -> V2ForwardMessagesPlan {
+    public func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID], now: Date) throws -> V2ForwardMessagesPlan {
         try databasePool.write { db in
             if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [plan.operationID.rawValue]) {
                 let existing = try Self.decodeForwardMessagesPlan(row)
-                guard existing.sourceMessageCount == sourceMessageIDs.count,
+                guard existing.sourceMessageCount == sources.count,
                       existing.targetRoomCount == targetRoomIDs.count,
-                      existing.totalForwardCount == plan.totalForwardCount
+                      existing.totalForwardCount == plan.totalForwardCount,
+                      try Self.decodeForwardSourceReferences(row) == sources,
+                      try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)) == sources.map({ $0.messageID.rawValue }),
+                      try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)) == targetRoomIDs.map(\.rawValue)
                 else { throw V2ClientCommandError.commandConflict }
                 return existing
             }
-            let sourceJSON = String(decoding: try JSONEncoder().encode(sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
+            let (totalForwardCount, overflow) = sources.count.multipliedReportingOverflow(by: targetRoomIDs.count)
+            guard !sources.isEmpty, !targetRoomIDs.isEmpty, !overflow,
+                  Set(sources.map(\.messageID)).count == sources.count,
+                  Set(targetRoomIDs).count == targetRoomIDs.count,
+                  plan.sourceMessageCount == sources.count, plan.targetRoomCount == targetRoomIDs.count,
+                  plan.totalForwardCount == totalForwardCount,
+                  plan.succeededCount == 0, plan.failedCount == 0,
+                  plan.state == .active, plan.terminalCode == nil
+            else { throw V2ClientCommandError.commandConflict }
+            let sourceJSON = String(decoding: try JSONEncoder().encode(sources.map { $0.messageID.rawValue }), as: UTF8.self)
+            let references = String(decoding: try JSONEncoder().encode(sources), as: UTF8.self)
             let targetJSON = String(decoding: try JSONEncoder().encode(targetRoomIDs.map(\.rawValue)), as: UTF8.self)
-            let sourceChunkCount = (sourceMessageIDs.count + V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk - 1) / V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+            let pageSize = V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
+            let sourceChunkCount = sources.count / pageSize + (sources.count % pageSize == 0 ? 0 : 1)
             let totalChunkCount = try Self.storageInteger(UInt64(sourceChunkCount * targetRoomIDs.count))
             try db.execute(
-                sql: "INSERT INTO v2_forward_message_plans (plan_id, source_message_ids, target_room_ids, next_chunk_index, total_chunk_count, state, created_at, updated_at) VALUES (?, ?, ?, 0, ?, 'active', ?, ?)",
-                arguments: [plan.operationID.rawValue, sourceJSON, targetJSON, totalChunkCount, now.timeIntervalSince1970, now.timeIntervalSince1970]
+                sql: "INSERT INTO v2_forward_message_plans (plan_id, source_message_ids, source_references, target_room_ids, next_chunk_index, total_chunk_count, state, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, 'active', ?, ?)",
+                arguments: [plan.operationID.rawValue, sourceJSON, references, targetJSON, totalChunkCount, try Self.commandRetryTimestamp(now), try Self.commandRetryTimestamp(now)]
             )
             return plan
         }
@@ -959,30 +981,41 @@ extension GRDBV2LocalSyncStore {
 
     public func nextReadyForwardPlanChunk(now: Date) throws -> V2PendingForwardMessagesCommand? {
         try databasePool.write { db in
-            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) {
+            _ = try Self.commandRetryTimestamp(now)
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) {
+                let planID: String = row["plan_id"]
+                guard let planRow = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [planID]),
+                      try Self.decodeForwardMessagesPlan(planRow).state == .active
+                else { throw V2ClientCommandError.commandConflict }
+                let chunkIndex = try Self.commandNonnegativeInteger(row["chunk_index"])
+                let nextIndex = try Self.commandNonnegativeInteger(planRow["next_chunk_index"])
+                let totalChunks = try Self.commandNonnegativeInteger(planRow["total_chunk_count"])
+                guard chunkIndex == nextIndex, chunkIndex < totalChunks
+                else { throw V2ClientCommandError.commandConflict }
                 return try Self.decodeForwardPlanChunk(row)
             }
-            guard let planRow = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE state = 'active' ORDER BY created_at, plan_id LIMIT 1") else { return nil }
+            guard let planRow = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans AS plan WHERE state = 'active' AND NOT EXISTS (SELECT 1 FROM v2_forward_message_chunks AS chunk WHERE chunk.plan_id = plan.plan_id AND chunk.chunk_index = plan.next_chunk_index) ORDER BY created_at, plan_id LIMIT 1") else { return nil }
             let planID: String = planRow["plan_id"]
-            let sourceIDs = try JSONDecoder().decode([String].self, from: Data((planRow["source_message_ids"] as String).utf8)).map(MessageID.init)
+            _ = try Self.decodeForwardMessagesPlan(planRow)
+            let sourceReferences = try Self.decodeForwardSourceReferences(planRow)
             let targetIDs = try JSONDecoder().decode([String].self, from: Data((planRow["target_room_ids"] as String).utf8)).map(RoomID.init)
-            let chunkIndex: Int64 = planRow["next_chunk_index"]
-            let totalChunkCount: Int64 = planRow["total_chunk_count"]
+            let (chunkIndex, totalChunkCount) = try Self.validatedForwardChunkProgress(planRow, sourceCount: sourceReferences.count, targetCount: targetIDs.count)
             guard chunkIndex < totalChunkCount else {
                 try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'completed', updated_at = ? WHERE plan_id = ?", arguments: [now.timeIntervalSince1970, planID])
                 return nil
             }
             let sourcePage = Int(chunkIndex) / targetIDs.count
             let sourceStart = sourcePage * V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
-            let sourceEnd = min(sourceStart + V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk, sourceIDs.count)
+            let sourceEnd = min(sourceStart + V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk, sourceReferences.count)
             guard sourceStart < sourceEnd else { throw V2ClientCommandError.commandConflict }
             let targetRoomID = targetIDs[Int(chunkIndex) % targetIDs.count]
-            let operationID = try MessageForwardOperationID("\(planID)-f\(chunkIndex)")
-            let command = try V2ForwardMessagesCommand(operationID: operationID, sourceMessageIDs: Array(sourceIDs[sourceStart ..< sourceEnd]), targetRoomIDs: [targetRoomID])
-            let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
+            let operationID = try V2ForwardChunkIdentity.operationID(planID: .init(planID), chunkIndex: UInt64(chunkIndex))
+            let command = try V2ForwardMessagesCommand(operationID: operationID, sources: Array(sourceReferences[sourceStart ..< sourceEnd]), targetRoomIDs: [targetRoomID])
+            let sources = String(decoding: try JSONEncoder().encode(command.sources.map { $0.messageID.rawValue }), as: UTF8.self)
+            let references = String(decoding: try JSONEncoder().encode(command.sources), as: UTF8.self)
             try db.execute(
-                sql: "INSERT INTO v2_forward_message_chunks (operation_id, plan_id, chunk_index, source_message_ids, target_room_id, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
-                arguments: [operationID.rawValue, planID, chunkIndex, sources, targetRoomID.rawValue, now.timeIntervalSince1970, now.timeIntervalSince1970]
+                sql: "INSERT INTO v2_forward_message_chunks (operation_id, plan_id, chunk_index, source_message_ids, source_references, target_room_id, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+                arguments: [operationID.rawValue, planID, chunkIndex, sources, references, targetRoomID.rawValue, now.timeIntervalSince1970, now.timeIntervalSince1970]
             )
             return .init(command: command, state: .pending, attemptCount: 0, nextAttemptAt: now, terminalCode: nil)
         }
@@ -990,17 +1023,21 @@ extension GRDBV2LocalSyncStore {
 
     public func markForwardPlanChunkAcknowledged(operationID: MessageForwardOperationID, results: [V2ForwardMessageResult], now: Date) throws -> MessageForwardOperationID? {
         try databasePool.write { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending'", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
-            let pending = try Self.decodeForwardPlanChunk(row)
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ?", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
+            let state: String = row["state"]
+            guard state == "pending" || state == "acknowledged" else { throw V2ClientCommandError.commandConflict }
+            let sourceIDs = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init)
+            let target = try RoomID(row["target_room_id"] as String)
             let planID: String = row["plan_id"]
-            let chunkIndex: Int64 = row["chunk_index"]
-            guard results.count == pending.command.sourceMessageIDs.count,
-                  results.allSatisfy({ $0.targetRoomID == pending.command.targetRoomIDs[0] }),
-                  Set(results.map(\.sourceMessageID)) == Set(pending.command.sourceMessageIDs)
-            else { throw V2ClientCommandError.commandConflict }
+            let chunkIndex = Int64(try Self.commandNonnegativeInteger(row["chunk_index"]))
+            let digest = try V2ForwardChunkCompletionDigest.acknowledged(sourceMessageIDs: sourceIDs, targetRoomIDs: [target], results: results)
+            if state == "acknowledged" {
+                guard (row["completion_digest"] as String?) == digest else { throw V2ClientCommandError.commandConflict }
+                return try MessageForwardOperationID(planID)
+            }
             let succeeded = results.filter { $0.errorCode == nil }.count
             let failed = results.count - succeeded
-            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue])
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'acknowledged', completion_digest = ? WHERE operation_id = ?", arguments: [digest, operationID.rawValue])
             try Self.advanceForwardPlan(planID: planID, completedChunkIndex: chunkIndex, succeeded: succeeded, failed: failed, now: now, db: db)
             return try MessageForwardOperationID(planID)
         }
@@ -1009,19 +1046,26 @@ extension GRDBV2LocalSyncStore {
     public func scheduleForwardPlanChunkRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending')", arguments: [operationID.rawValue]) == true else { throw V2ClientCommandError.commandNotPending }
-            try db.execute(sql: "UPDATE v2_forward_message_chunks SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_forward_message_chunks", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
     public func rejectForwardPlanChunk(operationID: MessageForwardOperationID, code: String, now: Date) throws -> MessageForwardOperationID? {
         guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }
         return try databasePool.write { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ? AND state = 'pending'", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
-            let pending = try Self.decodeForwardPlanChunk(row)
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_chunks WHERE operation_id = ?", arguments: [operationID.rawValue]) else { throw V2ClientCommandError.commandNotPending }
+            let state: String = row["state"]
+            guard state == "pending" || state == "rejected" else { throw V2ClientCommandError.commandConflict }
+            let sourceIDs = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8)).map(MessageID.init)
             let planID: String = row["plan_id"]
-            let chunkIndex: Int64 = row["chunk_index"]
-            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue])
-            try Self.advanceForwardPlan(planID: planID, completedChunkIndex: chunkIndex, succeeded: 0, failed: pending.command.sourceMessageIDs.count, now: now, db: db)
+            let chunkIndex = Int64(try Self.commandNonnegativeInteger(row["chunk_index"]))
+            let digest = V2ForwardChunkCompletionDigest.rejected(code: code)
+            if state == "rejected" {
+                guard (row["completion_digest"] as String?) == digest else { throw V2ClientCommandError.commandConflict }
+                return try MessageForwardOperationID(planID)
+            }
+            try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'rejected', terminal_code = ?, completion_digest = ? WHERE operation_id = ?", arguments: [code, digest, operationID.rawValue])
+            try Self.advanceForwardPlan(planID: planID, completedChunkIndex: chunkIndex, succeeded: 0, failed: sourceIDs.count, now: now, db: db)
             return try MessageForwardOperationID(planID)
         }
     }
@@ -1029,7 +1073,7 @@ extension GRDBV2LocalSyncStore {
     public func cancelForwardPlan(operationID: MessageForwardOperationID, now: Date) throws {
         try databasePool.write { db in
             guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_forward_message_plans WHERE plan_id = ? AND state = 'active')", arguments: [operationID.rawValue]) == true else { throw V2ClientCommandError.commandConflict }
-            try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', updated_at = ? WHERE plan_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
+            try db.execute(sql: "UPDATE v2_forward_message_plans SET state = 'cancelled', updated_at = ? WHERE plan_id = ?", arguments: [try Self.commandRetryTimestamp(now), operationID.rawValue])
             try db.execute(sql: "UPDATE v2_forward_message_chunks SET state = 'cancelled' WHERE plan_id = ? AND state = 'pending'", arguments: [operationID.rawValue])
         }
     }
@@ -1053,7 +1097,7 @@ extension GRDBV2LocalSyncStore {
                 guard kind == command.kind.rawValue, target == command.targetUserID?.rawValue, relationship == command.relationshipAction?.rawValue, block == command.blockAction?.rawValue, permission == command.strangerPermission?.rawValue, addPermission == command.userAddPermission?.rawValue, direct == command.allowsDirectReadReceipts, group == command.allowsGroupReadReceipts else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.userAddPermission?.rawValue, command.allowsDirectReadReceipts, command.allowsGroupReadReceipts, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_social_commands (operation_id, command_kind, target_user_id, relationship_action, block_action, stranger_permission, user_add_permission, allows_direct_read_receipts, allows_group_read_receipts, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID, command.kind.rawValue, command.targetUserID?.rawValue, command.relationshipAction?.rawValue, command.blockAction?.rawValue, command.strangerPermission?.rawValue, command.userAddPermission?.rawValue, command.allowsDirectReadReceipts, command.allowsGroupReadReceipts, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -1123,8 +1167,8 @@ extension GRDBV2LocalSyncStore {
                     command.strangerPermission?.rawValue,
                     command.userAddPermission?.rawValue,
                     command.allowsDirectReadReceipts, command.allowsGroupReadReceipts,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -1132,10 +1176,10 @@ extension GRDBV2LocalSyncStore {
     }
 
     public func nextReadySocialCommand(now: Date) throws -> V2PendingSocialCommand? {
-        try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_social_commands WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }; return try Self.decodePendingSocialCommand(row) }
+        try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_social_commands WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingSocialCommand(row) }
     }
-    public func markSocialCommandAcknowledged(operationID: String) throws { try databasePool.write { db in try Self.requirePendingSocialCommand(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_social_commands SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID]) } }
-    public func scheduleSocialCommandRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingSocialCommand(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_social_commands SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID]) } }
+    public func markSocialCommandAcknowledged(operationID: String) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_social_commands", keyColumn: "operation_id", key: operationID, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_social_commands SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID]) } }
+    public func scheduleSocialCommandRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingSocialCommand(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_social_commands", keyColumn: "operation_id", key: operationID, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectSocialCommand(operationID: String, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingSocialCommand(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_social_commands SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID]) } }
     public func pendingSocialCommands() throws -> [V2PendingSocialCommand] { try databasePool.read { db in try Row.fetchAll(db, sql: "SELECT * FROM v2_pending_social_commands ORDER BY created_at, operation_id").map(Self.decodePendingSocialCommand) } }
 
@@ -1150,7 +1194,7 @@ extension GRDBV2LocalSyncStore {
                 guard title == command.title, deliveryMode == command.deliveryMode.rawValue, existingMembers == members else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, command.deliveryMode.rawValue, members, command.nextAttemptAt.timeIntervalSince1970, command.nextAttemptAt.timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, command.deliveryMode.rawValue, members, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -1200,8 +1244,8 @@ extension GRDBV2LocalSyncStore {
                     command.title,
                     command.deliveryMode.rawValue,
                     members,
-                    command.nextAttemptAt.timeIntervalSince1970,
-                    command.nextAttemptAt.timeIntervalSince1970
+                    try Self.commandRetryTimestamp(command.nextAttemptAt),
+                    try Self.commandRetryTimestamp(command.nextAttemptAt)
                 ]
             )
             return command
@@ -1210,7 +1254,7 @@ extension GRDBV2LocalSyncStore {
 
     public func nextReadyGroupRoomCreation(now: Date) throws -> V2PendingGroupRoomCreation? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state IN ('pending', 'finalizing') AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state IN ('pending', 'finalizing') AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingGroupRoomCreation(row)
         }
     }
@@ -1225,7 +1269,7 @@ extension GRDBV2LocalSyncStore {
                   )
             else { throw V2ClientCommandError.commandNotPending }
             let memberIDs = try Self.decodeGroupMemberUserIDs(row["initial_member_user_ids"] as String)
-            let current = Int(row["uploaded_member_count"] as Int64)
+            let current = try Self.commandNonnegativeInteger(row["uploaded_member_count"])
             guard uploadedMemberCount >= current, uploadedMemberCount <= memberIDs.count else {
                 throw V2ClientCommandError.commandConflict
             }
@@ -1248,7 +1292,7 @@ extension GRDBV2LocalSyncStore {
 
     public func markGroupRoomCreationAcknowledged(operationID: GroupRoomOperationID, roomID: RoomID) throws {
         try databasePool.write { db in
-            try Self.requireActiveGroupRoomCreation(operationID, db: db)
+            if try Self.acceptsRepeatedCompletion(table: "v2_pending_group_room_creations", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: ["created_room_id": roomID.rawValue.databaseValue], pendingStates: ["pending", "finalizing"], db: db) { return }
             try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'acknowledged', created_room_id = ?, terminal_code = NULL WHERE operation_id = ?", arguments: [roomID.rawValue, operationID.rawValue])
         }
     }
@@ -1256,20 +1300,20 @@ extension GRDBV2LocalSyncStore {
     public func scheduleGroupRoomCreationRetry(operationID: GroupRoomOperationID, nextAttemptAt: Date) throws {
         try databasePool.write { db in
             guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == "pending" || state == "finalizing" || state == "cancelling" else { throw V2ClientCommandError.commandNotPending }
-            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET attempt_count = attempt_count + 1, next_attempt_at = ? WHERE operation_id = ?", arguments: [nextAttemptAt.timeIntervalSince1970, operationID.rawValue])
+            try Self.scheduleCommandRetry(table: "v2_pending_group_room_creations", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db)
         }
     }
 
     public func beginCancellingGroupRoomCreation(operationID: GroupRoomOperationID, now: Date) throws {
         try databasePool.write { db in
             try Self.requirePendingGroupRoomCreation(operationID, db: db)
-            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'cancelling', next_attempt_at = ? WHERE operation_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
+            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'cancelling', next_attempt_at = ? WHERE operation_id = ?", arguments: [try Self.commandRetryTimestamp(now), operationID.rawValue])
         }
     }
 
     public func nextReadyGroupRoomCreationCancellation(now: Date) throws -> V2PendingGroupRoomCreation? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state = 'cancelling' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [now.timeIntervalSince1970]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_group_room_creations WHERE state = 'cancelling' AND next_attempt_at <= ? ORDER BY created_at, operation_id LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }
             return try Self.decodePendingGroupRoomCreation(row)
         }
     }
@@ -1284,7 +1328,7 @@ extension GRDBV2LocalSyncStore {
     public func resumeGroupRoomCreationAfterCancellationRefusal(operationID: GroupRoomOperationID, now: Date) throws {
         try databasePool.write { db in
             guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == "cancelling" else { throw V2ClientCommandError.commandNotPending }
-            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'finalizing', next_attempt_at = ? WHERE operation_id = ?", arguments: [now.timeIntervalSince1970, operationID.rawValue])
+            try db.execute(sql: "UPDATE v2_pending_group_room_creations SET state = 'finalizing', next_attempt_at = ? WHERE operation_id = ?", arguments: [try Self.commandRetryTimestamp(now), operationID.rawValue])
         }
     }
 
@@ -1302,5 +1346,28 @@ extension GRDBV2LocalSyncStore {
 
     public func groupRoomCreations() throws -> [V2PendingGroupRoomCreation] {
         try pendingGroupRoomCreations()
+    }
+}
+
+extension GRDBV2LocalSyncStore {
+    /// One indexed metadata read replaces the old pending-only check. Repeat
+    /// completion is safe only when every persisted canonical result agrees.
+    private static func acceptsRepeatedCompletion(
+        table: String, keyColumn: String, key: String, completedState: String,
+        canonicalValues: [String: DatabaseValue], pendingStates: Set<String> = ["pending"],
+        db: Database
+    ) throws -> Bool {
+        let columns = (["state"] + canonicalValues.keys.sorted()).joined(separator: ", ")
+        guard let row = try Row.fetchOne(db, sql: "SELECT \(columns) FROM \(table) WHERE \(keyColumn) = ?", arguments: [key]) else {
+            throw V2ClientCommandError.commandNotPending
+        }
+        let state: String = row["state"]
+        if pendingStates.contains(state) { return false }
+        guard state == completedState else { throw V2ClientCommandError.commandNotPending }
+        guard canonicalValues.allSatisfy({ column, expected in
+            let actual: DatabaseValue = row[column]
+            return actual == expected
+        }) else { throw V2ClientCommandError.commandConflict }
+        return true
     }
 }

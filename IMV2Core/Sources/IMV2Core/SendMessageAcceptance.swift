@@ -25,7 +25,8 @@ public struct V2SendMessageCommand: Equatable, Sendable {
     public let targetRule: FanoutTargetRule
     /// Server-created attribution for a copied message. It is never decoded
     /// from the ordinary send-message protocol surface.
-    public let forwardedFrom: V2ForwardedMessageAttribution?
+    public let forwardedFrom: V2ForwardMessageSource?
+    public let fingerprint: V2SendMessageFingerprint
 
     public init(
         roomID: RoomID,
@@ -37,7 +38,7 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
         targetRule: FanoutTargetRule = .eligibleMemberCount,
-        forwardedFrom: V2ForwardedMessageAttribution? = nil,
+        forwardedFrom: V2ForwardMessageSource? = nil,
         limits: V2MessageCommandLimits
     ) throws {
         let byteCount = text.lengthOfBytes(using: .utf8)
@@ -51,6 +52,9 @@ public struct V2SendMessageCommand: Equatable, Sendable {
             throw V2SendMessageValidationError.invalidTextLength
         }
         try V2RichMessageContent.validate(text: text, entities: entities)
+        if case .exactTargetCount(let count) = targetRule, count < 0 {
+            throw V2CoreError.invalidNonNegativeValue
+        }
         self.roomID = roomID
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
@@ -61,13 +65,39 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         self.replyTo = replyTo
         self.targetRule = targetRule
         self.forwardedFrom = forwardedFrom
+        self.fingerprint = V2SendMessageFingerprint(
+            roomID: roomID, senderUserID: senderUserID,
+            clientMessageID: clientMessageID, text: text, media: media,
+            mentions: mentions, entities: entities, replyTo: replyTo,
+            targetRule: targetRule, forwardedFrom: forwardedFrom
+        )
     }
 }
 
+/// Presentation metadata carried by historical accepted messages. This is not
+/// sufficient to authorize a new forward and intentionally needs no revision.
 public struct V2ForwardedMessageAttribution: Equatable, Sendable {
     public let messageID: MessageID
     public let senderUserID: UserID
-    public init(messageID: MessageID, senderUserID: UserID) { self.messageID = messageID; self.senderUserID = senderUserID }
+
+    public init(messageID: MessageID, senderUserID: UserID) {
+        self.messageID = messageID
+        self.senderUserID = senderUserID
+    }
+}
+
+/// Server-created source snapshot for a new forward. Unlike presentation
+/// attribution, this always carries the exact version used for acceptance.
+public struct V2ForwardMessageSource: Equatable, Sendable {
+    public let messageID: MessageID
+    public let senderUserID: UserID
+    public let sourceRevision: V2MessageRevision
+
+    public init(messageID: MessageID, senderUserID: UserID, sourceRevision: V2MessageRevision) {
+        self.messageID = messageID
+        self.senderUserID = senderUserID
+        self.sourceRevision = sourceRevision
+    }
 }
 
 public enum V2SendMessageValidationError: Error, Equatable, Sendable {
@@ -75,10 +105,12 @@ public enum V2SendMessageValidationError: Error, Equatable, Sendable {
 }
 
 public struct V2CommandDeduplicationKey: Hashable, Sendable {
+    public let roomID: RoomID
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
 
-    public init(senderUserID: UserID, clientMessageID: ClientMessageID) {
+    public init(roomID: RoomID, senderUserID: UserID, clientMessageID: ClientMessageID) {
+        self.roomID = roomID
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
     }
@@ -156,7 +188,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         usesRoomEventLog: Bool = false,
         sourceEventID: EventID? = nil,
         acceptedMembershipRevision: UInt64? = nil,
-        directRecipientUserID: UserID? = nil
+        directRecipientUserID: UserID? = nil,
+        projectionCreatedAtUnixMilliseconds: Int64? = nil
     ) -> V2AcceptedMessage {
         V2AcceptedMessage(
             messageID: messageID,
@@ -176,6 +209,7 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             sourceEventID: sourceEventID,
             acceptedMembershipRevision: acceptedMembershipRevision,
             directRecipientUserID: directRecipientUserID,
+            projectionCreatedAtUnixMilliseconds: projectionCreatedAtUnixMilliseconds,
             createdAt: createdAt
         )
     }
@@ -218,6 +252,10 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     /// that were visible at commit time instead of inferring recipients from
     /// a later subscription or membership lookup.
     public let directRecipientUserID: UserID?
+    /// Exact persisted message-projection time. Date can lose submillisecond
+    /// precision at distant epochs; caches and live hints must retain the
+    /// database's integer value. This metadata is not part of the send receipt.
+    public let projectionCreatedAtUnixMilliseconds: Int64?
     public let createdAt: Date
 
     public init(
@@ -238,6 +276,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         sourceEventID: EventID? = nil,
         acceptedMembershipRevision: UInt64? = nil,
         directRecipientUserID: UserID? = nil,
+        projectionCreatedAtUnixMilliseconds: Int64? = nil,
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -259,6 +298,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         self.sourceEventID = sourceEventID
         self.acceptedMembershipRevision = acceptedMembershipRevision
         self.directRecipientUserID = directRecipientUserID
+        self.projectionCreatedAtUnixMilliseconds = projectionCreatedAtUnixMilliseconds
         self.createdAt = createdAt
     }
 }
@@ -314,18 +354,31 @@ public struct V2RoomCommandState: Equatable, Sendable {
     public let roomID: RoomID
     public let nextRoomSequence: UInt64
     public let admission: RoomAdmissionState
-    public let acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessageDraft]
+    public let acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedSendCommand]
 
     public init(
         roomID: RoomID,
         nextRoomSequence: UInt64,
         admission: RoomAdmissionState,
-        acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedMessageDraft] = [:]
+        acceptedCommands: [V2CommandDeduplicationKey: V2AcceptedSendCommand] = [:]
     ) {
         self.roomID = roomID
         self.nextRoomSequence = nextRoomSequence
         self.admission = admission
         self.acceptedCommands = acceptedCommands
+    }
+}
+
+/// The reducer retains the original input identity with its acceptance. A
+/// storage implementation must not reconstruct this fingerprint from an
+/// editable message row or replace it after a content mutation.
+public struct V2AcceptedSendCommand: Equatable, Sendable {
+    public let fingerprint: V2SendMessageFingerprint
+    public let acceptedMessage: V2AcceptedMessageDraft
+
+    public init(fingerprint: V2SendMessageFingerprint, acceptedMessage: V2AcceptedMessageDraft) {
+        self.fingerprint = fingerprint
+        self.acceptedMessage = acceptedMessage
     }
 }
 
@@ -363,11 +416,13 @@ public enum V2SendMessageReducer {
         }
 
         let deduplicationKey = V2CommandDeduplicationKey(
+            roomID: command.roomID,
             senderUserID: command.senderUserID,
             clientMessageID: command.clientMessageID
         )
         if let prior = roomState.acceptedCommands[deduplicationKey] {
-            return prior.text == command.text && prior.media == command.media && prior.mentions == command.mentions && prior.entities == command.entities && prior.replyTo == command.replyTo ? .idempotent(prior) : .idempotencyConflict
+            return prior.fingerprint == command.fingerprint
+                ? .idempotent(prior.acceptedMessage) : .idempotencyConflict
         }
 
         let admission = try FanoutAdmissionEvaluator.reserve(
@@ -397,7 +452,9 @@ public enum V2SendMessageReducer {
                 createdAt: now
             )
             var acceptedCommands = roomState.acceptedCommands
-            acceptedCommands[deduplicationKey] = accepted
+            acceptedCommands[deduplicationKey] = .init(
+                fingerprint: command.fingerprint, acceptedMessage: accepted
+            )
             let nextRoomState = V2RoomCommandState(
                 roomID: roomState.roomID,
                 nextRoomSequence: roomState.nextRoomSequence + 1,

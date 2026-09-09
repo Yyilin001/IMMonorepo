@@ -108,8 +108,10 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
     func persist(
         _ value: V2StoredMessageProjectionState,
         storage: V2MessageProjectionStateStorage = .inline,
+        persistedCreatedAt: V2PostgresTimestamp? = nil,
         sql: any SQLDatabase
     ) async throws {
+        let createdAt = try persistedCreatedAt ?? V2PostgresTimestamp(date: value.createdAt)
         // A data-modifying CTE does not expose its inserted row through a
         // sibling scan of the base table in the same statement snapshot.
         // Keep the successful insert in `inserted`, and consult the base
@@ -145,7 +147,7 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
                        \(bind: value.isWithdrawn), \(bind: value.payloadSchemaVersion),
                        CASE WHEN \(bind: storage.rawValue) = 'inline'
                             THEN \(bind: value.payloadJSON)::jsonb ELSE NULL END,
-                       \(bind: value.createdAt), \(bind: storage.rawValue)
+                       \(bind: createdAt), \(bind: storage.rawValue)
                 FROM validated
                 ON CONFLICT DO NOTHING
                 RETURNING 1
@@ -324,9 +326,9 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             state: restored,
             originEventID: source.originEventID,
             stateEventID: revision == 1 ? source.originEventID : nil,
-            createdAt: source.createdAt
+            createdAt: source.createdAt.date
         )
-        try await persist(value, sql: sql)
+        try await persist(value, persistedCreatedAt: source.createdAt, sql: sql)
         return value
     }
 
@@ -390,7 +392,7 @@ private struct MessageProjectionStateMaterializationRow: Decodable {
     let withdrawnAt: Date?
     let originEventID: UUID
     let acceptedPayloadJSON: String
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
 
     private enum CodingKeys: String, CodingKey {
         case text = "text_body"

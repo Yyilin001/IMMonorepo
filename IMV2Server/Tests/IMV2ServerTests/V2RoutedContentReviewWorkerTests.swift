@@ -3,6 +3,16 @@ import Testing
 
 @Suite("V2 routed content review worker")
 struct V2RoutedContentReviewWorkerTests {
+    @Test("invalid batch limits fail before calling any room owner")
+    func rejectsInvalidLimits() async throws {
+        let owner = RoutedReviewProgressor(result: .success(.init(claimedCount: 0, resolvedCount: 0, redactedCount: 0, releasedCount: 0)))
+        let worker = try V2RoutedContentReviewWorker(progressors: [owner])
+        for limit in [Int.min, -1, 0] {
+            await #expect(throws: V2ContentReviewWorkerError.invalidLimit) { try await worker.runOnce(limitPerOwner: limit) }
+        }
+        #expect(await owner.limits().isEmpty)
+    }
+
     @Test("healthy room owners continue while one review store is unavailable")
     func isolatesOwnerFailureAndAggregatesReports() async throws {
         let first = RoutedReviewProgressor(result: .success(.init(

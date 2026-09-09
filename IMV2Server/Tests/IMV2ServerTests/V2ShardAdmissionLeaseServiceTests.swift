@@ -5,6 +5,29 @@ import Testing
 
 @Suite("V2 shard admission lease control plane")
 struct V2ShardAdmissionLeaseServiceTests {
+    @Test("lease control rejects invalid clocks and lost expiry precision before persistence", arguments: ["issue", "renew", "replace"])
+    func lifetimeClockBounds(operation: String) async throws {
+        let store = UnusedClockLeaseStore()
+        let key = try V2ShardAdmissionPoolKey(roomShardID: "clock-room", capacityProfileID: "standard")
+        let profile = try profile()
+        let fence = V2ShardAdmissionLeaseFence(id: try .init(UUID().uuidString), generation: 1)
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        var inputs = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { (Date(timeIntervalSince1970: $0), 60.0) }
+        inputs += [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 0, -1, .leastNonzeroMagnitude, 0.0000001, 1e14].map { (base, $0) }
+        inputs.append((Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10), 60))
+        for (now, lifetime) in inputs {
+            let service = V2ShardAdmissionLeaseService(store: store, now: { now })
+            await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) {
+                switch operation {
+                case "renew": _ = try await service.renew(key: key, expectedFence: fence, lifetime: lifetime)
+                case "replace": _ = try await service.replaceExpired(key: key, capacityProfile: profile, lifetime: lifetime)
+                default: _ = try await service.issue(key: key, capacityProfile: profile, lifetime: lifetime)
+                }
+            }
+        }
+        #expect(await store.callCount == 0)
+    }
+
     @Test("issue and fenced renewal preserve the identity and counters")
     func issueAndRenew() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -96,5 +119,18 @@ struct V2ShardAdmissionLeaseServiceTests {
                 retryAfterSeconds: 3
             )
         )
+    }
+}
+
+private actor UnusedClockLeaseStore: V2ShardAdmissionLeaseStore {
+    private(set) var callCount = 0
+    func issue(key: V2ShardAdmissionPoolKey, capacityProfile: V2CapacityProfile, leaseID: ShardAdmissionLeaseID, validUntil: Date, now: Date) throws -> ShardAdmissionLease {
+        callCount += 1; throw V2ShardAdmissionLeaseControlError.poolNotFound
+    }
+    func renew(key: V2ShardAdmissionPoolKey, expectedFence: V2ShardAdmissionLeaseFence, validUntil: Date, now: Date) throws -> ShardAdmissionLease {
+        callCount += 1; throw V2ShardAdmissionLeaseControlError.poolNotFound
+    }
+    func replaceExpired(key: V2ShardAdmissionPoolKey, capacityProfile: V2CapacityProfile, replacementLeaseID: ShardAdmissionLeaseID, validUntil: Date, now: Date) throws -> ShardAdmissionLease {
+        callCount += 1; throw V2ShardAdmissionLeaseControlError.poolNotFound
     }
 }

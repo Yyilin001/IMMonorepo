@@ -174,10 +174,8 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
     }
 
     public func record(request: V2TrustedSpecialAccountMessage, account: V2ResolvedSpecialAccount, roomID: RoomID, outcome: V2SendMessageOutcome, now: Date) async throws {
-        let message: V2AcceptedMessage
-        switch outcome {
-        case .accepted(let value), .idempotent(let value): message = value
-        case .idempotencyConflict, .rateLimited, .unavailable, .denied: throw V2SpecialAccountMessagingError.corruptPersistenceState
+        guard let message = outcome.acceptanceReceipt else {
+            throw V2SpecialAccountMessagingError.corruptPersistenceState
         }
         guard let accountUUID = UUID(uuidString: account.userID.rawValue),
               let operationUUID = UUID(uuidString: request.operationID.rawValue),
@@ -186,12 +184,16 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
         else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
+            // Serialize retries even when the operation row does not exist yet.
+            let lockKey = "special-account-message:\(accountUUID):\(operationUUID)"
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let existing = try await sql.raw("SELECT request_fingerprint, message_id FROM im_v2.special_account_message_operations WHERE account_user_id = \(bind: accountUUID) AND operation_id = \(bind: operationUUID) FOR UPDATE").first(decoding: SpecialAccountOperationRow.self) {
                 guard existing.requestFingerprint == request.requestFingerprint, existing.messageID == messageUUID else {
                     throw V2SpecialAccountMessagingError.idempotencyConflict
                 }
                 return
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.special_account_message_operations (account_user_id, operation_id, request_fingerprint, room_id, message_id, created_at) VALUES (\(bind: accountUUID), \(bind: operationUUID), \(bind: request.requestFingerprint), \(bind: roomUUID), \(bind: messageUUID), \(bind: now))").run()
             let supportRoomID: UUID? = account.kind == .customerSupport ? roomUUID : nil
             try await sql.raw("INSERT INTO im_v2.special_account_message_audit (message_id, account_user_id, service_principal, operator_id, support_session_room_id, content_fingerprint, created_at) VALUES (\(bind: messageUUID), \(bind: accountUUID), \(bind: request.servicePrincipal), \(bind: request.operatorID), \(bind: supportRoomID), \(bind: request.requestFingerprint), \(bind: now)) ON CONFLICT (message_id) DO NOTHING").run()

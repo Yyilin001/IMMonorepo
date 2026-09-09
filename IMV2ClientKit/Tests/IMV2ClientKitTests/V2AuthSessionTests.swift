@@ -5,6 +5,96 @@ import Testing
 
 @Suite("V2 auth session")
 struct V2AuthSessionTests {
+
+    @Test("Refresh cannot replace or extend the old session revocation capability", arguments: [false, true])
+    func preservesRevocationCapability(changeExpiry: Bool) async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_100)
+        let old = try credentials(expiry: now.addingTimeInterval(-1), refresh: "old-refresh")
+        let successor = try V2AuthCredentials(userID: old.userID, deviceID: old.deviceID,
+            accessToken: "new-access", accessTokenExpiresAt: now.addingTimeInterval(60), refreshCredential: "new-refresh",
+            revocationCredential: changeExpiry ? old.revocationCredential : .generate(),
+            revocationCredentialExpiresAt: changeExpiry ? old.revocationCredentialExpiresAt.addingTimeInterval(1) : old.revocationCredentialExpiresAt)
+        let store = InMemoryCredentialStore(record: .init(credentials: old))
+        let transport = AuthTransportStub(result: .success(successor))
+        let session = V2AuthSession(credentialStore: store, transport: transport, now: { now })
+        await #expect(throws: V2AuthSessionError.malformedCredentials) { try await session.accessToken() }
+        let stored = try #require(await store.record())
+        #expect(stored.credentials == old)
+        #expect(stored.pendingRefreshOperationID != nil)
+        let sent = try #require(await transport.requests().first)
+        #expect(sent.revocationCredential == old.revocationCredential)
+    }
+
+    @Test("The atomic credential record requires the revocation proof and expiry")
+    func credentialRecordRoundTrip() throws {
+        let credentials = try credentials(expiry: .distantFuture, refresh: "record-refresh")
+        let record = V2AuthCredentialRecord(credentials: credentials, pendingRefreshOperationID: UUID())
+        let data = try JSONEncoder().encode(record)
+        #expect(try JSONDecoder().decode(V2AuthCredentialRecord.self, from: data) == record)
+        let original = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for field in ["revocationCredential", "revocationCredentialExpiresAt"] {
+            var body = original
+            var values = try #require(body["credentials"] as? [String: Any])
+            values.removeValue(forKey: field)
+            body["credentials"] = values
+            let incomplete = try JSONSerialization.data(withJSONObject: body)
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(V2AuthCredentialRecord.self, from: incomplete) }
+        }
+    }
+    @Test("a cancelled refresh waiter exits while the shared rotation remains owned and completes")
+    func cancelledRefreshWaitDoesNotWaitForNetwork() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_100)
+        let old = try credentials(expiry: now.addingTimeInterval(-1), refresh: "cancel-predecessor")
+        let successor = try credentials(expiry: now.addingTimeInterval(60), refresh: "cancel-successor")
+        let store = InMemoryCredentialStore(record: .init(credentials: old))
+        let transport = BlockingAuthTransport(response: successor)
+        let session = V2AuthSession(credentialStore: store, transport: transport, now: { now })
+        let cancelled = Task { try await session.accessToken() }
+        await transport.waitForFirstRequest()
+        cancelled.cancel()
+        let exitedBeforeRelease = try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                do { _ = try await cancelled.value; return false }
+                catch is CancellationError { return true }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(2))
+                // Release on failure as well so the fixture cannot leak a
+                // suspended shared rotation while the assertion fails.
+                await transport.release()
+                return false
+            }
+            let first = try await group.next()!
+            group.cancelAll()
+            return first
+        }
+        #expect(exitedBeforeRelease)
+        #expect(await store.record()?.pendingRefreshOperationID != nil)
+        await transport.release()
+        #expect(try await session.accessToken() == successor.accessToken)
+        #expect(await store.record()?.credentials == successor)
+        #expect(await store.record()?.pendingRefreshOperationID == nil)
+        #expect(await transport.requestCount() == 1)
+    }
+
+    @Test("local logout recovery distinguishes missing, expired and locked credentials without refresh")
+    func restoresLocalStateWithoutNetwork() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_000_200)
+        let expired = try credentials(expiry: now.addingTimeInterval(-1), refresh: "local-only")
+        let transport = AuthTransportStub(result: .failure(V2AuthTransportError.terminalRejection))
+        let absent = V2AuthSession(credentialStore: InMemoryCredentialStore(), transport: transport, now: { now })
+        #expect(try await absent.restoreState() == .unauthenticated)
+        let present = V2AuthSession(credentialStore: InMemoryCredentialStore(record: .init(credentials: expired)), transport: transport, now: { now })
+        #expect(try await present.restoreState() == .authenticated(accessTokenExpiresAt: expired.accessTokenExpiresAt))
+        let lockedStore = InMemoryCredentialStore(loadFailure: .unavailable)
+        let locked = V2AuthSession(credentialStore: lockedStore, transport: transport, now: { now })
+        await #expect(throws: V2AuthSessionError.credentialsUnavailable) { try await locked.restoreState() }
+        await lockedStore.setLoadFailure(nil)
+        await locked.retryCredentialStoreAccess()
+        #expect(try await locked.restoreState() == .unauthenticated)
+        #expect(await transport.requests().isEmpty)
+    }
+
     @Test("cold-start pending operation is reused and atomically cleared after success")
     func reusesPendingOperation() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)

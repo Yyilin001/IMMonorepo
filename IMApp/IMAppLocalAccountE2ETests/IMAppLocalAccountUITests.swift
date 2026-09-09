@@ -43,17 +43,18 @@ final class IMAppLocalAccountUITests: XCTestCase {
         )
         let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
         XCTAssertFalse(assertion.isEmpty)
+        let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: DeviceID(deviceID), operationID: UUID())
         let issued = try await localJSONRequest(
             endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
             body: [
                 "accountAssertion": assertion,
                 "deviceID": deviceID,
-                "operationID": UUID().uuidString.lowercased(),
-            ]
+                "operationID": pending.operationID.uuidString,
+            ], cancellation: pending.cancellation
         )
         let issuedUserID = try XCTUnwrap(issued["userID"] as? String)
         let issuedExpiry = try XCTUnwrap(issued["accessTokenExpiresAtMilliseconds"] as? NSNumber)
-        XCTAssertEqual(issued["deviceID"] as? String, deviceID)
+        XCTAssertEqual((issued["deviceID"] as? String).flatMap(UUID.init(uuidString:)), UUID(uuidString: deviceID))
         XCTAssertNotNil(UUID(uuidString: issuedUserID))
         XCTAssertFalse((issued["accessToken"] as? String ?? "").isEmpty)
         XCTAssertFalse((issued["refreshCredential"] as? String ?? "").isEmpty)
@@ -704,13 +705,14 @@ private func registerLocalAccount(displayName: String) async throws -> LocalE2EA
         ]
     )
     let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
+    let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: deviceID, operationID: UUID())
     let issued = try await localJSONRequest(
         endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
         body: [
             "accountAssertion": assertion,
             "deviceID": deviceID.rawValue,
-            "operationID": UUID().uuidString.lowercased(),
-        ]
+            "operationID": pending.operationID.uuidString,
+        ], cancellation: pending.cancellation
     )
     return try .init(
         accessToken: XCTUnwrap(issued["accessToken"] as? String),
@@ -847,16 +849,25 @@ private enum LocalE2EDeliveryError: Error, LocalizedError {
     }
 }
 
-private func localJSONRequest(endpoint: URL, body: [String: String]) async throws -> [String: Any] {
+private func localJSONRequest(endpoint: URL, body: [String: String], cancellation: V2DeviceRegistrationCancellation? = nil) async throws -> [String: Any] {
     var request = URLRequest(url: endpoint)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
     request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-    request.httpBody = try JSONEncoder().encode(body)
+    var payload: [String: Any] = body
+    if let cancellation { payload["cancellation"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cancellation)) }
+    request.httpBody = try JSONSerialization.data(withJSONObject: payload)
     let (data, response) = try await URLSession.shared.data(for: request)
     let http = try XCTUnwrap(response as? HTTPURLResponse)
     XCTAssertEqual(http.statusCode, 200, "本机账户 HTTPS 合约应接受测试中的有效请求。")
-    return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    if let cancellation {
+        let confirmation = try XCTUnwrap(result["registrationCancellation"])
+        let decoded = try JSONDecoder().decode(V2DeviceRegistrationCancellation.self,
+            from: JSONSerialization.data(withJSONObject: confirmation))
+        XCTAssertTrue(decoded == cancellation, "Issuer must confirm original cancellation binding.")
+    }
+    return result
 }

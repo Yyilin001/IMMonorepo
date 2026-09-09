@@ -3,6 +3,25 @@ import Testing
 @testable import IMV2Core
 
 struct ProfilePresentationTests {
+    @Test("profile commands retain validated canonical display names",
+          arguments: [" Café ", "\nCafe\u{301}\t", String(repeating: " ", count: 300) + "Café"])
+    func updateCommandNormalizesName(input: String) throws {
+        let command = try V2ProfileUpdateCommand(actorUserID: Fixture().owner,
+            operationID: .init(uuid: UUID()), expectedRevision: Fixture().profileRevision,
+            displayName: input, avatar: nil)
+        #expect(Array(command.displayName.utf8) == Array("Café".utf8))
+    }
+
+    @Test("profile name normalization preserves validation",
+          arguments: [" \n\t ", "Cafe\nName", "Cafe\tName", String(repeating: "é", count: 41)])
+    func updateCommandRejectsInvalidName(input: String) {
+        #expect(throws: V2PublicIdentityValidationError.invalidDisplayName) {
+            try V2ProfileUpdateCommand(actorUserID: Fixture().owner,
+                operationID: .init(uuid: UUID()), expectedRevision: Fixture().profileRevision,
+                displayName: input, avatar: nil)
+        }
+    }
+
     @Test("direct conversations prefer an owner-private alias")
     func directConversationPrefersAlias() {
         let fixture = Fixture()

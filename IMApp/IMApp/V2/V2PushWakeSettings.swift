@@ -3,43 +3,22 @@ import IMV2ClientKit
 import Observation
 import UIKit
 
-/// Only the user's desired wake policy is persisted locally. APNs tokens are
-/// intentionally ephemeral: they move directly from UIApplicationDelegate to
-/// the authenticated account edge and never enter UserDefaults, Keychain,
-/// analytics, logs, or a view model.
-protocol V2PushWakePreferenceStoring: Sendable {
-    func isEnabled() async -> Bool
-    func setEnabled(_ enabled: Bool) async
-    /// A disabled preference may still need a remote DELETE after a previous
-    /// network failure. This marker contains no APNs token or endpoint data.
-    func hasPendingEndpointRemoval() async -> Bool
-    func setPendingEndpointRemoval(_ pending: Bool) async
+/// User preference survives account cache retirement. Remote intent and
+/// acknowledgement remain authoritative in SQLite. MainActor writes happen
+/// only after this active store accepts a durable snapshot.
+@MainActor
+protocol V2PushWakePreferenceStoring: AnyObject {
+    func isEnabled() -> Bool
+    func setEnabled(_ enabled: Bool)
 }
 
-actor V2UserDefaultsPushWakePreferenceStore: V2PushWakePreferenceStoring {
+@MainActor
+final class V2UserDefaultsPushWakePreferenceStore: V2PushWakePreferenceStoring {
     private let defaults: UserDefaults
     private let key: String
-    private let pendingRemovalKey: String
-
-    init(defaults: UserDefaults = .standard, key: String) {
-        self.defaults = defaults
-        self.key = key
-        pendingRemovalKey = key + ".pending-endpoint-removal"
-    }
-
+    init(defaults: UserDefaults = .standard, key: String) { self.defaults = defaults; self.key = key }
     func isEnabled() -> Bool { defaults.bool(forKey: key) }
-
-    func setEnabled(_ enabled: Bool) {
-        defaults.set(enabled, forKey: key)
-    }
-
-    func hasPendingEndpointRemoval() -> Bool {
-        defaults.bool(forKey: pendingRemovalKey)
-    }
-
-    func setPendingEndpointRemoval(_ pending: Bool) {
-        defaults.set(pending, forKey: pendingRemovalKey)
-    }
+    func setEnabled(_ enabled: Bool) { defaults.set(enabled, forKey: key) }
 }
 
 /// UIKit's registration request is a main-thread side effect. Its callback is
@@ -63,201 +42,230 @@ protocol V2PushWakeHandling: AnyObject {
     func handlePushWake() async -> UIBackgroundFetchResult
 }
 
+enum V2PushWakeSettingsError: Error { case endpointRemovalPending }
+
 @MainActor
 @Observable
 final class V2PushWakeSettingsStore {
-    enum State: Equatable {
-        case loading
-        case disabled
-        case waitingForToken
-        case registering
-        case enabled
-        case retryableFailure
-    }
-
+    enum State: Equatable { case loading, disabled, waitingForToken, registering, enabled, retryableFailure }
+    private let reconciler: V2PushIntentReconciler
     private let preferences: any V2PushWakePreferenceStoring
-    private let endpointClient: any V2ClientPushEndpointRegistering
     private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     private let environment: V2ClientPushEndpointEnvironment
-
     private(set) var state: State = .loading
     private(set) var isEnabled = false
     private(set) var feedback: String?
-    private var preferenceGeneration: UInt64 = 0
-    private var endpointOperationGeneration: UInt64 = 0
+    private(set) var isSigningOut = false
+    private var stopped = false
+    private var lifecycle = UUID()
+    private var inputID: UUID?
+    private var tokenFailed = false
+    private var lastSnapshot: V2LocalPushIntent?
+    private var runner: Task<Void, Never>?
+    private var observer: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
 
-    init(
-        preferences: any V2PushWakePreferenceStoring,
-        endpointClient: any V2ClientPushEndpointRegistering,
-        remoteNotificationRegistrar: any V2RemoteNotificationRegistering,
-        environment: V2ClientPushEndpointEnvironment
-    ) {
-        self.preferences = preferences
-        self.endpointClient = endpointClient
-        self.remoteNotificationRegistrar = remoteNotificationRegistrar
+    init(reconciler: V2PushIntentReconciler, preferences: any V2PushWakePreferenceStoring, remoteNotificationRegistrar: any V2RemoteNotificationRegistering,
+         environment: V2ClientPushEndpointEnvironment) {
+        self.reconciler = reconciler; self.preferences = preferences; self.remoteNotificationRegistrar = remoteNotificationRegistrar
         self.environment = environment
     }
 
-    /// Replays only the non-secret preference after session restoration. An
-    /// enabled setting obtains a fresh system token rather than retaining an
-    /// old endpoint token across an app restart.
+    isolated deinit { runner?.cancel(); observer?.cancel() }
+
     func activate() async {
-        preferenceGeneration &+= 1
-        let generation = preferenceGeneration
-        endpointOperationGeneration &+= 1
-        let persistedEnabled = await preferences.isEnabled()
-        guard generation == preferenceGeneration else { return }
-        isEnabled = persistedEnabled
-        if isEnabled {
-            await preferences.setPendingEndpointRemoval(false)
-            guard generation == preferenceGeneration else { return }
-            requestFreshToken()
-            return
-        }
-        let hasPendingEndpointRemoval = await preferences.hasPendingEndpointRemoval()
-        guard generation == preferenceGeneration else { return }
-        guard hasPendingEndpointRemoval else {
-            state = .disabled
-            feedback = nil
-            return
-        }
-        await removePendingEndpointAfterDisable(
-            preferenceGeneration: generation,
-            endpointGeneration: endpointOperationGeneration
-        )
+        guard !stopped, observer == nil else { return }
+        let id = lifecycle
+        do {
+            let value = try await reconciler.state()
+            guard id == lifecycle, !Task.isCancelled else { return }
+            apply(value)
+            observer = Task { [weak self, reconciler] in
+                do {
+                    for try await value in reconciler.updates() {
+                        guard let self, self.lifecycle == id, !Task.isCancelled else { return }
+                        if self.inputID == nil { self.apply(value) }
+                    }
+                } catch {
+                    guard let self, self.lifecycle == id, !Task.isCancelled else { return }
+                    self.fail("暂时无法读取后台同步唤醒设置，请重试。")
+                }
+            }
+            startRunner()
+            if value.desiredEnabled { requestFreshToken() }
+        } catch { if id == lifecycle { fail("暂时无法读取后台同步唤醒设置，请重试。") } }
     }
 
-    func setEnabled(_ desiredValue: Bool) async {
-        guard desiredValue != isEnabled || state == .retryableFailure else { return }
-        preferenceGeneration &+= 1
-        let generation = preferenceGeneration
-        endpointOperationGeneration &+= 1
-        let endpointGeneration = endpointOperationGeneration
-        feedback = nil
-        isEnabled = desiredValue
-        await preferences.setEnabled(desiredValue)
-        guard generation == preferenceGeneration else { return }
-        if desiredValue {
-            await preferences.setPendingEndpointRemoval(false)
-            guard generation == preferenceGeneration else { return }
-            requestFreshToken()
-            return
+    func setEnabled(_ enabled: Bool) async {
+        guard !stopped, !isSigningOut, !Task.isCancelled else { return }
+        let id = UUID(); inputID = id
+        isEnabled = enabled; state = .registering; feedback = nil; tokenFailed = false
+        do {
+            try await reconciler.setEnabled(enabled)
+            let value = try await reconciler.state()
+            guard inputID == id, !stopped else { return }
+            inputID = nil; apply(value)
+            if value.desiredEnabled && value.waitingForToken { requestFreshToken() }
+        } catch {
+            guard inputID == id, !stopped else { return }
+            let saved = try? await reconciler.state()
+            guard inputID == id, !stopped else { return }
+            inputID = nil
+            if let saved { apply(saved) }
+            if saved?.preferenceEnabled != enabled { fail("设置尚未保存，请重试。") }
         }
-        await preferences.setPendingEndpointRemoval(true)
-        guard generation == preferenceGeneration else { return }
-        await removePendingEndpointAfterDisable(
-            preferenceGeneration: generation,
-            endpointGeneration: endpointGeneration
-        )
     }
 
     func receiveAPNSToken(_ token: String) async {
-        guard isEnabled else { return }
-        endpointOperationGeneration &+= 1
-        let endpointGeneration = endpointOperationGeneration
-        state = .registering
-        feedback = nil
+        guard !stopped, !isSigningOut, isEnabled else { return }
+        let id = lifecycle
+        tokenFailed = false
         do {
-            try await endpointClient.register(provider: .apns, environment: environment, token: token)
-            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
-            state = .enabled
-        } catch is CancellationError {
-            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
-            state = .retryableFailure
-            feedback = "后台同步唤醒注册被取消，请重试。"
+            try await reconciler.receiveToken(provider: .apns, environment: environment, value: token)
+            let value = try await reconciler.state()
+            guard id == lifecycle, inputID == nil else { return }
+            apply(value)
         } catch {
-            guard endpointGeneration == endpointOperationGeneration, isEnabled else { return }
-            state = .retryableFailure
-            feedback = "无法注册后台同步唤醒，请稍后重试。"
+            guard id == lifecycle, isEnabled, inputID == nil else { return }
+            fail("后台同步唤醒注册尚未完成，请重试。")
         }
     }
 
     func remoteNotificationRegistrationFailed() async {
-        guard isEnabled else { return }
-        state = .retryableFailure
-        feedback = "此设备暂无法获取后台同步唤醒令牌，请稍后重试。"
+        guard !stopped, !isSigningOut, isEnabled else { return }
+        let id = lifecycle
+        do {
+            let current = try await reconciler.state()
+            guard id == lifecycle, isEnabled, !isSigningOut, current.waitingForToken, inputID == nil,
+                  current.revision >= (lastSnapshot?.revision ?? 0) else { return }
+            tokenFailed = true
+            fail("此设备暂无法获取后台同步唤醒令牌，请稍后重试。")
+        } catch { if id == lifecycle { fail("暂时无法读取后台同步唤醒设置，请重试。") } }
     }
 
-    /// Signing out must remove the server-side device endpoint while the
-    /// current credential is still usable. The user preference itself remains
-    /// scoped to that user and is not copied to a later account on this device.
-    func deactivateForSignOut() async throws {
-        guard isEnabled || state != .disabled else { return }
-        preferenceGeneration &+= 1
-        endpointOperationGeneration &+= 1
-        isEnabled = false
-        state = .disabled
-        feedback = nil
+    func retry() async {
+        guard !stopped, !isSigningOut, inputID == nil else { return }
+        let id = lifecycle
         do {
-            try await endpointClient.remove()
-            await preferences.setPendingEndpointRemoval(false)
-        } catch is CancellationError {
-            state = .retryableFailure
-            feedback = "后台同步唤醒端点尚未移除，请联网后重试退出登录。"
-            throw CancellationError()
+            try await reconciler.setEnabled(isEnabled)
+            let value = try await reconciler.state()
+            if value.pauseReason != nil { try await reconciler.restartSession() }
+            guard id == lifecycle else { return }
+            tokenFailed = false
+            startRunner()
+            let current = try await reconciler.state()
+            guard id == lifecycle else { return }
+            apply(current)
+            if current.desiredEnabled && current.waitingForToken { requestFreshToken() }
+        } catch { if id == lifecycle { fail("暂时无法重试后台同步唤醒设置。") } }
+    }
+
+    func deactivateForSignOut() async throws {
+        guard !stopped else { throw CancellationError() }
+        isSigningOut = true; inputID = nil; isEnabled = false; state = .registering; feedback = nil
+        do {
+            try await Self.removeEndpoint(using: reconciler)
+            state = .disabled
         } catch {
-            state = .retryableFailure
-            feedback = "后台同步唤醒端点尚未移除，请联网后重试退出登录。"
+            fail("后台同步唤醒端点尚未移除，请联网后重试退出登录。")
             throw error
         }
     }
 
-    private func requestFreshToken() {
-        guard isEnabled else { return }
-        state = .waitingForToken
-        remoteNotificationRegistrar?.registerForRemoteNotifications()
+    static func removeEndpoint(using reconciler: V2PushIntentReconciler) async throws {
+        try await reconciler.prepareSignOut()
+        // One epoch read, one claim, one publish, plus a superseded old flight.
+        for _ in 0..<4 {
+            try Task.checkCancellation()
+            let current = try await reconciler.state()
+            if !current.desiredEnabled && !current.pending { return }
+            let result = try await reconciler.flushOnce()
+            if result == .retryScheduled || result == .paused || result == .idle { break }
+        }
+        let current = try await reconciler.state()
+        guard !current.desiredEnabled, !current.pending else { throw V2PushWakeSettingsError.endpointRemovalPending }
     }
 
-    /// DELETE is idempotent and device scoped. Keeping a token-free durable
-    /// marker makes a failed opt-out retryable after the app is relaunched.
-    private func removePendingEndpointAfterDisable(
-        preferenceGeneration: UInt64,
-        endpointGeneration: UInt64
-    ) async {
-        state = .loading
-        feedback = nil
-        do {
-            try await endpointClient.remove()
-            guard preferenceGeneration == self.preferenceGeneration,
-                  endpointGeneration == endpointOperationGeneration,
-                  !isEnabled
-            else { return }
-            await preferences.setPendingEndpointRemoval(false)
-            guard preferenceGeneration == self.preferenceGeneration,
-                  endpointGeneration == endpointOperationGeneration,
-                  !isEnabled
-            else { return }
-            state = .disabled
-        } catch is CancellationError {
-            applyEndpointRemovalFailure(
-                preferenceGeneration: preferenceGeneration,
-                endpointGeneration: endpointGeneration
-            )
-        } catch {
-            applyEndpointRemovalFailure(
-                preferenceGeneration: preferenceGeneration,
-                endpointGeneration: endpointGeneration
-            )
+    func stop() async {
+        if let stopTask { await stopTask.value; return }
+        stopped = true; lifecycle = UUID(); inputID = nil
+        let run = runner, observe = observer
+        runner = nil; observer = nil
+        run?.cancel(); observe?.cancel()
+        let task = Task { [reconciler] in
+            await reconciler.stop()
+            await run?.value; await observe?.value
+        }
+        stopTask = task
+        await task.value
+    }
+
+    private func startRunner() {
+        guard runner == nil, !stopped else { return }
+        let id = lifecycle
+        runner = Task { [weak self, reconciler] in
+            do { try await reconciler.run() }
+            catch is CancellationError { }
+            catch {
+                guard let self, self.lifecycle == id else { return }
+                self.fail("后台同步唤醒暂时无法同步，请重试。")
+            }
+            guard let self, self.lifecycle == id else { return }
+            self.runner = nil
         }
     }
 
-    private func applyEndpointRemovalFailure(
-        preferenceGeneration: UInt64,
-        endpointGeneration: UInt64
-    ) {
-        guard preferenceGeneration == self.preferenceGeneration,
-              endpointGeneration == endpointOperationGeneration,
-              !isEnabled
-        else { return }
-        state = .retryableFailure
-        feedback = "后台同步唤醒设置尚未同步，请稍后重试。"
+    private func apply(_ value: V2LocalPushIntent) {
+        if let prior = lastSnapshot {
+            guard value.ownerID == prior.ownerID, value.revision >= prior.revision else { return }
+            if value.revision == prior.revision {
+                guard (value.epoch ?? 0) >= (prior.epoch ?? 0) else { return }
+                if value.epoch == prior.epoch {
+                    guard value.acknowledgedRevision >= prior.acknowledgedRevision else { return }
+                    if value.acknowledgedRevision == prior.acknowledgedRevision {
+                        guard value.attemptCount >= prior.attemptCount else { return }
+                        if prior.pauseReason != nil && value.pauseReason == nil { return }
+                    }
+                }
+            }
+        }
+        lastSnapshot = value
+        preferences.setEnabled(value.preferenceEnabled)
+        if isSigningOut && value.desiredEnabled { return }
+        isEnabled = isSigningOut ? false : value.preferenceEnabled
+        feedback = nil
+        if value.pauseReason != nil { fail("后台同步唤醒设置已暂停，请重试。") }
+        else if value.attemptCount > 0 && value.pending { fail("设置尚未同步，将自动重试。") }
+        else if value.waitingForToken {
+            if tokenFailed { fail("此设备暂无法获取后台同步唤醒令牌，请稍后重试。") }
+            else { state = .waitingForToken }
+        } else if value.pending { state = .registering }
+        else { state = value.desiredEnabled ? .enabled : .disabled }
     }
+
+    private func requestFreshToken() {
+        guard isEnabled, !isSigningOut else { return }
+        tokenFailed = false
+        remoteNotificationRegistrar?.registerForRemoteNotifications()
+    }
+    private func fail(_ message: String) { state = .retryableFailure; feedback = message }
 }
 
 /// This adapter contains the UIApplication callback boundary. It never logs
 /// the APNs token or registration error; both are sensitive endpoint material.
 @MainActor
 final class V2AppPushDelegate: NSObject, UIApplicationDelegate, V2RemoteNotificationRegistering {
+    private(set) var store: V2AppStore!
+
+    override convenience init() { self.init(makeStore: { V2AppStore.launched(remoteNotificationRegistrar: $0) }) }
+
+    init(makeStore: (V2AppPushDelegate) -> V2AppStore) {
+        super.init()
+        store = makeStore(self)
+        tokenReceiver = store
+        wakeHandler = store
+    }
+
     weak var tokenReceiver: (any V2PushDeviceTokenReceiving)?
     weak var wakeHandler: (any V2PushWakeHandling)?
 

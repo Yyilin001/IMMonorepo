@@ -56,7 +56,7 @@ private actor MembershipStoreSpy: V2RoomMembershipStore {
 
     func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2RoomMembershipChangeOutcome {
         captured = command
-        return .changed(.init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 8, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 8, eventID: eventID, fanoutPlanID: planID, createdAt: now))
     }
 
     func command() -> V2ChangeRoomMembershipCommand? { captured }

@@ -32,6 +32,8 @@ public protocol V2LocalModeratedMemberRemovalStore: Sendable {
 public enum V2ModeratedMemberRemovalFlushResult: Equatable, Sendable { case idle, acknowledged(ModerationOperationID), retryScheduled(ModerationOperationID), rejected(ModerationOperationID, code: String) }
 
 public actor V2ModeratedMemberRemovalOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2ModeratedMemberRemovalFlushResult>()
+
     private let store: any V2LocalModeratedMemberRemovalStore
     private let transport: any V2ClientModeratedMemberRemovalTransport
     private let makeUUID: @Sendable () -> UUID
@@ -49,6 +51,10 @@ public actor V2ModeratedMemberRemovalOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2ModeratedMemberRemovalFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2ModeratedMemberRemovalFlushResult {
         guard let command = try await store.nextReadyModeratedMemberRemoval(now: now()) else { return .idle }
         do {
             let result = try await transport.removeMemberByModerator(roomID: command.roomID, operationID: command.operationID, targetUserID: command.targetUserID, reasonCode: command.reasonCode)
@@ -60,17 +66,22 @@ public actor V2ModeratedMemberRemovalOutboxEngine {
         catch let error as V2RealtimeTransportError {
             if case .server(let code, let retryable, let retryAfter, _) = error {
                 if retryable {
-                    try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1))))
+                    try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: TimeInterval(max(retryAfter, 1))))
                     return .retryScheduled(command.operationID)
                 }
                 try await store.rejectModeratedMemberRemoval(operationID: command.operationID, code: code)
                 return .rejected(command.operationID, code: code)
             }
-            try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.operationID)
         } catch {
-            try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleModeratedMemberRemovalRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2ModeratedMemberRemovalOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

@@ -116,7 +116,9 @@ public struct V2AuthenticatedAccountRateLimitMiddleware: AsyncMiddleware, Sendab
             let pageSize = min(100, max(1, request.query[Int.self, at: "page_size"] ?? 50))
             return ("devices", (pageSize + 49) / 50)
         }
-        if path == "/v2/push-endpoint" { return ("push", 3) }
+        if path == "/v2/push-endpoint" || path.hasPrefix("/v2/push-endpoint/") {
+            return ("push", request.method == .GET ? 1 : 3)
+        }
         if path == "/v2/public-identities/resolve" { return nil }
         if path.hasPrefix("/v2/public-identities/") { return ("public-identities", 1) }
         return ("account", 1)

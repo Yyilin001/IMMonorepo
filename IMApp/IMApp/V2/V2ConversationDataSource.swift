@@ -4,7 +4,7 @@ import IMV2Core
 
 /// Boundary from the UI feature to the V2 SQLite projection. All IDs are
 /// parsed at this boundary; invalid data can never become a navigation route.
-actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyReading {
+actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
 
     init(localStore: GRDBV2LocalSyncStore) {
@@ -22,6 +22,15 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
             before: cursor,
             limit: limit
         )
+        return Self.listPage(page, userID: userID)
+    }
+
+    func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow {
+        let result = try await localStore.conversationListWindow(isArchived: isArchived, around: anchor, limit: limit, precedingCount: precedingCount)
+        return .init(page: Self.listPage(result.page, userID: userID), anchorID: result.anchor?.roomID.rawValue, hasEarlier: result.hasEarlier)
+    }
+
+    private static func listPage(_ page: V2ClientConversationListPage, userID: String) -> V2ConversationListPage {
         let items = page.entries.map { entry in
             let directTitle = entry.directIdentity.map { identity in
                 V2ProfileResolver.resolve(
@@ -112,10 +121,26 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         let page = try await localStore.conversationTimelinePage(
             in: parsedRoomID,
             before: cursor.map {
-                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID)
+                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
             },
             limit: limit
         )
+        return Self.timelinePage(page, userID: userID)
+    }
+
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
+        let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after)
+        switch location {
+        case .unavailable: return .unavailable
+        case .withdrawn: return .withdrawn
+        case .found(let window):
+            return .found(page: Self.timelinePage(window.page, userID: userID), newerBoundary: window.newerBoundary.map {
+                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
+            })
+        }
+    }
+
+    private static func timelinePage(_ page: V2ClientConversationTimelinePage, userID: String) -> V2ConversationTimelinePage {
         let reactionsByMessageID = Dictionary(grouping: page.reactions, by: \.messageID)
         let renderedMessages: [V2ConversationTimelineItem] = page.messages.map { message in
             .message(
@@ -138,14 +163,14 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
             return .activity(.init(id: activity.id, timelineSequence: activity.timelineSequence, kind: kind, createdAt: activity.createdAt))
         }
         let items = (renderedMessages + renderedActivities).sorted { lhs, rhs in
-            lhs.timelineSequence == rhs.timelineSequence
-                ? lhs.storageItemID < rhs.storageItemID
-                : lhs.timelineSequence < rhs.timelineSequence
+            if lhs.timelineSequence != rhs.timelineSequence { return lhs.timelineSequence < rhs.timelineSequence }
+            if lhs.storageItemID != rhs.storageItemID { return lhs.storageItemID < rhs.storageItemID }
+            return lhs.cursor.kind.rawValue < rhs.cursor.kind.rawValue
         }
         return .init(
             items: items,
             olderCursor: page.olderCursor.map {
-                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID)
+                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
             }
         )
     }
@@ -158,12 +183,29 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationSend
         try await localStore.groupAnnouncement(roomID: .init(roomID))
     }
 
-    func groupRolePolicies(in roomID: String) async throws -> [V2ClientGroupRolePolicy] {
-        try await localStore.groupRolePolicies(roomID: .init(roomID))
+    func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        try await localStore.groupRolePolicyState(roomID: .init(roomID))
+    }
+
+    func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        _ = try await localStore.resumeRolePolicyBaseline(roomID: .init(roomID))
+        return try await localStore.groupRolePolicyState(roomID: .init(roomID))
     }
 
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
         try await localStore.searchMessages(request)
+    }
+
+    func searchSenderDisplayName(userID: UserID) async throws -> String? {
+        guard let profile = try await localStore.profileView(userID: userID) else { return nil }
+        return V2ProfileResolver.resolve(
+            userID: userID, profile: profile, alias: nil, groupMember: nil,
+            surface: .groupMessage(allowsPrivateAlias: false)
+        ).displayName
+    }
+
+    func messageSearchIndexUpdates() async -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
+        localStore.messageSearchIndexUpdates()
     }
 
     func messageSearchIndexProgress() async throws -> V2MessageSearchIndexProgress {

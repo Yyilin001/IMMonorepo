@@ -5,6 +5,32 @@ import Testing
 
 @Suite("V2 account assertions")
 struct V2AccountAssertionTests {
+    @Test("Assertion lifetimes cannot gain time through negative timestamp rounding",
+          arguments: [Double(-1.0005), -1_000_000_000.1255, 1_750_000_000.1255])
+    func deadlineRounding(seconds: Double) throws {
+        let issuedAt = Date(timeIntervalSince1970: seconds)
+        let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+        let key = Data(repeating: 8, count: 32)
+        for lifetime in [1e-12, 0.0001] {
+            let issuer = try V2HMACAccountAssertionIssuer(rawKey: key, lifetime: lifetime, now: { issuedAt })
+            #expect(throws: V2AccountAssertionError.invalidClock) {
+                _ = try issuer.issue(userID: user, deviceID: device)
+            }
+        }
+
+        // A usable lifetime still works normally, and has ended by the
+        // requested deadline. All data and key material belong to this test.
+        let lifetime = 0.5
+        let issuer = try V2HMACAccountAssertionIssuer(rawKey: key, lifetime: lifetime, now: { issuedAt })
+        let assertion = try issuer.issue(userID: user, deviceID: device)
+        let before = try V2HMACAccountAssertionIssuer(rawKey: key, now: { issuedAt.addingTimeInterval(lifetime - 0.002) })
+        #expect(try before.verifiedUserID(for: assertion, deviceID: device) == user)
+        let ended = try V2HMACAccountAssertionIssuer(rawKey: key, now: { issuedAt.addingTimeInterval(lifetime) })
+        #expect(throws: V2AccountAssertionError.invalidAssertion) {
+            _ = try ended.verifiedUserID(for: assertion, deviceID: device)
+        }
+    }
+
     @Test("signed assertion is short-lived and bound to one device")
     func verifiesOnlyForBoundDeviceBeforeExpiry() throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)

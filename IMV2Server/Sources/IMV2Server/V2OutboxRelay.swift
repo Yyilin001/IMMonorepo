@@ -110,6 +110,9 @@ public struct V2OutboxRelay: Sendable {
                 // intentionally retried. Consumers must deduplicate by event.
                 let failureTime = now()
                 let disposition = retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: failureTime)
+                if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
                 try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
                 switch disposition {
                 case .retry: released += 1
@@ -146,6 +149,9 @@ public struct V2OutboxRelay: Sendable {
                     claimToken: lease.claimToken,
                     now: failureTime
                 )
+                if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
                 try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
                 switch disposition {
                 case .retry: released += 1

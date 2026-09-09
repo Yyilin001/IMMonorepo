@@ -154,7 +154,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             let currentProjector = try PostgresV2UserShardFanoutProjector(database: current.database, schema: current.schema)
             let sequence = try await currentProjector.projectAllocated(
                 userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
-                payloadJSON: row.payloadJSON, createdAt: row.createdAt
+                payloadJSON: row.payloadJSON, createdAt: row.createdAt.date, persistedCreatedAt: row.createdAt
             )
             // A single source event can carry a profile projection plus an
             // invalidation. The wake hint must cover the last
@@ -174,8 +174,8 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 let targetProjector = try PostgresV2UserShardFanoutProjector(database: target.database, schema: target.schema)
                 _ = try await targetProjector.mirror(.init(
                     userID: userID, sequence: sequence, sourceEventID: sourceEventID,
-                    projectionKind: row.projectionKind, payloadJSON: row.payloadJSON, createdAt: row.createdAt
-                ))
+                    projectionKind: row.projectionKind, payloadJSON: row.payloadJSON, createdAt: row.createdAt.date
+                ), persistedCreatedAt: row.createdAt)
             }
         }
         return liveSequence
@@ -302,7 +302,8 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                         sourceEventID: request.sourceEventID,
                         projectionKind: row.projectionKind,
                         payloadJSON: row.payloadJSON,
-                        createdAt: row.createdAt
+                        createdAt: row.createdAt.date,
+                        persistedCreatedAt: row.createdAt
                     )
                 }
                 liveSequence = max(liveSequence ?? 0, sequence)
@@ -327,8 +328,8 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                         sourceEventID: request.sourceEventID,
                         projectionKind: row.projectionKind,
                         payloadJSON: row.payloadJSON,
-                        createdAt: row.createdAt
-                    ))
+                        createdAt: row.createdAt.date
+                    ), persistedCreatedAt: row.createdAt)
                 }
             }
             results[index] = liveSequence
@@ -341,7 +342,8 @@ private struct ShadowSourceRow: Decodable {
     let sequence: Int64
     let projectionKind: String
     let payloadJSON: String
-    let createdAt: Date
+    // Preserve the source's database value through both allocation and mirror.
+    let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence"
         case projectionKind = "projection_kind"
@@ -400,7 +402,7 @@ private struct ShadowBatchSourceRow: Decodable {
     let sequence: Int64
     let projectionKind: String
     let payloadJSON: String
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
     var record: ShadowSourceRow {
         .init(
             sequence: sequence,

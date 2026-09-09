@@ -4,6 +4,24 @@ import IMV2Core
 import Testing
 
 struct V2MessageProjectionStateTests {
+    @Test("accepted timestamps reject rounded Int64 overflow", arguments: [
+        Double(Int64.max) / 1_000, Double(Int64.min).nextDown / 1_000,
+        Double.infinity, -Double.infinity, Double.nan
+    ])
+    func rejectsUnrepresentableTimestamp(seconds: Double) throws {
+        #expect(throws: V2MessageProjectionStateError.invalidPayload) {
+            try makeState(createdAt: Date(timeIntervalSince1970: seconds))
+        }
+    }
+
+    @Test("accepted timestamps preserve floor rounding", arguments: [
+        (1_750_000_000.1239, Int64(1_750_000_000_123)), (-0.5001, Int64(-501)),
+        (0.0, Int64(0)), (9_000_000_000_000_000.0, Int64(9_000_000_000_000_000_000))
+    ])
+    func preservesTimestamp(sample: (Double, Int64)) throws {
+        #expect(try makeState(createdAt: Date(timeIntervalSince1970: sample.0)).acceptedAtUnixMilliseconds == sample.1)
+    }
+
     @Test("shared message state identity is deterministic across shards")
     func deterministicIdentity() throws {
         let messageID = UUID(uuidString: "00000000-0000-0000-0000-000000000040")!
@@ -74,7 +92,7 @@ struct V2MessageProjectionStateTests {
         }
     }
 
-    private func makeState() throws -> V2MessageProjectionState {
+    private func makeState(createdAt: Date = Date(timeIntervalSince1970: 1_750_000_000.123)) throws -> V2MessageProjectionState {
         let sender = try UserID("00000000-0000-0000-0000-000000000041")
         let accepted = V2AcceptedMessage(
             messageID: try .init("00000000-0000-0000-0000-000000000040"),
@@ -89,7 +107,7 @@ struct V2MessageProjectionStateTests {
             replyTo: .init(
                 messageID: try .init("00000000-0000-0000-0000-000000000044")
             ),
-            createdAt: Date(timeIntervalSince1970: 1_750_000_000.123)
+            createdAt: createdAt
         )
         return try .init(
             accepted: accepted,

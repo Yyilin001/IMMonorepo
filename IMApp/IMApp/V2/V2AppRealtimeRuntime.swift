@@ -100,14 +100,14 @@ protocol V2GroupMessagePinning: Sendable {
 
 enum V2MessageForwardingOutcome: Equatable, Sendable {
     case completed(succeeded: Int, failed: Int)
-    case queuedForRetry
+    case queued
     case rejected(code: String)
 }
 
-/// The UI submits only opaque message and room IDs.  The outbox holds the
+/// The UI submits a room/message/version reference for each source. The outbox holds the
 /// actual retry record, so leaving the destination picker never loses work.
 protocol V2MessageForwarding: Sendable {
-    func forward(sourceMessageIDs: [String], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome
+    func forward(sources: [V2ForwardMessageReference], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome
 }
 
 protocol V2GroupAnnouncementManaging: Sendable {
@@ -289,14 +289,22 @@ actor V2OutboxConversationSender: V2ConversationSending {
     }
 
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
-        _ = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo)
-        switch try await outbox.flushOnce() {
-        case .accepted:
-            return .accepted
-        case .retryScheduled, .idle:
+        try Task.checkCancellation()
+        let command = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo)
+        do {
+            switch try await outbox.flushOnce() {
+            case .accepted(let identifier) where identifier == command.clientMessageID:
+                return .accepted
+            case .rejected(let identifier, let code) where identifier == command.clientMessageID:
+                return .rejected(code: code)
+            case .accepted, .rejected, .retryScheduled, .idle:
+                return .queuedForRetry
+            }
+        } catch is CancellationError {
+            // Runtime suspension cancels its flush owner independently from
+            // this caller. The command was durably enqueued above.
+            try Task.checkCancellation()
             return .queuedForRetry
-        case .rejected(_, let code):
-            return .rejected(code: code)
         }
     }
 }
@@ -310,15 +318,16 @@ actor V2OutboxMessageWithdrawer: V2MessageWithdrawing {
     init(outbox: V2MessageWithdrawalOutboxEngine) { self.outbox = outbox }
 
     func withdraw(messageID: String, in roomID: String, expectedMessageRevision: UInt64) async throws -> V2MessageWithdrawalOutcome {
-        _ = try await outbox.enqueueWithdrawal(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueWithdrawal(
             roomID: try .init(roomID),
             messageID: try .init(messageID),
             expectedMessageRevision: expectedMessageRevision
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -329,16 +338,17 @@ actor V2OutboxMessageReactionChanger: V2MessageReactionChanging {
     init(outbox: V2MessageReactionOutboxEngine) { self.outbox = outbox }
 
     func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
-        _ = try await outbox.enqueueReaction(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueReaction(
             roomID: try .init(roomID),
             messageID: try .init(messageID),
             reaction: reaction,
             action: action
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -349,16 +359,17 @@ actor V2OutboxMessageEditor: V2MessageEditing {
     init(outbox: V2MessageEditOutboxEngine) { self.outbox = outbox }
 
     func edit(messageID: String, in roomID: String, expectedMessageRevision: UInt64, text: String) async throws -> V2MessageEditOutcome {
-        _ = try await outbox.enqueueEdit(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueEdit(
             roomID: try .init(roomID),
             messageID: try .init(messageID),
             expectedMessageRevision: expectedMessageRevision,
             text: text
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -372,13 +383,14 @@ actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
     init(outbox: V2ReadReceiptOutboxEngine) { self.outbox = outbox }
 
     func recordReadThrough(roomID: String, roomSequence: UInt64) async throws -> V2ReadReceiptReportOutcome {
-        guard try await outbox.enqueueReceiptIfAdvancing(roomID: .init(roomID), readThroughRoomSequence: roomSequence) != nil else {
+        try Task.checkCancellation()
+        guard let pending = try await outbox.enqueueReceiptIfAdvancing(roomID: .init(roomID), readThroughRoomSequence: roomSequence) else {
             return .alreadyRecorded
         }
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .recorded
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .recorded
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -387,6 +399,7 @@ actor V2OutboxConversationStateChanger: V2ConversationStateChanging {
     private let outbox: V2ConversationCapabilitiesOutboxEngine
     init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
     func setState(roomID: String, isPinned: Bool, isArchived: Bool, muteUntil: Date?) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueueConversationState(roomID: .init(roomID), isPinned: isPinned, isArchived: isArchived, muteUntil: muteUntil)
         switch try await outbox.flushOnce() {
         case .conversationStateAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
@@ -401,6 +414,7 @@ actor V2OutboxMessageFavoriter: V2MessageFavoriting {
     private let outbox: V2ConversationCapabilitiesOutboxEngine
     init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
     func setFavorite(roomID: String, messageID: String, isFavorited: Bool) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueueMessageFavorite(roomID: .init(roomID), messageID: .init(messageID), isFavorited: isFavorited)
         switch try await outbox.flushOnce() {
         case .messageFavoriteAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
@@ -415,6 +429,7 @@ actor V2OutboxGroupMessagePinner: V2GroupMessagePinning {
     private let outbox: V2GroupCapabilitiesOutboxEngine
     init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
     func setPinned(roomID: String, messageID: String, isPinned: Bool) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueuePin(roomID: .init(roomID), messageID: .init(messageID), isPinned: isPinned)
         switch try await outbox.flushOnce() {
         case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
@@ -429,22 +444,23 @@ actor V2OutboxMessageForwarder: V2MessageForwarding {
 
     init(outbox: V2BulkForwardMessagesOutboxEngine) { self.outbox = outbox }
 
-    func forward(sourceMessageIDs: [String], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
-        let sourceIDs = try sourceMessageIDs.map(MessageID.init)
+    func forward(sources: [V2ForwardMessageReference], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
+        try Task.checkCancellation()
         let targetIDs = try targetRoomIDs.map(RoomID.init)
-        let plan = try await outbox.enqueue(sourceMessageIDs: sourceIDs, targetRoomIDs: targetIDs)
-        switch try await outbox.flushOnce() {
-        case .chunkAcknowledged(let planID, _, let results) where planID == plan.operationID:
-            return .completed(
-                succeeded: results.filter { $0.errorCode == nil }.count,
-                failed: results.filter { $0.errorCode != nil }.count
-            )
-        case .chunkAcknowledged, .retryScheduled, .idle:
-            return .queuedForRetry
-        case .chunkRejected(let planID, _, let code) where planID == plan.operationID:
-            return .rejected(code: code)
-        case .chunkRejected:
-            return .queuedForRetry
+        let plan = try await outbox.enqueue(sources: sources, targetRoomIDs: targetIDs)
+        _ = try await outbox.flushOnce()
+        // A flush completes at most one chunk and may serve an older plan.
+        // Only the durable parent can establish this user's whole outcome.
+        guard let current = try await outbox.plan(operationID: plan.operationID) else {
+            throw V2ClientCommandError.commandConflict
+        }
+        switch current.state {
+        case .completed:
+            return .completed(succeeded: current.succeededCount, failed: current.failedCount)
+        case .active:
+            return .queued
+        case .cancelled:
+            return .rejected(code: current.terminalCode ?? "CANCELLED")
         }
     }
 }
@@ -455,6 +471,7 @@ actor V2OutboxGroupAnnouncementManager: V2GroupAnnouncementManaging {
     init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
 
     func setAnnouncement(roomID: String, body: String, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueueAnnouncement(
             roomID: .init(roomID),
             body: body,
@@ -474,6 +491,7 @@ actor V2OutboxGroupMemberRoleChanger: V2GroupMemberRoleChanging {
     init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
 
     func setRole(roomID: String, userID: String, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueueMemberRole(
             roomID: .init(roomID),
             targetUserID: .init(userID),
@@ -494,6 +512,7 @@ actor V2OutboxGroupRolePolicyChanger: V2GroupRolePolicyChanging {
     init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
 
     func setPolicy(roomID: String, role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        try Task.checkCancellation()
         let pending = try await outbox.enqueueRolePermissions(
             roomID: .init(roomID),
             role: role,
@@ -578,11 +597,11 @@ actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
         let maximumForegroundFlushes = pageCount + 2
         for _ in 0..<maximumForegroundFlushes {
             switch try await outbox.flushOnce() {
-            case .acknowledged(_, let roomID): return .created(roomID: roomID.rawValue)
-            case .rejected(_, let code): return .rejected(code: code)
+            case .acknowledged(let operationID, let roomID) where operationID == command.operationID: return .created(roomID: roomID.rawValue)
+            case .rejected(let operationID, let code) where operationID == command.operationID: return .rejected(code: code)
             case .retryScheduled:
                 continue
-            case .idle, .cancelled, .cancellationRefused:
+            case .idle, .cancelled, .cancellationRefused, .acknowledged, .rejected:
                 return .queuedForRetry(operationID: command.operationID.rawValue)
             }
         }
@@ -590,13 +609,15 @@ actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
     }
 
     func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {
-        try await outbox.requestCancellation(operationID: .init(operationID))
+        try Task.checkCancellation()
+        let requestedID = try GroupRoomOperationID(operationID)
+        try await outbox.requestCancellation(operationID: requestedID)
         switch try await outbox.flushOnce() {
-        case .cancelled:
+        case .cancelled(let completedID) where completedID == requestedID:
             return .cancelled
-        case .cancellationRefused:
+        case .cancellationRefused(let completedID) where completedID == requestedID:
             return .finalizationAlreadyStarted
-        case .retryScheduled, .idle, .acknowledged, .rejected:
+        case .retryScheduled, .idle, .acknowledged, .rejected, .cancelled, .cancellationRefused:
             return .queuedForRetry
         }
     }
@@ -719,16 +740,17 @@ actor V2OutboxGroupMembershipChanger: V2GroupMembershipChanging {
     init(outbox: V2MembershipCommandOutboxEngine) { self.outbox = outbox }
 
     func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
-        _ = try await outbox.enqueueMembershipChange(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueMembershipChange(
             roomID: .init(roomID),
             targetUserID: .init(targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)),
             action: action,
             expectedMembershipRevision: expectedMembershipRevision
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -739,16 +761,17 @@ actor V2OutboxGroupMemberMuter: V2GroupMemberMuting {
     init(outbox: V2MemberMuteOutboxEngine) { self.outbox = outbox }
 
     func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
-        _ = try await outbox.enqueueMute(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueMute(
             roomID: .init(roomID),
             targetUserID: .init(targetUserID),
             muteUntil: muteUntil,
             reasonCode: reasonCode
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -759,15 +782,16 @@ actor V2OutboxModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
     init(outbox: V2ModeratedMemberRemovalOutboxEngine) { self.outbox = outbox }
 
     func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
-        _ = try await outbox.enqueueRemoval(
+        try Task.checkCancellation()
+        let pending = try await outbox.enqueueRemoval(
             roomID: .init(roomID),
             targetUserID: .init(targetUserID),
             reasonCode: reasonCode
         )
         switch try await outbox.flushOnce() {
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
+        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
+        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
+        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
         }
     }
 }
@@ -783,6 +807,7 @@ actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdat
     }
 
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
+        try Task.checkCancellation()
         let command = try await outbox.enqueueStrangerMessagePermission(allowsStrangerMessages ? .allow : .deny)
         switch try await outbox.flushIfReady(operationID: command.operationID) {
         case nil:
@@ -803,6 +828,7 @@ actor V2OutboxUserAddPreferenceUpdater: V2UserAddPreferenceUpdating {
     init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
 
     func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome {
+        try Task.checkCancellation()
         let command = try await outbox.enqueueUserAddPermission(allowsBeingAdded ? .allow : .deny)
         switch try await outbox.flushIfReady(operationID: command.operationID) {
         case nil: return .queuedForRetry
@@ -819,6 +845,7 @@ actor V2RealtimeReadReceiptPreferenceUpdater: V2ReadReceiptPreferenceUpdating {
     private let outbox: V2SocialCommandOutboxEngine
     init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
     func update(allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferenceUpdateOutcome {
+        try Task.checkCancellation()
         let command = try await outbox.enqueueReadReceiptPreferences(allowsDirect: allowsDirectReadReceipts, allowsGroup: allowsGroupReadReceipts)
         switch try await outbox.flushIfReady(operationID: command.operationID) {
         case .acknowledged: return .accepted
@@ -836,6 +863,7 @@ actor V2OutboxUserBlockChanger: V2UserBlockChanging {
     }
 
     func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
+        try Task.checkCancellation()
         let command = try await outbox.enqueueUserBlock(
             targetUserID: try .init(targetUserID),
             action: action
@@ -861,6 +889,7 @@ actor V2OutboxRelationshipChanger: V2RelationshipChanging {
     }
 
     func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome {
+        try Task.checkCancellation()
         let command = try await outbox.enqueueRelationship(
             targetUserID: try .init(targetUserID),
             action: action
@@ -981,7 +1010,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
         guard unapplied.first?.roomSequence == cursor + 1,
               unapplied.last?.roomSequence == wake.highWatermark
         else { return false }
-        let page = V2ClientGroupEventPage(
+        let page = try V2ClientGroupEventPage(
             roomID: roomID,
             events: Array(unapplied),
             nextRoomSequence: wake.highWatermark,
@@ -1000,6 +1029,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
 struct V2AppRealtimeRuntime {
     let runtime: V2ClientRuntime
+    let backgroundSync: V2BackgroundSyncRunner
     let projectionChangeNotifier: V2ProjectionChangeNotifier
     let sender: any V2ConversationSending
     let messageWithdrawer: any V2MessageWithdrawing
@@ -1015,15 +1045,17 @@ struct V2AppRealtimeRuntime {
     let groupRolePolicyChanger: any V2GroupRolePolicyChanging
     let groupReadReceiptReader: any V2GroupReadReceiptReading
     let conversationLiveActivity: any V2ConversationLiveActivityManaging
-    let attachmentUploader: any V2ConversationAttachmentUploading
+    let attachmentUploader: V2ForegroundConversationAttachmentUploader
     let mediaDownloader: any V2ConversationMediaDownloading
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
     let activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing
+    let roomSubscriptions: V2RoomSubscriptionCoordinator
     let profileRepository: V2ProfileRepository
 
     init(
         configuration: V2AppConfiguration,
         authSession: V2AuthSession,
+        authEpoch: V2AuthSessionEpoch,
         localStore: GRDBV2LocalSyncStore,
         mediaCacheDirectory: URL
     ) throws {
@@ -1054,9 +1086,10 @@ struct V2AppRealtimeRuntime {
         let conversationCapabilitiesOutbox = V2ConversationCapabilitiesOutboxEngine(store: localStore, transport: transport)
         let groupCapabilitiesOutbox = V2GroupCapabilitiesOutboxEngine(store: localStore, transport: transport)
         let forwardMessagesOutbox = V2BulkForwardMessagesOutboxEngine(store: localStore, transport: transport)
+        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
         let mediaEdge = try V2HTTPMediaUploadEdgeClient(
             endpoint: configuration.mediaEdgeEndpoint,
-            credentials: authSession
+            credentials: accountHTTP, transport: accountHTTP
         )
         let mediaUploader = V2ClientMediaUploadService(
             targetResolver: mediaEdge,
@@ -1066,7 +1099,7 @@ struct V2AppRealtimeRuntime {
         )
         let mediaDownloadResolver = try V2HTTPMediaDownloadTargetResolver(
             endpoint: configuration.mediaEdgeEndpoint,
-            credentials: authSession
+            credentials: accountHTTP, transport: accountHTTP
         )
         let mediaDownloader = V2ClientMediaDownloadService(
             targetResolver: mediaDownloadResolver,
@@ -1076,11 +1109,19 @@ struct V2AppRealtimeRuntime {
             store: localStore,
             reader: try V2HTTPProfileViewClient(
                 endpoint: configuration.endpoint("v2/profile-views/batch"),
-                credentials: authSession
+                credentials: accountHTTP, transport: accountHTTP
             )
         )
         self.profileRepository = profileRepository
-        let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
+        let syncOwnership = V2SyncOperationGate()
+        let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
+        let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits)
+        let backgroundTransport = V2ProtobufSyncTransport(wire: backgroundConnection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        backgroundSync = V2BackgroundSyncRunner(
+            connection: V2RealtimeSessionCoordinator(authSession: authSession, connection: backgroundConnection, supportedCapabilityProfiles: ["base"]),
+            syncEngine: V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership),
+            roomSync: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100)
+        )
         let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
         let foregroundGroupPreview = V2ForegroundGroupEventPreviewEngine(transport: transport, store: localStore)
         let activeHybridGroupSynchronizer = V2RealtimeActiveHybridGroupSynchronizer(
@@ -1090,12 +1131,50 @@ struct V2AppRealtimeRuntime {
             subscriptionTransport: transport,
             wakeSource: connection
         )
+        let roomSubscriptions = V2RoomSubscriptionCoordinator(
+            subscriptions: transport, activity: transport,
+            groupEvents: connection, activityEvents: connection,
+            isAuthorized: { roomID in
+                try await localStore.groupEventAccess(roomID: roomID)?.isAuthorized == true
+            },
+            roomCursor: { roomID in
+                guard let access = try await localStore.groupEventAccess(roomID: roomID), access.isAuthorized else {
+                    throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
+                }
+                switch access.delivery {
+                case .durableRoomLog: return try await localStore.groupEventCursor(roomID: roomID)
+                case .foregroundPreview: return try await foregroundGroupPreview.cursor(roomID: roomID)
+                }
+            },
+            didUnsubscribeRoom: { roomID in await foregroundGroupPreview.forget(roomID: roomID) }
+        )
+        self.roomSubscriptions = roomSubscriptions
         let coordinator = V2RealtimeSessionCoordinator(
             authSession: authSession,
             connection: connection,
             supportedCapabilityProfiles: ["base"]
         )
-        let projectionChangeNotifier = V2ProjectionChangeNotifier()
+        let projectionChangeNotifier = V2ProjectionChangeNotifier(localStore: localStore)
+        let commandScheduler = V2FairDurableCommandScheduler(lanes: [
+            // Safety and room-authority changes run before normal
+            // sends, but all lanes retain one-quantum fairness.
+            .init { if case .idle = try await withdrawalOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await groupCapabilitiesOutbox.flushOnce() { return false }; return true },
+            // Interactive sends take precedence over deferred bulk
+            // forwarding. The latter is itself internally chunked.
+            .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await reactionOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
+            .init { if case .idle = try await conversationCapabilitiesOutbox.flushOnce() { return false }; return true },
+        ])
+        let roomCatchUpWorker = V2RoomLogCatchUpWorker(engine: groupEventSync)
         let activity = V2DefaultClientRuntimeActivity(
             syncEngine: syncEngine,
             availabilitySource: connection,
@@ -1106,6 +1185,17 @@ struct V2AppRealtimeRuntime {
             // must not delay withdrawal or room-authority operations by 256
             // sequential requests.
             commandOutbox: nil,
+            commandLifecycles: [
+                commandScheduler, outbox, socialOutbox, groupOutbox, membershipOutbox, memberMuteOutbox,
+                moderatedMemberRemovalOutbox, withdrawalOutbox, reactionOutbox,
+                editOutbox, readReceiptOutbox, conversationCapabilitiesOutbox,
+                groupCapabilitiesOutbox, forwardMessagesOutbox
+            ],
+            commandRetrySchedule: localStore.commandRetrySchedule(lanes: [
+                .messages, .withdrawals, .edits, .reactions, .readReceipts, .membership,
+                .memberMutes, .moderatedMemberRemovals, .groupCapabilities,
+                .conversationCapabilities, .social, .groupCreation, .forwardPlans
+            ]),
             flushAdditionalDurableCommands: {
                 // This must precede lane selection: once the first-party
                 // retry contract expires, no old operation may get one final
@@ -1113,33 +1203,13 @@ struct V2AppRealtimeRuntime {
                 try await localStore.expireStalePendingCommands(
                     now: Date()
                 )
-                let scheduler = V2FairDurableCommandScheduler(lanes: [
-                    // Safety and room-authority changes run before normal
-                    // sends, but all lanes retain one-quantum fairness.
-                    .init { if case .idle = try await withdrawalOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await groupCapabilitiesOutbox.flushOnce() { return false }; return true },
-                    // Interactive sends take precedence over deferred bulk
-                    // forwarding. The latter is itself internally chunked.
-                    .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await reactionOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
-                    .init { if case .idle = try await conversationCapabilitiesOutbox.flushOnce() { return false }; return true },
-                ])
-                _ = try await scheduler.flush(maximumWorkItems: 256)
+                _ = try await commandScheduler.flush(maximumWorkItems: 256)
             },
             afterDurableSynchronization: {
-                // This runs after the priority outboxes.  It advances at most
-                // a small number of persistent room cursors per activity
-                // cycle; visible conversations retain their separate
-                // immediate one-page path.
-                _ = try await groupEventSync.synchronizeBackgroundKnownRooms(maximumPages: 12)
+                // Request bounded room work after priority commands; the
+                // runtime-owned worker continues without blocking startup.
+                await roomCatchUpWorker.requestCatchUp()
+                await roomSubscriptions.authorityDidChange()
                 // Profile invalidations are already durable at this point.
                 // A transient account-edge failure must not roll back or
                 // stall realtime synchronization; the next sync activity
@@ -1155,8 +1225,15 @@ struct V2AppRealtimeRuntime {
                     olderThan: Date().addingTimeInterval(-86_400)
                 )
             },
-            onProjectionSynchronized: {
-                await projectionChangeNotifier.publish()
+            roomSubscriptionLoop: { connectionID in
+                guard let connectionID else { throw V2TLSFrameConnectionError.notConnected }
+                try await roomSubscriptions.run(connectionID: connectionID)
+            },
+            roomCatchUpLoop: { try await roomCatchUpWorker.run() },
+            policyRecoveryLoop: {
+                // A fresh loop owner per authenticated connection prevents an
+                // old cancelled read from owning the replacement session.
+                try await V2RolePolicyRecoveryRunner(store: localStore, transport: transport).run()
             }
         )
         runtime = .init(connection: coordinator, activity: activity)

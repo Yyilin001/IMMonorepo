@@ -63,27 +63,19 @@ private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity
     return wire
 }
 
+/// A content-free canonical receipt. Accepted content is synchronized through
+/// the authorized event/projection stream, never reconstructed from a retry ACK.
 public struct V2ClientMessageAcceptance: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
-    public let media: [V2MediaReference]
-    public let mediaPresentations: [V2MediaPresentation]
-    public let mentions: [V2MentionTarget]
-    public let entities: [V2MessageEntity]
-    public let replyTo: V2MessageReplyReference?
     public let createdAt: Date
 
-    public init(messageID: MessageID, roomID: RoomID, roomSequence: UInt64, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date) {
+    public init(messageID: MessageID, roomID: RoomID, roomSequence: UInt64, createdAt: Date) throws {
+        guard roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.messageID = messageID
         self.roomID = roomID
         self.roomSequence = roomSequence
-        self.media = media
-        precondition(mediaPresentations.map(\.mediaID) == media.map(\.mediaID))
-        self.mediaPresentations = mediaPresentations
-        self.mentions = mentions
-        self.entities = entities
-        self.replyTo = replyTo
         self.createdAt = createdAt
     }
 }
@@ -116,7 +108,8 @@ public struct V2ClientMembershipChange: Equatable, Sendable {
     public let roomSequence: UInt64
     public let createdAt: Date
 
-    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) {
+    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
+        guard membershipRevision > 0 && membershipRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.targetUserID = targetUserID
         self.action = action
@@ -154,7 +147,8 @@ public struct V2ClientRoomMembersPage: Equatable, Sendable {
     public let members: [V2ClientRoomMember]
     public let nextCursor: String?
 
-    public init(roomID: RoomID, membershipRevision: UInt64, actorRole: V2RoomMembershipRole, members: [V2ClientRoomMember], nextCursor: String?) {
+    public init(roomID: RoomID, membershipRevision: UInt64, actorRole: V2RoomMembershipRole, members: [V2ClientRoomMember], nextCursor: String?) throws {
+        guard membershipRevision <= UInt64(Int64.max) else { throw V2ClientSyncError.storageRangeExceeded }
         self.roomID = roomID
         self.membershipRevision = membershipRevision
         self.actorRole = actorRole
@@ -269,7 +263,8 @@ public struct V2ClientMessageWithdrawal: Equatable, Sendable {
     public let roomSequence: UInt64
     public let createdAt: Date
 
-    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) {
+    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
+        guard messageRevision > 0 && messageRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.messageID = messageID
         self.messageRevision = messageRevision
@@ -289,7 +284,8 @@ public struct V2ClientMessageRedaction: Equatable, Sendable {
     public let roomSequence: UInt64
     public let createdAt: Date
 
-    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) {
+    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
+        guard messageRevision > 0 && messageRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.messageID = messageID
         self.messageRevision = messageRevision
@@ -309,7 +305,8 @@ public struct V2ClientMemberMute: Equatable, Sendable {
     public let roomSequence: UInt64
     public let createdAt: Date
 
-    public init(roomID: RoomID, targetUserID: UserID, muteUntil: Date, roomSequence: UInt64, createdAt: Date) {
+    public init(roomID: RoomID, targetUserID: UserID, muteUntil: Date, roomSequence: UInt64, createdAt: Date) throws {
+        guard roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.targetUserID = targetUserID
         self.muteUntil = muteUntil
@@ -332,7 +329,8 @@ public struct V2ClientModeratedMemberRemoval: Equatable, Sendable {
     public let roomSequence: UInt64
     public let createdAt: Date
 
-    public init(roomID: RoomID, targetUserID: UserID, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) {
+    public init(roomID: RoomID, targetUserID: UserID, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
+        guard membershipRevision > 0 && membershipRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.targetUserID = targetUserID
         self.membershipRevision = membershipRevision
@@ -352,6 +350,16 @@ public struct V2ClientMessageEdit: Equatable, Sendable {
     public let messageRevision: UInt64
     public let roomSequence: UInt64
     public let createdAt: Date
+
+    public init(roomID: RoomID, messageID: MessageID, text: String, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
+        guard messageRevision > 0 && messageRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
+        self.roomID = roomID
+        self.messageID = messageID
+        self.text = text
+        self.messageRevision = messageRevision
+        self.roomSequence = roomSequence
+        self.createdAt = createdAt
+    }
 }
 
 public protocol V2ClientMessageEditTransport: Sendable {
@@ -363,6 +371,14 @@ public struct V2ClientReadReceipt: Equatable, Sendable {
     public let userID: UserID
     public let readThroughRoomSequence: UInt64
     public let recordedAt: Date
+
+    public init(roomID: RoomID, userID: UserID, readThroughRoomSequence: UInt64, recordedAt: Date) throws {
+        guard readThroughRoomSequence > 0 && readThroughRoomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
+        self.roomID = roomID
+        self.userID = userID
+        self.readThroughRoomSequence = readThroughRoomSequence
+        self.recordedAt = recordedAt
+    }
 }
 
 public protocol V2ClientReadReceiptTransport: Sendable {
@@ -393,6 +409,17 @@ public struct V2ClientMessageReactionChange: Equatable, Sendable {
     public let action: V2MessageReactionAction
     public let roomSequence: UInt64
     public let createdAt: Date
+
+    public init(roomID: RoomID, messageID: MessageID, actorUserID: UserID, reaction: String, action: V2MessageReactionAction, roomSequence: UInt64, createdAt: Date) throws {
+        guard roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
+        self.roomID = roomID
+        self.messageID = messageID
+        self.actorUserID = actorUserID
+        self.reaction = reaction
+        self.action = action
+        self.roomSequence = roomSequence
+        self.createdAt = createdAt
+    }
 }
 
 public protocol V2ClientMessageReactionTransport: Sendable {
@@ -431,37 +458,48 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 /// Maps protobuf envelopes at the authenticated frame boundary onto the
 /// SyncEngine transport protocol. DTO validation happens here; the engine only
 /// sees V2 value types suitable for durable local application.
-public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
+public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePolicyBaselineTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
     private let wire: any V2AuthenticatedFrameTransport
     private let protocolVersion: UInt8
     private let pageDigestVerifier: any V2SnapshotPageDigestVerifier
+    private let now: @Sendable () -> Date
     private var nextRequestID: UInt64 = 1
 
     public init(
         wire: any V2AuthenticatedFrameTransport,
         protocolVersion: UInt8,
-        pageDigestVerifier: any V2SnapshotPageDigestVerifier = V2SHA256SnapshotPageDigestVerifier()
+        pageDigestVerifier: any V2SnapshotPageDigestVerifier = V2SHA256SnapshotPageDigestVerifier(),
+        now: @escaping @Sendable () -> Date = Date.init
     ) {
         precondition(protocolVersion > 0)
         self.wire = wire
         self.protocolVersion = protocolVersion
         self.pageDigestVerifier = pageDigestVerifier
+        self.now = now
     }
 
-    public func pull(syncToken: V2SyncToken?, maxRecords: Int) async throws -> V2ClientPullResult {
+    public func pull(syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool = false) async throws -> V2ClientPullResult {
         var request = IMV2Envelope()
         request.syncPull = .init()
         request.syncPull.syncToken = syncToken?.rawValue ?? ""
         request.syncPull.maxRecords = UInt32(clamping: maxRecords)
+        request.syncPull.requireSnapshot = requireSnapshot
         let response = try await requestEnvelope(request)
         switch response.body {
         case .syncBatch(let batch):
+            guard batch.generation > 0, batch.generation <= UInt64(Int64.max),
+                  batch.records.allSatisfy({ $0.userSyncSequence > 0 && $0.userSyncSequence <= UInt64(Int64.max) })
+            else { throw V2RealtimeTransportError.unexpectedResponse }
             let records = try batch.records.map {
                 try V2ClientSyncRecord(sequence: $0.userSyncSequence, sourceEventID: .init($0.sourceEventID), projectionKind: $0.projectionKind, payload: $0.payload)
             }
             return .ready(try .init(generation: batch.generation, records: records, nextSyncToken: .init(batch.nextSyncToken), receipt: .init(batch.syncReceipt), hasMore: batch.hasMore_p, capabilityProfile: batch.capabilityProfile))
         case .resetRequired(let reset):
-            return .resetRequired(try .init(snapshotID: .init(reset.snapshotID), generation: reset.generation, baseSequence: reset.baseUserSyncSequence, expiresAt: Date(timeIntervalSince1970: TimeInterval(reset.expiresAtMs) / 1_000)))
+            guard reset.generation > 0, reset.generation <= UInt64(Int64.max),
+                  reset.baseUserSyncSequence <= UInt64(Int64.max)
+            else { throw V2RealtimeTransportError.unexpectedResponse }
+            let value = try V2ClientResetRequired(snapshotID: .init(reset.snapshotID), generation: reset.generation, baseSequence: reset.baseUserSyncSequence, expiresAt: Date(timeIntervalSince1970: TimeInterval(reset.expiresAtMs) / 1_000))
+            return .resetRequired(value)
         default:
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
@@ -482,9 +520,13 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
     }
 
     public func sendHeartbeat(clientTime: Date = Date()) async throws {
+        let milliseconds = clientTime.timeIntervalSince1970 * 1_000
+        guard milliseconds.isFinite,
+              let wireTime = UInt64(exactly: max(0, milliseconds).rounded(.towardZero))
+        else { throw V2RealtimeTransportError.unexpectedResponse }
         var request = IMV2Envelope()
         request.heartbeat = .init()
-        request.heartbeat.clientTimeMs = UInt64(max(0, clientTime.timeIntervalSince1970 * 1_000))
+        request.heartbeat.clientTimeMs = wireTime
         let response = try await requestEnvelope(request)
         guard case .heartbeatAck? = response.body else {
             try throwServerErrorIfPresent(response)
@@ -493,6 +535,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
     }
 
     public func fetchSnapshotManifest(for reset: V2ClientResetRequired) async throws -> V2ClientSnapshotManifest {
+        guard reset.hasPersistableIntegers else { throw V2RealtimeTransportError.invalidSnapshotManifest }
         var request = IMV2Envelope()
         request.syncSnapshot = .init()
         request.syncSnapshot.snapshotID = reset.snapshotID.rawValue
@@ -502,11 +545,12 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
-        guard manifest.snapshotID == reset.snapshotID.rawValue,
+        guard let currentMilliseconds = Int64(exactly: (now().timeIntervalSince1970 * 1_000).rounded(.towardZero)),
+              manifest.snapshotID == reset.snapshotID.rawValue,
               manifest.generation == reset.generation,
               manifest.baseUserSyncSequence == reset.baseSequence,
               manifest.schemaVersion == V2SnapshotProjectionV3Codec.schemaVersion,
-              manifest.expiresAtMs > Int64(Date().timeIntervalSince1970 * 1_000),
+              manifest.expiresAtMs > currentMilliseconds,
               manifest.rootDigest.count == 64,
               !manifest.nextSyncToken.isEmpty,
               !manifest.syncReceipt.isEmpty,
@@ -536,10 +580,11 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
               page.rootDigest == manifest.rootDigest,
               page.pageIndex == UInt32(index),
               page.itemCount > 0,
+              page.itemCount <= V2SnapshotProjectionV3Codec.maximumPageItems,
               firstKey <= lastKey,
               pageDigestVerifier.matches(payload: page.payload, expectedDigest: page.pageDigest)
         else { throw V2RealtimeTransportError.snapshotDigestMismatch }
-        return .init(index: index, digest: page.pageDigest, firstKey: firstKey, lastKey: lastKey, itemCount: Int(page.itemCount), payload: page.payload)
+        return try .init(index: index, digest: page.pageDigest, firstKey: firstKey, lastKey: lastKey, itemCount: Int(page.itemCount), payload: page.payload)
     }
 
     public func acknowledgeSnapshot(_ manifest: V2ClientSnapshotManifest) async throws {
@@ -573,27 +618,28 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
-        let acceptedMedia = try accepted.mediaIds.map { try V2MediaReference(mediaID: .init($0)) }
-        let acceptedPresentations = try accepted.mediaPresentations.map(v2MediaPresentation(from:))
-        var acceptedMentions = try accepted.mentionedUserIds.map { try V2MentionTarget.user(.init($0)) }
-        if accepted.mentionsEveryone { acceptedMentions.append(.everyone) }
-        let acceptedEntities = try accepted.entities.map(v2MessageEntity(from:))
-        let acceptedReplyTo = try accepted.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(accepted.replyToMessageID))
-        guard acceptedMedia == media,
-              acceptedPresentations.map(\.mediaID) == acceptedMedia.map(\.mediaID),
-              acceptedMentions == mentions,
-              acceptedEntities == entities,
-              acceptedReplyTo == replyTo
+        let acceptedRoomID = try RoomID(accepted.roomID)
+        guard acceptedRoomID == roomID, accepted.roomSequence > 0,
+              Int64(exactly: accepted.roomSequence) != nil,
+              accepted.serverCreatedAtMs >= 0
         else { throw V2RealtimeTransportError.unexpectedResponse }
-        try V2RichMessageContent.validate(text: text, entities: acceptedEntities)
-        return try .init(messageID: .init(accepted.messageID), roomID: .init(accepted.roomID), roomSequence: accepted.roomSequence, media: acceptedMedia, mediaPresentations: acceptedPresentations, mentions: acceptedMentions, entities: acceptedEntities, replyTo: acceptedReplyTo, createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000))
+        return try .init(
+            messageID: .init(accepted.messageID), roomID: acceptedRoomID,
+            roomSequence: accepted.roomSequence,
+            createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000)
+        )
     }
 
     public func setConversationState(command: V2ConversationStateCommand) async throws -> V2ConversationState {
         var request = IMV2Envelope(); request.setConversationState = .init()
         request.setConversationState.operationID = command.operationID.rawValue; request.setConversationState.roomID = command.roomID.rawValue
         request.setConversationState.isPinned = command.isPinned; request.setConversationState.isArchived = command.isArchived
-        request.setConversationState.muteUntilMs = command.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0
+        if let muteUntil = command.muteUntil {
+            guard let milliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)) else {
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
+            request.setConversationState.muteUntilMs = milliseconds
+        }
         let response = try await requestEnvelope(request)
         guard case .conversationStateSet(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         guard value.roomID == command.roomID.rawValue, value.isPinned == command.isPinned, value.isArchived == command.isArchived else { throw V2RealtimeTransportError.unexpectedResponse }
@@ -616,6 +662,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         let response = try await requestEnvelope(request)
         guard case .pinnedMessageChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         guard value.roomID == command.roomID.rawValue, value.messageID == command.messageID.rawValue, value.isPinned == command.isPinned else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max) else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(value.roomID), messageID: .init(value.messageID), isPinned: value.isPinned, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
     }
 
@@ -624,6 +671,10 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         let response = try await requestEnvelope(request)
         guard case .groupAnnouncementChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         guard value.roomID == command.roomID.rawValue, value.body == command.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.revision > 0, value.revision <= UInt64(Int64.max),
+              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
+        else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.revision - 1 == command.expectedRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(value.roomID), body: value.body, revision: value.revision, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
     }
 
@@ -633,6 +684,10 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         guard case .groupRolePermissionsChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let permissions = Set(value.permissions.compactMap { V2GroupPermission(rawValue: $0.permission) })
         guard permissions.count == value.permissions.count, permissions == command.permissions else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.revision > 0, value.revision <= UInt64(Int64.max),
+              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
+        else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.revision - 1 == command.expectedRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(value.roomID), role: command.role, permissions: permissions, revision: value.revision, roomSequence: value.roomSequence)
     }
 
@@ -640,19 +695,29 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         var request = IMV2Envelope(); request.changeGroupMemberRole = .init(); request.changeGroupMemberRole.operationID = command.operationID.rawValue; request.changeGroupMemberRole.roomID = command.roomID.rawValue; request.changeGroupMemberRole.userID = command.targetUserID.rawValue; request.changeGroupMemberRole.role = command.role.rawValue; request.changeGroupMemberRole.expectedMembershipRevision = command.expectedMembershipRevision
         let response = try await requestEnvelope(request)
         guard case .groupMemberRoleChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.userID == command.targetUserID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.membershipRevision > 0, value.membershipRevision <= UInt64(Int64.max),
+              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
+        else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard value.membershipRevision - 1 == command.expectedMembershipRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(value.roomID), targetUserID: .init(value.userID), role: command.role, membershipRevision: value.membershipRevision, roomSequence: value.roomSequence)
     }
 
     public func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
-        var request = IMV2Envelope(); request.forwardMessages = .init(); request.forwardMessages.operationID = command.operationID.rawValue; request.forwardMessages.sourceMessageIds = command.sourceMessageIDs.map(\.rawValue); request.forwardMessages.targetRoomIds = command.targetRoomIDs.map(\.rawValue)
+        var request = IMV2Envelope(); request.forwardMessages = .init(); request.forwardMessages.operationID = command.operationID.rawValue; request.forwardMessages.sources = command.sources.map { source in
+            var wire = IMV2ForwardMessageReference()
+            wire.roomID = source.roomID.rawValue
+            wire.messageID = source.messageID.rawValue
+            wire.revision = source.revision.rawValue
+            return wire
+        }; request.forwardMessages.targetRoomIds = command.targetRoomIDs.map(\.rawValue)
         let response = try await requestEnvelope(request)
         guard case .messagesForwarded(let body)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let expected = Set(command.sourceMessageIDs.flatMap { source in command.targetRoomIDs.map { source.rawValue + "|" + $0.rawValue } })
         let results = try body.results.map { value -> V2ForwardMessageResult in
             let source = try MessageID(value.sourceMessageID), target = try RoomID(value.targetRoomID)
-            if value.errorCode.isEmpty { guard !value.messageID.isEmpty, value.roomSequence > 0 else { throw V2RealtimeTransportError.unexpectedResponse }; return .init(sourceMessageID: source, targetRoomID: target, messageID: try .init(value.messageID), roomSequence: value.roomSequence, errorCode: nil) }
+            if value.errorCode.isEmpty { guard !value.messageID.isEmpty, value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max) else { throw V2RealtimeTransportError.unexpectedResponse }; return try .init(sourceMessageID: source, targetRoomID: target, messageID: try .init(value.messageID), roomSequence: value.roomSequence, errorCode: nil) }
             guard value.messageID.isEmpty, value.roomSequence == 0 else { throw V2RealtimeTransportError.unexpectedResponse }
-            return .init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: value.errorCode)
+            return try .init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: value.errorCode)
         }
         guard Set(results.map { $0.sourceMessageID.rawValue + "|" + $0.targetRoomID.rawValue }) == expected, results.count == expected.count else { throw V2RealtimeTransportError.unexpectedResponse }
         return results
@@ -679,9 +744,35 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
         guard returnedAction == action,
               changed.roomID == roomID.rawValue,
-              changed.targetUserID == targetUserID.rawValue
+              changed.targetUserID == targetUserID.rawValue,
+              changed.membershipRevision > 0, changed.membershipRevision <= UInt64(Int64.max),
+              changed.roomSequence > 0, changed.roomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard changed.membershipRevision - 1 == expectedMembershipRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(changed.roomID), targetUserID: .init(changed.targetUserID), action: returnedAction, membershipRevision: changed.membershipRevision, roomSequence: changed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(changed.serverCreatedAtMs) / 1_000))
+    }
+
+    public func fetchRolePolicyBaseline(roomID: RoomID) async throws -> V2GroupRolePolicyBaseline {
+        guard UUID(uuidString: roomID.rawValue) != nil else { throw V2RealtimeTransportError.unexpectedResponse }
+        var request = IMV2Envelope()
+        request.getGroupRolePolicyBaseline.roomID = roomID.rawValue
+        let response = try await requestEnvelope(request)
+        guard case .groupRolePolicyBaseline(let baseline)? = response.body else {
+            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
+        }
+        do {
+            guard try RoomID(baseline.roomID) == roomID, baseline.policies.count == 2,
+                  Set(baseline.policies.map(\.role)) == Set([V2RoomMembershipRole.admin.rawValue, V2RoomMembershipRole.member.rawValue])
+            else { throw V2RealtimeTransportError.unexpectedResponse }
+            var decoded: [String: Set<V2GroupPermission>] = [:]
+            for policy in baseline.policies {
+                let values = Set(policy.permissions.compactMap { V2GroupPermission(rawValue: $0.permission) })
+                guard values.count == policy.permissions.count else { throw V2RealtimeTransportError.unexpectedResponse }
+                decoded[policy.role] = values
+            }
+            guard let admin = decoded[V2RoomMembershipRole.admin.rawValue], let member = decoded[V2RoomMembershipRole.member.rawValue] else { throw V2RealtimeTransportError.unexpectedResponse }
+            return try .init(roomID: roomID, permissionRevision: baseline.permissionRevision, membershipRevision: baseline.membershipRevision, roomSequence: baseline.roomSequence, adminPermissions: admin, memberPermissions: member)
+        } catch { throw V2RealtimeTransportError.unexpectedResponse }
     }
 
     public func listRoomMembers(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2ClientRoomMembersPage {
@@ -698,7 +789,8 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         guard case .roomMembersPage(let page)? = response.body else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
-        guard page.roomID == roomID.rawValue, page.membershipRevision > 0,
+        guard page.roomID == roomID.rawValue,
+              page.membershipRevision <= UInt64(Int64.max),
               page.members.count <= pageSize,
               page.nextCursor.utf8.count <= V2ClientRoomMembersPageLimits.maximumCursorBytes
         else { throw V2RealtimeTransportError.unexpectedResponse }
@@ -818,21 +910,22 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         guard case .groupEventPage(let page)? = response.body,
               page.roomID == roomID.rawValue,
               page.events.count <= pageSize,
-              page.nextRoomSequence >= afterRoomSequence
+              page.nextRoomSequence >= afterRoomSequence,
+              page.nextRoomSequence <= UInt64(Int64.max)
         else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
         let events: [V2ClientGroupEvent] = try page.events.map {
-            guard $0.roomSequence > afterRoomSequence,
+            guard $0.roomSequence > afterRoomSequence, $0.roomSequence <= page.nextRoomSequence,
                   !$0.projectionKind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   !$0.payload.isEmpty
             else { throw V2RealtimeTransportError.unexpectedResponse }
-            return .init(sourceEventID: try .init($0.sourceEventID), roomSequence: $0.roomSequence, projectionKind: $0.projectionKind, payload: $0.payload)
+            return try .init(sourceEventID: try .init($0.sourceEventID), roomSequence: $0.roomSequence, projectionKind: $0.projectionKind, payload: $0.payload)
         }
         guard zip(events, events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
-              (events.last.map(\.roomSequence) ?? afterRoomSequence) == page.nextRoomSequence,
-              !page.hasMore_p || !events.isEmpty
+              (events.last.map(\.roomSequence) ?? afterRoomSequence) <= page.nextRoomSequence,
+              !page.hasMore_p || page.nextRoomSequence > afterRoomSequence
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(page.roomID), events: events, nextRoomSequence: page.nextRoomSequence, hasMore: page.hasMore_p)
     }
@@ -844,12 +937,13 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         request.groupEventSubscribe.afterRoomSequence = afterRoomSequence
         let response = try await requestEnvelope(request)
         guard case .groupEventSubscribed(let subscribed)? = response.body,
-              subscribed.roomID == roomID.rawValue
+              subscribed.roomID == roomID.rawValue,
+              subscribed.highWatermark <= UInt64(Int64.max)
         else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
-        return .init(roomID: roomID, highWatermark: subscribed.highWatermark)
+        return try .init(roomID: roomID, highWatermark: subscribed.highWatermark)
     }
 
     public func unsubscribeFromGroupEvents(roomID: RoomID) async throws {
@@ -932,8 +1026,10 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             throw V2RealtimeTransportError.unexpectedResponse
         }
         guard withdrawn.roomID == roomID.rawValue, withdrawn.messageID == messageID.rawValue,
-              withdrawn.messageRevision > expectedMessageRevision
+              withdrawn.messageRevision > expectedMessageRevision, withdrawn.messageRevision <= UInt64(Int64.max),
+              withdrawn.roomSequence > 0, withdrawn.roomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard withdrawn.messageRevision - 1 == expectedMessageRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(withdrawn.roomID), messageID: .init(withdrawn.messageID), messageRevision: withdrawn.messageRevision, roomSequence: withdrawn.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(withdrawn.serverCreatedAtMs) / 1_000))
     }
 
@@ -950,14 +1046,16 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             throw V2RealtimeTransportError.unexpectedResponse
         }
         guard redacted.roomID == roomID.rawValue, redacted.messageID == messageID.rawValue,
-              redacted.messageRevision > 1, redacted.roomSequence > 0
+              redacted.messageRevision > 1, redacted.messageRevision <= UInt64(Int64.max),
+              redacted.roomSequence > 0, redacted.roomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(redacted.roomID), messageID: .init(redacted.messageID), messageRevision: redacted.messageRevision, roomSequence: redacted.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(redacted.serverCreatedAtMs) / 1_000))
     }
 
     public func muteMember(roomID: RoomID, operationID: ModerationOperationID, targetUserID: UserID, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2ClientMemberMute {
-        let muteUntilMilliseconds = Int64(muteUntil.timeIntervalSince1970 * 1_000)
-        guard muteUntilMilliseconds > 0 else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard let muteUntilMilliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)),
+              muteUntilMilliseconds > 0
+        else { throw V2RealtimeTransportError.unexpectedResponse }
         var request = IMV2Envelope(); request.muteMember = .init()
         request.muteMember.roomID = roomID.rawValue
         request.muteMember.operationID = operationID.rawValue
@@ -971,6 +1069,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
         guard muted.roomID == roomID.rawValue, muted.targetUserID == targetUserID.rawValue,
               muted.muteUntilMs == muteUntilMilliseconds, muted.roomSequence > 0,
+              muted.roomSequence <= UInt64(Int64.max),
               muted.serverCreatedAtMs >= 0
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(muted.roomID), targetUserID: .init(muted.targetUserID), muteUntil: Date(timeIntervalSince1970: TimeInterval(muted.muteUntilMs) / 1_000), roomSequence: muted.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(muted.serverCreatedAtMs) / 1_000))
@@ -989,6 +1088,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
         guard removed.roomID == roomID.rawValue, removed.targetUserID == targetUserID.rawValue,
               removed.membershipRevision > 0, removed.roomSequence > 0,
+              removed.membershipRevision <= UInt64(Int64.max), removed.roomSequence <= UInt64(Int64.max),
               removed.serverCreatedAtMs >= 0
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(removed.roomID), targetUserID: .init(removed.targetUserID), membershipRevision: removed.membershipRevision, roomSequence: removed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(removed.serverCreatedAtMs) / 1_000))
@@ -1010,8 +1110,10 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         }
         guard edited.roomID == roomID.rawValue, edited.messageID == messageID.rawValue,
               edited.text == text, edited.messageRevision > expectedMessageRevision,
-              edited.roomSequence > 0
+              edited.messageRevision <= UInt64(Int64.max),
+              edited.roomSequence > 0, edited.roomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard edited.messageRevision - 1 == expectedMessageRevision else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(edited.roomID), messageID: .init(edited.messageID), text: edited.text, messageRevision: edited.messageRevision, roomSequence: edited.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(edited.serverCreatedAtMs) / 1_000))
     }
 
@@ -1025,7 +1127,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
         guard recorded.roomID == roomID.rawValue, recorded.readThroughRoomSequence >= readThroughRoomSequence,
-              recorded.readThroughRoomSequence > 0
+              recorded.readThroughRoomSequence > 0, recorded.readThroughRoomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(recorded.roomID), userID: .init(recorded.userID), readThroughRoomSequence: recorded.readThroughRoomSequence, recordedAt: Date(timeIntervalSince1970: TimeInterval(recorded.recordedAtMs) / 1_000))
     }
@@ -1145,7 +1247,8 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         let returnedAction: V2MessageReactionAction
         switch changed.action { case .add: returnedAction = .add; case .remove: returnedAction = .remove; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
         guard changed.roomID == roomID.rawValue, changed.messageID == messageID.rawValue,
-              changed.reaction == reaction, returnedAction == action, changed.roomSequence > 0
+              changed.reaction == reaction, returnedAction == action,
+              changed.roomSequence > 0, changed.roomSequence <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(changed.roomID), messageID: .init(changed.messageID), actorUserID: .init(changed.actorUserID), reaction: changed.reaction, action: returnedAction, roomSequence: changed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(changed.serverCreatedAtMs) / 1_000))
     }
@@ -1159,12 +1262,15 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientMessageTran
         outbound.protocolVersion = UInt32(protocolVersion)
         let response = try await wire.request(try V2ProtobufFrameCodec.encode(outbound, frameVersion: protocolVersion))
         let decoded = try V2ProtobufFrameCodec.decode(response)
-        guard decoded.requestID == requestID else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard decoded.requestID == requestID, decoded.protocolVersion == UInt32(protocolVersion), response.version == protocolVersion else { throw V2RealtimeTransportError.unexpectedResponse }
         return decoded
     }
 
     private func throwServerErrorIfPresent(_ envelope: IMV2Envelope) throws {
         if case .error(let error)? = envelope.body {
+            guard error.code != "REVISION_CONFLICT" || error.currentRevision <= UInt64(Int64.max) else {
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
             throw V2RealtimeTransportError.server(
                 code: error.code,
                 retryable: error.retryable,

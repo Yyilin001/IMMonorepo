@@ -49,6 +49,8 @@ public protocol V2MediaDownloadSessionStore: Sendable {
         now: Date,
         leaseDuration: TimeInterval
     ) async throws -> V2ClaimedMediaDownload
+    /// Revalidate authorization and consume exactly this unexpired lease.
+    /// Missing, expired, replaced or unauthorized claims must throw.
     func completeDownload(_ claim: V2ClaimedMediaDownload, now: Date) async throws
     func releaseDownload(_ claim: V2ClaimedMediaDownload) async throws
 }
@@ -68,7 +70,7 @@ public struct V2MediaProviderSessionService: Sendable {
         leaseDuration: TimeInterval = 15,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
-        guard leaseDuration > 0 else { throw V2MediaProviderSessionError.invalidLeaseDuration }
+        guard leaseDuration.isFinite, leaseDuration > 0 else { throw V2MediaProviderSessionError.invalidLeaseDuration }
         self.store = store
         self.provider = provider
         self.leaseDuration = leaseDuration
@@ -80,7 +82,9 @@ public struct V2MediaProviderSessionService: Sendable {
         deviceID: DeviceID,
         downloadSessionID: MediaDownloadSessionID
     ) async throws -> V2MediaProviderObjectTarget {
+        try Task.checkCancellation()
         let instant = now()
+        guard v2PostgresTimestampCanEncode(instant) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let claim = try await store.claimDownload(
             requesterUserID: actorUserID,
             deviceID: deviceID,
@@ -89,9 +93,15 @@ public struct V2MediaProviderSessionService: Sendable {
             leaseDuration: leaseDuration
         )
         do {
-            guard claim.expiresAt > instant else { throw V2MediaProviderSessionError.expiredSession }
+            try Task.checkCancellation()
+            let claimedAt = now()
+            guard v2PostgresTimestampCanEncode(claimedAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard claim.expiresAt > claimedAt else { throw V2MediaProviderSessionError.expiredSession }
             let target = try await provider.issueDownloadTarget(mediaID: claim.mediaID, expiresAt: claim.expiresAt)
-            guard target.expiresAt > instant,
+            try Task.checkCancellation()
+            let completionTime = now()
+            guard v2PostgresTimestampCanEncode(completionTime) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard target.expiresAt > completionTime,
                   target.expiresAt <= claim.expiresAt,
                   target.url.scheme?.lowercased() == "https",
                   target.url.host != nil,
@@ -105,7 +115,11 @@ public struct V2MediaProviderSessionService: Sendable {
             else {
                 throw V2MediaProviderSessionError.invalidProviderTarget
             }
-            try await store.completeDownload(claim, now: now())
+            try await store.completeDownload(claim, now: completionTime)
+            try Task.checkCancellation()
+            let returnedAt = now()
+            guard v2PostgresTimestampCanEncode(returnedAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard target.expiresAt > returnedAt else { throw V2MediaProviderSessionError.expiredSession }
             return target
         } catch {
             try? await store.releaseDownload(claim)

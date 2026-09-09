@@ -89,6 +89,9 @@ public struct V2PostgresUserShardRouter: V2UserShardRouter {
     /// is authoritative; changing a process environment cannot silently
     /// replace a controlled routing decision.
     public func bootstrap(defaultRoute: V2UserShardRoute, now: Date = Date()) async throws {
+        guard v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
             INSERT INTO im_v2.user_shard_router_configuration
@@ -302,6 +305,9 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                 else { throw V2UserShardRouteControlError.operationConflict }
                 return .init(route: try .init(bucket: replay.writeBucket, observedRouterEpoch: replay.resultingRouterEpoch, readFallbackBucket: replay.readFallbackBucket), wasIdempotent: true)
             }
+            guard let retentionUntil = v2PostgresFutureTimestamp(now: now, interval: retentionWindow),
+                  command.expectedRouterEpoch < Int64.max
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
             guard let configuration = try await sql.raw("""
                 SELECT router_epoch FROM im_v2.user_shard_router_configuration
                 WHERE configuration_key = TRUE FOR UPDATE
@@ -336,7 +342,6 @@ public struct V2PostgresUserShardRouteControl: Sendable {
             }
             let cutoverPhase = try V2UserShardMigrationStateMachine.transition(from: migration.phase, by: .cutOver)
             let migrationPhase = try V2UserShardMigrationStateMachine.transition(from: cutoverPhase, by: .beginRetention)
-            let retentionUntil = now.addingTimeInterval(retentionWindow)
             let resultingEpoch = configuration.routerEpoch + 1
             try await sql.raw("""
                 INSERT INTO im_v2.user_shard_route_overrides
@@ -379,7 +384,7 @@ public struct V2PostgresUserShardRouteControl: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             guard let migration = try await sql.raw("""
                 SELECT migration_id, source_bucket, target_bucket, source_router_epoch, phase,
-                       cutover_operation_id, retention_until
+                       cutover_operation_id, retention_until, retention_claim_token
                 FROM im_v2.user_shard_migrations
                 WHERE user_id = \(bind: try v2UUID(command.userID)) FOR UPDATE
                 """).first(decoding: V2UserShardCutoverMigrationRow.self)
@@ -395,8 +400,16 @@ public struct V2PostgresUserShardRouteControl: Sendable {
                 else { throw V2UserShardRouteControlError.operationConflict }
                 return .init(route: try .init(bucket: replay.writeBucket, observedRouterEpoch: replay.resultingRouterEpoch, readFallbackBucket: replay.readFallbackBucket), wasIdempotent: true)
             }
-            guard migration.phase == .retention,
-                  let retentionUntil = migration.retentionUntil, retentionUntil > now
+            guard v2PostgresTimestampCanEncode(now), command.expectedRouterEpoch < Int64.max else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let currentTime = try V2PostgresTimestamp(date: now)
+            // Cleanup runs outside this transaction after its durable claim.
+            // A backwards clock cannot make a source already being cleaned
+            // safe for rollback; the shared row lock orders these decisions.
+            guard migration.phase == .retention, migration.retentionClaimToken == nil,
+                  let retentionUntil = migration.retentionUntil,
+                  retentionUntil.microseconds > currentTime.microseconds
             else { throw V2UserShardRouteControlError.migrationNotVerified }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: command.userID.rawValue), 0))").run()
             do {
@@ -521,11 +534,13 @@ private struct V2UserShardCutoverMigrationRow: Decodable {
     let sourceRouterEpoch: Int64
     let phase: V2UserShardMigrationPhase
     let cutoverOperationID: UUID?
-    let retentionUntil: Date?
+    let retentionUntil: V2PostgresTimestamp?
+    let retentionClaimToken: UUID?
 
     enum CodingKeys: String, CodingKey {
         case migrationID = "migration_id", sourceBucket = "source_bucket", targetBucket = "target_bucket"
         case sourceRouterEpoch = "source_router_epoch", phase, cutoverOperationID = "cutover_operation_id", retentionUntil = "retention_until"
+        case retentionClaimToken = "retention_claim_token"
     }
 }
 

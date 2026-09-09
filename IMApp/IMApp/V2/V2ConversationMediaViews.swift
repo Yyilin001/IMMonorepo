@@ -117,6 +117,7 @@ private struct V2LocalMediaImagePreview: View {
     let accessibilityLabel: String
     let accessibilityValue: String
     let accessibilityIdentifier: String
+    @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
     @State private var image: UIImage?
 
     var body: some View {
@@ -136,10 +137,12 @@ private struct V2LocalMediaImagePreview: View {
         .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier(accessibilityIdentifier)
         .task(id: fileURL) {
-            image = await V2LocalMediaThumbnailCache.shared.thumbnail(
+            let result = await thumbnailCache?.thumbnail(
                 fileURL: fileURL,
                 maximumPixelSize: 960
-            )?.image
+            )
+            guard !Task.isCancelled else { return }
+            image = result?.image
         }
     }
 }
@@ -148,8 +151,39 @@ struct V2SendableImage: @unchecked Sendable {
     let image: UIImage
 }
 
+private struct V2MediaThumbnailCacheKey: EnvironmentKey {
+    static let defaultValue: V2LocalMediaThumbnailCache? = nil
+}
+
+extension EnvironmentValues {
+    var v2MediaThumbnailCache: V2LocalMediaThumbnailCache? {
+        get { self[V2MediaThumbnailCacheKey.self] }
+        set { self[V2MediaThumbnailCacheKey.self] = newValue }
+    }
+}
+
 actor V2LocalMediaThumbnailCache {
-    static let shared = V2LocalMediaThumbnailCache()
+    typealias Decoder = @Sendable (URL, Int) async -> V2SendableImage?
+    private let directory: URL
+    private let decode: Decoder
+    private var isClosed = false
+
+    init(directory: URL, decode: @escaping Decoder = V2LocalMediaThumbnailCache.decodeImage) {
+        self.directory = directory.standardizedFileURL
+        self.decode = decode
+    }
+
+    /// Closing is terminal for this account incarnation. Await decoders even
+    /// when ImageIO cannot interrupt synchronous work after cancellation.
+    func close() async {
+        isClosed = true
+        images.removeAll()
+        recency.removeAll()
+        let tasks = Array(inFlight.values)
+        for task in tasks { task.cancel() }
+        for task in tasks { _ = await task.value }
+        inFlight.removeAll()
+    }
 
     private struct Key: Hashable, Sendable {
         let path: String
@@ -162,27 +196,28 @@ actor V2LocalMediaThumbnailCache {
     private var inFlight: [Key: Task<V2SendableImage?, Never>] = [:]
 
     func thumbnail(fileURL: URL, maximumPixelSize: Int) async -> V2SendableImage? {
+        let fileURL = fileURL.standardizedFileURL
+        guard !isClosed, !Task.isCancelled, maximumPixelSize > 0,
+              fileURL.isFileURL,
+              fileURL.pathComponents.starts(with: directory.pathComponents),
+              fileURL.pathComponents.count > directory.pathComponents.count else { return nil }
         let key = Key(path: fileURL.path, maximumPixelSize: maximumPixelSize)
         if let cached = images[key] {
             touch(key)
             return cached
         }
-        if let existing = inFlight[key] { return await existing.value }
-        let task = Task.detached(priority: .utility) { () -> V2SendableImage? in
-            let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-            guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions) else { return nil }
-            let thumbnailOptions = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
-            ] as CFDictionary
-            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
-            return V2SendableImage(image: UIImage(cgImage: thumbnail))
+        if let existing = inFlight[key] {
+            let result = await existing.value
+            return isClosed || Task.isCancelled ? nil : result
         }
+        // The cache owns this shared decode, which must not inherit a view's
+        // actor executor or cancellation. close() cancels and drains it.
+        let decode = self.decode
+        let task = Task.detached(priority: .utility) { await decode(fileURL, maximumPixelSize) }
         inFlight[key] = task
         let result = await task.value
         inFlight.removeValue(forKey: key)
+        guard !isClosed else { return nil }
         if let result {
             images[key] = result
             touch(key)
@@ -191,7 +226,20 @@ actor V2LocalMediaThumbnailCache {
                 images.removeValue(forKey: oldest)
             }
         }
-        return result
+        return Task.isCancelled ? nil : result
+    }
+
+    nonisolated private static func decodeImage(fileURL: URL, maximumPixelSize: Int) async -> V2SendableImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, sourceOptions) else { return nil }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
+        ] as CFDictionary
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+        return V2SendableImage(image: UIImage(cgImage: thumbnail))
     }
 
     private func touch(_ key: Key) {

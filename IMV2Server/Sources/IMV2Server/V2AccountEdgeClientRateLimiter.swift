@@ -68,7 +68,9 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
             throw V2AccountEdgeClientRateLimitError.unavailable
         }
         let current = now()
-        let expiredBefore = current.addingTimeInterval(-policy.window)
+        guard let expiredBefore = v2PostgresPastTimestamp(now: current, interval: policy.window) else {
+            throw V2AccountEdgeClientRateLimitError.unavailable
+        }
         let maximumBeforeCharge = policy.maximumRequests - cost
         let saturatedCount = policy.maximumRequests + 1
         // The unique-key conflict row lock is the serialization boundary. A
@@ -96,9 +98,11 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         else { throw V2AccountEdgeClientRateLimitError.unavailable }
 
         guard row.requestCount <= policy.maximumRequests else {
-            let elapsed = max(0, current.timeIntervalSince(row.windowStartedAt))
+            guard let retryAfter = v2RateLimitRetryAfterSeconds(
+                windowStartedAt: row.windowStartedAt, now: current, window: policy.window
+            ) else { throw V2AccountEdgeClientRateLimitError.unavailable }
             return .rateLimited(
-                retryAfterSeconds: max(1, Int(ceil(policy.window - elapsed)))
+                retryAfterSeconds: retryAfter
             )
         }
         return .allowed
@@ -111,7 +115,9 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         guard limit > 0, let sql = database as? any SQLDatabase else {
             throw V2AccountEdgeClientRateLimitError.unavailable
         }
-        let expiredBefore = now().addingTimeInterval(-policy.window)
+        guard let expiredBefore = v2PostgresPastTimestamp(now: now(), interval: policy.window) else {
+            throw V2AccountEdgeClientRateLimitError.unavailable
+        }
         let row = try await sql.raw("""
             WITH expired AS (
                 SELECT client_key
@@ -133,12 +139,12 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
 }
 
 private struct RateLimitRow: Decodable {
-    let windowStartedAt: Date
     let requestCount: Int
+    let windowStartedAt: V2PostgresTimestamp
 
     enum CodingKeys: String, CodingKey {
-        case windowStartedAt = "window_started_at"
         case requestCount = "request_count"
+        case windowStartedAt = "window_started_at"
     }
 }
 

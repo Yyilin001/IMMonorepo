@@ -53,6 +53,31 @@ struct V2VaporMediaEdgeRoutesTests {
         }
     }
 
+    @Test("message location query is validated before owner resolution", arguments: ["valid", "room-only", "message-only", "malformed"])
+    func validatesMessageQuery(scenario: String) async throws {
+        try await withApp { app in
+            let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID())
+            let resolver = ScopedRouteResolver()
+            V2VaporMediaEdgeRoutes(
+                authenticator: RouteAuthenticator(result: .success(try .init("user"))),
+                handler: .init(resolver: resolver)
+            ).register(on: app)
+            let query: String
+            switch scenario {
+            case "room-only": query = "room_id=\(room.rawValue)"
+            case "message-only": query = "message_id=\(message.rawValue)"
+            case "malformed": query = "room_id=invalid&message_id=\(message.rawValue)"
+            default: query = "room_id=\(room.rawValue.lowercased())&message_id=\(message.rawValue.lowercased())"
+            }
+            try await app.testing().test(.GET, "v2/media/media?\(query)", headers: [
+                "Authorization": "Bearer access-token", "X-IM-Device-ID": "device",
+            ]) { response async in
+                #expect(response.status == (scenario == "valid" ? .ok : .badRequest))
+            }
+            #expect(await resolver.locations == (scenario == "valid" ? [.init(roomID: room, messageID: message)] : []))
+        }
+    }
+
     @Test("missing or invalid authentication is rejected before the media handler")
     func routeRejectsUnauthenticatedRequest() async throws {
         try await withApp { app in
@@ -204,4 +229,13 @@ private actor UnusedSessionStore: V2MediaDownloadSessionStore {
 
 private struct UnusedProvider: V2MediaObjectProvider {
     func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2MediaProviderObjectTarget { fatalError("unused") }
+}
+
+private actor ScopedRouteResolver: V2MediaDownloadTargetResolving {
+    private(set) var locations: [V2MediaMessageLocation] = []
+    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2MediaProviderObjectTarget {
+        guard let message else { throw V2MediaEdgeHTTPHandlerError.invalidMessageLocation }
+        locations.append(message)
+        return .init(url: URL(string: "https://provider.invalid/object")!, expiresAt: .now.addingTimeInterval(60))
+    }
 }

@@ -5,6 +5,58 @@ import Testing
 
 @Suite("V2 fan-out pipeline")
 struct V2FanoutPipelineTests {
+    @Test("Fanout stage and failure metrics use elapsed time across wall-clock corrections",
+          arguments: ["pipeline", "relay", "delivery", "pipelineFailure", "relayFailure", "deliveryFailure"],
+          [Double(-3_600), 3_600, .nan])
+    func telemetryElapsedClock(path: String, wallShift: Double) async throws {
+        let clock = V2TelemetryTestClock()
+        let fixedNow = clock.now()
+        let fails = path.hasSuffix("Failure")
+        let trigger = try V2FanoutPlanTrigger(sourceEventID: .init(uuid: UUID()), planID: .init(uuid: UUID()))
+        let outbox = PipelineOutboxStore(trigger: trigger, beforeClaim: {
+            clock.advance(by: .milliseconds(25), wallShift: wallShift)
+            if fails { throw CancellationError() }
+        })
+        let delivery = PipelineDeliveryStore(lease: try makeConcurrentDeliveryLease(userSuffix: "603"), beforeClaim: {
+            clock.advance(by: .milliseconds(40), wallShift: wallShift)
+            if fails { throw CancellationError() }
+        })
+        let telemetry = V2InMemoryTelemetrySink()
+        let pipeline = V2FanoutPipeline(
+            relay: .init(store: outbox,
+                publisher: V2LocalFanoutPlanPublisher(planner: .init(store: PipelinePlanStore(), pageSize: 64, now: { fixedNow })),
+                now: { fixedNow }),
+            deliveryWorker: .init(store: delivery, now: { fixedNow }), telemetry: telemetry,
+            monotonicNow: { clock.monotonicNow() })
+        do {
+            if path.hasPrefix("pipeline") { _ = try await pipeline.runOnce(limit: 1) }
+            else if path.hasPrefix("relay") { _ = try await pipeline.runRelayAndPlanOnce(limit: 1, concurrency: 1) }
+            else { _ = try await pipeline.runDeliveryOnce(claimLimit: 1, concurrency: 1) }
+            #expect(!fails)
+        } catch is CancellationError {
+            #expect(fails)
+        }
+        let events = await telemetry.events()
+        #expect(events.count == 1)
+        let event = try #require(events.first)
+        if fails {
+            guard case .fanoutFailure(_, let stage, let elapsed) = event else {
+                Issue.record("Missing fanout failure metric")
+                return
+            }
+            #expect(elapsed == (path == "deliveryFailure" ? 40 : 25))
+            #expect(stage == (path == "deliveryFailure" ? .delivery : path == "relayFailure" ? .relay : .pipeline))
+        } else {
+            guard case .fanoutProgress(_, _, _, _, _, _, _, _, _, _, _, let relayTime, let deliveryTime, let total) = event else {
+                Issue.record("Missing fanout progress metric")
+                return
+            }
+            #expect(relayTime == (path == "delivery" ? 0 : 25))
+            #expect(deliveryTime == (path == "relay" ? 0 : 40))
+            #expect(total == (path == "pipeline" ? 65 : path == "relay" ? 25 : 40))
+        }
+    }
+
     @Test("one bounded run progresses durable outbox publication and delivery")
     func runOnceProgressesBothStages() async throws {
         let trigger = try V2FanoutPlanTrigger(
@@ -23,6 +75,7 @@ struct V2FanoutPipelineTests {
             claimToken: UUID(uuidString: "00000000-0000-0000-0000-000000000605")!
         ))
         let telemetry = V2InMemoryTelemetrySink()
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: outbox,
@@ -31,7 +84,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
             telemetry: telemetry,
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(limit: 8)
@@ -64,6 +117,7 @@ struct V2FanoutPipelineTests {
             makeConcurrentDeliveryLease(userSuffix: "617"),
         ])
         let telemetry = V2InMemoryTelemetrySink()
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: outbox,
@@ -72,7 +126,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
             telemetry: telemetry,
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(limit: 1, plannerConcurrency: 2, deliveryConcurrency: 3)
@@ -101,6 +155,7 @@ struct V2FanoutPipelineTests {
             makeConcurrentDeliveryLease(userSuffix: "682"),
             makeConcurrentDeliveryLease(userSuffix: "683"),
         ])
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: ConcurrentPipelineOutboxStore(triggers: []),
@@ -109,7 +164,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: store, now: { now }),
             telemetry: V2DiscardingTelemetrySink(),
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(limit: 3, plannerConcurrency: 1, deliveryConcurrency: 3)
@@ -126,6 +181,7 @@ struct V2FanoutPipelineTests {
         )
         let outbox = PipelineOutboxStore(trigger: trigger)
         let deliveryStore = PipelineDeliveryStore(lease: try makeConcurrentDeliveryLease(userSuffix: "620"))
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: outbox,
@@ -134,7 +190,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
             telemetry: V2DiscardingTelemetrySink(),
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(
@@ -159,6 +215,7 @@ struct V2FanoutPipelineTests {
         )
         let outbox = PipelineOutboxStore(trigger: trigger)
         let deliveryStore = DelayingPipelineDeliveryStore(lease: try makeConcurrentDeliveryLease(userSuffix: "625"))
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: outbox,
@@ -167,7 +224,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: deliveryStore, now: { now }),
             telemetry: V2DiscardingTelemetrySink(),
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let deliveryTask = Task {
@@ -185,6 +242,7 @@ struct V2FanoutPipelineTests {
     func idleRunIsTelemetrySilent() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_200)
         let telemetry = V2InMemoryTelemetrySink()
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: ConcurrentPipelineOutboxStore(triggers: []),
@@ -193,7 +251,7 @@ struct V2FanoutPipelineTests {
             ),
             deliveryWorker: .init(store: ConcurrentPipelineDeliveryStore(leases: []), now: { now }),
             telemetry: telemetry,
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(limit: 8)
@@ -210,6 +268,7 @@ struct V2FanoutPipelineTests {
             "users-a": makeBucketedDeliveryLease(bucket: "users-a", userSuffix: "621"),
             "users-b": makeBucketedDeliveryLease(bucket: "users-b", userSuffix: "622"),
         ])
+        let metricInstant = ContinuousClock.now
         let pipeline = V2FanoutPipeline(
             relay: .init(
                 store: ConcurrentPipelineOutboxStore(triggers: []),
@@ -221,7 +280,7 @@ struct V2FanoutPipelineTests {
                 .init(store: store, bucket: "users-b", now: { now }),
             ],
             telemetry: V2DiscardingTelemetrySink(),
-            now: { now }
+            monotonicNow: { metricInstant }
         )
 
         let report = try await pipeline.runOnce(limit: 1, plannerConcurrency: 1, deliveryConcurrency: 1)
@@ -233,13 +292,18 @@ struct V2FanoutPipelineTests {
 
 private actor PipelineOutboxStore: V2RoomOutboxStore {
     private let trigger: V2FanoutPlanTrigger
+    private let beforeClaim: (@Sendable () throws -> Void)?
     private var claimed = false
     private var published = false
     private var limits: [Int] = []
 
-    init(trigger: V2FanoutPlanTrigger) { self.trigger = trigger }
+    init(trigger: V2FanoutPlanTrigger, beforeClaim: (@Sendable () throws -> Void)? = nil) {
+        self.trigger = trigger
+        self.beforeClaim = beforeClaim
+    }
 
-    func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2OutboxLease] {
+    func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) throws -> [V2OutboxLease] {
+        try beforeClaim?()
         limits.append(limit)
         guard !claimed else { return [] }
         claimed = true
@@ -266,13 +330,18 @@ private actor PipelinePlanStore: V2FanoutPlanStore {
 
 private actor PipelineDeliveryStore: V2FanoutDeliveryStore {
     private let lease: V2FanoutDeliveryLease
+    private let beforeClaim: (@Sendable () throws -> Void)?
     private var claimed = false
     private var committed = false
     private var limits: [Int] = []
 
-    init(lease: V2FanoutDeliveryLease) { self.lease = lease }
+    init(lease: V2FanoutDeliveryLease, beforeClaim: (@Sendable () throws -> Void)? = nil) {
+        self.lease = lease
+        self.beforeClaim = beforeClaim
+    }
 
-    func claimPending(bucket _: String?, lane _: V2FanoutDeliveryClaimLane, now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2FanoutDeliveryLease] {
+    func claimPending(bucket _: String?, lane _: V2FanoutDeliveryClaimLane, now _: Date, leaseDuration _: TimeInterval, limit: Int) throws -> [V2FanoutDeliveryLease] {
+        try beforeClaim?()
         limits.append(limit)
         guard !claimed else { return [] }
         claimed = true

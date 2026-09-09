@@ -49,11 +49,15 @@ public struct V2VaporAccountDisableOperatorRoutes: Sendable {
             do { result = try await service.disable(command) }
             catch V2AccountDisableError.operationConflict { throw Abort(.conflict) }
             catch V2AccountDisableError.invalidUserID { throw Abort(.badRequest) }
+            catch V2AccountDisableError.unavailable { return unavailableResponse() }
             catch { throw Abort(.serviceUnavailable) }
+            guard let disabledAtMilliseconds = milliseconds(disabledAt: result) else {
+                return unavailableResponse()
+            }
             return try noStoreJSON(.init(
                 operationID: command.operationID,
                 outcome: outcomeName(result),
-                disabledAtMilliseconds: milliseconds(disabledAt: result)
+                disabledAtMilliseconds: disabledAtMilliseconds
             ))
         }
     }
@@ -66,12 +70,16 @@ public struct V2VaporAccountDisableOperatorRoutes: Sendable {
         }
     }
 
-    private func milliseconds(disabledAt result: V2AccountDisableOutcome) -> Int64 {
+    private func milliseconds(disabledAt result: V2AccountDisableOutcome) -> Int64? {
         let date: Date
         switch result {
         case .disabled(let value), .idempotent(let value), .alreadyDisabled(let value): date = value
         }
-        return Int64((date.timeIntervalSince1970 * 1_000).rounded(.down))
+        return Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.down))
+    }
+
+    private func unavailableResponse() -> Response {
+        .init(status: .serviceUnavailable, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
     }
 
     private func noStoreJSON(_ response: V2AccountDisableHTTPResponse) throws -> Response {

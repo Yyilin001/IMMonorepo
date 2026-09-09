@@ -2,7 +2,7 @@ import IMV2Server
 import Vapor
 
 /// Runs after `V2AccountEdgeAuthenticationMiddleware`. A route cannot reach
-/// bcrypt, token parsing, or database business logic unless Caddy both proves
+/// password derivation, token parsing, or database business logic unless Caddy both proves
 /// itself and supplies one syntactically valid client address.
 public struct V2AccountEdgeClientRateLimitMiddleware: AsyncMiddleware, Sendable {
     private let limiter: any V2AccountEdgeClientRateLimiting

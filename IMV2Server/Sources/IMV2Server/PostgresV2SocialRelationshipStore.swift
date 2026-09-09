@@ -22,11 +22,14 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             let actorID = try socialUUID(command.actorUserID)
             let targetID = try socialUUID(command.targetUserID)
             let operationID = try socialUUID(command.operationID)
+            try await lockOperation(actor: actorID, operation: operationID, kind: "relationship", sql: sql)
             if let existing = try await sql.raw("SELECT target_user_id, action, resulting_state, updated_at FROM im_v2.user_relationship_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: RelationshipOperationRow.self) {
                 guard existing.targetUserID == targetID, existing.action == command.action.rawValue else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(existing.updatedAt) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
                 return .idempotent(try existing.change(actor: command.actorUserID, target: command.targetUserID))
             }
 
+            guard v2PostgresTimestampCanEncode(now) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let pair = socialPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             guard try await socialUserIsActive(actorID, sql: sql) else {
@@ -62,7 +65,8 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
                 try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.none, nil)
             }
-            try await sql.raw("INSERT INTO im_v2.user_relationship_operations (actor_user_id, operation_id, target_user_id, action, resulting_state, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: result.state.rawValue), \(bind: now))").run()
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_relationship_operations (actor_user_id, operation_id, target_user_id, action, resulting_state, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: result.state.rawValue), \(bind: now)) RETURNING target_user_id, action, resulting_state, updated_at").first(decoding: RelationshipOperationRow.self) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
+            let updatedAtMilliseconds = try v2GatewayMilliseconds(persisted.updatedAt)
             try await bumpDirectPairPolicyRevision(pair: pair, sql: sql)
             let sequences = try await reserveSyncSequences(
                 counts: [actorID: 1, targetID: 1], sql: sql
@@ -70,9 +74,9 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             guard let actorSequence = sequences[actorID]?.firstSequence,
                   let targetSequence = sequences[targetID]?.firstSequence
             else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
-            try await appendRelationshipProjection(userID: actorID, sequence: actorSequence, targetID: targetID, requestedBy: result.requestedBy, state: result.state, sourceEventID: operationID, now: now, sql: sql)
-            try await appendRelationshipProjection(userID: targetID, sequence: targetSequence, targetID: actorID, requestedBy: result.requestedBy, state: result.state, sourceEventID: operationID, now: now, sql: sql)
-            return .changed(.init(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, resultingState: result.state, updatedAt: now))
+            try await appendRelationshipProjection(userID: actorID, sequence: actorSequence, targetID: targetID, requestedBy: result.requestedBy, state: result.state, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
+            try await appendRelationshipProjection(userID: targetID, sequence: targetSequence, targetID: actorID, requestedBy: result.requestedBy, state: result.state, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
+            return .changed(try persisted.change(actor: command.actorUserID, target: command.targetUserID))
         }
         switch outcome {
         case .changed, .idempotent:
@@ -89,11 +93,14 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             let actorID = try socialUUID(command.actorUserID)
             let targetID = try socialUUID(command.targetUserID)
             let operationID = try socialUUID(command.operationID)
+            try await lockOperation(actor: actorID, operation: operationID, kind: "block", sql: sql)
             if let existing = try await sql.raw("SELECT target_user_id, action, is_blocked, updated_at FROM im_v2.user_block_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: BlockOperationRow.self) {
                 guard existing.targetUserID == targetID, existing.action == command.action.rawValue else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(existing.updatedAt) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
                 return .idempotent(try existing.change(actor: command.actorUserID, target: command.targetUserID))
             }
 
+            guard v2PostgresTimestampCanEncode(now) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let pair = socialPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             guard try await socialUserIsActive(actorID, sql: sql) else {
@@ -107,7 +114,8 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
                 try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id = \(bind: actorID) AND blocked_user_id = \(bind: targetID)").run()
             }
             let isBlocked = command.action == .block
-            try await sql.raw("INSERT INTO im_v2.user_block_operations (actor_user_id, operation_id, target_user_id, action, is_blocked, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: isBlocked), \(bind: now))").run()
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_block_operations (actor_user_id, operation_id, target_user_id, action, is_blocked, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: command.action.rawValue), \(bind: isBlocked), \(bind: now)) RETURNING target_user_id, action, is_blocked, updated_at").first(decoding: BlockOperationRow.self) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
+            let updatedAtMilliseconds = try v2GatewayMilliseconds(persisted.updatedAt)
             try await bumpDirectPairPolicyRevision(pair: pair, sql: sql)
             let sequences = try await reserveSyncSequences(
                 counts: relationshipWasRemoved
@@ -118,17 +126,17 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             guard let actorSequence = sequences[actorID]?.firstSequence else {
                 throw V2SocialRelationshipStoreError.corruptPersistenceState
             }
-            try await appendBlockProjection(userID: actorID, sequence: actorSequence, targetID: targetID, isBlocked: isBlocked, sourceEventID: operationID, now: now, sql: sql)
+            try await appendBlockProjection(userID: actorID, sequence: actorSequence, targetID: targetID, isBlocked: isBlocked, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
             if relationshipWasRemoved {
                 // The target observes only an ordinary relation removal; it
                 // cannot distinguish it from a user-initiated unfriend.
                 guard let targetSequence = sequences[targetID]?.firstSequence else {
                     throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
-                try await appendRelationshipProjection(userID: actorID, sequence: actorSequence + 1, targetID: targetID, requestedBy: nil, state: .none, sourceEventID: operationID, now: now, sql: sql)
-                try await appendRelationshipProjection(userID: targetID, sequence: targetSequence, targetID: actorID, requestedBy: nil, state: .none, sourceEventID: operationID, now: now, sql: sql)
+                try await appendRelationshipProjection(userID: actorID, sequence: actorSequence + 1, targetID: targetID, requestedBy: nil, state: .none, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
+                try await appendRelationshipProjection(userID: targetID, sequence: targetSequence, targetID: actorID, requestedBy: nil, state: .none, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
             }
-            return .changed(.init(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, isBlocked: isBlocked, updatedAt: now))
+            return .changed(try persisted.change(actor: command.actorUserID, target: command.targetUserID))
         }
         switch outcome {
         case .changed, .idempotent:
@@ -142,6 +150,13 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         return outcome
     }
 
+    private func lockOperation(actor: UUID, operation: UUID, kind: String, sql: any SQLDatabase) async throws {
+        // Pair locks protect relationship state; this lock protects the
+        // actor-scoped replay record before checking state or the clock.
+        let key = "v2-social-operation:" + kind + ":" + actor.uuidString.lowercased() + ":" + operation.uuidString.lowercased()
+        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+
     private func isBlocked(_ lhs: UUID, _ rhs: UUID, sql: any SQLDatabase) async throws -> Bool {
         try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.user_blocks WHERE (blocker_user_id = \(bind: lhs) AND blocked_user_id = \(bind: rhs)) OR (blocker_user_id = \(bind: rhs) AND blocked_user_id = \(bind: lhs))) AS value").first(decoding: SocialBooleanRow.self)?.value ?? true
     }
@@ -153,15 +168,31 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         // Send acceptance locks the same pair row. This serializes a social
         // mutation with cached-policy admission and makes the revision a real
         // fence instead of a best-effort invalidation hint.
-        try await sql.raw("UPDATE im_v2.direct_room_pairs SET direct_policy_revision = direct_policy_revision + 1 WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
+        guard try await sql.raw("""
+            WITH candidate AS MATERIALIZED (
+                SELECT room_id FROM im_v2.direct_room_pairs
+                WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)
+                FOR UPDATE
+            ), advanced AS (
+                UPDATE im_v2.direct_room_pairs AS pair
+                SET direct_policy_revision = pair.direct_policy_revision + 1
+                FROM candidate
+                WHERE pair.room_id = candidate.room_id
+                  AND pair.direct_policy_revision < \(bind: Int64.max)
+                RETURNING pair.room_id
+            )
+            SELECT (SELECT count(*) FROM candidate) = (SELECT count(*) FROM advanced) AS value
+            """).first(decoding: SocialBooleanRow.self)?.value == true else {
+            throw V2SocialRelationshipStoreError.corruptPersistenceState
+        }
     }
 
-    private func appendRelationshipProjection(userID: UUID, sequence: Int64, targetID: UUID, requestedBy: UUID?, state: V2RelationshipState, sourceEventID: UUID, now: Date, sql: any SQLDatabase) async throws {
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'relationship', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'state', \(bind: state.rawValue), 'requested_by_user_id', \(bind: requestedBy)::text, 'updated_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
+    private func appendRelationshipProjection(userID: UUID, sequence: Int64, targetID: UUID, requestedBy: UUID?, state: V2RelationshipState, sourceEventID: UUID, updatedAtMilliseconds: Int64, now: Date, sql: any SQLDatabase) async throws {
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'relationship', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'state', \(bind: state.rawValue), 'requested_by_user_id', \(bind: requestedBy)::text, 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
     }
 
-    private func appendBlockProjection(userID: UUID, sequence: Int64, targetID: UUID, isBlocked: Bool, sourceEventID: UUID, now: Date, sql: any SQLDatabase) async throws {
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'user_block', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'is_blocked', \(bind: isBlocked), 'updated_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
+    private func appendBlockProjection(userID: UUID, sequence: Int64, targetID: UUID, isBlocked: Bool, sourceEventID: UUID, updatedAtMilliseconds: Int64, now: Date, sql: any SQLDatabase) async throws {
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'user_block', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'is_blocked', \(bind: isBlocked), 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
     }
 
     /// Reserves every user range in UUID order. Any transaction that needs
@@ -192,6 +223,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
                 ORDER BY user_id
                 ON CONFLICT (user_id) DO UPDATE
                 SET next_sequence = sequence.next_sequence + EXCLUDED.next_sequence
+                WHERE sequence.next_sequence <= \(bind: Int64.max) - EXCLUDED.next_sequence
                 RETURNING user_id, next_sequence
             )
             SELECT reserved.user_id,

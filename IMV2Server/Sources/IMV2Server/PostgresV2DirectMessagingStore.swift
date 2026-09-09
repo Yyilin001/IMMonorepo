@@ -21,11 +21,18 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let actorID = try directUUID(command.actorUserID)
             let targetID = try directUUID(command.targetUserID)
             let operationID = try directUUID(command.operationID)
+            // The operation is scoped to the actor, independently of the
+            // target pair. Serialize its lookup before taking a pair lock so
+            // concurrent retries observe the committed room and timestamp.
+            let operationLockKey = "v2-direct-room-operation:" + actorID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
             if let existing = try await sql.raw("SELECT target_user_id, room_id, created_at FROM im_v2.direct_room_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectOperationRow.self) {
-                let direct = try existing.directRoom(actor: command.actorUserID, target: command.targetUserID)
-                return existing.targetUserID == targetID ? .idempotent(direct) : .idempotencyConflict
+                guard existing.targetUserID == targetID else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(existing.createdAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+                return .idempotent(try existing.directRoom(actor: command.actorUserID, target: command.targetUserID))
             }
 
+            guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let pair = directPair(actorID, targetID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             let activeAccountCount = try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.public_user_profiles AS profile WHERE (profile.user_id = \(bind: actorID) OR profile.user_id = \(bind: targetID)) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)").first(decoding: DirectCountRow.self)?.value ?? 0
@@ -39,9 +46,9 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 guard existingPair.capacityProfileID == capacityProfile.id else {
                     return .unavailable
                 }
-                let result = try existingPair.directRoom(actor: command.actorUserID, target: command.targetUserID)
-                try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: existingPair.roomID, createdAt: existingPair.createdAt, sql: sql)
-                return .opened(result)
+                guard v2PostgresTimestampCanEncode(existingPair.createdAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+                let persisted = try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: existingPair.roomID, sql: sql)
+                return .opened(try persisted.directRoom(actor: command.actorUserID, target: command.targetUserID))
             }
 
             let createdRoomID = try directUUID(roomID)
@@ -78,9 +85,9 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions (user_id) VALUES (\(bind: actorID)), (\(bind: targetID)) ON CONFLICT (user_id) DO NOTHING").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
-            try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, createdAt: now, sql: sql)
+            let persisted = try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, sql: sql)
             try await appendDirectRoomProfileProjection(recipientID: actorID, roomID: createdRoomID, profile: targetProfile, sourceEventID: operationID, createdAt: now, sql: sql)
-            return .opened(.init(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: now))
+            return .opened(try persisted.directRoom(actor: command.actorUserID, target: command.targetUserID))
         }
         switch outcome {
         case .opened, .idempotent:
@@ -98,18 +105,24 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)
             let requested = command.permission == .allow
+            // Serialize the replay lookup with this account's preference
+            // transition, including when the policy revision is exhausted.
+            let lockKey = "v2-stranger-message-preference:" + actorID.uuidString.lowercased()
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let existing = try await sql.raw("SELECT allows_stranger_messages, updated_at FROM im_v2.stranger_message_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectPreferenceOperationRow.self) {
                 guard existing.allowsStrangerMessages == requested else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(existing.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
                 return .idempotent(permission: existing.permission, updatedAt: existing.updatedAt)
             }
+            guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_stranger_message_preferences (user_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_stranger_messages = EXCLUDED.allows_stranger_messages, updated_at = EXCLUDED.updated_at").run()
             try await bumpDirectSendPolicyVersion(userID: actorID, now: now, sql: sql)
-            try await sql.raw("INSERT INTO im_v2.stranger_message_preference_operations (actor_user_id, operation_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now))").run()
-            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.stranger_message_preference_operations (actor_user_id, operation_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now)) RETURNING allows_stranger_messages, updated_at").first(decoding: DirectPreferenceOperationRow.self) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
                 throw V2DirectMessagingStoreError.corruptPersistenceState
             }
-            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'stranger_message_permission', jsonb_build_object('allows_stranger_messages', \(bind: requested), 'updated_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
-            return .updated(permission: command.permission, updatedAt: now)
+            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'stranger_message_permission', jsonb_build_object('allows_stranger_messages', \(bind: requested), 'updated_at_ms', \(bind: try v2GatewayMilliseconds(persisted.updatedAt))), \(bind: now))").run()
+            return .updated(permission: command.permission, updatedAt: persisted.updatedAt)
         }
         switch outcome {
         case .updated, .idempotent:
@@ -129,18 +142,20 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)
             let requested = command.permission == .allow
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: userAddPreferenceLockKey(actorID)), 0))").run()
             if let existing = try await sql.raw("SELECT allows_being_added, updated_at FROM im_v2.user_add_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectUserAddPreferenceOperationRow.self) {
                 guard existing.allowsBeingAdded == requested else { return .idempotencyConflict }
+                guard v2PostgresTimestampCanEncode(existing.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
                 return .idempotent(permission: existing.permission, updatedAt: existing.updatedAt)
             }
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: userAddPreferenceLockKey(actorID)), 0))").run()
+            guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_add_preferences (user_id, allows_being_added, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_being_added = EXCLUDED.allows_being_added, updated_at = EXCLUDED.updated_at").run()
-            try await sql.raw("INSERT INTO im_v2.user_add_preference_operations (actor_user_id, operation_id, allows_being_added, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now))").run()
-            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
+            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_add_preference_operations (actor_user_id, operation_id, allows_being_added, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now)) RETURNING allows_being_added, updated_at").first(decoding: DirectUserAddPreferenceOperationRow.self) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
                 throw V2DirectMessagingStoreError.corruptPersistenceState
             }
-            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'user_add_permission', jsonb_build_object('allows_being_added', \(bind: requested), 'updated_at_ms', \(bind: Int64(now.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
-            return .updated(permission: command.permission, updatedAt: now)
+            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'user_add_permission', jsonb_build_object('allows_being_added', \(bind: requested), 'updated_at_ms', \(bind: try v2GatewayMilliseconds(persisted.updatedAt))), \(bind: now))").run()
+            return .updated(permission: command.permission, updatedAt: persisted.updatedAt)
         }
         switch outcome {
         case .updated, .idempotent:
@@ -151,23 +166,35 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         return outcome
     }
 
-    private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
-        try await sql.raw("INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: targetID), \(bind: roomID), \(bind: createdAt))").run()
+    private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, sql: any SQLDatabase) async throws -> DirectOperationRow {
+        // Copy the pair's native timestamp without decoding and re-encoding it.
+        // Both new-room and existing-room responses then use the committed receipt.
+        guard let persisted = try await sql.raw("""
+            INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at)
+            SELECT \(bind: actorID), \(bind: operationID), \(bind: targetID), pair.room_id, pair.created_at
+            FROM im_v2.direct_room_pairs AS pair WHERE pair.room_id = \(bind: roomID)
+            RETURNING target_user_id, room_id, created_at
+            """).first(decoding: DirectOperationRow.self) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+        return persisted
     }
 
     private func bumpDirectSendPolicyVersion(userID: UUID, now: Date, sql: any SQLDatabase) async throws {
-        try await sql.raw("""
+        guard let updated = try await sql.raw("""
             INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at)
             VALUES (\(bind: userID), 2, \(bind: now))
             ON CONFLICT (user_id) DO UPDATE
             SET revision = version.revision + 1,
                 updated_at = EXCLUDED.updated_at
-            """).run()
+            WHERE version.revision < \(bind: Int64.max)
+            RETURNING 1 AS value
+            """).first(decoding: DirectCountRow.self), updated.value == 1 else {
+            throw V2DirectMessagingStoreError.corruptPersistenceState
+        }
     }
 
     private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
-        guard profile.revision > 0 else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-        guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
+        guard profile.revision > 0, v2PostgresTimestampCanEncode(profile.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+        guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
             throw V2DirectMessagingStoreError.corruptPersistenceState
         }
         // All room-event payloads use Foundation's canonical UUID spelling.

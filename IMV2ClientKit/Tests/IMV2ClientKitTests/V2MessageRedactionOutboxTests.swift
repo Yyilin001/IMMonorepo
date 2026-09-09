@@ -84,7 +84,7 @@ private actor ScriptedRedactionTransport: V2ClientMessageRedactionTransport {
         switch results.removeFirst() {
         case .offline: throw V2RealtimeTransportError.unexpectedResponse
         case .forbidden: throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
-        case .accepted: return .init(roomID: roomID, messageID: messageID, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, messageID: messageID, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
         }
     }
 

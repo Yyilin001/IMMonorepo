@@ -56,7 +56,8 @@ public struct V2MessageReactionChange: Equatable, Sendable {
     public let fanoutPlanID: FanoutPlanID
     public let createdAt: Date
 
-    public init(roomID: RoomID, messageID: MessageID, actorUserID: UserID, reaction: String, action: V2MessageReactionAction, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) {
+    public init(roomID: RoomID, messageID: MessageID, actorUserID: UserID, reaction: String, action: V2MessageReactionAction, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+        guard roomSequence > 0, roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.messageID = messageID
         self.actorUserID = actorUserID

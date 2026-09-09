@@ -45,7 +45,11 @@ public struct V2ModerationResult: Equatable, Sendable {
     public let fanoutPlanID: FanoutPlanID
     public let createdAt: Date
 
-    public init(roomID: RoomID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID?, messageID: MessageID?, messageRevision: UInt64? = nil, membershipRevision: UInt64? = nil, muteUntil: Date?, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) {
+    public init(roomID: RoomID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID?, messageID: MessageID?, messageRevision: UInt64? = nil, membershipRevision: UInt64? = nil, muteUntil: Date?, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+        guard roomSequence > 0, roomSequence <= UInt64(Int64.max),
+              messageRevision.map({ $0 > 0 && $0 <= UInt64(Int64.max) }) ?? true,
+              membershipRevision.map({ $0 > 0 && $0 <= UInt64(Int64.max) }) ?? true
+        else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.operationID = operationID
         self.action = action

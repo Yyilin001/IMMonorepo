@@ -23,7 +23,7 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         now: Date
     ) async throws -> ShardAdmissionLease {
         try ensureProfile(capacityProfile, matches: key)
-        guard validUntil > now else { throw V2ShardAdmissionLeaseControlError.invalidLifetime }
+        guard v2PostgresTimestampPrecedes(now, validUntil) else { throw V2ShardAdmissionLeaseControlError.invalidLifetime }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -31,7 +31,7 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             let existing = try await selectPool(key: key, sql: sql)
             guard existing == nil else { throw V2ShardAdmissionLeaseControlError.poolAlreadyExists }
 
-            try await sql.raw("""
+            guard try await sql.raw("""
                 INSERT INTO im_v2.shard_admission_pools
                     (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
                      command_window_limit, fanout_window_limit,
@@ -40,7 +40,13 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
                     (\(bind: key.roomShardID), \(bind: key.capacityProfileID), \(bind: try uuid(leaseID)), 1, \(bind: validUntil),
                      \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow),
                      \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans))
-                """).run()
+                ON CONFLICT (room_shard_id, capacity_profile_id) DO NOTHING
+                RETURNING 1
+                """).first() != nil else {
+                // SELECT FOR UPDATE cannot lock an absent row. A concurrent
+                // initializer may create this pool after the lookup above.
+                throw V2ShardAdmissionLeaseControlError.poolAlreadyExists
+            }
             return try ShardAdmissionLease(
                 id: leaseID,
                 generation: 1,
@@ -71,8 +77,16 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             guard current.leaseID == expectedLeaseID, current.generation == expectedGeneration else {
                 throw V2ShardAdmissionLeaseControlError.fenceMismatch
             }
+            guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(validUntil) else {
+                throw V2ShardAdmissionLeaseControlError.invalidLifetime
+            }
+            guard v2PostgresTimestampCanEncode(current.validUntil) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
             guard current.validUntil > now else { throw V2ShardAdmissionLeaseControlError.leaseExpired }
-            guard validUntil > current.validUntil else { throw V2ShardAdmissionLeaseControlError.invalidLifetime }
+            guard v2PostgresTimestampPrecedes(current.validUntil, validUntil) else {
+                throw V2ShardAdmissionLeaseControlError.invalidLifetime
+            }
 
             try await sql.raw("""
                 UPDATE im_v2.shard_admission_pools
@@ -94,13 +108,16 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         now: Date
     ) async throws -> ShardAdmissionLease {
         try ensureProfile(capacityProfile, matches: key)
-        guard validUntil > now else { throw V2ShardAdmissionLeaseControlError.invalidLifetime }
+        guard v2PostgresTimestampPrecedes(now, validUntil) else { throw V2ShardAdmissionLeaseControlError.invalidLifetime }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard let current = try await selectPool(key: key, sql: sql) else {
                 throw V2ShardAdmissionLeaseControlError.poolNotFound
+            }
+            guard v2PostgresTimestampCanEncode(current.validUntil) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard current.validUntil <= now else {
                 throw V2ShardAdmissionLeaseControlError.replacementRequiresExpiredLease

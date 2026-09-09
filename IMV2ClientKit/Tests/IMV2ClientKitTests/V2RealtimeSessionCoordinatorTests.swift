@@ -71,6 +71,38 @@ struct V2RealtimeSessionCoordinatorTests {
         #expect(await connection.disconnectCount() == 1)
     }
 
+    @Test("terminal refresh rejection and missing restored credentials require authentication", arguments: [false, true])
+    func terminalCredentialAcquisitionRequiresAuthentication(missingRecord: Bool) async throws {
+        let now = Date(timeIntervalSince1970: 1_750_001_300)
+        let expired = try credentials(access: "expired", refresh: "revoked", expiry: now.addingTimeInterval(-1))
+        let store = RealtimeCredentialStore(record: missingRecord ? nil : .init(credentials: expired))
+        let auth = V2AuthSession(credentialStore: store, transport: RealtimeRefreshTransport(result: .failure(V2AuthTransportError.terminalRejection)), now: { now })
+        let connection = RecordingRealtimeConnection(result: .success(session(for: expired)))
+        let coordinator = V2RealtimeSessionCoordinator(authSession: auth, connection: connection, supportedCapabilityProfiles: ["standard"])
+        for _ in 0..<2 {
+            await #expect(throws: V2RealtimeSessionCoordinatorError.authenticationRequired) {
+                try await coordinator.connect()
+            }
+        }
+        #expect(await store.record() == nil)
+        #expect(await auth.currentState() == .unauthenticated)
+        #expect(await connection.attempts().isEmpty)
+    }
+
+    @Test("a failed refresh network request preserves credentials and remains retryable")
+    func transientCredentialFailureDoesNotBecomeLogout() async throws {
+        let now = Date(timeIntervalSince1970: 1_750_001_300)
+        let expired = try credentials(access: "expired", refresh: "valid", expiry: now.addingTimeInterval(-1))
+        let store = RealtimeCredentialStore(record: .init(credentials: expired))
+        let auth = V2AuthSession(credentialStore: store, transport: RealtimeRefreshTransport(result: .failure(URLError(.notConnectedToInternet))), now: { now })
+        let connection = RecordingRealtimeConnection(result: .success(session(for: expired)))
+        let coordinator = V2RealtimeSessionCoordinator(authSession: auth, connection: connection, supportedCapabilityProfiles: ["standard"])
+        await #expect(throws: URLError.self) { try await coordinator.connect() }
+        #expect(await store.record() != nil)
+        #expect(await auth.currentState() != .unauthenticated)
+        #expect(await connection.attempts().isEmpty)
+    }
+
     private func credentials(access: String, refresh: String, expiry: Date) throws -> V2AuthCredentials {
         try .init(
             userID: .init("00000000-0000-0000-0000-000000000700"),

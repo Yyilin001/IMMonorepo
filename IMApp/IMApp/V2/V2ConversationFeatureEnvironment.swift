@@ -1,3 +1,4 @@
+import IMV2ClientKit
 import Foundation
 import IMV2Core
 
@@ -6,13 +7,13 @@ struct V2ConversationProjectionDependencies {
     let dataSource: any V2ConversationDataSource
     let messageSearcher: (any V2ConversationMessageSearching)?
     let groupAnnouncementReader: (any V2GroupAnnouncementReading)?
-    let groupRolePolicyReader: (any V2GroupRolePolicyReading)?
+    let groupRolePolicyReader: (any V2GroupRolePolicyAccessing)?
 
     init(
         dataSource: any V2ConversationDataSource,
         messageSearcher: (any V2ConversationMessageSearching)? = nil,
         groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil,
-        groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil
+        groupRolePolicyReader: (any V2GroupRolePolicyAccessing)? = nil
     ) {
         self.dataSource = dataSource
         self.messageSearcher = messageSearcher
@@ -122,6 +123,7 @@ struct V2ConversationMediaDependencies {
 }
 
 struct V2ConversationRuntimeDependencies {
+    let roomSubscriptions: V2RoomSubscriptionCoordinator?
     let liveActivity: (any V2ConversationLiveActivityManaging)?
     let projectionChangeNotifier: V2ProjectionChangeNotifier?
     let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
@@ -129,9 +131,11 @@ struct V2ConversationRuntimeDependencies {
     init(
         liveActivity: (any V2ConversationLiveActivityManaging)? = nil,
         projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
-        activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
+        activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil,
+        roomSubscriptions: V2RoomSubscriptionCoordinator? = nil
     ) {
         self.liveActivity = liveActivity
+        self.roomSubscriptions = roomSubscriptions
         self.projectionChangeNotifier = projectionChangeNotifier
         self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
     }

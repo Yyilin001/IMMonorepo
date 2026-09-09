@@ -56,22 +56,9 @@ struct V2AuthenticationAttemptGate {
     }
 }
 
-/// A background push owns only the bounded catch-up it starts. If the scene
-/// returns to the foreground before that catch-up finishes, foreground
-/// lifecycle ownership takes over and the shared runtime must stay alive.
-@MainActor
-enum V2PushWakeRuntimeOwnership {
-    static func shouldStopAfterFetch(
-        startedWhileApplicationInactive: Bool,
-        isApplicationActive: Bool
-    ) -> Bool {
-        startedWhileApplicationInactive && !isApplicationActive
-    }
-}
-
-/// Sign-out spans authenticated endpoint removal and protected credential
-/// deletion. It is a single-flight operation so duplicate user taps or a
-/// simultaneous terminal-auth callback cannot interleave those two steps.
+/// Sign-out owns local task shutdown and durable credential handoff. Duplicate
+/// taps and terminal-auth callbacks share this gate; network revocation has an
+/// independent App-lifetime owner.
 @MainActor
 struct V2SignOutAttemptGate {
     private(set) var isInFlight = false
@@ -149,26 +136,58 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     enum PasswordMode: Sendable { case register, signIn }
 
     private let configuration: V2AppConfiguration?
-    @ObservationIgnored private let startupMode: StartupMode
+    @ObservationIgnored let startupMode: StartupMode
     @ObservationIgnored private let authSession: V2AuthSession?
     @ObservationIgnored private let bootstrapper: V2ClientSessionBootstrapper?
-    @ObservationIgnored private let deviceIdentityProvider: (any V2DeviceIdentityProvider)?
+    @ObservationIgnored private let deviceRegistrationStore: V2DeviceRegistrationStore?
+    @ObservationIgnored private let deviceRevocationStore: V2DeviceRevocationStore?
+    @ObservationIgnored private let issuedCredentialRecovery: V2IssuedCredentialRecoveryStore?
+    @ObservationIgnored private var recoveredIssuedCredentials = false
+    @ObservationIgnored private let deviceRevocationRunner: V2DeviceRevocationRunner?
+    @ObservationIgnored private let registrationCancellationRunner: V2DeviceRegistrationCancellationRunner?
+    @ObservationIgnored private var registrationCancellationTask: Task<Void, Never>?
+    @ObservationIgnored private var registrationCancellationObservation: Task<Void, Never>?
+    private var registrationCancellationNeedsRetry = false
+    private var registrationCancellationObservationState: RevocationObservationState = .unknown
+    @ObservationIgnored private var deviceRevocationTask: Task<Void, Never>?
+    private(set) var deviceRevocationNeedsRetry = false
+    @ObservationIgnored private var deviceRevocationObservation: Task<Void, Never>?
+    private var revocationObservationState: RevocationObservationState = .unknown
+    private var revocationRetrying = false
+    private enum RevocationObservationState { case unknown, known(V2DeviceRevocationQueueStatus), unavailable }
+
+    var deviceRevocationPresentation: V2DeviceRevocationPresentation {
+        if revocationRetrying { return .retrying }
+        if deviceRevocationNeedsRetry || registrationCancellationNeedsRetry { return .unavailable }
+        let states = [revocationObservationState, registrationCancellationObservationState]
+        if states.contains(where: { if case .unavailable = $0 { true } else { false } }) { return .unavailable }
+        if states.contains(where: { if case .known(.paused) = $0 { true } else { false } }) { return .paused }
+        if states.contains(where: { if case .known(.pending) = $0 { true } else { false } }) { return .pending }
+        return .hidden
+    }
     @ObservationIgnored private let localKeychainService: String?
     @ObservationIgnored private let localDatabaseURL: URL?
     @ObservationIgnored private let liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope?
     @ObservationIgnored private let pendingCredentialDeletionStore: (any V2PendingCredentialDeletionStoring)?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
+    @ObservationIgnored private var backgroundSync: V2BackgroundSyncRunner?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
     @ObservationIgnored private var messageSearchIndexTask: Task<Void, Never>?
     @ObservationIgnored private var messageSearchLocalStore: GRDBV2LocalSyncStore?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
-    @ObservationIgnored private var isApplicationActive = true
+    @ObservationIgnored private var isApplicationActive = false
+    @ObservationIgnored private let restoration = V2SessionRestoration()
+    @ObservationIgnored private let authenticationObserver = V2AuthenticationStateObserver()
 
     private(set) var route: Route
     private(set) var authenticationMessage: String?
+    @ObservationIgnored private var accountAttachmentUploader: V2ForegroundConversationAttachmentUploader?
+    @ObservationIgnored private var accountAttachmentStager: V2FileConversationAttachmentStager?
+    @ObservationIgnored private var mediaCacheDownloader: V2ForegroundConversationMediaDownloader?
+    private(set) var mediaThumbnailCache: V2LocalMediaThumbnailCache? = nil
     private(set) var conversationStore: V2ConversationListStore?
     private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
@@ -176,6 +195,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var publicIdentitySettingsStore: V2PublicIdentitySettingsStore?
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
+    private(set) var groupInvitationStore: V2GroupInvitationStore?
 
     init(
         startupMode: StartupMode = .production,
@@ -189,7 +209,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             configuration = nil
             authSession = nil
             bootstrapper = nil
-            deviceIdentityProvider = nil
+            deviceRegistrationStore = nil
+            deviceRevocationStore = nil
+            issuedCredentialRecovery = nil
+            deviceRevocationRunner = nil
+            registrationCancellationRunner = nil
             localKeychainService = nil
             localDatabaseURL = nil
             self.liveLocalAccountE2ETestScope = nil
@@ -203,6 +227,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
+            groupInvitationStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
@@ -227,38 +252,46 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let keychainService = liveLocalAccountE2ETestScope?.keychainService(
                 basedOn: configuration.keychainService
             ) ?? configuration.keychainService
+            #if DEBUG
+            if startupMode.usesLiveLocalAccountE2ETestScope && startupMode != .uiTestingLiveLocalAccountCleanup {
+                try V2LegacyRegistrationE2EFixture.installIfRequested(baseService: configuration.keychainService,
+                    scope: liveLocalAccountE2ETestScope, arguments: ProcessInfo.processInfo.arguments)
+            }
+            #endif
             let refreshTransport = try V2HTTPDeviceCredentialAuthTransport(
                 refreshEndpoint: configuration.endpoint("v2/device-credentials/refresh")
             )
             let credentialStore = V2KeychainCredentialStore(service: keychainService)
-            let authSession = V2AuthSession(credentialStore: credentialStore, transport: refreshTransport)
+            let revocationStore = V2DeviceRevocationStore(service: keychainService)
+            let registrationStore = V2DeviceRegistrationStore(service: keychainService)
+            let cancellationClient = try V2HTTPDeviceRegistrationCancellationClient(endpoint: configuration.endpoint("v2/device-credentials/cancel-registration"))
+            let authSession = V2AuthSession(credentialStore: credentialStore, transport: refreshTransport,
+                revocationScheduler: revocationStore)
             let databaseURL = try Self.databaseURL(
                 fileName: liveLocalAccountE2ETestScope?.databaseFileName
             )
+            let revocationClient = try V2HTTPDeviceRevocationClient(endpoint: configuration.endpoint("v2/device-credentials/revoke"))
             self.configuration = configuration
             self.authSession = authSession
+            self.deviceRevocationStore = revocationStore
+            self.issuedCredentialRecovery = V2IssuedCredentialRecoveryStore(service: keychainService, revocations: revocationStore)
+            self.deviceRevocationRunner = V2DeviceRevocationRunner(store: revocationStore,
+                client: revocationClient)
+            registrationCancellationRunner = V2DeviceRegistrationCancellationRunner(store: registrationStore, client: cancellationClient)
             localKeychainService = keychainService
             localDatabaseURL = databaseURL
             self.liveLocalAccountE2ETestScope = liveLocalAccountE2ETestScope
-            pendingCredentialDeletionStore = V2UserDefaultsPendingCredentialDeletionStore(
-                key: keychainService + ".pending-credential-deletion"
+            pendingCredentialDeletionStore = V2FilePendingCredentialDeletionStore(
+                url: V2FilePendingCredentialDeletionStore.fileURL(databaseURL: databaseURL, legacyKey: keychainService + ".pending-credential-deletion"),
+                legacyKey: keychainService + ".pending-credential-deletion"
             )
             self.bootstrapper = V2ClientSessionBootstrapper(
                 authSession: authSession,
                 localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: keychainService)),
-                databaseURL: databaseURL
+                databaseURL: databaseURL,
+                accountStorageRoot: databaseURL.appendingPathExtension("accounts")
             )
-            #if DEBUG
-            if let liveLocalAccountE2ETestScope {
-                self.deviceIdentityProvider = V2LiveLocalAccountE2ETestDeviceIdentityProvider(
-                    deviceID: liveLocalAccountE2ETestScope.deviceID
-                )
-            } else {
-                self.deviceIdentityProvider = V2KeychainDeviceIdentityProvider(service: keychainService)
-            }
-            #else
-            self.deviceIdentityProvider = V2KeychainDeviceIdentityProvider(service: keychainService)
-            #endif
+            deviceRegistrationStore = registrationStore
             route = .launching
             authenticationMessage = nil
             conversationStore = nil
@@ -268,6 +301,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
+            groupInvitationStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
@@ -275,7 +309,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             configuration = nil
             authSession = nil
             bootstrapper = nil
-            deviceIdentityProvider = nil
+            deviceRegistrationStore = nil
+            deviceRevocationStore = nil
+            issuedCredentialRecovery = nil
+            deviceRevocationRunner = nil
+            registrationCancellationRunner = nil
             localKeychainService = nil
             localDatabaseURL = nil
             self.liveLocalAccountE2ETestScope = nil
@@ -289,15 +327,42 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             publicIdentitySettingsStore = nil
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
+            groupInvitationStore = nil
             realtimeRuntime = nil
             realtimeTask = nil
         }
     }
 
     func restore() async {
+        do { try await restore(until: nil) } catch { /* A later scene/Push may retry. */ }
+    }
+
+    private func restore(until deadline: ContinuousClock.Instant?) async throws {
+        guard route == .launching else { return }
+        try await restoration.run(until: deadline) { [weak self] in await self?.performRestore() }
+    }
+
+    private func performRestore() async {
         if startupMode == .uiTestingLiveLocalAccountCleanup {
             await cleanupLiveLocalAccountE2ETestScope()
             return
+        }
+        if !recoveredIssuedCredentials, let issuedCredentialRecovery, let localKeychainService {
+            do {
+                let record: V2AuthCredentialRecord?
+                do { record = try await V2KeychainCredentialStore(service: localKeychainService).load() }
+                catch V2CredentialStoreError.malformedRecord { record = nil }
+                catch V2CredentialStoreError.permanentlyInvalidated { record = nil }
+                try await deviceRegistrationStore?.recoverUnclaimed(ownedBy: record)
+                try await issuedCredentialRecovery.recoverUnclaimed(ownedBy: record)
+                recoveredIssuedCredentials = true
+            } catch V2CredentialStoreError.unavailable, V2IssuedCredentialRecoveryError.unavailable, V2DeviceCredentialRegistrationOperationStoreError.unavailable {
+                route = .protectedDataUnavailable
+                return
+            } catch {
+                route = .unavailable(message: "无法恢复待确认的登录结果，请重新打开应用后重试。")
+                return
+            }
         }
         guard startupMode.restoresPersistedSession else {
             route = .signedOut
@@ -307,20 +372,25 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         if await finishPendingCredentialDeletionIfNeeded() {
             return
         }
-        guard let bootstrapper else { return }
+        guard !Task.isCancelled, !signOutAttemptGate.isInFlight, let bootstrapper else { return }
+        let attemptGeneration = authenticationAttemptGate.begin()
         route = .launching
         authenticationMessage = nil
         do {
             let localStore = try await bootstrapper.openEstablishedSession()
             try Task.checkCancellation()
-            try await activate(localStore: localStore)
-        } catch V2ClientSessionBootstrapError.authenticationRequired {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            try await activate(localStore: localStore, authenticationAttemptGeneration: attemptGeneration)
+        } catch V2ClientSessionBootstrapError.authenticationRequired, V2AuthSessionError.unauthenticated {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
-        } catch V2ClientSessionBootstrapError.credentialsUnavailable {
+        } catch V2ClientSessionBootstrapError.credentialsUnavailable, V2AuthSessionError.credentialsUnavailable {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
         } catch is CancellationError {
             return
         } catch {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .unavailable(message: "无法打开本地 V2 数据。")
         }
     }
@@ -338,13 +408,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode, publicHandle: String? = nil, displayName: String? = nil) async {
+        guard route == .signedOut, !signOutAttemptGate.isInFlight else { return }
         guard let configuration,
               let bootstrapper,
-              let deviceIdentityProvider,
-              let localKeychainService
+              let deviceRegistrationStore,
+              let issuedCredentialRecovery,
+              let authSession
         else { return }
         let attemptGeneration = beginAuthenticationAttempt()
         do {
+            let expectedEpoch = await authSession.currentEpoch()
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             let passwordAuthenticator = try V2HTTPPasswordAccountAuthenticator(
                 registrationEndpoint: configuration.endpoint("v2/account-auth/password/register"),
                 assertionEndpoint: configuration.endpoint("v2/account-auth/password/assertion")
@@ -357,17 +431,32 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 displayName: displayName,
                 authenticator: passwordAuthenticator
             )
+            let registration = try await deviceRegistrationStore.prepare(accountHandle: accountHandle)
+            try Task.checkCancellation()
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             let issuer = try V2HTTPAccountAssertionDeviceCredentialProvider(
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
-                assertionProvider: accountProvider,
-                deviceIdentityProvider: deviceIdentityProvider,
-                operationStore: V2KeychainDeviceCredentialRegistrationOperationStore(service: localKeychainService),
+                assertionProvider: registration.recoveringLegacyRegistration(using: accountProvider,
+                    client: try V2HTTPLegacyRegistrationCancellationClient(endpoint: configuration.endpoint("v2/device-credentials/cancel-legacy-registration"))),
+                deviceIdentityProvider: registration,
+                operationStore: registration,
+                recovery: issuedCredentialRecovery,
                 registrationMetadata: Self.deviceRegistrationMetadata()
             )
-            let localStore = try await bootstrapper.establishSession(using: issuer)
+            let localStore = try await bootstrapper.establishSession(using: issuer, ifCurrent: expectedEpoch)
             try Task.checkCancellation()
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             try await activate(localStore: localStore, authenticationAttemptGeneration: attemptGeneration)
+        } catch V2ClientSessionBootstrapError.credentialIssueRecoveryPending {
+            deviceRevocationNeedsRetry = true
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = "登录结果暂时无法完成交接，请解锁并重新打开应用后重试。"
+        } catch is V2IssuedCredentialRecoveryError {
+            deviceRevocationNeedsRetry = true
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = "登录结果暂时无法完成交接，请解锁并重新打开应用后重试。"
         } catch is CancellationError {
             guard !Task.isCancelled else { return }
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
@@ -406,14 +495,35 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"
+        } catch let error as V2LegacyRegistrationCancellationError {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            switch error {
+            case .authenticationRequired:
+                authenticationMessage = "登录验证已过期，请重新输入密码后重试。"
+            case .targetUnavailable, .conflict:
+                authenticationMessage = "旧登录记录暂时无法核实，已保留记录，请稍后重试。"
+            case .capacityExceeded:
+                authenticationMessage = "旧登录记录已达到服务端上限，暂时无法继续登录。"
+            default:
+                authenticationMessage = "旧登录尚未完成清理，记录已保留，请稍后重新登录。"
+            }
         } catch V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "受保护凭据暂不可用，请解锁设备后重试。"
+        } catch V2AccountAssertionCredentialProviderError.registrationExpired {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = "本次登录已超时，请重新提交登录。"
         } catch V2AccountAssertionCredentialProviderError.registrationOperationUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "无法保存本次设备注册，请稍后重试。"
+        } catch is V2DeviceCredentialRegistrationOperationStoreError {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = "无法保存本次设备注册，请解锁设备后重试。"
         } catch V2AuthSessionError.credentialsUnavailable {
             // Device credentials were issued but could not be durably written.
             // This is normally a temporary protected-data/keychain state; never
@@ -449,19 +559,20 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     func signOut() async {
         guard signOutAttemptGate.begin() else { return }
         defer { signOutAttemptGate.finish() }
+        _ = authenticationAttemptGate.begin()
+        route = .launching
+        groupInvitationStore?.invalidate()
         guard let authSession, let pendingCredentialDeletionStore else {
             await discardAuthenticatedPresentation(route: .signedOut)
             return
         }
-        // Persist intent before the first await so a process termination while
-        // protected data is locked cannot resurrect a session on next launch.
-        await pendingCredentialDeletionStore.markPending()
         do {
-            try await removePushEndpointBeforeCredentialDeletion()
+            // Commit intent before credential deletion. Failure keeps the
+            // credential and the pending UI so a later retry can commit it.
+            try await pendingCredentialDeletionStore.markPending()
+            await authSession.invalidateOutstandingWork()
             try Task.checkCancellation()
-            try await authSession.handleTerminalRejection()
-            await pendingCredentialDeletionStore.clearPending()
-            await discardAuthenticatedPresentation(route: .signedOut)
+            try await completeLocalSignOut(authSession: authSession, marker: pendingCredentialDeletionStore)
         } catch {
             await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
         }
@@ -470,57 +581,64 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// Attempts the already-persisted logout completion after protected data
     /// becomes available. It never opens an authenticated session.
     func retryPendingCredentialDeletion() async {
-        guard route == .signOutPendingCredentialDeletion else { return }
+        guard route == .signOutPendingCredentialDeletion, signOutAttemptGate.begin() else { return }
+        defer { signOutAttemptGate.finish() }
         _ = await finishPendingCredentialDeletionIfNeeded()
     }
 
     private func finishPendingCredentialDeletionIfNeeded() async -> Bool {
-        guard let pendingCredentialDeletionStore,
-              await pendingCredentialDeletionStore.isPending()
-        else { return false }
+        guard let pendingCredentialDeletionStore else { return false }
+        let retryingFailedWrite = route == .signOutPendingCredentialDeletion
+        route = .launching
+        do {
+            let persisted = try await pendingCredentialDeletionStore.isPending()
+            guard persisted || retryingFailedWrite else { return false }
+            // Also retries an earlier write failure retained by the UI.
+            try await pendingCredentialDeletionStore.markPending()
+        } catch {
+            await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+            return true
+        }
         guard let authSession else {
             route = .unavailable(message: "V2 账户服务配置无效。")
             return true
         }
-        // Claim the route before awaiting the actor so manual retry and scene
-        // activation cannot issue duplicate Keychain deletion attempts.
-        route = .launching
         do {
-            try await removePushEndpointBeforeCredentialDeletion()
             try Task.checkCancellation()
-            try await authSession.handleTerminalRejection()
-            await pendingCredentialDeletionStore.clearPending()
-            await discardAuthenticatedPresentation(route: .signedOut)
+            try await completeLocalSignOut(authSession: authSession, marker: pendingCredentialDeletionStore)
         } catch {
             await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
         }
         return true
     }
 
-    /// The device endpoint is authenticated by the same credential record as
-    /// sign-out. Never discard that record before an endpoint DELETE has
-    /// succeeded; a persisted pending sign-out retries this idempotent DELETE
-    /// on the next launch even though the prior UI store has been discarded.
-    private func removePushEndpointBeforeCredentialDeletion() async throws {
-        if let pushWakeSettingsStore {
-            try await pushWakeSettingsStore.deactivateForSignOut()
-            return
-        }
-        guard let configuration, let authSession else { return }
-        let endpointClient = try V2HTTPPushEndpointClient(
-            endpoint: configuration.pushEndpoint,
-            credentials: authSession
-        )
-        try await endpointClient.remove()
+    private func completeLocalSignOut(authSession: V2AuthSession, marker: any V2PendingCredentialDeletionStoring) async throws {
+        await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+        guard route == .signOutPendingCredentialDeletion else { return }
+        try await authSession.handleTerminalRejection()
+        try await deviceRegistrationStore?.discardPendingRegistrations()
+        // Keep intent if closing the captured local store failed. A cold
+        // start must still finish cleanup when credentials are already gone.
+        guard route == .signOutPendingCredentialDeletion else { return }
+        route = .launching
+        try await marker.clearPending()
+        route = .signedOut
     }
 
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
-        messageSearchIndexTask?.cancel()
+        authenticationObserver.stop()
+        groupInvitationStore?.invalidate()
+        let thumbnails = mediaThumbnailCache
+        mediaThumbnailCache = nil
+        let indexer = messageSearchIndexTask
+        let localStore = messageSearchLocalStore
+        let pushSettings = pushWakeSettingsStore
+        indexer?.cancel()
         messageSearchIndexTask = nil
         messageSearchLocalStore = nil
-        await stopRealtime()
-        realtimeRuntime = nil
-        authenticationMessage = nil
+        // Hide account-owned views before awaits; their late results cannot
+        // be presented in the next account's view hierarchy.
+        route = .launching
         conversationStore = nil
         contactsStore = nil
         privacySettingsStore = nil
@@ -528,13 +646,27 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
         deviceSessionsStore = nil
-        route = nextRoute
-    }
-
-    private func currentUserID() async throws -> UserID {
-        guard let authSession else { throw V2AppConfigurationError.invalidAccountBaseURL }
-        let credentials = try await authSession.realtimeCredentials()
-        return credentials.userID
+        groupInvitationStore = nil
+        await thumbnails?.close()
+        await pushSettings?.stop()
+        await backgroundSync?.stop()
+        backgroundSync = nil
+        await stopRealtime()
+        realtimeRuntime = nil
+        await indexer?.value
+        do {
+            try await mediaCacheDownloader?.close()
+            mediaCacheDownloader = nil
+            await accountAttachmentUploader?.close()
+            accountAttachmentUploader = nil
+            try await accountAttachmentStager?.close()
+            accountAttachmentStager = nil
+            if let localStore { try await bootstrapper?.closeLocalStore(localStore) }
+            authenticationMessage = nil
+            route = nextRoute
+        } catch {
+            route = .unavailable(message: "无法关闭本地数据，请重新启动应用后重试。")
+        }
     }
 
     private static func deviceRegistrationMetadata() -> V2ClientDeviceRegistrationMetadata {
@@ -552,26 +684,43 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         localStore: GRDBV2LocalSyncStore,
         authenticationAttemptGeneration: UInt64? = nil
     ) async throws {
-        guard let configuration, let authSession, let localKeychainService, let localDatabaseURL else {
+        guard let configuration, let authSession, let localKeychainService else {
             throw V2AppConfigurationError.invalidRealtimeEndpoint
         }
-        try Self.applyDatabaseStoragePolicy(databaseURL: localDatabaseURL)
-        let userID = try await currentUserID()
+        guard let scope = try await bootstrapper?.storageScope(for: localStore) else {
+            throw V2AccountLocalStoreError.staleStore
+        }
+        try Self.applyDatabaseStoragePolicy(databaseURL: scope.database.primary)
+        let credentials = try await authSession.realtimeCredentials()
+        let userID = credentials.userID
+        guard let authEpoch = credentials.sessionEpoch else { throw V2AuthSessionError.sessionInvalidated }
+        guard scope.accountID == userID else { throw V2AccountLocalStoreError.staleStore }
         try Task.checkCancellation()
+        try await mediaCacheDownloader?.close()
+        mediaCacheDownloader = nil
+        await accountAttachmentUploader?.close()
+        accountAttachmentUploader = nil
+        try await accountAttachmentStager?.close()
+        accountAttachmentStager = nil
+        try Task.checkCancellation()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+        try await authSession.requireAuthenticatedEpoch(authEpoch)
         let realtime = try V2AppRealtimeRuntime(
             configuration: configuration,
             authSession: authSession,
+            authEpoch: authEpoch,
             localStore: localStore,
-            mediaCacheDirectory: try Self.mediaCacheDirectory()
+            mediaCacheDirectory: scope.mediaCacheDirectory
         )
-        let attachmentStager = try? V2FileConversationAttachmentStager(directory: try Self.attachmentStagingDirectory())
+        let attachmentStager = try? V2FileConversationAttachmentStager(directory: scope.mediaStagingDirectory)
         await attachmentStager?.discardOrphanedStagedFiles()
         try Task.checkCancellation()
         await realtime.mediaCacheMaintenance.performMaintenance()
         try Task.checkCancellation()
+        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
         let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
-            credentials: authSession
+            credentials: accountHTTP, transport: accountHTTP
         )
         let conversationDataSource = V2GRDBConversationDataSource(localStore: localStore)
         let contactsDataSource = V2GRDBContactsDataSource(
@@ -619,7 +768,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             runtime: .init(
                 liveActivity: realtime.conversationLiveActivity,
                 projectionChangeNotifier: realtime.projectionChangeNotifier,
-                activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer
+                activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer,
+                roomSubscriptions: realtime.roomSubscriptions
             )
         )
         let conversations = V2ConversationListStore(environment: conversationEnvironment)
@@ -651,7 +801,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let publicIdentitySettings = V2PublicIdentitySettingsStore(
             manager: try V2HTTPOwnProfileClient(
                 endpoint: configuration.endpoint("v2/profile/me"),
-                credentials: authSession
+                credentials: accountHTTP, transport: accountHTTP
             ),
             attachmentStager: attachmentStager,
             attachmentUploader: realtime.attachmentUploader,
@@ -660,31 +810,53 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let deviceSessions = try V2DeviceSessionsStore(
             manager: V2HTTPDeviceSessionClient(
                 endpoint: configuration.endpoint("v2/devices"),
-                credentials: authSession
+                credentials: accountHTTP, transport: accountHTTP
+            )
+        )
+        let groupInvitations = V2GroupInvitationStore(
+            client: try V2HTTPGroupInvitationClient(
+                baseURL: configuration.accountBaseURL,
+                credentials: accountHTTP, transport: accountHTTP
             )
         )
         let pushWakeSettings: V2PushWakeSettingsStore?
-        if let remoteNotificationRegistrar,
-           let endpointClient = try? V2HTTPPushEndpointClient(
-               endpoint: configuration.pushEndpoint,
-               credentials: authSession
-           ) {
-            pushWakeSettings = .init(
-                preferences: V2UserDefaultsPushWakePreferenceStore(
-                    key: localKeychainService + ".push-wake-enabled." + userID.rawValue
-                ),
-                endpointClient: endpointClient,
-                remoteNotificationRegistrar: remoteNotificationRegistrar,
-                environment: configuration.pushEndpointEnvironment
+        if let remoteNotificationRegistrar {
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            try await authSession.requireAuthenticatedEpoch(authEpoch)
+            await pushWakeSettingsStore?.stop()
+            let preferences = V2UserDefaultsPushWakePreferenceStore(key: localKeychainService + ".push-wake-enabled." + userID.rawValue)
+            let initialPreference = preferences.isEnabled()
+            let pushScope = try await localStore.pushIntentScope(deviceID: credentials.deviceID)
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            try await authSession.requireAuthenticatedEpoch(authEpoch)
+            let reconciler = try await V2PushIntentReconciler.activate(
+                store: localStore,
+                transport: V2HTTPPushEndpointClient(endpoint: configuration.pushEndpoint, session: authSession, epoch: authEpoch),
+                scope: pushScope, initialPreference: initialPreference
             )
-        } else {
-            pushWakeSettings = nil
-        }
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else {
+                await reconciler.stop(); return
+            }
+            do { try await authSession.requireAuthenticatedEpoch(authEpoch); try Task.checkCancellation() }
+            catch { await reconciler.stop(); throw error }
+            pushWakeSettings = .init(reconciler: reconciler, preferences: preferences, remoteNotificationRegistrar: remoteNotificationRegistrar, environment: configuration.pushEndpointEnvironment)
+        } else { pushWakeSettings = nil }
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         await stopRealtime()
+        let previousThumbnails = mediaThumbnailCache
+        mediaThumbnailCache = nil
+        await previousThumbnails?.close()
         try Task.checkCancellation()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+        try await authSession.requireAuthenticatedEpoch(authEpoch)
+        try Task.checkCancellation()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+        accountAttachmentUploader = realtime.attachmentUploader
+        accountAttachmentStager = attachmentStager
+        mediaCacheDownloader = realtime.mediaCacheMaintenance
+        mediaThumbnailCache = V2LocalMediaThumbnailCache(directory: scope.directory)
         realtimeRuntime = realtime.runtime
+        backgroundSync = realtime.backgroundSync
         conversationStore = conversations
         contactsStore = contacts
         privacySettingsStore = privacySettings
@@ -692,13 +864,40 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         publicIdentitySettingsStore = publicIdentitySettings
         pushWakeSettingsStore = pushWakeSettings
         deviceSessionsStore = deviceSessions
+        groupInvitationStore = groupInvitations
         messageSearchLocalStore = localStore
         route = .signedIn(userID: userID.rawValue)
+        authenticationObserver.start(session: authSession, epoch: authEpoch) { [weak self] change in
+            await self?.authenticationStateDidChange(change)
+        }
+        guard isApplicationActive else { return }
         startMessageSearchIndexing(localStore: localStore)
         await conversations.refresh()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         await pushWakeSettings?.activate()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
+    }
+
+    private func authenticationStateDidChange(_ change: V2AuthenticationStateObserver.Change) async {
+        guard case .signedIn = route, signOutAttemptGate.begin() else { return }
+        defer { signOutAttemptGate.finish() }
+        _ = authenticationAttemptGate.begin()
+        route = .launching
+        let destination: Route
+        switch change {
+        case .authenticationRequired, .superseded:
+            // The event belongs to the old observed epoch. Never delete or
+            // revoke whatever credential is now current in the auth owner.
+            destination = .signedOut
+        case .protectedDataUnavailable:
+            destination = .protectedDataUnavailable
+        case .credentialDeletionPending:
+            do { try await pendingCredentialDeletionStore?.markPending() }
+            catch { /* The pending route retries the failed durable write. */ }
+            destination = .signOutPendingCredentialDeletion
+        }
+        await discardAuthenticatedPresentation(route: destination)
     }
 
     /// Stops the foreground realtime connection only after iOS has actually
@@ -707,6 +906,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// UI is presented over the app.
     func applicationDidEnterBackground() async {
         isApplicationActive = false
+        deviceRevocationTask?.cancel()
+        deviceRevocationObservation?.cancel()
+        registrationCancellationTask?.cancel()
+        registrationCancellationObservation?.cancel()
         messageSearchIndexTask?.cancel()
         messageSearchIndexTask = nil
         await stopRealtime()
@@ -716,6 +919,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// realtime attempt after the app returns to the foreground.
     func applicationDidBecomeActive() async {
         isApplicationActive = true
+        startDeviceRevocationObservationIfActive()
+        startDeviceRevocationIfActive()
+        startRegistrationCancellationObservationIfActive()
+        startRegistrationCancellationIfActive()
+        await backgroundSync?.stop()
+        if route == .launching { await restore() }
         if route == .signOutPendingCredentialDeletion {
             await retryPendingCredentialDeletion()
             return
@@ -731,7 +940,110 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         if let messageSearchLocalStore {
             startMessageSearchIndexing(localStore: messageSearchLocalStore)
         }
+        let activationGeneration = authenticationAttemptGate.generation
+        await conversationStore.refresh()
+        guard isApplicationActive, authenticationAttemptGate.matchesCurrentGeneration(activationGeneration) else { return }
+        await pushWakeSettingsStore?.activate()
+        guard isApplicationActive, authenticationAttemptGate.matchesCurrentGeneration(activationGeneration), case .signedIn = route else { return }
         startRealtimeIfApplicationActive(runtime: realtimeRuntime, conversations: conversationStore)
+    }
+
+    /// Retain the task until its actual network flight drains. A foreground
+    /// transition during cancellation restarts only after that old task ends.
+    private func startDeviceRevocationIfActive() {
+        guard isApplicationActive, deviceRevocationTask == nil, let deviceRevocationRunner else { return }
+        deviceRevocationNeedsRetry = false
+        let recovery = issuedCredentialRecovery
+        deviceRevocationTask = Task { [weak self, deviceRevocationRunner, recovery] in
+            var cancelled = false
+            do {
+                try await recovery?.drainAbandoned()
+                try await deviceRevocationRunner.run()
+            }
+            catch is CancellationError { cancelled = true }
+            catch { self?.deviceRevocationNeedsRetry = true }
+            guard let self else { return }
+            self.deviceRevocationTask = nil
+            if cancelled { self.startDeviceRevocationIfActive() }
+        }
+    }
+
+    private func startDeviceRevocationObservationIfActive() {
+        guard isApplicationActive, deviceRevocationObservation == nil, let deviceRevocationStore else { return }
+        deviceRevocationObservation = Task { [weak self, deviceRevocationStore] in
+            do {
+                for try await status in await deviceRevocationStore.statusUpdates() {
+                    try Task.checkCancellation()
+                    self?.revocationObservationState = .known(status)
+                }
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { self?.revocationObservationState = .unavailable } }
+            guard let self else { return }
+            self.deviceRevocationObservation = nil
+            if Task.isCancelled { self.startDeviceRevocationObservationIfActive() }
+        }
+    }
+
+    private func startRegistrationCancellationIfActive() {
+        guard isApplicationActive, registrationCancellationTask == nil, let registrationCancellationRunner else { return }
+        registrationCancellationNeedsRetry = false
+        registrationCancellationTask = Task { [weak self, registrationCancellationRunner] in
+            var cancelled = false
+            do { try await registrationCancellationRunner.run() }
+            catch is CancellationError { cancelled = true }
+            catch { self?.registrationCancellationNeedsRetry = true }
+            guard let self else { return }
+            self.registrationCancellationTask = nil
+            if cancelled { self.startRegistrationCancellationIfActive() }
+        }
+    }
+
+    private func startRegistrationCancellationObservationIfActive() {
+        guard isApplicationActive, registrationCancellationObservation == nil, let deviceRegistrationStore else { return }
+        registrationCancellationObservation = Task { [weak self, deviceRegistrationStore] in
+            do {
+                for try await status in await deviceRegistrationStore.cancellationStatusUpdates() {
+                    try Task.checkCancellation()
+                    self?.registrationCancellationObservationState = .known(status)
+                }
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { self?.registrationCancellationObservationState = .unavailable } }
+            guard let self else { return }
+            self.registrationCancellationObservation = nil
+            if Task.isCancelled { self.startRegistrationCancellationObservationIfActive() }
+        }
+    }
+
+    func retryDeviceRevocation() async {
+        guard !revocationRetrying, let deviceRevocationStore else { return }
+        revocationRetrying = true
+        defer { revocationRetrying = false }
+        do {
+            try await issuedCredentialRecovery?.drainAbandoned()
+            try await deviceRevocationStore.retryPaused()
+            try await deviceRegistrationStore?.retryPausedCancellations()
+            try Task.checkCancellation()
+            // A successful no-op retry may not emit a queue notification.
+            // Re-subscribe for a fresh snapshot after a prior read failure.
+            let observation = deviceRevocationObservation
+            observation?.cancel()
+            await observation?.value
+            try Task.checkCancellation()
+            startDeviceRevocationObservationIfActive()
+            startDeviceRevocationIfActive()
+            let cancellationObservation = registrationCancellationObservation
+            cancellationObservation?.cancel()
+            await cancellationObservation?.value
+            try Task.checkCancellation()
+            startRegistrationCancellationObservationIfActive()
+            startRegistrationCancellationIfActive()
+        } catch is CancellationError { }
+        catch { revocationObservationState = .unavailable }
+    }
+
+    deinit {
+        deviceRevocationTask?.cancel(); deviceRevocationObservation?.cancel()
+        registrationCancellationTask?.cancel(); registrationCancellationObservation?.cancel()
     }
 
     private func startMessageSearchIndexing(localStore: GRDBV2LocalSyncStore) {
@@ -820,31 +1132,23 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     func handlePushWake() async -> UIBackgroundFetchResult {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(25))
+        do { try await restore(until: deadline) } catch { return .failed }
         guard case .signedIn = route,
-              let realtimeRuntime,
-              let conversationStore
+              let backgroundSync
         else { return .noData }
-        let startedWhileApplicationInactive = !isApplicationActive
-        let result: UIBackgroundFetchResult
         do {
-            _ = try await realtimeRuntime.start()
-            await conversationStore.refresh()
-            result = .newData
+            let result = try await backgroundSync.run(until: deadline)
+            return result.didCommitNewRecords ? .newData : .noData
         } catch is CancellationError {
-            result = .noData
+            return .noData
         } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
-            await signOut()
-            result = .failed
+            // The coordinator already notified the auth owner. Its observer
+            // owns UI/logout cleanup; never add that work to the fetch budget.
+            return .failed
         } catch {
-            result = .failed
+            return .failed
         }
-        if V2PushWakeRuntimeOwnership.shouldStopAfterFetch(
-            startedWhileApplicationInactive: startedWhileApplicationInactive,
-            isApplicationActive: isApplicationActive
-        ) {
-            await realtimeRuntime.stop()
-        }
-        return result
     }
 
     private func cleanupLiveLocalAccountE2ETestScope() async {
@@ -863,12 +1167,29 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
         do {
             try await V2KeychainCredentialStore(service: localKeychainService).delete()
+            try await issuedCredentialRecovery?.recoverUnclaimed(ownedBy: nil)
+            if let deviceRevocationStore {
+                for job in try await deviceRevocationStore.jobs() { try await deviceRevocationStore.complete(job) }
+            }
+            try await deviceRegistrationStore?.discardPendingRegistrations()
+            if let deviceRegistrationStore {
+                for cancellation in try await deviceRegistrationStore.pendingCancellations() {
+                    try await deviceRegistrationStore.completeCancellation(cancellation)
+                }
+            }
             try await V2KeychainDeviceCredentialRegistrationOperationStore(
                 service: localKeychainService
             ).delete()
+            #if DEBUG
+            try V2LegacyRegistrationE2EFixture.remove(baseService: configuration.keychainService, scope: liveLocalAccountE2ETestScope)
+            #endif
             try await V2KeychainInstallationBindingStore(service: localKeychainService).delete()
-            await pendingCredentialDeletionStore?.clearPending()
+            try await pendingCredentialDeletionStore?.clearPending()
             try Self.eraseDatabaseArtifacts(at: localDatabaseURL)
+            let deletionMarker = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: localDatabaseURL, legacyKey: localKeychainService + ".pending-credential-deletion")
+            if FileManager.default.fileExists(atPath: deletionMarker.path) { try FileManager.default.removeItem(at: deletionMarker) }
+            let scopedRoot = localDatabaseURL.appendingPathExtension("accounts")
+            if FileManager.default.fileExists(atPath: scopedRoot.path) { try FileManager.default.removeItem(at: scopedRoot) }
             route = .uiTestingLiveLocalAccountCleanupCompleted
         } catch {
             route = .unavailable(message: "无法清理本地 E2E 测试数据。")
@@ -882,39 +1203,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         return managedDirectory.appending(path: fileName ?? "sync.sqlite", directoryHint: .notDirectory)
     }
 
-    private static func attachmentStagingDirectory(fileManager: FileManager = .default) throws -> URL {
-        let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return base
-            .appending(path: "IMAppV2", directoryHint: .isDirectory)
-            .appending(path: "media-staging", directoryHint: .isDirectory)
-    }
-
-    private static func mediaCacheDirectory(fileManager: FileManager = .default) throws -> URL {
-        let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return base
-            .appending(path: "IMAppV2", directoryHint: .isDirectory)
-            .appending(path: "media-cache", directoryHint: .isDirectory)
-    }
-
     /// SQLite may create its WAL/SHM after the main database file; re-apply and
     /// verify the policy after each open rather than assuming directory state
     /// covers every file-system implementation.
     private static func applyDatabaseStoragePolicy(databaseURL database: URL, fileManager: FileManager = .default) throws {
-        for url in [
-            database,
-            URL(fileURLWithPath: database.path + "-wal", isDirectory: false),
-            URL(fileURLWithPath: database.path + "-shm", isDirectory: false)
-        ] where fileManager.fileExists(atPath: url.path) {
+        for url in V2LocalDatabaseArtifacts(primary: database).files where fileManager.fileExists(atPath: url.path) {
             try V2DeviceLocalStoragePolicy.applyToManagedFile(url, fileManager: fileManager)
         }
     }
 
     private static func eraseDatabaseArtifacts(at databaseURL: URL, fileManager: FileManager = .default) throws {
-        for artifact in [
-            databaseURL,
-            URL(fileURLWithPath: databaseURL.path + "-wal", isDirectory: false),
-            URL(fileURLWithPath: databaseURL.path + "-shm", isDirectory: false)
-        ] where fileManager.fileExists(atPath: artifact.path) {
+        for artifact in V2LocalDatabaseArtifacts(primary: databaseURL).files where fileManager.fileExists(atPath: artifact.path) {
             try fileManager.removeItem(at: artifact)
         }
     }

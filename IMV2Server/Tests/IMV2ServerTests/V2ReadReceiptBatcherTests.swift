@@ -96,12 +96,14 @@ private actor ReadReceiptBatchStoreSpy: V2ReadReceiptBatchStore {
             if request.command.readThroughRoomSequence == failingSequence {
                 return .failure(.roomSequenceNotFound)
             }
-            return .success(.recorded(.init(
+            do {
+                return .success(.recorded(try .init(
                 roomID: request.command.roomID,
                 userID: request.command.actorUserID,
                 readThroughRoomSequence: request.command.readThroughRoomSequence,
                 recordedAt: request.now
-            )))
+                )))
+            } catch { return .failure(.corruptPersistenceState) }
         }
     }
 

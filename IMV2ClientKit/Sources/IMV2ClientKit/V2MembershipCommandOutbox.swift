@@ -71,6 +71,8 @@ public enum V2MembershipCommandFlushResult: Equatable, Sendable {
 /// valid; callers must refresh membership state and explicitly create a new
 /// operation.
 public actor V2MembershipCommandOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2MembershipCommandFlushResult>()
+
     private let store: any V2LocalMembershipCommandStore
     private let transport: any V2ClientMembershipTransport
     private let makeUUID: @Sendable () -> UUID
@@ -117,6 +119,10 @@ public actor V2MembershipCommandOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2MembershipCommandFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2MembershipCommandFlushResult {
         guard let command = try await store.nextReadyMembershipCommand(now: now()) else { return .idle }
         do {
             let changed = try await transport.changeMembership(
@@ -145,19 +151,24 @@ public actor V2MembershipCommandOutboxEngine {
                 if retryable {
                     try await store.scheduleMembershipRetry(
                         operationID: command.operationID,
-                        nextAttemptAt: now().addingTimeInterval(TimeInterval(max(retryAfter, 1)))
+                        nextAttemptAt: try v2CommandRetryDate(now: now(), delay: TimeInterval(max(retryAfter, 1)))
                     )
                     return .retryScheduled(command.operationID)
                 }
                 try await store.rejectMembership(operationID: command.operationID, code: code, currentRevision: currentRevision)
                 return .rejected(command.operationID, code: code)
             default:
-                try await store.scheduleMembershipRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+                try await store.scheduleMembershipRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
                 return .retryScheduled(command.operationID)
             }
         } catch {
-            try await store.scheduleMembershipRetry(operationID: command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleMembershipRetry(operationID: command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(command.operationID)
         }
     }
+}
+
+extension V2MembershipCommandOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

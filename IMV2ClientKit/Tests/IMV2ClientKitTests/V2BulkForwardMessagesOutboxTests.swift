@@ -17,7 +17,7 @@ struct V2BulkForwardMessagesOutboxTests {
         let sources = try (1 ... 45).map { try MessageID(String(format: "00000000-0000-0000-0000-%012x", $0)) }
         let targets = try [RoomID("00000000-0000-0000-0000-00000000f101"), RoomID("00000000-0000-0000-0000-00000000f102")]
 
-        let plan = try await engine.enqueue(sourceMessageIDs: sources, targetRoomIDs: targets)
+        let plan = try await engine.enqueue(sources: try sources.map(testForwardReference), targetRoomIDs: targets)
         #expect(plan.totalForwardCount == 90)
 
         for _ in 0 ..< 6 {
@@ -35,7 +35,9 @@ struct V2BulkForwardMessagesOutboxTests {
         let commands = await transport.commands
         #expect(commands.count == 6)
         #expect(commands.allSatisfy { $0.sourceMessageIDs.count <= 20 && $0.targetRoomIDs.count == 1 })
-        #expect(commands.map(\.operationID.rawValue) == commands.map(\.operationID.rawValue).sorted())
+        let expectedIDs = try (0..<6).map { try V2ForwardChunkIdentity.operationID(planID: plan.operationID, chunkIndex: UInt64($0)) }
+        #expect(commands.map(\.operationID) == expectedIDs)
+        #expect(commands.allSatisfy { $0.operationID.uuidValue != nil })
     }
 
     @Test("cancelling a plan stops undelivered chunks without changing completed work")
@@ -49,7 +51,7 @@ struct V2BulkForwardMessagesOutboxTests {
         )
         let sources = try (1 ... 25).map { try MessageID(String(format: "00000000-0000-0000-0000-%012x", 500 + $0)) }
         let target = try RoomID("00000000-0000-0000-0000-00000000f202")
-        let plan = try await engine.enqueue(sourceMessageIDs: sources, targetRoomIDs: [target])
+        let plan = try await engine.enqueue(sources: try sources.map(testForwardReference), targetRoomIDs: [target])
 
         guard case .chunkAcknowledged = try await engine.flushOnce() else {
             Issue.record("expected first chunk")
@@ -75,7 +77,7 @@ struct V2BulkForwardMessagesOutboxTests {
             transport: firstTransport,
             makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-00000000f301")! }
         )
-        let plan = try await first.enqueue(sourceMessageIDs: sources, targetRoomIDs: [target])
+        let plan = try await first.enqueue(sources: try sources.map(testForwardReference), targetRoomIDs: [target])
         guard case .chunkAcknowledged = try await first.flushOnce() else {
             Issue.record("expected first chunk")
             return
@@ -109,8 +111,8 @@ private actor BulkForwardTransport: V2ClientForwardMessagesTransport {
 
     func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
         commands.append(command)
-        return command.sourceMessageIDs.map { source in
-            .init(sourceMessageID: source, targetRoomID: command.targetRoomIDs[0], messageID: source, roomSequence: 1, errorCode: nil)
+        return try command.sourceMessageIDs.map { source in
+            try .init(sourceMessageID: source, targetRoomID: command.targetRoomIDs[0], messageID: source, roomSequence: 1, errorCode: nil)
         }
     }
 }

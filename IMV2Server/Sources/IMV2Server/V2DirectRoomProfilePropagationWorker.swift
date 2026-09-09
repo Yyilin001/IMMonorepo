@@ -53,7 +53,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     /// source updates. One invocation therefore remains safe even when a
     /// profile has a very large direct-contact graph.
     public func runOnce(limit: Int) async throws -> V2DirectRoomProfilePropagationReport {
-        precondition(limit > 0)
+        guard limit > 0, limit < Int.max else {
+            throw V2DirectRoomProfilePropagationError.invalidLimit
+        }
         var remaining = limit
         var claimed = 0
         var projected = 0
@@ -83,7 +85,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 projected += 1
             }
 
-            remaining -= targets.count
+            // An empty contact graph still consumes one source update, so
+            // concurrent profile changes cannot make this pass unbounded.
+            remaining -= max(1, targets.count)
             try await advance(lease: lease, lastTargetUserID: targets.last?.userID, completed: isComplete, now: now())
             if isComplete { completed += 1 }
         }
@@ -92,6 +96,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
 
     private func claimNext(now: Date) async throws -> ProfileUpdateLease? {
         guard let sql = database as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
+        guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+        }
         let token = makeUUID()
         return try await sql.raw("""
             WITH candidate AS (
@@ -105,8 +112,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             )
             UPDATE im_v2.public_profile_update_outbox AS outbox
             SET state = 'claimed', claim_token = \(bind: token),
-                lease_expires_at = \(bind: now.addingTimeInterval(leaseDuration)),
-                retry_count = outbox.retry_count + CASE WHEN outbox.state = 'claimed' THEN 1 ELSE 0 END
+                lease_expires_at = \(bind: expiresAt),
+                retry_count = CASE WHEN outbox.state = 'claimed' AND outbox.retry_count < 9223372036854775807
+                    THEN outbox.retry_count + 1 ELSE outbox.retry_count END
             FROM candidate
             WHERE outbox.source_event_id = candidate.source_event_id
             RETURNING outbox.source_event_id, outbox.source_user_id, outbox.public_handle,
@@ -228,6 +236,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             VALUES (\(bind: userID), 1)
             ON CONFLICT (user_id) DO UPDATE
             SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
+            WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max)
             RETURNING next_sequence AS user_sync_sequence
             """).first(decoding: DirectProfileSequenceRow.self) else {
             throw V2DirectRoomProfilePropagationError.corruptPersistenceState
@@ -255,6 +264,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     private func advance(lease: ProfileUpdateLease, lastTargetUserID: UUID?, completed: Bool, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
         if completed {
+            guard v2PostgresTimestampCanEncode(now) else {
+                throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+            }
             try await sql.raw("""
                 UPDATE im_v2.public_profile_update_outbox
                 SET state = 'completed', claim_token = NULL, lease_expires_at = NULL,
@@ -276,6 +288,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
 }
 
 public enum V2DirectRoomProfilePropagationError: Error, Equatable, Sendable {
+    case invalidLimit
     case corruptPersistenceState
     case missingControlProjection
 }
@@ -288,11 +301,11 @@ private struct ProfileUpdateLease: Sendable {
     let accountKind: String
     let profileState: String
     let revision: Int64
-    let profileUpdatedAt: Date
+    let profileUpdatedAt: V2PostgresTimestamp
     let enumerationCheckpoint: UUID?
     let claimToken: UUID
 
-    var updatedAtMilliseconds: Int64 { Int64(profileUpdatedAt.timeIntervalSince1970 * 1_000) }
+    let updatedAtMilliseconds: Int64
 }
 
 private struct ProfileUpdateLeaseRow: Decodable {
@@ -303,7 +316,7 @@ private struct ProfileUpdateLeaseRow: Decodable {
     let accountKind: String
     let profileState: String
     let revision: Int64
-    let profileUpdatedAt: Date
+    let profileUpdatedAt: V2PostgresTimestamp
     let enumerationCheckpoint: UUID?
     let claimToken: UUID
 
@@ -322,7 +335,11 @@ private struct ProfileUpdateLeaseRow: Decodable {
 }
 
 private extension ProfileUpdateLease {
-    init(_ row: ProfileUpdateLeaseRow) {
+    init(_ row: ProfileUpdateLeaseRow) throws {
+        guard let milliseconds = try? v2GatewayMilliseconds(row.profileUpdatedAt.date) else {
+            throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+        }
+        updatedAtMilliseconds = milliseconds
         sourceEventID = row.sourceEventID
         sourceUserID = row.sourceUserID
         publicHandle = row.publicHandle

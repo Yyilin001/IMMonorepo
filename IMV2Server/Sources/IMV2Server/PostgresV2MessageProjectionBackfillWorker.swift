@@ -41,6 +41,7 @@ public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
     ) async throws -> V2MessageProjectionBackfillReport {
         guard limit > 0 else { throw V2MessageProjectionBackfillError.invalidLimit }
         try Task.checkCancellation()
+        guard v2PostgresTimestampCanEncode(now) else { throw V2MessageProjectionBackfillError.corruptPersistence }
         return try await database.transaction { database in
             guard let sql = database as? any SQLDatabase else {
                 throw V2MessageProjectionBackfillError.corruptPersistence
@@ -106,9 +107,9 @@ public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
                         state: state,
                         originEventID: row.sourceEventID,
                         stateEventID: stateEventID,
-                        createdAt: row.createdAt
+                        createdAt: row.createdAt.date
                     )
-                    try await repository.persist(stored, sql: sql)
+                    try await repository.persist(stored, persistedCreatedAt: row.createdAt, sql: sql)
                     stateID = stored.stateID
                     linked += 1
                 }
@@ -149,7 +150,7 @@ private struct MessageProjectionBackfillRow: Decodable {
     let roomID: UUID?
     let messageStateID: UUID?
     let payloadJSON: String?
-    let createdAt: Date
+    let createdAt: V2PostgresTimestamp
     let statePayloadJSON: String?
     enum CodingKeys: String, CodingKey {
         case userID = "user_id", entityKey = "entity_key"

@@ -6,8 +6,46 @@ import Testing
 
 @Suite("V2 room write service")
 struct V2SendMessageServiceTests {
+    @Test("UUIDv7 timestamps reject invalid clocks before conversion or monotonic state changes")
+    func orderedIdentifierClockBounds() throws {
+        let generator = V2SecureProcessUUIDGenerator()
+        let factory = V2AcceptanceIDFactory()
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        _ = try generator.makeOrderedTriple(at: base)
+        let invalidSeconds: [Double] = [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, -1, 1e14, -1e14, -1e12, 281_474_976_710.656, 946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10]
+        for seconds in invalidSeconds {
+            let invalid = Date(timeIntervalSince1970: seconds)
+            #expect(throws: V2AcceptanceIdentifierError.invalidTimestamp) { try generator.makeOrderedTriple(at: invalid) }
+            #expect(throws: V2AcceptanceIdentifierError.invalidTimestamp) { try factory.make(at: invalid) }
+        }
+        let recovered = try generator.makeOrderedTriple(at: base.addingTimeInterval(-60))
+        var uuid = recovered.0.uuid
+        let milliseconds = withUnsafeBytes(of: &uuid) { $0.prefix(6).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) } }
+        #expect(milliseconds == 1_750_000_000_000)
+        _ = try factory.make(at: base)
+    }
+
+    @Test("UUIDv7 finite endpoints and fractional milliseconds preserve all 48 timestamp bits")
+    func orderedIdentifierTimestampEndpoints() throws {
+        let cases: [(Double, UInt64)] = [(0, 0), (1.2345, 1_234), (1_750_000_000.125, 1_750_000_000_125), (281_474_976_710.655, 0x0000_ffff_ffff_ffff)]
+        for (seconds, expected) in cases {
+            // Keep the extreme valid future timestamp out of the shared production generator.
+            let generator = V2SecureProcessUUIDGenerator()
+            let triple = try generator.makeOrderedTriple(at: Date(timeIntervalSince1970: seconds))
+            #expect(Set([triple.0, triple.1, triple.2]).count == 3)
+            for value in [triple.0, triple.1, triple.2] {
+                var uuid = value.uuid
+                withUnsafeBytes(of: &uuid) { bytes in
+                    #expect(bytes[6] >> 4 == 7)
+                    #expect(bytes[8] & 0xc0 == 0x80)
+                    #expect(bytes.prefix(6).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) } == expected)
+                }
+            }
+        }
+    }
+
     @Test("secure process identifiers are concurrent-safe and accepted identifiers are UUIDv7")
-    func secureProcessIdentifiersAreUniqueAndOrdered() async {
+    func secureProcessIdentifiersAreUniqueAndOrdered() async throws {
         let generator = V2SecureProcessUUIDGenerator()
         let values = await withTaskGroup(of: [UUID].self, returning: [UUID].self) { group in
             for _ in 0..<8 {
@@ -30,7 +68,7 @@ struct V2SendMessageServiceTests {
             }
         }
         let acceptedAt = Date(timeIntervalSince1970: 1_645_557_742)
-        let triple = generator.makeOrderedTriple(at: acceptedAt)
+        let triple = try generator.makeOrderedTriple(at: acceptedAt)
         #expect(Set([triple.0, triple.1, triple.2]).count == 3)
         for value in [triple.0, triple.1, triple.2] {
             var uuid = value.uuid
@@ -46,7 +84,7 @@ struct V2SendMessageServiceTests {
 
         // A local wall-clock correction cannot move subsequently generated
         // identifiers into an older B-tree range.
-        let afterClockRollback = generator.makeOrderedTriple(
+        let afterClockRollback = try generator.makeOrderedTriple(
             at: acceptedAt.addingTimeInterval(-60)
         ).0
         var rollbackUUID = afterClockRollback.uuid
@@ -59,20 +97,20 @@ struct V2SendMessageServiceTests {
         // disjoint UUIDv7 random regions. Exercise that shared generator under
         // contention so a future layout change cannot overlap regions or
         // reuse a counter value unnoticed.
-        let triples = await withTaskGroup(
+        let triples = try await withThrowingTaskGroup(
             of: [(UUID, UUID, UUID)].self,
             returning: [(UUID, UUID, UUID)].self
         ) { group in
             for _ in 0..<8 {
                 group.addTask {
-                    (0..<256).map { _ in
-                        generator.makeOrderedTriple(at: acceptedAt)
+                    try (0..<256).map { _ in
+                        try generator.makeOrderedTriple(at: acceptedAt)
                     }
                 }
             }
             var result: [(UUID, UUID, UUID)] = []
             result.reserveCapacity(2_048)
-            for await batch in group { result.append(contentsOf: batch) }
+            for try await batch in group { result.append(contentsOf: batch) }
             return result
         }
         let flattened = triples.flatMap { [$0.0, $0.1, $0.2] }
@@ -112,7 +150,7 @@ struct V2SendMessageServiceTests {
             return
         }
         #expect(accepted.senderUserID == fixture.senderID)
-        #expect(retry == .idempotent(accepted))
+        #expect(retry == .idempotent(accepted.receipt))
         let state = try #require(await store.state(for: fixture.roomID))
         #expect(state.0.nextRoomSequence == 2)
         #expect(state.0.admission.commandWindow.used == 1)

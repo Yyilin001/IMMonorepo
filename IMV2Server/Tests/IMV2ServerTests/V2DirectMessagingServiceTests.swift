@@ -5,6 +5,19 @@ import Testing
 
 @Suite("V2 direct messaging service")
 struct V2DirectMessagingServiceTests {
+    @Test("Stranger quota windows reject non-finite and unencodable durations")
+    func strangerWindowConfigurationBounds() throws {
+        for window in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude,
+                       Double(Int64.max) / 1_000_000, 0, -1] {
+            #expect(throws: V2DirectMessagingPolicyError.invalidLimit) {
+                try V2StrangerMessagePolicy(maximumMessagesPerWindow: 3, window: window)
+            }
+        }
+        for window in [0.0000001, 0.1234567, 86_400] {
+            #expect(try V2StrangerMessagePolicy(maximumMessagesPerWindow: 3, window: window).window == window)
+        }
+    }
+
     @Test("opens a pair with authenticated actor and durable operation")
     func forwardsOpen() async throws {
         let store = DirectStoreSpy()

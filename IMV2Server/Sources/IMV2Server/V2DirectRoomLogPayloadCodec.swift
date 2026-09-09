@@ -9,12 +9,14 @@ enum V2DirectRoomLogPayloadCodec {
     private static let hexadecimal = Array("0123456789abcdef".utf8)
 
     static func encode(_ message: V2AcceptedMessage) -> Data? {
+        // This is a message projection, so pre-1970 timestamps must match the durable floor rounding.
+        guard let milliseconds = try? v2MessageProjectionMilliseconds(message) else { return nil }
         if message.entities.isEmpty {
-            return encodePlainText(message)
+            return encodePlainText(message, milliseconds: milliseconds)
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return try? encoder.encode(Payload(message))
+        return try? encoder.encode(Payload(message: message, milliseconds: milliseconds))
     }
 
     /// Plain direct text is the dominant room-log shape. Avoid constructing a
@@ -22,7 +24,7 @@ enum V2DirectRoomLogPayloadCodec {
     /// while retaining the exact JSON contract. Dynamic strings are escaped
     /// from their UTF-8 bytes according to RFC 8259; richer entity payloads keep
     /// using the general encoder above.
-    private static func encodePlainText(_ message: V2AcceptedMessage) -> Data {
+    private static func encodePlainText(_ message: V2AcceptedMessage, milliseconds: Int64) -> Data {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(message.text.utf8.count + 512)
         append("{\"entities\":[],\"event_type\":\"message.accepted\",\"forwarded_from_message_id\":null,\"forwarded_from_user_id\":null,\"media_ids\":[],\"media_presentations\":[],\"mention_user_ids\":[],\"mentions_everyone\":false,\"message_id\":", to: &bytes)
@@ -31,7 +33,7 @@ enum V2DirectRoomLogPayloadCodec {
         appendJSONString(message.roomID.rawValue, to: &bytes)
         append(",\"room_sequence\":\(message.roomSequence),\"sender_user_id\":", to: &bytes)
         appendJSONString(message.senderUserID.rawValue, to: &bytes)
-        append(",\"server_created_at_ms\":\(Int64(message.createdAt.timeIntervalSince1970 * 1_000)),\"text\":", to: &bytes)
+        append(",\"server_created_at_ms\":\(milliseconds),\"text\":", to: &bytes)
         appendJSONString(message.text, to: &bytes)
         append(",\"timeline_sequence\":\(message.timelineSequence)}", to: &bytes)
         return Data(bytes)
@@ -67,8 +69,7 @@ enum V2DirectRoomLogPayloadCodec {
 
     private struct Payload: Encodable {
         let message: V2AcceptedMessage
-
-        init(_ message: V2AcceptedMessage) { self.message = message }
+        let milliseconds: Int64
 
         enum CodingKeys: String, CodingKey {
             case eventType = "event_type"
@@ -109,7 +110,7 @@ enum V2DirectRoomLogPayloadCodec {
             try container.encodeNil(forKey: .forwardedFromUserID)
             try container.encode(1, forKey: .messageRevision)
             try container.encode(
-                Int64(message.createdAt.timeIntervalSince1970 * 1_000),
+                milliseconds,
                 forKey: .serverCreatedAtMilliseconds
             )
         }

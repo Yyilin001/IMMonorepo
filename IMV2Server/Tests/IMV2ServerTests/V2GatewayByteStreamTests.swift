@@ -8,6 +8,221 @@ import Synchronization
 import Testing
 
 struct V2GatewayByteStreamTests {
+    @Test("subscription responses match canonical UUID identity and preserve opaque spelling", arguments: ["group", "presence"])
+    func canonicalSubscriptionIdentity(kind: String) async throws {
+        for spelling in ["00000000-0000-0000-0000-abcdef123456", "00000000-0000-0000-0000-ABCDEF123456", "Room-A"] {
+            let registry = V2DeviceConnectionRegistry()
+            let room = try RoomID(spelling), subject = UserID(uuid: UUID())
+            let stream = V2GatewayByteStream(
+                frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
+                    capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+                handler: CanonicalSubscriptionCommandFake(subject: subject), registry: registry)
+            let recorder = OutboundFrameRecorder()
+            await stream.setOutboundWriter { await recorder.append($0) }
+            var hello = IMV2Envelope(); hello.requestID = 1
+            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.supportedCapabilityProfiles = ["base"]
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
+            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(auth, version: protocolVersion))
+            var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(protocolVersion)
+            if kind == "group" { request.groupEventSubscribe.roomID = spelling }
+            else { request.subscribePresence.roomID = spelling }
+            let responses = try await stream.receive(encoded(request, version: protocolVersion))
+            let response = try decode(#require(responses.first))
+            #expect(response.requestID == 3)
+            #expect((kind == "group" ? response.groupEventSubscribed.roomID : response.presenceSubscribed.roomID) == room.rawValue)
+            if kind == "group" {
+                await registry.notifyForegroundGroupAvailable(roomID: room, highWatermark: 9)
+                if spelling == "Room-A" { await registry.notifyForegroundGroupAvailable(roomID: try .init("room-a"), highWatermark: 10) }
+            } else {
+                await registry.receivePresence(targetUserID: subject, isOnline: true, expiresAt: Date(timeIntervalSince1970: 1_750_000_006))
+            }
+            let notifications = await recorder.all()
+            #expect(notifications.count == 1)
+            let notification = try decode(#require(notifications.first))
+            #expect((kind == "group" ? notification.groupEventAvailable.roomID : notification.presenceChanged.roomID) == room.rawValue)
+            #expect(await stream.isAuthenticated())
+            try await stream.finish()
+        }
+    }
+
+    @Test("Subscription state changes only after a successful command acknowledgement", arguments: ["subscribe-typing", "unsubscribe-typing", "unsubscribe-presence", "unsubscribe-group"])
+    func subscriptionResponseControlsState(kind: String) async throws {
+        for hasPriorSubscription in kind == "subscribe-typing" ? [false, true] : [true] {
+            let registry = V2DeviceConnectionRegistry(), connectionID = UUID()
+            let handler = SubscriptionResponseCommandFake()
+            let stream = V2GatewayByteStream(
+                frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
+                    capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+                handler: handler, connectionID: connectionID, registry: registry)
+            let recorder = OutboundFrameRecorder()
+            await stream.setOutboundWriter { await recorder.append($0) }
+            var hello = IMV2Envelope(); hello.requestID = 1
+            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.supportedCapabilityProfiles = ["base"]
+            _ = try await stream.receive(encoded(hello, version: 0))
+            var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
+            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+            _ = try await stream.receive(encoded(auth, version: protocolVersion))
+            let oldRoom = RoomID(uuid: UUID()), newRoom = RoomID(uuid: UUID()), subject = UserID(uuid: UUID())
+            if hasPriorSubscription {
+                switch kind {
+                case "unsubscribe-group": await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: oldRoom)
+                case "unsubscribe-presence": await registry.subscribePresence(stream, connectionID: connectionID, roomID: oldRoom, targetUserID: subject)
+                default: await registry.subscribeTyping(stream, connectionID: connectionID, roomID: oldRoom)
+                }
+            }
+            func publish() async {
+                let expiry = Date(timeIntervalSince1970: 1_750_000_006)
+                switch kind {
+                case "unsubscribe-group":
+                    await registry.notifyForegroundGroupAvailable(roomID: oldRoom, highWatermark: 1)
+                    await registry.notifyForegroundGroupAvailable(roomID: newRoom, highWatermark: 1)
+                case "unsubscribe-presence": await registry.receivePresence(targetUserID: subject, isOnline: true, expiresAt: expiry)
+                default:
+                    await registry.receiveTyping(.init(roomID: oldRoom, userID: subject, isTyping: true, expiresAt: expiry))
+                    await registry.receiveTyping(.init(roomID: newRoom, userID: subject, isTyping: true, expiresAt: expiry))
+                }
+            }
+            var command = IMV2Envelope(); command.requestID = 3; command.protocolVersion = UInt32(protocolVersion)
+            switch kind {
+            case "subscribe-typing": command.subscribeTyping.roomID = newRoom.rawValue
+            case "unsubscribe-typing": command.unsubscribeTyping.roomID = oldRoom.rawValue
+            case "unsubscribe-presence": command.unsubscribePresence.roomID = oldRoom.rawValue
+            default: command.groupEventUnsubscribe.roomID = oldRoom.rawValue
+            }
+            var expectedRooms: [String] = []
+            for failure in ["UNAVAILABLE", "RATE_LIMITED", "unexpected-response"] {
+                await handler.setFailure(failure)
+                let responses = try await stream.receive(encoded(command, version: protocolVersion))
+                #expect(responses.count == 1)
+                let response = try decode(#require(responses.first))
+                #expect(response.requestID == command.requestID)
+                if failure != "unexpected-response" { #expect(response.error.code == failure); #expect(response.error.retryable) }
+                await publish()
+                if hasPriorSubscription { expectedRooms.append(oldRoom.rawValue) }
+                let rooms = try await recorder.all().map { bytes -> String in
+                    let envelope = try decode(bytes)
+                    switch kind {
+                    case "unsubscribe-group": return envelope.groupEventAvailable.roomID
+                    case "unsubscribe-presence": return envelope.presenceChanged.roomID
+                    default: return envelope.typingStateChanged.roomID
+                    }
+                }
+                #expect(rooms == expectedRooms)
+                #expect(await stream.isAuthenticated())
+                command.requestID += 1
+            }
+            await handler.setFailure(nil)
+            let responses = try await stream.receive(encoded(command, version: protocolVersion))
+            let response = try decode(#require(responses.first))
+            guard case .acknowledged? = response.body else { Issue.record("Expected command acknowledgement"); try await stream.finish(); return }
+            await publish()
+            if kind == "subscribe-typing" { expectedRooms.append(newRoom.rawValue) }
+            #expect(await recorder.count() == expectedRooms.count)
+            if kind == "subscribe-typing" {
+                let latest = try decode(#require(await recorder.all().last))
+                #expect(latest.typingStateChanged.roomID == newRoom.rawValue)
+            }
+            try await stream.finish()
+        }
+    }
+
+    @Test("Invalid presence and typing expiry emits no frame and preserves the authenticated stream")
+    func notificationTimestampBoundary() async throws {
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
+                           capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+        let recorder = OutboundFrameRecorder()
+        await stream.setOutboundWriter { await recorder.append($0) }
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(auth, version: protocolVersion))
+        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+        for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, Double(Int64.max) / 1_000] {
+            let date = Date(timeIntervalSince1970: seconds)
+            await stream.sendPresenceState(.init(roomID: room, targetUserID: user, isOnline: true, expiresAt: date))
+            await stream.sendTypingState(.init(roomID: room, userID: user, isTyping: true, expiresAt: date))
+        }
+        #expect(await recorder.count() == 0)
+        #expect(await stream.isAuthenticated())
+        let date = Date(timeIntervalSince1970: 1_750_000_000.125)
+        await stream.sendPresenceState(.init(roomID: room, targetUserID: user, isOnline: true, expiresAt: date))
+        await stream.sendTypingState(.init(roomID: room, userID: user, isTyping: false, expiresAt: date))
+        let frames = await recorder.all()
+        #expect(frames.count == 2)
+        let presence = try decode(#require(frames.first)), typing = try decode(#require(frames.last))
+        #expect(presence.presenceChanged.expiresAtMs == 1_750_000_000_125)
+        #expect(presence.presenceChanged.isOnline)
+        #expect(typing.typingStateChanged.expiresAtMs == 1_750_000_000_125)
+        #expect(!typing.typingStateChanged.isTyping)
+        try await stream.finish()
+    }
+
+    @Test("credential rejection is flushed before close; infrastructure errors never revoke client credentials",
+          arguments: [V2GatewayAuthenticationError.unauthenticated, .corruptPersistenceState])
+    func authenticationFailureWireContract(failure: V2GatewayAuthenticationError) async throws {
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: RejectingByteStreamAuthenticator(failure: failure),
+            capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission()
+        )
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: session,
+            handler: ByteStreamCommandFake(),
+            registry: V2DeviceConnectionRegistry()
+        )
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello = .init()
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var authenticate = IMV2Envelope()
+        authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate = .init()
+        authenticate.authenticate.accessToken = "rejected-opaque-token"
+        authenticate.authenticate.deviceID = "device-a"
+        let bytes = try encoded(authenticate, version: protocolVersion)
+        var responses: [Data] = []
+        do {
+            // A second coalesced request must never execute after rejection.
+            _ = try await stream.receive(bytes + bytes) { responses.append($0) }
+            Issue.record("Authentication failure must close the stream")
+        } catch {
+            #expect(error as? V2GatewayAuthenticationError == failure)
+        }
+        if failure == .unauthenticated {
+            #expect(responses.count == 1)
+            let response = try decode(#require(responses.first))
+            #expect(response.requestID == authenticate.requestID)
+            #expect(response.protocolVersion == UInt32(protocolVersion))
+            #expect(response.error.code == "UNAUTHENTICATED")
+            #expect(!response.error.retryable)
+            #expect(response.error.retryAfterSeconds == 0)
+            #expect(response.error.currentRevision == 0)
+        } else {
+            #expect(responses.isEmpty)
+        }
+        #expect(await !stream.isAuthenticated())
+        await #expect(throws: (any Error).self) {
+            _ = try await stream.receive(bytes)
+        }
+    }
+
     @Test("NIO response encoding is byte-identical to the transport-neutral codec")
     func nioWireEncodingMatchesCoreCodec() throws {
         let limits = try V2FrameLimits(
@@ -916,6 +1131,44 @@ private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
 private struct ByteStreamAuthFake: V2GatewayAuthenticator {
     func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
         try .init(userID: .init("user-a"), expiresAt: nil)
+    }
+}
+
+private struct RejectingByteStreamAuthenticator: V2GatewayAuthenticator {
+    let failure: V2GatewayAuthenticationError
+
+    func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
+        throw failure
+    }
+}
+
+private actor SubscriptionResponseCommandFake: V2GatewayCommandHandler {
+    private var failure: String?
+    func setFailure(_ value: String?) { failure = value }
+    func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        var response = IMV2Envelope()
+        if let failure {
+            if failure == "unexpected-response" { response.heartbeatAck.serverTimeMs = 1 }
+            else { response.error.code = failure; response.error.retryable = true }
+        } else { response.acknowledged = .init() }
+        return response
+    }
+}
+
+private struct CanonicalSubscriptionCommandFake: V2GatewayCommandHandler {
+    let subject: UserID
+    func handle(envelope: IMV2Envelope, identity _: V2AuthenticatedConnection) throws -> IMV2Envelope {
+        var response = IMV2Envelope()
+        switch envelope.body {
+        case .groupEventSubscribe(let request):
+            response.groupEventSubscribed.roomID = try RoomID(request.roomID).rawValue
+            response.groupEventSubscribed.membershipRevision = 1
+        case .subscribePresence(let request):
+            response.presenceSubscribed.roomID = try RoomID(request.roomID).rawValue
+            response.presenceSubscribed.targetUserID = subject.rawValue
+        default: Issue.record("Unexpected command in subscription fixture")
+        }
+        return response
     }
 }
 

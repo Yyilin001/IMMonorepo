@@ -75,7 +75,7 @@ private actor ReactionTransport: V2ClientMessageReactionTransport {
     func changeMessageReaction(roomID: RoomID, operationID _: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) throws -> V2ClientMessageReactionChange {
         switch results.removeFirst() {
         case .retry: throw V2RealtimeTransportError.unexpectedResponse
-        case .accepted: return .init(roomID: roomID, messageID: messageID, actorUserID: try .init("00000000-0000-0000-0000-000000000955"), reaction: reaction, action: action, roomSequence: 8, createdAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, messageID: messageID, actorUserID: try .init("00000000-0000-0000-0000-000000000955"), reaction: reaction, action: action, roomSequence: 8, createdAt: .distantPast)
         }
     }
 }

@@ -6,13 +6,13 @@ import IMV2Core
 /// receipt projections remain on the control/user path.
 public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
     private let router: any V2RoomShardRouting
-    private let ownerStores: [String: any V2GroupReadReceiptOwnerStore]
+    private let ownerStores: [String: any V2OwnerValidatedReadReceiptStore]
     private let controlStore: any V2ReadReceiptControlStore
     private let physicalStoreKeyByShard: [String: String]
 
     public init(
         router: any V2RoomShardRouting,
-        ownerStores: [String: any V2GroupReadReceiptOwnerStore],
+        ownerStores: [String: any V2OwnerValidatedReadReceiptStore],
         controlStore: any V2ReadReceiptControlStore,
         physicalStoreKeyByShard: [String: String]? = nil
     ) throws {
@@ -43,7 +43,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
         struct RoutedRequest: Sendable {
             let index: Int
             let request: V2ReadReceiptRecordRequest
-            let shardID: String
+            let route: V2RoomShardRoute
         }
         var batches: [String: [RoutedRequest]] = [:]
         for (index, request) in requests.enumerated() {
@@ -54,7 +54,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
             batches[physicalKey, default: []].append(.init(
                 index: index,
                 request: request,
-                shardID: route.shardID
+                route: route
             ))
         }
 
@@ -63,12 +63,12 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
             returning: [(Int, V2GroupReadReceiptBatchResult)].self
         ) { group in
             for batch in batches.values {
-                guard let shardID = batch.first?.shardID,
+                guard let shardID = batch.first?.route.shardID,
                       let owner = ownerStores[shardID]
                 else { throw V2RoomShardStorageRegistryError.unknownShardID }
                 group.addTask {
-                    let outcomes = try await owner.recordGroups(
-                        batch.map(\.request)
+                    let outcomes = try await owner.recordGroupsOwnerValidated(
+                        batch.map { .init(request: $0.request, ownerRoute: $0.route) }
                     )
                     guard outcomes.count == batch.count else {
                         throw V2ReadReceiptStoreError.corruptPersistenceState
@@ -119,7 +119,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
         guard let owner = ownerStores[route.shardID] else {
             throw V2RoomShardStorageRegistryError.unknownShardID
         }
-        switch try await owner.recordGroup(command: command, now: now) {
+        switch try await owner.recordGroupOwnerValidated(command: command, ownerRoute: route, now: now) {
         case .handled(let outcome): return outcome
         case .notGroup:
             return try await controlStore.record(command: command, now: now)
@@ -159,10 +159,11 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
         repeat {
             let remaining = pageSize - readers.count
             let batchSize = min(100, remaining)
-            let candidates = try await owner.readerCandidates(
+            let candidates = try await owner.readerCandidatesOwnerValidated(
                 roomID: roomID,
                 messageID: messageID,
                 actorUserID: actorUserID,
+                ownerRoute: route,
                 cursor: scanCursor,
                 pageSize: batchSize
             )

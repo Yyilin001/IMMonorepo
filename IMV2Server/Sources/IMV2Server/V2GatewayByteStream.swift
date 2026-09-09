@@ -347,6 +347,12 @@ public actor V2GatewayByteStream {
                 )
                 try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
                 try await respond(exchange.response)
+                if let rejection = exchange.terminalAuthenticationError {
+                    // The awaited transport write must finish before the
+                    // existing failure path closes the channel. Stop here so
+                    // coalesced commands cannot run after a failed login.
+                    throw rejection
+                }
             }
             // A full decode quantum can leave a valid complete frame behind.
             // The NIO owner schedules one continuation before it consumes a
@@ -521,23 +527,25 @@ public actor V2GatewayByteStream {
     }
 
     public func sendPresenceState(_ state: V2PresenceState) async {
-        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter,
+              let milliseconds = try? v2GatewayMilliseconds(state.expiresAt) else { return }
         var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.presenceChanged = .init()
         envelope.presenceChanged.roomID = state.roomID.rawValue
         envelope.presenceChanged.targetUserID = state.targetUserID.rawValue
         envelope.presenceChanged.isOnline = state.isOnline
-        envelope.presenceChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
+        envelope.presenceChanged.expiresAtMs = milliseconds
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
         await outboundWriter(bytes)
     }
 
     public func sendTypingState(_ state: V2TypingState) async {
-        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter,
+              let milliseconds = try? v2GatewayMilliseconds(state.expiresAt) else { return }
         var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.typingStateChanged = .init()
         envelope.typingStateChanged.roomID = state.roomID.rawValue
         envelope.typingStateChanged.userID = state.userID.rawValue
         envelope.typingStateChanged.isTyping = state.isTyping
-        envelope.typingStateChanged.expiresAtMs = Int64(state.expiresAt.timeIntervalSince1970 * 1_000)
+        envelope.typingStateChanged.expiresAtMs = milliseconds
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
         await outboundWriter(bytes)
     }
@@ -589,27 +597,35 @@ public actor V2GatewayByteStream {
             ) else { throw V2GatewaySessionError.authenticatedConnectionLimit }
         case .groupEventSubscribe(let request):
             guard case .groupEventSubscribed(let subscribed)? = response.body,
-                  subscribed.roomID == request.roomID
+                  let roomID = try? RoomID(request.roomID),
+                  let subscribedRoomID = try? RoomID(subscribed.roomID),
+                  subscribedRoomID == roomID
             else { return }
             await registry.subscribeForegroundGroup(
                 self,
                 connectionID: connectionID,
-                roomID: try .init(request.roomID),
+                roomID: roomID,
                 membershipRevision: subscribed.membershipRevision
             )
         case .groupEventUnsubscribe(let request):
+            guard case .acknowledged? = response.body else { return }
             await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
         case .subscribePresence(let request):
             guard case .presenceSubscribed(let subscribed)? = response.body,
-                  subscribed.roomID == request.roomID,
-                  let roomID = try? RoomID(request.roomID), let targetUserID = try? UserID(subscribed.targetUserID)
+                  let roomID = try? RoomID(request.roomID),
+                  let subscribedRoomID = try? RoomID(subscribed.roomID),
+                  subscribedRoomID == roomID,
+                  let targetUserID = try? UserID(subscribed.targetUserID)
             else { return }
             await registry.subscribePresence(self, connectionID: connectionID, roomID: roomID, targetUserID: targetUserID)
         case .unsubscribePresence(let request):
+            guard case .acknowledged? = response.body else { return }
             await registry.unsubscribePresence(connectionID: connectionID, roomID: try .init(request.roomID))
         case .subscribeTyping(let request):
+            guard case .acknowledged? = response.body else { return }
             await registry.subscribeTyping(self, connectionID: connectionID, roomID: try .init(request.roomID))
         case .unsubscribeTyping(let request):
+            guard case .acknowledged? = response.body else { return }
             await registry.unsubscribeTyping(connectionID: connectionID, roomID: try .init(request.roomID))
         case .setTypingState(let request):
             guard case .acknowledged? = response.body,

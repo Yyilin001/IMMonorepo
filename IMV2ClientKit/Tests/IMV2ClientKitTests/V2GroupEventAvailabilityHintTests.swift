@@ -5,6 +5,21 @@ import Testing
 
 @Suite("V2 group-event availability acceleration")
 struct V2GroupEventAvailabilityHintTests {
+    @Test("unpersistable optional event sequences degrade to a metadata wake", arguments: [false, true], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func liveSequenceBounds(legacy: Bool, sequence: UInt64) {
+        var hint = IMV2GroupEventAvailable()
+        hint.highWatermark = sequence
+        let value = event(sequence: sequence, idSuffix: 601)
+        if legacy {
+            hint.sourceEventID = value.sourceEventID
+            hint.roomSequence = sequence
+            hint.projectionKind = value.projectionKind
+            hint.eventPayload = value.payload
+        } else { hint.liveEvents = [value] }
+        let decoded = V2TLSFrameConnection.liveGroupEvents(from: hint)
+        #expect(decoded.map(\.roomSequence) == (sequence > 0 && sequence <= UInt64(Int64.max) ? [sequence] : []))
+    }
+
     @Test("an ordered protobuf live batch maps to domain events")
     func decodesOrderedLiveBatch() throws {
         var hint = IMV2GroupEventAvailable()
@@ -42,18 +57,18 @@ struct V2GroupEventAvailabilityHintTests {
             roomID: roomID,
             highWatermark: 12,
             liveEvents: [
-                clientEvent(sequence: 10, idSuffix: 630),
-                clientEvent(sequence: 11, idSuffix: 631),
-                clientEvent(sequence: 12, idSuffix: 632),
+                try clientEvent(sequence: 10, idSuffix: 630),
+                try clientEvent(sequence: 11, idSuffix: 631),
+                try clientEvent(sequence: 12, idSuffix: 632),
             ]
         )
         let newer = V2GroupEventAvailabilityHint(
             roomID: roomID,
             highWatermark: 14,
             liveEvents: [
-                clientEvent(sequence: 12, idSuffix: 632),
-                clientEvent(sequence: 13, idSuffix: 633),
-                clientEvent(sequence: 14, idSuffix: 634),
+                try clientEvent(sequence: 12, idSuffix: 632),
+                try clientEvent(sequence: 13, idSuffix: 633),
+                try clientEvent(sequence: 14, idSuffix: 634),
             ]
         )
 
@@ -69,12 +84,12 @@ struct V2GroupEventAvailabilityHintTests {
         let older = V2GroupEventAvailabilityHint(
             roomID: roomID,
             highWatermark: 10,
-            liveEvents: [clientEvent(sequence: 10, idSuffix: 640)]
+            liveEvents: [try clientEvent(sequence: 10, idSuffix: 640)]
         )
         let newer = V2GroupEventAvailabilityHint(
             roomID: roomID,
             highWatermark: 12,
-            liveEvents: [clientEvent(sequence: 12, idSuffix: 642)]
+            liveEvents: [try clientEvent(sequence: 12, idSuffix: 642)]
         )
 
         let merged = older.coalescing(with: newer)
@@ -92,8 +107,8 @@ struct V2GroupEventAvailabilityHintTests {
         return value
     }
 
-    private func clientEvent(sequence: UInt64, idSuffix: Int) -> V2ClientGroupEvent {
-        .init(
+    private func clientEvent(sequence: UInt64, idSuffix: Int) throws -> V2ClientGroupEvent {
+        try .init(
             sourceEventID: try! EventID(
                 String(format: "00000000-0000-0000-0000-%012d", idSuffix)
             ),

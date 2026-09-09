@@ -51,13 +51,16 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
         guard userLimit > 0, rowLimit > 0 else {
             throw V2UserSyncLogCompactionError.invalidLimit
         }
+        guard let cutoff = v2PostgresPastTimestamp(now: now, interval: minimumLogAge) else {
+            throw V2UserSyncLogCompactionError.corruptPersistence
+        }
         var report = V2UserSyncLogCompactionReport(
             claimedUserCount: 0,
             deletedLogRowCount: 0, deletedSharedPayloadCount: 0
         )
         for _ in 0 ..< userLimit {
             try Task.checkCancellation()
-            guard let pass = try await compactOne(now: now, rowLimit: rowLimit) else { break }
+            guard let pass = try await compactOne(now: now, cutoff: cutoff, rowLimit: rowLimit) else { break }
             report = .init(
                 claimedUserCount: report.claimedUserCount + 1,
                 deletedLogRowCount: report.deletedLogRowCount + pass.deletedLogRowCount,
@@ -67,7 +70,7 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
         return report
     }
 
-    private func compactOne(now: Date, rowLimit: Int) async throws -> CompactionPass? {
+    private func compactOne(now: Date, cutoff: Date, rowLimit: Int) async throws -> CompactionPass? {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2UserSyncLogCompactionError.corruptPersistence
@@ -125,7 +128,7 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                 SELECT MIN(user_sync_sequence) - 1 AS value
                 FROM \(unsafeRaw: table("user_sync_log"))
                 WHERE user_id = \(bind: candidate.userID)
-                  AND created_at > \(bind: now.addingTimeInterval(-minimumLogAge))
+                  AND created_at > \(bind: cutoff)
                 """).first(decoding: OptionalCompactionFloorRow.self)?.value
             let safeFloor = min(
                 candidate.projectedSequence,

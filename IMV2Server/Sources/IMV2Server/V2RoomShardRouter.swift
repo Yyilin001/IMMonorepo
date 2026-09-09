@@ -70,8 +70,12 @@ public protocol V2DirectRoomShardRouting: V2RoomShardRouting {
 /// existing room on command handling.
 public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
     private let database: any Database
+    private let now: @Sendable () -> Date
 
-    public init(database: any Database) { self.database = database }
+    public init(database: any Database, now: @escaping @Sendable () -> Date = Date.init) {
+        self.database = database
+        self.now = now
+    }
 
     public func route(for roomID: RoomID) async throws -> V2RoomShardRoute {
         guard let sql = database as? any SQLDatabase,
@@ -179,7 +183,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
                   let roomUUID = UUID(uuidString: roomID.rawValue)
             else { return completion.result }
             try await record(
-                roomID: roomUUID, pair: pair, route: route, sql: sql
+                roomID: roomUUID, pair: pair, route: route, sql: sql, now: now()
             )
             return completion.result
         }
@@ -187,7 +191,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
 
     private func record(
         roomID: UUID, pair: CanonicalDirectPair, route: V2RoomShardRoute,
-        sql: any SQLDatabase, now: Date = Date()
+        sql: any SQLDatabase, now: Date
     ) async throws {
         if let existing = try await sql.raw("""
             SELECT room_shard_id, route_epoch
@@ -197,6 +201,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
                 throw V2RoomShardRouteError.routeConflict
             }
         } else {
+            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomShardRouteError.corruptPersistenceState }
             try await sql.raw("""
                 INSERT INTO im_v2.room_owner_routes
                     (room_id, room_shard_id, route_epoch, created_at, updated_at)
@@ -214,6 +219,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
                   existing.routeEpoch == route.epoch
             else { throw V2RoomShardRouteError.routeConflict }
         } else {
+            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomShardRouteError.corruptPersistenceState }
             try await sql.raw("""
                 INSERT INTO im_v2.direct_room_owner_routes
                     (lower_user_id, higher_user_id, room_id, room_shard_id, route_epoch, created_at, updated_at)

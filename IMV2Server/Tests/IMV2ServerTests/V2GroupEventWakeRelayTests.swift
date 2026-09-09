@@ -258,7 +258,7 @@ struct V2GroupEventWakeRelayTests {
 
         observer.observeCommittedMessages([
             .accepted(higher),
-            .idempotent(try acceptedHybridMessage(roomID: roomID, sequence: 30)),
+            .idempotent(try acceptedHybridMessage(roomID: roomID, sequence: 30).receipt),
             .rateLimited(retryAfterSeconds: 1),
             .accepted(lower),
         ])

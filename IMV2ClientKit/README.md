@@ -58,13 +58,45 @@ or emulate a login method.
 `V2HTTPAccountAssertionDeviceCredentialProvider` is the corresponding generic
 initial-credential adapter for `POST /v2/device-credentials`. It receives an
 opaque assertion only from an injected account-factor provider and a device ID
-from an injected identity provider. Its device-only
-`V2KeychainDeviceCredentialRegistrationOperationStore` persists only the
-device ID and registration operation UUID using
-`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`; it never persists an
-assertion or raw credential. That operation is removed only after
-`V2AuthSession` has durably stored the returned credential pair, so a lost
-response can safely replay the same registration operation.
+from an injected identity provider. The App's `V2DeviceRegistrationStore`
+keeps account-scoped device/operation identities and a purpose-limited random
+cancellation proof in device-local Keychain before requesting the factor;
+the generic `V2KeychainDeviceCredentialRegistrationOperationStore` remains a
+device-only adapter. Neither stores the account assertion. Registration replay
+still requires a valid account factor and the server's bounded replay window.
+HTTP issuance requires the exact cancellation identity and confirms it in the
+response. A missing or mismatched confirmation durably hands off any received
+revocation authority before rejecting login. New attempts have a ten-minute
+issuance deadline; expiry rotates both IDs while retaining the old proof.
+The issuer requires `V2IssuedCredentialRecovering`: production composition uses
+`V2IssuedCredentialRecoveryStore` to persist received revocation authority
+before returning credentials. After durable login adoption, finalization clears
+the operation and received-result record. Cold recovery must precede interactive
+registration so it does not abandon an in-flight result.
+
+`V2HTTPDeviceRegistrationCancellationClient` sends a caller-owned
+`V2DeviceRegistrationCancellation` to
+`POST /v2/device-credentials/cancel-registration` without account authentication.
+Its exact device, operation, proof and issue deadline survive retries; only an
+empty 204 confirms cancellation, while an empty 410 reports server expiry.
+The cancellation JSON encodes its typed device as
+`"deviceID":{"rawValue":"CANONICAL-UUID"}`; the outer issuance request's
+`deviceID` remains a string. Non-Swift callers must preserve this distinction.
+The server can fence an unissued operation or revoke its bound issued session.
+The registration ledger uses format 3, atomically migrating format 2 proofs
+into jobs with durable retry state. Logout moves pending proofs to its
+abandoned collection; `pendingCancellations()` and exact-match
+`completeCancellation(_:)` allow recovery after a completely lost response.
+`V2DeviceRegistrationCancellationRunner` observes this queue, retries transient
+failures with bounded backoff, and pauses invalid requests/responses. Its App
+owner runs while active, cancels and drains on background entry, and shares
+aggregate cleanup status and manual retry with session revocation. Cold startup
+must call `recoverUnclaimed(ownedBy:)` before interactive registration: pending
+proofs matching an owned durable device are retired locally; unowned proofs
+are queued. Only server cancellation or expiry settles a queued proof.
+Legacy format-1 IDs are archived without fabricating proof;
+their server cleanup needs an explicit deployment/recovery policy. The generic
+device-only Keychain adapter retains unsupported old records and fails closed.
 
 The package contains framework-neutral WebAuthn building blocks, but the app
 does not expose them until the account service owns a complete challenge,
@@ -109,3 +141,16 @@ Unit tests use actor-isolated fake stores and transports. Keychain behavior
 under device lock, reboot-before-first-unlock, entitlement/access-group changes,
 and real terminal server errors still require simulator/device and backend
 integration validation.
+
+
+For format-1 legacy archives, use the prepared lease's
+`recoveringLegacyRegistration(using:client:)` to wrap the fresh factor provider
+with `V2HTTPLegacyRegistrationCancellationClient`. The App uses this composition
+before new credential issuance. The same factor authorizes only its account's
+old device, and only empty 204 permits exact archive completion. Failures retain
+the archive; a new login attempt obtains a new factor and replays the original
+operation. Full pending-lease and archived-identity comparisons fence late
+completion. No password or account assertion is persisted. Format 3 retains a
+single extra recovery slot (maximum 257 entries) when 256 legacy entries would
+otherwise prevent recovery; ordinary registrations cannot consume that slot.
+See the [recovery contract](../docs/reviews/legacy-registration-client-recovery-contract.md).

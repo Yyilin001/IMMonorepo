@@ -2,9 +2,115 @@ import Foundation
 
 /// Canonical schema for a fresh, device-local V2 projection database.
 ///
-/// The application is not deployed, so historical SQLite layouts are not
-/// supported. Schema evolution starts from this current contract only.
+/// The application is not deployed. Only explicitly registered, tested
+/// migrations are supported; these preserve pending commands and committed
+/// projection effects rather than silently accepting arbitrary older layouts.
 extension GRDBV2LocalSyncStore {
+    static let pinnedMessageProjectionSchemaSQL = """
+        CREATE TABLE v2_group_pinned_messages (
+            room_id TEXT NOT NULL, message_id TEXT NOT NULL,
+            is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
+            room_sequence INTEGER NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL,
+            source_event_id TEXT NULL, canonical_digest BLOB NULL CHECK (length(canonical_digest) = 32),
+            CHECK ((source_event_id IS NULL) = (canonical_digest IS NULL)),
+            PRIMARY KEY (room_id, message_id)
+        )
+        """
+    static let pinnedMessageEffectsSchemaSQL = """
+        CREATE TABLE v2_pin_effects (
+            source_event_id TEXT NOT NULL, room_id TEXT NOT NULL, message_id TEXT NOT NULL,
+            room_sequence INTEGER NULL CHECK (room_sequence > 0),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (source_event_id, room_id)
+        )
+        """
+
+    static let announcementProjectionSchemaSQL = """
+        CREATE TABLE v2_group_announcements (
+            room_id TEXT PRIMARY KEY, body TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            room_sequence INTEGER NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL,
+            source_event_id TEXT NULL,
+            canonical_digest BLOB NULL CHECK (length(canonical_digest) = 32),
+            CHECK ((source_event_id IS NULL) = (canonical_digest IS NULL))
+        )
+        """
+    static let announcementEffectsSchemaSQL = """
+        CREATE TABLE v2_announcement_effects (
+            source_event_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            room_sequence INTEGER NULL CHECK (room_sequence > 0),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (source_event_id, room_id)
+        )
+        """
+
+    static let rolePolicyProjectionSchemaSQL = """
+        CREATE TABLE v2_group_role_policies (
+            room_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+            permissions BLOB NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
+            room_sequence INTEGER NULL CHECK (room_sequence > 0),
+            source_event_id TEXT NULL, canonical_digest BLOB NULL CHECK (length(canonical_digest) = 32),
+            CHECK ((source_event_id IS NULL) = (canonical_digest IS NULL)),
+            PRIMARY KEY (room_id, role)
+        )
+        """
+    static let rolePolicyEffectsSchemaSQL = """
+        CREATE TABLE v2_role_policy_effects (
+            source_event_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            room_sequence INTEGER NULL CHECK (room_sequence > 0),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (source_event_id, room_id)
+        )
+        """
+
+    static let rolePolicyBaselineSchemaSQL = """
+        CREATE TABLE v2_group_role_policy_baselines (
+            room_id TEXT PRIMARY KEY,
+            permission_revision INTEGER NOT NULL CHECK (permission_revision > 0),
+            membership_revision INTEGER NOT NULL CHECK (membership_revision >= 0),
+            room_sequence INTEGER NOT NULL CHECK (room_sequence >= 0),
+            admin_permissions BLOB NOT NULL, member_permissions BLOB NOT NULL
+        )
+        """
+    static let rolePolicyRecoverySchemaSQL = """
+        CREATE TABLE v2_role_policy_recovery_requests (
+            room_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
+            installation_binding TEXT NOT NULL, user_id TEXT NOT NULL,
+            membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+            membership_source_event_id TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 2147483647),
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'paused'))
+        );
+        CREATE INDEX v2_role_policy_recovery_due_idx ON v2_role_policy_recovery_requests (next_attempt_at, room_id) WHERE state = 'pending'
+        """
+
+    static let pushIntentSchemaSQL = """
+        CREATE TABLE v2_push_intent (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            device_id TEXT NOT NULL CHECK (length(device_id) = 36),
+            owner_id TEXT NOT NULL CHECK (length(owner_id) = 36),
+            preference_enabled INTEGER NOT NULL CHECK (preference_enabled IN (0, 1)),
+            desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
+            intent_revision INTEGER NOT NULL CHECK (typeof(intent_revision) = 'integer' AND intent_revision > 0),
+            acknowledged_revision INTEGER NOT NULL CHECK (typeof(acknowledged_revision) = 'integer' AND acknowledged_revision >= 0 AND acknowledged_revision <= intent_revision),
+            token_reference TEXT NULL CHECK (length(token_reference) = 36),
+            claim_id TEXT NULL CHECK (length(claim_id) = 36),
+            expected_epoch INTEGER NULL CHECK (expected_epoch IS NULL OR (typeof(expected_epoch) = 'integer' AND expected_epoch >= 0 AND expected_epoch < 9223372036854775807)),
+            session_epoch INTEGER NULL CHECK (session_epoch IS NULL OR (typeof(session_epoch) = 'integer' AND session_epoch > 0)),
+            attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0 AND attempt_count <= 2147483647),
+            next_attempt_at REAL NOT NULL CHECK (next_attempt_at >= 0 AND next_attempt_at < 1e300),
+            pause_reason TEXT NULL CHECK (pause_reason IN ('staleSession', 'conflictingIntent', 'authorization')),
+            CHECK ((claim_id IS NULL) = (expected_epoch IS NULL)),
+            CHECK (session_epoch IS NULL OR (expected_epoch IS NOT NULL AND session_epoch = expected_epoch + 1)),
+            CHECK (token_reference IS NULL OR desired_enabled = 1)
+        )
+        """
+
     static let currentSchemaSQL = """
         CREATE VIRTUAL TABLE v2_contact_profile_search USING fts5(
                 display_unigrams,
@@ -70,9 +176,10 @@ extension GRDBV2LocalSyncStore {
                 operation_id TEXT PRIMARY KEY,
                 plan_id TEXT NOT NULL REFERENCES v2_forward_message_plans(plan_id),
                 chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
-                source_message_ids TEXT NOT NULL,
+                source_message_ids TEXT NOT NULL, source_references TEXT,
                 target_room_id TEXT NOT NULL,
                 state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected','cancelled')),
+                completion_digest TEXT,
                 attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
                 next_attempt_at REAL NOT NULL,
                 terminal_code TEXT,
@@ -82,21 +189,20 @@ extension GRDBV2LocalSyncStore {
 
         CREATE TABLE v2_forward_message_plans (
                 plan_id TEXT PRIMARY KEY,
-                source_message_ids TEXT NOT NULL,
+                source_message_ids TEXT NOT NULL, source_references TEXT,
                 target_room_ids TEXT NOT NULL,
                 next_chunk_index INTEGER NOT NULL CHECK (next_chunk_index >= 0),
                 total_chunk_count INTEGER NOT NULL CHECK (total_chunk_count > 0),
                 succeeded_count INTEGER NOT NULL DEFAULT 0 CHECK (succeeded_count >= 0),
                 failed_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
-                state TEXT NOT NULL CHECK (state IN ('active','completed','cancelled')),
+                state TEXT NOT NULL CHECK (state IN ('active','completed','cancelled')), terminal_code TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );
 
-        CREATE TABLE v2_group_announcements (
-                room_id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
-                room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL
-            );
+        \(announcementProjectionSchemaSQL);
+
+        \(announcementEffectsSchemaSQL);
 
         CREATE TABLE v2_group_event_cursors (
                 room_id TEXT PRIMARY KEY,
@@ -129,18 +235,18 @@ extension GRDBV2LocalSyncStore {
 
         CREATE TABLE v2_group_permission_revisions (room_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK (revision > 0));
 
-        CREATE TABLE v2_group_pinned_messages (
-                room_id TEXT NOT NULL, message_id TEXT NOT NULL,
-                is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
-                room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL,
-                PRIMARY KEY (room_id, message_id)
-            );
+        \(pinnedMessageProjectionSchemaSQL);
 
-        CREATE TABLE v2_group_role_permissions (
-                room_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-                permission TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0),
-                room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), PRIMARY KEY (room_id, role, permission)
-            );
+        \(pinnedMessageEffectsSchemaSQL);
+
+        \(rolePolicyProjectionSchemaSQL);
+
+        \(rolePolicyEffectsSchemaSQL);
+
+        \(rolePolicyBaselineSchemaSQL);
+
+        \(rolePolicyRecoverySchemaSQL);
+        \(pushIntentSchemaSQL);
 
         CREATE TABLE v2_hybrid_group_background_state (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -174,6 +280,23 @@ extension GRDBV2LocalSyncStore {
             UNIQUE (room_id, room_sequence)
         );
 
+        CREATE TABLE v2_sync_rebuild_requests (singleton INTEGER PRIMARY KEY CHECK (singleton = 1));
+
+        CREATE TABLE v2_reaction_versions (
+            message_id TEXT NOT NULL, room_id TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+            reaction TEXT NOT NULL, room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+            source_event_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('add','remove')),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (message_id, actor_user_id, reaction)
+        );
+        CREATE TABLE v2_reaction_effects (
+            source_event_id TEXT NOT NULL, message_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            actor_user_id TEXT NOT NULL, reaction TEXT NOT NULL,
+            room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (source_event_id, message_id, actor_user_id, reaction)
+        );
+
         CREATE TABLE v2_message_reactions (
                 message_id TEXT NOT NULL,
                 room_id TEXT NOT NULL,
@@ -196,6 +319,16 @@ extension GRDBV2LocalSyncStore {
             index_version INTEGER NOT NULL CHECK (index_version > 0),
             state TEXT NOT NULL CHECK (state IN ('building', 'ready', 'failed')),
             generation INTEGER NOT NULL CHECK (generation > 0)
+        );
+
+        CREATE TABLE v2_message_effects (
+            source_event_id TEXT NOT NULL,
+            projection_kind TEXT NOT NULL CHECK (projection_kind = 'message'),
+            entity_key TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            message_revision INTEGER NOT NULL CHECK (message_revision > 0),
+            canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+            PRIMARY KEY (source_event_id, projection_kind, entity_key)
         );
 
         CREATE TABLE v2_message_tombstones (
@@ -230,7 +363,7 @@ extension GRDBV2LocalSyncStore {
                 CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
             );
 
-        CREATE TABLE v2_pending_forward_messages (operation_id TEXT PRIMARY KEY, source_message_ids TEXT NOT NULL, target_room_ids TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected')), attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT, terminal_at REAL NULL);
+        CREATE TABLE v2_pending_forward_messages (operation_id TEXT PRIMARY KEY, source_message_ids TEXT NOT NULL, source_references TEXT, target_room_ids TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected')), attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT, terminal_at REAL NULL);
 
         CREATE TABLE v2_pending_group_capabilities (
                 operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('pin', 'announcement', 'rolePermissions', 'memberRole')),

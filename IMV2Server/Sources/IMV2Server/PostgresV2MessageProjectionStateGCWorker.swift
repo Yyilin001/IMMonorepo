@@ -31,10 +31,12 @@ public struct PostgresV2MessageProjectionStateGCWorker: Sendable {
     public func runOnce(now: Date = Date(), limit: Int = 500) async throws -> Int {
         guard limit > 0 else { throw V2MessageProjectionStateGCError.invalidLimit }
         try Task.checkCancellation()
+        guard let cutoff = v2PostgresPastTimestamp(now: now, interval: retention) else {
+            throw V2MessageProjectionStateGCError.corruptPersistence
+        }
         guard let sql = database as? any SQLDatabase else {
             throw V2MessageProjectionStateGCError.corruptPersistence
         }
-        let cutoff = now.addingTimeInterval(-retention)
         return try await sql.raw("""
             WITH candidates AS (
                 SELECT state.state_id

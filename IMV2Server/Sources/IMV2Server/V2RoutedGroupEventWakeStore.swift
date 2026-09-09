@@ -61,7 +61,8 @@ public actor V2RoutedGroupEventWakeStore: V2GroupEventWakeStore {
         leaseDuration: TimeInterval,
         limit: Int
     ) async throws -> [V2GroupEventWakeLease] {
-        guard leaseDuration > 0, limit > 0 else {
+        guard limit > 0,
+              let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
             throw V2GroupEventWakeStoreError.corruptPersistenceState
         }
         leaseOwners = leaseOwners.filter { $0.value.expiresAt > now }
@@ -105,9 +106,7 @@ public actor V2RoutedGroupEventWakeStore: V2GroupEventWakeStore {
             return collected
         }
 
-        let expiry = now.addingTimeInterval(leaseDuration)
         var leases: [V2GroupEventWakeLease] = []
-        leases.reserveCapacity(limit)
         var firstError: (any Error)?
         var successfulOwnerCount = 0
         for result in results {
@@ -148,6 +147,9 @@ public actor V2RoutedGroupEventWakeStore: V2GroupEventWakeStore {
         _ lease: V2GroupEventWakeLease,
         nextAttemptAt: Date
     ) async throws {
+        guard v2PostgresTimestampCanEncode(nextAttemptAt) else {
+            throw V2GroupEventWakeStoreError.corruptPersistenceState
+        }
         let key = LeaseKey(lease)
         guard let owner = leaseOwners[key] else {
             throw V2GroupEventWakeStoreError.corruptPersistenceState

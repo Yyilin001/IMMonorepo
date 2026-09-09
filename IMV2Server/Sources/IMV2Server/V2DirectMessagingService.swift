@@ -6,7 +6,7 @@ public struct V2StrangerMessagePolicy: Equatable, Sendable {
     public let window: TimeInterval
 
     public init(maximumMessagesPerWindow: Int, window: TimeInterval) throws {
-        guard maximumMessagesPerWindow > 0, window > 0 else { throw V2DirectMessagingPolicyError.invalidLimit }
+        guard maximumMessagesPerWindow > 0, v2RateLimitDurationIsRepresentable(window) else { throw V2DirectMessagingPolicyError.invalidLimit }
         self.maximumMessagesPerWindow = maximumMessagesPerWindow
         self.window = window
     }

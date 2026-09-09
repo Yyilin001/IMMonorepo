@@ -3,6 +3,28 @@ import Foundation
 import Testing
 
 struct V2AccountRuntimeConfigurationTests {
+    @Test("runtime rejects unencodable account rate-limit settings", arguments: [
+        "IM_V2_PASSWORD_LOGIN_MAX_FAILURES", "IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS",
+        "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS",
+        "IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS"
+    ])
+    func rejectsUnencodableRateLimitSetting(key: String) {
+        var invalid = values
+        invalid[key] = String(Int.max)
+        #expect(throws: V2GatewayRuntimeConfigurationError.self) {
+            try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalid))
+        }
+    }
+
+    @Test("account invitations require an explicit owner registry even without local media")
+    func requiresInvitationOwners() {
+        var missing = values
+        missing.removeValue(forKey: "IM_V2_ROOM_SHARD_STORES_JSON")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_ROOM_SHARD_STORES_JSON")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
+        }
+    }
+
     @Test("account service accepts only an internal listener with explicit secrets")
     func parsesStrictConfiguration() throws {
         let configuration = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
@@ -17,10 +39,30 @@ struct V2AccountRuntimeConfigurationTests {
         )
         #expect(configuration.listener == expectedListener)
         #expect(configuration.accountAssertionKey.count == 32)
+        #expect(configuration.groupInviteTokenHMACKey.count == 32)
+        #expect(configuration.capacityProfile.id == "standard")
         #expect(configuration.passwordLoginRateLimit == expectedRateLimit)
         #expect(configuration.publicIdentityLookupRateLimit == expectedIdentityRateLimit)
         #expect(configuration.edgeClientRateLimit == expectedEdgeClientRateLimit)
         #expect(configuration.deviceRegistrationPolicy == expectedDeviceRegistrationPolicy)
+    }
+
+    @Test("media owner routing requires user storage and counts every database pool")
+    func validatesMediaOwnerRegistry() throws {
+        var configured = values
+        configured.removeValue(forKey: "IM_V2_USER_SHARD_STORES_JSON")
+        configured["IM_V2_ROOM_SHARD_STORES_JSON"] = #"[{"shard_id":"room-b","database_url":"postgres://v2:password@db/room_b","schema":"im_v2"}]"#
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_USER_SHARD_STORES_JSON")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
+        }
+        configured["IM_V2_USER_SHARD_STORES_JSON"] = #"[{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"}]"#
+        let valid = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
+        #expect(valid.roomShardStorage.count == 1)
+        #expect(valid.userShardStorage.count == 1)
+        configured["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "4"
+        #expect(throws: (any Error).self) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
+        }
     }
 
     @Test("account service rejects public binding")
@@ -52,6 +94,21 @@ struct V2AccountRuntimeConfigurationTests {
         var undersizedValues = values
         undersizedValues["IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64"] = Data(repeating: 5, count: 31).base64EncodedString()
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(undersizedValues))
+        }
+    }
+
+    @Test("account service fails closed without an independent group-invite key")
+    func rejectsInvalidGroupInviteKey() {
+        var missingValues = values
+        missingValues.removeValue(forKey: "IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missingValues))
+        }
+
+        var undersizedValues = values
+        undersizedValues["IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64"] = Data(repeating: 5, count: 31).base64EncodedString()
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")) {
             _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(undersizedValues))
         }
     }
@@ -105,6 +162,8 @@ struct V2AccountRuntimeConfigurationTests {
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_ROOM_SHARD_STORES_JSON": #"[{"shard_id":"room-a","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"}]"#,
+            "IM_V2_USER_SHARD_STORES_JSON": #"[{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"}]"#,
             "IM_V2_DATABASE_EVENT_LOOP_THREADS": "2",
             "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP": "4",
             "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS": "16",
@@ -122,7 +181,17 @@ struct V2AccountRuntimeConfigurationTests {
             "IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64": Data(repeating: 5, count: 32).base64EncodedString(),
             "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64": Data(repeating: 6, count: 32).base64EncodedString(),
             "IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64": Data(repeating: 3, count: 32).base64EncodedString(),
-            "IM_V2_PASSWORD_DUMMY_BCRYPT_HASH": "$2b$12$123456789012345678901u12345678901234567890123456789012",
+            "IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64": Data(repeating: 8, count: 32).base64EncodedString(),
+            "IM_V2_CAPACITY_PROFILE_ID": "standard",
+            "IM_V2_MAX_ELIGIBLE_MEMBERS": "100000",
+            "IM_V2_MAX_COMMANDS_PER_WINDOW": "1000",
+            "IM_V2_MAX_FANOUT_UNITS_PER_WINDOW": "100000",
+            "IM_V2_MAX_OUTSTANDING_FANOUT_UNITS": "1000000",
+            "IM_V2_MAX_OUTSTANDING_PLANS": "10000",
+            "IM_V2_MAX_ENUMERATION_PAGE_SIZE": "1000",
+            "IM_V2_MAX_PLANNER_CONCURRENCY": "8",
+            "IM_V2_MAX_DELIVERY_CONCURRENCY": "16",
+            "IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS": "3",
             "IM_V2_PASSWORD_LOGIN_MAX_FAILURES": "5",
             "IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS": "900",
             "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS": "900",

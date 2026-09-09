@@ -5,6 +5,114 @@ import Testing
 
 @Suite("Direct room-log event cache")
 struct V2DirectRoomLogEventCacheTests {
+    @Test("Persisted projection milliseconds survive Date precision loss through materialization and accelerators",
+          arguments: [false, true], [false, true])
+    func persistedTimestampSurvivesMaterialization(richText: Bool, enqueue: Bool) async throws {
+        let date = Date(timeIntervalSince1970: 9_224_318_015_990)
+        let persisted: Int64 = 9_224_318_015_989_999
+        let entities: [V2MessageEntity] = richText ? [try .init(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)] : []
+        let draft = V2AcceptedMessageDraft(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), roomSequence: 1,
+            senderUserID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "hello", entities: entities, createdAt: date)
+        let message = draft.materialized(mediaPresentations: [], usesRoomEventLog: true, sourceEventID: .init(uuid: UUID()),
+            acceptedMembershipRevision: 1, directRecipientUserID: .init(uuid: UUID()), projectionCreatedAtUnixMilliseconds: persisted)
+        #expect(try v2MessageProjectionMilliseconds(date) != persisted)
+        #expect(message.receipt.createdAt == date)
+        let projection = try V2MessageProjectionState(accepted: message, forwardedFromMessageID: nil, forwardedFromUserID: nil)
+        #expect(projection.acceptedAtUnixMilliseconds == persisted)
+        let payload = try #require(V2DirectRoomLogPayloadCodec.encode(message))
+        #expect(try JSONDecoder().decode(V2MessageProjectionState.self, from: payload) == projection)
+        let live = try #require(V2DirectRoomLiveEvent(message))
+        #expect(live.payload == payload)
+        let cache = V2DirectRoomLogEventCache(configuration: .init(maximumEvents: 4, maximumBytes: 1_048_576, maximumEventsPerRoom: 4))
+        if enqueue { cache.enqueueCommittedPlainDirectMessage(message) }
+        else { await cache.recordCommittedPlainDirectMessage(message) }
+        let page = try #require(await cache.page(roomID: message.roomID, actorJoinedRevision: 0, actorLeftRevision: nil,
+            currentHighWatermark: 1, afterRoomSequence: 0, pageSize: 1))
+        #expect(page.events.map(\.payload) == [payload])
+        await cache.finish()
+    }
+
+    @Test("Cached and live message timestamps preserve the durable projection's floor rounding",
+          arguments: [false, true], [false, true])
+    func timestampMatchesDurableProjection(richText: Bool, enqueue: Bool) async throws {
+        let room = RoomID(uuid: UUID()), sender = UserID(uuid: UUID()), recipient = UserID(uuid: UUID())
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8, maximumBytes: 1_048_576, maximumEventsPerRoom: 8))
+        let entities: [V2MessageEntity] = richText ? [try .init(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)] : []
+        let cases: [(Double, Int64)] = [(-1.0005, -1_001), (-0.0005, -1), (0, 0), (0.0005, 0),
+                                       (1.0005, 1_000), (1_750_000_000.125, 1_750_000_000_125)]
+        var payloads: [Data] = []
+        for (index, boundary) in cases.enumerated() {
+            let message = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: room, roomSequence: UInt64(index + 1),
+                senderUserID: sender, clientMessageID: .init(uuid: UUID()), text: "hello", mediaPresentations: [],
+                entities: entities, usesRoomEventLog: true, sourceEventID: .init(uuid: UUID()),
+                acceptedMembershipRevision: 4, directRecipientUserID: recipient, createdAt: Date(timeIntervalSince1970: boundary.0))
+            let payload = try #require(V2DirectRoomLogPayloadCodec.encode(message))
+            let projection = try JSONDecoder().decode(V2MessageProjectionState.self, from: payload)
+            #expect(projection.acceptedAtUnixMilliseconds == boundary.1)
+            let durable = try V2MessageProjectionState(accepted: message, forwardedFromMessageID: nil, forwardedFromUserID: nil)
+            #expect(projection == durable)
+            let live = try #require(V2DirectRoomLiveEvent(message))
+            #expect(live.payload == payload)
+            payloads.append(payload)
+            if enqueue { cache.enqueueCommittedPlainDirectMessage(message) }
+            else { await cache.recordCommittedPlainDirectMessage(message) }
+        }
+        let page = try #require(await cache.page(roomID: room, actorJoinedRevision: 1, actorLeftRevision: nil,
+            currentHighWatermark: UInt64(cases.count), afterRoomSequence: 0, pageSize: 8))
+        #expect(page.events.map(\.roomSequence) == Array(1...UInt64(cases.count)))
+        #expect(page.events.map(\.payload) == payloads)
+        await cache.finish()
+    }
+
+    @Test("Invalid timestamp bypasses both encoders and cache entry points without hiding a durable gap",
+          arguments: [false, true], [false, true])
+    func invalidTimestampPreservesGap(richText: Bool, enqueue: Bool) async throws {
+        let room = RoomID(uuid: UUID()), sender = UserID(uuid: UUID()), recipient = UserID(uuid: UUID())
+        let cache = V2DirectRoomLogEventCache(configuration: .init(
+            maximumEvents: 8, maximumBytes: 1_048_576, maximumEventsPerRoom: 8))
+        let entities: [V2MessageEntity] = richText ? [try .init(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)] : []
+        func event(_ sequence: UInt64, at seconds: Double) -> V2AcceptedMessage {
+            .init(messageID: .init(uuid: UUID()), roomID: room, roomSequence: sequence,
+                  senderUserID: sender, clientMessageID: .init(uuid: UUID()), text: "hello",
+                  mediaPresentations: [], entities: entities, usesRoomEventLog: true,
+                  sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 4,
+                  directRecipientUserID: recipient, createdAt: Date(timeIntervalSince1970: seconds))
+        }
+        func record(_ message: V2AcceptedMessage) async {
+            if enqueue { cache.enqueueCommittedPlainDirectMessage(message) }
+            else { await cache.recordCommittedPlainDirectMessage(message) }
+        }
+        await record(event(1, at: 1_750_000_000.125))
+        let invalidTimes = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude,
+                            -.greatestFiniteMagnitude, Double(Int64.max) / 1_000]
+        for seconds in invalidTimes {
+            let message = event(2, at: seconds)
+            #expect(V2DirectRoomLogPayloadCodec.encode(message) == nil)
+            #expect(V2DirectRoomLiveEvent(message) == nil)
+            await record(message)
+        }
+        let last = event(3, at: 1_750_000_000.875)
+        await record(last)
+        // A requested range containing an internal gap is a full cache miss;
+        // the durable reader must supply it instead of advancing past it.
+        #expect(await cache.page(roomID: room, actorJoinedRevision: 1, actorLeftRevision: nil,
+            currentHighWatermark: 3, afterRoomSequence: 0, pageSize: 8) == nil)
+        #expect(await cache.page(roomID: room, actorJoinedRevision: 1, actorLeftRevision: nil,
+            currentHighWatermark: 3, afterRoomSequence: 1, pageSize: 8) == nil)
+        let tail = try #require(await cache.page(roomID: room, actorJoinedRevision: 1,
+            actorLeftRevision: nil, currentHighWatermark: 3, afterRoomSequence: 2, pageSize: 8))
+        #expect(tail.events.map(\.roomSequence) == [3])
+        let payload = try #require(V2DirectRoomLogPayloadCodec.encode(last))
+        let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        #expect((object["server_created_at_ms"] as? NSNumber)?.int64Value == 1_750_000_000_875)
+        #expect((object["entities"] as? [Any])?.count == entities.count)
+        let snapshot = await cache.snapshot()
+        #expect(snapshot.cachedEvents == 2)
+        #expect(snapshot.bypassedIneligibleEvents == UInt64(invalidTimes.count))
+        await cache.finish()
+    }
+
     @Test("plain payload fast encoder preserves the canonical JSON contract")
     func plainPayloadFastEncoderPreservesJSONContract() throws {
         let message = V2AcceptedMessage(

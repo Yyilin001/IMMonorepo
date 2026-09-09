@@ -369,6 +369,8 @@ CREATE TABLE im_v2.auth_devices (
     device_id uuid NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone NOT NULL,
+    session_expires_at timestamp with time zone DEFAULT (CURRENT_TIMESTAMP + interval '30 days') NOT NULL,
+    CONSTRAINT auth_devices_session_expiry_finite CHECK (isfinite(session_expires_at)),
     display_name text DEFAULT 'This device'::text NOT NULL,
     platform text DEFAULT 'Unknown'::text NOT NULL,
     last_active_at timestamp with time zone NOT NULL,
@@ -459,6 +461,9 @@ CREATE TABLE im_v2.device_credential_operations (
     resulting_access_token_hmac text NOT NULL,
     encrypted_access_token text NOT NULL,
     encrypted_refresh_credential text NOT NULL,
+    encrypted_revocation_credential text NOT NULL,
+    revocation_credential_expires_at timestamptz NOT NULL,
+    CONSTRAINT device_credential_operations_revocation_result_check CHECK (encrypted_revocation_credential <> '' AND isfinite(revocation_credential_expires_at)),
     access_token_expires_at timestamp with time zone NOT NULL,
     replay_expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone NOT NULL,
@@ -573,6 +578,8 @@ CREATE TABLE im_v2.direct_message_denials (
     source_event_id uuid NOT NULL,
     timeline_sequence bigint NOT NULL,
     created_at timestamp with time zone NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version IN (1, 2)),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
     reason text DEFAULT 'generic'::text NOT NULL,
     CONSTRAINT direct_message_denials_reason_check CHECK ((reason = ANY (ARRAY['generic'::text, 'system_account_read_only'::text]))),
     CONSTRAINT direct_message_denials_timeline_sequence_check CHECK ((timeline_sequence > 0))
@@ -611,6 +618,39 @@ CREATE TABLE im_v2.user_direct_send_policy_versions (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT user_direct_send_policy_versions_revision_check CHECK ((revision > 0))
 );
+
+CREATE TABLE im_v2.forward_work_replay_audit (
+    operation_id uuid PRIMARY KEY,
+    operator_principal text NOT NULL CHECK (char_length(operator_principal) BETWEEN 1 AND 128),
+    shard_id text NOT NULL CHECK (char_length(shard_id) BETWEEN 1 AND 128),
+    target_kind text NOT NULL,
+    export_id uuid NOT NULL,
+    ordinal integer,
+    reason_code text NOT NULL CHECK (reason_code IN ('dependency_recovered', 'data_repaired', 'false_positive')),
+    requested_at timestamptz NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN ('processing', 'requeued', 'not_paused')),
+    CONSTRAINT forward_work_replay_audit_target_check CHECK (
+        (target_kind = 'delivery' AND ordinal IS NULL)
+        OR (target_kind = 'media' AND ordinal IS NOT NULL AND ordinal BETWEEN 0 AND 9)
+    )
+);
+CREATE INDEX forward_work_replay_audit_requested_idx ON im_v2.forward_work_replay_audit (requested_at DESC);
+CREATE FUNCTION im_v2.reject_forward_replay_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'forward replay audit cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.operation_id, NEW.operator_principal, NEW.shard_id, NEW.target_kind, NEW.export_id, NEW.ordinal, NEW.reason_code, NEW.requested_at)
+       IS DISTINCT FROM ROW(OLD.operation_id, OLD.operator_principal, OLD.shard_id, OLD.target_kind, OLD.export_id, OLD.ordinal, OLD.reason_code, OLD.requested_at)
+       OR (OLD.outcome <> 'processing' AND NEW IS DISTINCT FROM OLD)
+       OR (OLD.outcome = 'processing' AND NEW.outcome NOT IN ('requeued', 'not_paused')) THEN
+        RAISE EXCEPTION 'forward replay audit identity and result are immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER forward_work_replay_audit_immutable BEFORE UPDATE OR DELETE ON im_v2.forward_work_replay_audit
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_replay_audit_mutation();
 
 CREATE TABLE im_v2.durable_work_replay_audit (
     operation_id uuid NOT NULL,
@@ -771,6 +811,13 @@ CREATE TABLE im_v2.group_event_wake_outbox (
     CONSTRAINT group_event_wake_outbox_target_room_sequence_check CHECK ((target_room_sequence > 0))
 );
 
+CREATE TABLE im_v2.group_role_policies (
+    room_id uuid NOT NULL,
+    role text NOT NULL,
+    CONSTRAINT group_role_policies_pkey PRIMARY KEY (room_id, role),
+    CONSTRAINT group_role_policies_role_check CHECK (role IN ('admin', 'member'))
+);
+
 CREATE TABLE im_v2.group_permission_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -863,6 +910,100 @@ CREATE TABLE im_v2.group_rooms (
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT group_rooms_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 120)))
 );
+
+CREATE TABLE im_v2.group_invite_links (
+    invite_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    created_by_user_id uuid NOT NULL,
+    creation_operation_id uuid NOT NULL,
+    token_digest bytea NOT NULL,
+    requested_lifetime_seconds integer NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    maximum_approved_uses integer NOT NULL,
+    approved_use_count integer DEFAULT 0 NOT NULL,
+    state text DEFAULT 'active'::text NOT NULL,
+    revocation_operation_id uuid,
+    revoked_by_user_id uuid,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT group_invite_links_token_digest_check CHECK ((octet_length(token_digest) = 32)),
+    CONSTRAINT group_invite_links_lifetime_check CHECK (((requested_lifetime_seconds >= 300) AND (requested_lifetime_seconds <= 2592000))),
+    CONSTRAINT group_invite_links_expiry_check CHECK ((expires_at > created_at)),
+    CONSTRAINT group_invite_links_use_count_check CHECK (((maximum_approved_uses > 0) AND (approved_use_count >= 0) AND (approved_use_count <= maximum_approved_uses))),
+    CONSTRAINT group_invite_links_state_check CHECK ((state = ANY (ARRAY['active'::text, 'revoked'::text]))),
+    CONSTRAINT group_invite_links_revocation_check CHECK ((((state = 'active'::text) AND (revocation_operation_id IS NULL) AND (revoked_by_user_id IS NULL) AND (revoked_at IS NULL)) OR ((state = 'revoked'::text) AND (revocation_operation_id IS NOT NULL) AND (revoked_by_user_id IS NOT NULL) AND (revoked_at IS NOT NULL))))
+);
+
+CREATE TABLE im_v2.group_join_requests (
+    request_id uuid NOT NULL,
+    invite_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    applicant_user_id uuid NOT NULL,
+    submission_operation_id uuid NOT NULL,
+    note text,
+    state text DEFAULT 'pending'::text NOT NULL,
+    decision_operation_id uuid,
+    decided_by_user_id uuid,
+    approval_membership_revision bigint,
+    decided_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT group_join_requests_note_check CHECK (((note IS NULL) OR ((octet_length(note) >= 1) AND (octet_length(note) <= 500)))),
+    CONSTRAINT group_join_requests_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'approving'::text, 'approved'::text, 'rejected'::text]))),
+    CONSTRAINT group_join_requests_decision_check CHECK ((((state = 'pending'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = 'approving'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = 'approved'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = 'rejected'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))
+);
+
+CREATE TABLE im_v2.group_join_approval_recovery_audit (
+    operation_id uuid PRIMARY KEY,
+    operator_principal text NOT NULL,
+    shard_id text NOT NULL,
+    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
+    room_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    reviewer_user_id uuid NOT NULL,
+    decision_operation_id uuid NOT NULL,
+    reason_code text NOT NULL CHECK (reason_code IN ('dependency_recovered', 'data_repaired', 'false_positive')),
+    outcome text NOT NULL CHECK (outcome IN ('completed', 'released', 'quarantined', 'not_approving')),
+    detail text NOT NULL CHECK (detail IN ('committed_operation', 'no_historical_add', 'operation_mismatch', 'historical_add_without_receipt', 'invalid_revision', 'invite_exhausted', 'not_approving')),
+    requested_at timestamp with time zone NOT NULL,
+    applicant_user_id uuid NOT NULL,
+    prepared_revision bigint,
+    member_room_id uuid,
+    member_target_user_id uuid,
+    member_action text,
+    expected_revision bigint,
+    resulting_revision bigint,
+    room_sequence bigint,
+    event_id uuid,
+    plan_id uuid,
+    CONSTRAINT group_join_approval_recovery_audit_result_check CHECK (
+        (member_room_id IS NULL AND member_target_user_id IS NULL AND member_action IS NULL AND expected_revision IS NULL AND resulting_revision IS NULL AND room_sequence IS NULL AND event_id IS NULL AND plan_id IS NULL)
+        OR (member_room_id IS NOT NULL AND member_target_user_id IS NOT NULL AND member_action IS NOT NULL AND expected_revision IS NOT NULL AND resulting_revision IS NOT NULL AND room_sequence IS NOT NULL AND event_id IS NOT NULL AND plan_id IS NOT NULL)
+    ),
+    CONSTRAINT group_join_approval_recovery_audit_completed_check CHECK (outcome <> 'completed' OR expected_revision IS NOT NULL)
+);
+
+CREATE TABLE im_v2.room_membership_operation_fences (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    recovery_operation_id uuid NOT NULL REFERENCES im_v2.group_join_approval_recovery_audit(operation_id) ON DELETE RESTRICT,
+    created_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (actor_user_id, operation_id)
+);
+
+CREATE FUNCTION im_v2.reject_approval_recovery_mutation() RETURNS trigger
+    LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'approval recovery evidence is immutable'; END;$$;
+
+CREATE TRIGGER group_join_approval_recovery_audit_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.group_join_approval_recovery_audit
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_approval_recovery_mutation();
+CREATE TRIGGER room_membership_operation_fences_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.room_membership_operation_fences
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_approval_recovery_mutation();
+CREATE INDEX group_join_requests_approving_recovery_idx
+    ON im_v2.group_join_requests (room_id, request_id) WHERE state = 'approving';
 
 CREATE TABLE im_v2.media_download_grants (
     download_session_id uuid NOT NULL,
@@ -994,15 +1135,260 @@ CREATE TABLE im_v2.message_edit_operations (
     CONSTRAINT message_edit_operations_text_body_check CHECK ((octet_length(text_body) > 0))
 );
 
+-- Immutable source authorization envelopes double as the durable export outbox.
+-- No source/target message FK: source retention cannot erase committed evidence,
+-- and the destination room deliberately lives in a different physical database.
+CREATE TABLE im_v2.message_forward_exports (
+    export_id uuid PRIMARY KEY,
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    source_room_id uuid NOT NULL,
+    source_message_id uuid NOT NULL,
+    source_content_revision bigint NOT NULL CHECK (source_content_revision > 0),
+    source_shard_id text NOT NULL CHECK (length(btrim(source_shard_id)) > 0),
+    source_epoch bigint NOT NULL CHECK (source_epoch >= 0),
+    target_room_id uuid NOT NULL,
+    target_client_message_id uuid NOT NULL,
+    target_shard_id text NOT NULL CHECK (length(btrim(target_shard_id)) > 0),
+    target_epoch bigint NOT NULL CHECK (target_epoch >= 0),
+    payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
+    payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
+    media_ids uuid[] NOT NULL CHECK (cardinality(media_ids) <= 10 AND array_position(media_ids, NULL) IS NULL),
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT message_forward_exports_pair_key UNIQUE (actor_user_id, operation_id, source_message_id, target_room_id),
+    CONSTRAINT message_forward_exports_client_key UNIQUE (actor_user_id, target_client_message_id)
+);
+CREATE INDEX message_forward_exports_room_idx ON im_v2.message_forward_exports (source_room_id, created_at, export_id);
+CREATE INDEX message_forward_exports_delivery_idx ON im_v2.message_forward_exports (source_shard_id, created_at, export_id);
+CREATE INDEX message_forward_exports_media_idx ON im_v2.message_forward_exports USING gin (media_ids);
+CREATE FUNCTION im_v2.reject_forward_export_mutation() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'committed forward export is immutable' USING ERRCODE = '23514';
+END;
+$$;
+CREATE TRIGGER message_forward_exports_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.message_forward_exports FOR EACH ROW
+    EXECUTE FUNCTION im_v2.reject_forward_export_mutation();
+
+-- Terminal source receipts release delivery capacity and source object pins.
+-- No FK to a target message: the target is a different physical database.
+CREATE TABLE im_v2.message_forward_export_receipts (
+    export_id uuid PRIMARY KEY REFERENCES im_v2.message_forward_exports(export_id) ON DELETE RESTRICT,
+    payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
+    state text NOT NULL,
+    result_message_id uuid,
+    result_room_sequence bigint,
+    error_code text,
+    recorded_at timestamptz NOT NULL,
+    CONSTRAINT message_forward_export_receipts_shape_check CHECK (
+        (state = 'completed' AND result_message_id IS NOT NULL
+         AND result_room_sequence IS NOT NULL AND result_room_sequence > 0 AND error_code IS NULL)
+        OR (state = 'rejected' AND result_message_id IS NULL AND result_room_sequence IS NULL
+            AND error_code IS NOT NULL AND octet_length(error_code) BETWEEN 1 AND 128)
+    )
+);
+CREATE FUNCTION im_v2.reject_forward_export_receipt_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'forward export terminal receipt is immutable' USING ERRCODE = '23514';
+END;
+$$;
+CREATE TRIGGER message_forward_export_receipts_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.message_forward_export_receipts FOR EACH ROW
+    EXECUTE FUNCTION im_v2.reject_forward_export_receipt_mutation();
+
+CREATE TABLE im_v2.message_forward_delivery_jobs (
+    export_id uuid PRIMARY KEY REFERENCES im_v2.message_forward_exports(export_id) ON DELETE RESTRICT,
+    state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'paused', 'completed')),
+    claim_token uuid,
+    lease_expires_at timestamptz,
+    next_attempt_at timestamptz,
+    retry_count bigint NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    created_at timestamptz NOT NULL,
+    completed_at timestamptz,
+    CONSTRAINT message_forward_delivery_jobs_shape_check CHECK (
+        ((state = 'claimed') = (claim_token IS NOT NULL)) AND ((state = 'claimed') = (lease_expires_at IS NOT NULL))
+        AND ((state = 'pending') = (next_attempt_at IS NOT NULL))
+        AND ((state = 'completed') = (completed_at IS NOT NULL))
+    )
+);
+CREATE INDEX message_forward_delivery_jobs_ready_idx ON im_v2.message_forward_delivery_jobs (next_attempt_at, created_at, export_id) WHERE state = 'pending';
+CREATE INDEX message_forward_delivery_jobs_lease_idx ON im_v2.message_forward_delivery_jobs (lease_expires_at, export_id) WHERE state = 'claimed';
+CREATE FUNCTION im_v2.reject_forward_delivery_job_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'forward delivery identity cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.export_id, NEW.created_at) IS DISTINCT FROM ROW(OLD.export_id, OLD.created_at)
+       OR (OLD.state = 'completed' AND NEW IS DISTINCT FROM OLD)
+       OR (OLD.state = 'pending' AND NEW.state NOT IN ('pending', 'claimed'))
+       OR (OLD.state = 'paused' AND NEW.state NOT IN ('paused', 'pending')) THEN
+        RAISE EXCEPTION 'forward delivery identity and terminal result are immutable' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.state = 'completed' AND NOT EXISTS(SELECT 1 FROM im_v2.message_forward_export_receipts WHERE export_id = NEW.export_id) THEN
+        RAISE EXCEPTION 'forward delivery completion requires source receipt' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_forward_delivery_jobs_immutable BEFORE UPDATE OR DELETE ON im_v2.message_forward_delivery_jobs
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_delivery_job_mutation();
+
+-- An inbox receipt is independent of mutable message projections. No source
+-- message/room FK crosses the physical owner boundary.
+CREATE TABLE im_v2.message_forward_inbox (
+    export_id uuid PRIMARY KEY,
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    source_message_id uuid NOT NULL,
+    target_room_id uuid NOT NULL,
+    target_client_message_id uuid NOT NULL,
+    payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
+    payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
+    state text NOT NULL CHECK (state IN ('pending', 'accepted', 'completed', 'rejected')),
+    result_message_id uuid,
+    result_room_sequence bigint,
+    error_code text,
+    created_at timestamptz NOT NULL,
+    accepted_at timestamptz,
+    completed_at timestamptz,
+    CONSTRAINT message_forward_inbox_pair_key UNIQUE (actor_user_id, operation_id, source_message_id, target_room_id),
+    CONSTRAINT message_forward_inbox_client_key UNIQUE (actor_user_id, target_client_message_id),
+    CONSTRAINT message_forward_inbox_outcome_check CHECK (
+        (state = 'pending' AND result_message_id IS NULL AND result_room_sequence IS NULL AND error_code IS NULL AND accepted_at IS NULL AND completed_at IS NULL)
+        OR (state IN ('accepted', 'completed') AND result_message_id IS NOT NULL AND result_room_sequence IS NOT NULL AND result_room_sequence > 0 AND error_code IS NULL AND accepted_at IS NOT NULL AND ((state = 'completed') = (completed_at IS NOT NULL)))
+        OR (state = 'rejected' AND result_message_id IS NULL AND result_room_sequence IS NULL AND error_code IS NOT NULL AND length(error_code) BETWEEN 1 AND 64 AND accepted_at IS NULL AND completed_at IS NOT NULL)
+    )
+);
+CREATE INDEX message_forward_inbox_pending_idx ON im_v2.message_forward_inbox (target_room_id, created_at, export_id) WHERE state IN ('pending', 'accepted');
+CREATE FUNCTION im_v2.reject_forward_inbox_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'forward inbox receipt cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.export_id, NEW.actor_user_id, NEW.operation_id, NEW.source_message_id, NEW.target_room_id, NEW.target_client_message_id, NEW.payload, NEW.payload_digest, NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.export_id, OLD.actor_user_id, OLD.operation_id, OLD.source_message_id, OLD.target_room_id, OLD.target_client_message_id, OLD.payload, OLD.payload_digest, OLD.created_at)
+       OR (OLD.state IN ('completed', 'rejected') AND NEW IS DISTINCT FROM OLD)
+       OR (OLD.state = 'pending' AND NEW.state NOT IN ('pending', 'accepted', 'rejected'))
+       OR (OLD.state = 'accepted' AND (
+            NEW.state NOT IN ('accepted', 'completed')
+            OR ROW(NEW.result_message_id, NEW.result_room_sequence, NEW.accepted_at, NEW.error_code)
+               IS DISTINCT FROM ROW(OLD.result_message_id, OLD.result_room_sequence, OLD.accepted_at, OLD.error_code))) THEN
+        RAISE EXCEPTION 'forward inbox identity and terminal outcome are immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_forward_inbox_immutable BEFORE UPDATE OR DELETE ON im_v2.message_forward_inbox
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_inbox_mutation();
+CREATE TABLE im_v2.message_forward_inbox_media (
+    export_id uuid NOT NULL REFERENCES im_v2.message_forward_inbox(export_id) ON DELETE RESTRICT,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 9),
+    source_media_id uuid NOT NULL,
+    target_media_id uuid UNIQUE CHECK (target_media_id IS NULL OR target_media_id <> source_media_id),
+    object_digest bytea,
+    state text NOT NULL CHECK (state IN ('pending', 'ready')),
+    PRIMARY KEY (export_id, ordinal),
+    UNIQUE (export_id, source_media_id),
+    CONSTRAINT message_forward_inbox_media_ready_check CHECK (
+        (state = 'pending' AND target_media_id IS NULL AND object_digest IS NULL)
+        OR (state = 'ready' AND target_media_id IS NOT NULL AND object_digest IS NOT NULL AND octet_length(object_digest) = 32)
+    )
+);
+CREATE FUNCTION im_v2.reject_forward_inbox_media_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'forward inbox media identity cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.export_id, NEW.ordinal, NEW.source_media_id) IS DISTINCT FROM ROW(OLD.export_id, OLD.ordinal, OLD.source_media_id)
+       OR (OLD.state = 'ready' AND NEW IS DISTINCT FROM OLD) THEN
+        RAISE EXCEPTION 'forward inbox media identity and ready mapping are immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_forward_inbox_media_immutable BEFORE UPDATE OR DELETE ON im_v2.message_forward_inbox_media
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_inbox_media_mutation();
+
+CREATE TABLE im_v2.message_forward_media_imports (
+    export_id uuid NOT NULL,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 9),
+    target_media_id uuid NOT NULL UNIQUE,
+    target_upload_session_id uuid NOT NULL UNIQUE,
+    state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'paused', 'ready', 'failed')),
+    copied_digest bytea,
+    copied_at timestamptz,
+    claim_token uuid,
+    lease_expires_at timestamptz,
+    next_attempt_at timestamptz,
+    retry_count bigint NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    created_at timestamptz NOT NULL,
+    completed_at timestamptz,
+    PRIMARY KEY (export_id, ordinal),
+    FOREIGN KEY (export_id, ordinal) REFERENCES im_v2.message_forward_inbox_media(export_id, ordinal) ON DELETE RESTRICT,
+    CONSTRAINT message_forward_media_imports_shape_check CHECK (
+        ((state = 'claimed') = (claim_token IS NOT NULL)) AND ((state = 'claimed') = (lease_expires_at IS NOT NULL))
+        AND ((state IN ('ready', 'failed')) = (completed_at IS NOT NULL))
+        AND ((copied_digest IS NOT NULL) = (copied_at IS NOT NULL))
+        AND (copied_digest IS NULL OR octet_length(copied_digest) = 32)
+        AND (state <> 'ready' OR copied_digest IS NOT NULL)
+        AND (next_attempt_at IS NULL OR state = 'pending')
+    )
+);
+CREATE INDEX message_forward_media_imports_work_idx ON im_v2.message_forward_media_imports (state, next_attempt_at, lease_expires_at, created_at) WHERE state IN ('pending', 'claimed');
+CREATE FUNCTION im_v2.reject_forward_media_import_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'forward media import identity cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.export_id, NEW.ordinal, NEW.target_media_id, NEW.target_upload_session_id, NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.export_id, OLD.ordinal, OLD.target_media_id, OLD.target_upload_session_id, OLD.created_at)
+       OR (OLD.copied_digest IS NOT NULL AND ROW(NEW.copied_digest, NEW.copied_at) IS DISTINCT FROM ROW(OLD.copied_digest, OLD.copied_at))
+       OR (OLD.state IN ('ready', 'failed') AND NEW IS DISTINCT FROM OLD)
+       OR (OLD.state = 'pending' AND NEW.state NOT IN ('pending', 'claimed'))
+       OR (OLD.state = 'paused' AND NEW.state NOT IN ('paused', 'pending')) THEN
+        RAISE EXCEPTION 'forward media object, copied digest and terminal outcome are immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_forward_media_imports_immutable BEFORE UPDATE OR DELETE ON im_v2.message_forward_media_imports
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_media_import_mutation();
+
 CREATE TABLE im_v2.message_forward_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
     source_message_id uuid NOT NULL,
     target_room_id uuid NOT NULL,
     target_client_message_id uuid NOT NULL,
+    -- NULL is retained only for pre-v8 operations whose source version is
+    -- unknown. Successful results still replay; pending ones fail closed.
+    source_content_revision bigint CHECK (source_content_revision > 0),
+    source_room_id uuid,
     result_message_id uuid,
     created_at timestamp with time zone NOT NULL
 );
+
+CREATE FUNCTION im_v2.reject_forward_operation_identity_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF ROW(NEW.actor_user_id, NEW.operation_id, NEW.source_message_id,
+           NEW.target_room_id, NEW.target_client_message_id, NEW.source_content_revision, NEW.source_room_id, NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.actor_user_id, OLD.operation_id, OLD.source_message_id,
+           OLD.target_room_id, OLD.target_client_message_id, OLD.source_content_revision, OLD.source_room_id, OLD.created_at)
+       OR (OLD.result_message_id IS NOT NULL AND NEW.result_message_id IS DISTINCT FROM OLD.result_message_id) THEN
+        RAISE EXCEPTION 'forward operation identity and completed result are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER message_forward_operations_identity_immutable
+    BEFORE UPDATE ON im_v2.message_forward_operations FOR EACH ROW
+    EXECUTE FUNCTION im_v2.reject_forward_operation_identity_mutation();
 
 CREATE TABLE im_v2.message_media_references (
     message_id uuid NOT NULL,
@@ -1060,6 +1446,12 @@ CREATE TABLE im_v2.room_events (
     CONSTRAINT room_events_committed_membership_revision_check CHECK ((committed_membership_revision >= 0)),
     CONSTRAINT room_events_room_sequence_check CHECK ((room_sequence > 0))
 );
+
+CREATE UNIQUE INDEX room_events_message_edit_revision_idx
+    ON im_v2.room_events
+    (room_id, lower(payload->>'message_id'), (payload->>'message_revision'))
+    WHERE event_type = 'message.edited';
+
 
 CREATE VIEW im_v2.message_projection_state_values AS
  SELECT state.state_id,
@@ -1148,6 +1540,43 @@ CREATE TABLE im_v2.messages (
     CONSTRAINT messages_room_sequence_check CHECK ((room_sequence > 0)),
     CONSTRAINT messages_timeline_sequence_positive CHECK ((timeline_sequence > 0))
 );
+
+-- A send's result outlives its editable/deletable content. Deliberately no
+-- message/room foreign key or cascading delete: content retention must not
+-- make an acknowledged operation eligible for acceptance a second time.
+CREATE TABLE im_v2.message_send_completions (
+    room_id uuid NOT NULL,
+    sender_user_id uuid NOT NULL,
+    client_message_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version IN (1, 2)),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    message_id uuid NOT NULL,
+    event_id uuid NOT NULL,
+    room_sequence bigint NOT NULL CHECK (room_sequence > 0),
+    timeline_sequence bigint NOT NULL CHECK (timeline_sequence > 0),
+    accepted_membership_revision bigint NOT NULL CHECK (accepted_membership_revision >= 0),
+    delivery_authority text NOT NULL CHECK (delivery_authority IN ('personal', 'room_log')),
+    group_delivery_mode text CHECK (group_delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+    direct_recipient_user_id uuid,
+    created_at timestamp with time zone NOT NULL,
+    PRIMARY KEY (room_id, sender_user_id, client_message_id)
+);
+
+CREATE FUNCTION im_v2.reject_message_send_completion_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'send completion identity and result are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER message_send_completions_immutable
+    BEFORE UPDATE ON im_v2.message_send_completions
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_send_completion_mutation();
 
 -- Accepted room-log events may reference this immutable snapshot after a
 -- message is revised. The trigger below captures the prior revision inside
@@ -1314,6 +1743,19 @@ CREATE TABLE im_v2.push_device_budgets (
     CONSTRAINT push_device_budgets_max_work_units_check CHECK ((max_work_units >= 0)),
     CONSTRAINT push_device_budgets_used_new_key_operations_check CHECK ((used_new_key_operations >= 0)),
     CONSTRAINT push_device_budgets_used_work_units_check CHECK ((used_work_units >= 0))
+);
+
+CREATE TABLE im_v2.push_device_intents (
+    device_id uuid PRIMARY KEY,
+    session_epoch bigint NOT NULL CHECK (session_epoch > 0),
+    session_claim_id uuid NOT NULL,
+    intent_revision bigint NOT NULL CHECK (intent_revision >= 0),
+    intent_digest bytea,
+    updated_at timestamp with time zone NOT NULL,
+    CONSTRAINT push_device_intents_digest_check CHECK (
+        (intent_revision = 0 AND intent_digest IS NULL)
+        OR (intent_revision > 0 AND intent_digest IS NOT NULL AND octet_length(intent_digest) = 32)
+    )
 );
 
 CREATE TABLE im_v2.push_device_endpoints (
@@ -1547,6 +1989,7 @@ CREATE TABLE im_v2.room_timeline_activities (
 
 CREATE TABLE im_v2.rooms (
     room_id uuid NOT NULL,
+    owner_epoch bigint DEFAULT 0 NOT NULL CHECK (owner_epoch >= 0),
     room_kind text DEFAULT 'group'::text NOT NULL,
     room_shard_id text NOT NULL,
     room_sequence bigint DEFAULT 0 NOT NULL,
@@ -1667,14 +2110,14 @@ CREATE UNIQUE INDEX group_room_creation_intent_pages_final_key
     WHERE is_final;
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-4'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-4'::text))
+    schema_id text DEFAULT 'im-v2-current-30'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-30'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-4');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-30');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2226,7 +2669,7 @@ ALTER TABLE ONLY im_v2.device_sync_cursors
     ADD CONSTRAINT device_sync_cursors_pkey PRIMARY KEY (user_id, device_id);
 
 ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_pkey PRIMARY KEY (sender_user_id, client_message_id);
+    ADD CONSTRAINT direct_message_denials_pkey PRIMARY KEY (room_id, sender_user_id, client_message_id);
 
 ALTER TABLE ONLY im_v2.direct_message_denials
     ADD CONSTRAINT direct_message_denials_room_id_timeline_sequence_key UNIQUE (room_id, timeline_sequence);
@@ -2321,6 +2764,30 @@ ALTER TABLE ONLY im_v2.group_room_operations
 ALTER TABLE ONLY im_v2.group_rooms
     ADD CONSTRAINT group_rooms_pkey PRIMARY KEY (room_id);
 
+ALTER TABLE ONLY im_v2.group_invite_links
+    ADD CONSTRAINT group_invite_links_pkey PRIMARY KEY (invite_id);
+
+ALTER TABLE ONLY im_v2.group_invite_links
+    ADD CONSTRAINT group_invite_links_token_digest_key UNIQUE (token_digest);
+
+ALTER TABLE ONLY im_v2.group_invite_links
+    ADD CONSTRAINT group_invite_links_created_by_user_id_creation_operation_key UNIQUE (created_by_user_id, creation_operation_id);
+
+ALTER TABLE ONLY im_v2.group_invite_links
+    ADD CONSTRAINT group_invite_links_invite_room_key UNIQUE (invite_id, room_id);
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_pkey PRIMARY KEY (request_id);
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_applicant_user_id_submission_operation_key UNIQUE (applicant_user_id, submission_operation_id);
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_invite_id_applicant_user_id_key UNIQUE (invite_id, applicant_user_id);
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_reviewer_decision_key UNIQUE (decided_by_user_id, decision_operation_id);
+
 ALTER TABLE ONLY im_v2.media_download_grants
     ADD CONSTRAINT media_download_grants_pkey PRIMARY KEY (download_session_id);
 
@@ -2329,6 +2796,9 @@ ALTER TABLE ONLY im_v2.media_objects
 
 ALTER TABLE ONLY im_v2.media_objects
     ADD CONSTRAINT media_objects_upload_session_id_key UNIQUE (upload_session_id);
+
+ALTER TABLE ONLY im_v2.message_forward_media_imports
+    ADD CONSTRAINT message_forward_media_imports_target_media_id_fkey FOREIGN KEY (target_media_id) REFERENCES im_v2.media_objects(media_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.media_purge_outbox
     ADD CONSTRAINT media_purge_outbox_pkey PRIMARY KEY (media_id);
@@ -2412,7 +2882,7 @@ ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_room_timeline_sequence_key UNIQUE (room_id, timeline_sequence);
 
 ALTER TABLE ONLY im_v2.messages
-    ADD CONSTRAINT messages_sender_user_id_client_message_id_key UNIQUE (sender_user_id, client_message_id);
+    ADD CONSTRAINT messages_room_sender_client_key UNIQUE (room_id, sender_user_id, client_message_id);
 
 ALTER TABLE ONLY im_v2.moderation_audit_entries
     ADD CONSTRAINT moderation_audit_entries_pkey PRIMARY KEY (actor_user_id, operation_id);
@@ -2734,6 +3204,14 @@ CREATE INDEX fanout_sync_payloads_message_state_idx ON im_v2.fanout_sync_payload
 
 CREATE INDEX group_announcement_operations_cleanup_idx ON im_v2.group_announcement_operations USING btree (created_at);
 
+CREATE INDEX group_invite_links_room_active_idx ON im_v2.group_invite_links USING btree (room_id, created_at DESC, invite_id DESC) WHERE (state = 'active'::text);
+
+CREATE INDEX group_join_requests_room_pending_idx ON im_v2.group_join_requests USING btree (room_id, created_at, request_id) WHERE (state = ANY (ARRAY['pending'::text, 'approving'::text]));
+
+CREATE INDEX group_join_requests_applicant_pending_idx ON im_v2.group_join_requests USING btree (applicant_user_id, created_at) WHERE (state = ANY (ARRAY['pending'::text, 'approving'::text]));
+
+CREATE INDEX group_join_requests_invite_approving_idx ON im_v2.group_join_requests USING btree (invite_id) WHERE (state = 'approving'::text);
+
 CREATE INDEX group_event_wake_outbox_claim_idx ON im_v2.group_event_wake_outbox USING btree (next_attempt_at, updated_at) WHERE (state = 'pending'::text);
 
 CREATE INDEX group_permission_operations_cleanup_idx ON im_v2.group_permission_operations USING btree (created_at);
@@ -3020,6 +3498,9 @@ ALTER TABLE ONLY im_v2.group_announcements
 ALTER TABLE ONLY im_v2.group_event_wake_outbox
     ADD CONSTRAINT group_event_wake_outbox_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
+ALTER TABLE ONLY im_v2.group_role_policies
+    ADD CONSTRAINT group_role_policies_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY im_v2.group_permission_operations
     ADD CONSTRAINT group_permission_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
@@ -3041,11 +3522,43 @@ ALTER TABLE ONLY im_v2.group_room_operations
 ALTER TABLE ONLY im_v2.group_rooms
     ADD CONSTRAINT group_rooms_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY im_v2.group_invite_links
+    ADD CONSTRAINT group_invite_links_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.group_rooms(room_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_invite_room_fkey FOREIGN KEY (invite_id, room_id) REFERENCES im_v2.group_invite_links(invite_id, room_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY im_v2.group_join_requests
+    ADD CONSTRAINT group_join_requests_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.group_rooms(room_id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY im_v2.media_download_grants
     ADD CONSTRAINT media_download_grants_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
 
-ALTER TABLE ONLY im_v2.media_download_grants
-    ADD CONSTRAINT media_download_grants_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
+ALTER TABLE im_v2.media_download_grants
+    ADD COLUMN message_room_id uuid,
+    ADD COLUMN message_id uuid,
+    ADD COLUMN owner_shard_id text,
+    ADD COLUMN owner_epoch bigint,
+    ADD CONSTRAINT media_download_grants_scope_check CHECK (
+        (message_room_id IS NULL AND message_id IS NULL AND owner_shard_id IS NULL AND owner_epoch IS NULL)
+        OR (message_room_id IS NOT NULL AND message_id IS NOT NULL AND owner_shard_id IS NOT NULL
+            AND length(btrim(owner_shard_id)) > 0 AND owner_epoch IS NOT NULL AND owner_epoch >= 0)
+    );
+CREATE FUNCTION im_v2.reject_media_download_grant_identity_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.download_session_id, NEW.media_id, NEW.user_id, NEW.device_id, NEW.expires_at, NEW.created_at,
+           NEW.message_room_id, NEW.message_id, NEW.owner_shard_id, NEW.owner_epoch)
+       IS DISTINCT FROM ROW(OLD.download_session_id, OLD.media_id, OLD.user_id, OLD.device_id, OLD.expires_at, OLD.created_at,
+           OLD.message_room_id, OLD.message_id, OLD.owner_shard_id, OLD.owner_epoch)
+       OR (OLD.state = 'consumed' AND NEW IS DISTINCT FROM OLD) THEN
+        RAISE EXCEPTION 'media download grant identity is immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER media_download_grants_identity BEFORE UPDATE ON im_v2.media_download_grants
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_media_download_grant_identity_mutation();
+
 
 ALTER TABLE ONLY im_v2.media_purge_outbox
     ADD CONSTRAINT media_purge_outbox_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
@@ -3107,8 +3620,8 @@ ALTER TABLE ONLY im_v2.message_withdrawal_operations
 ALTER TABLE ONLY im_v2.message_withdrawal_operations
     ADD CONSTRAINT message_withdrawal_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
-ALTER TABLE ONLY im_v2.messages
-    ADD CONSTRAINT messages_forwarded_from_message_id_fkey FOREIGN KEY (forwarded_from_message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
+-- Forward attribution may name a message in another physical owner. Its
+-- authorization is the source transaction/export, not a local message FK.
 
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_reply_to_message_id_fkey FOREIGN KEY (reply_to_message_id) REFERENCES im_v2.messages(message_id);
@@ -3260,4 +3773,165 @@ ALTER TABLE ONLY im_v2.user_room_preference_operations
 ALTER TABLE ONLY im_v2.user_room_preferences
     ADD CONSTRAINT user_room_preferences_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
+ALTER TABLE im_v2.push_device_intents ADD CONSTRAINT push_device_intents_device_id_fkey FOREIGN KEY (device_id) REFERENCES im_v2.auth_devices(device_id) ON DELETE RESTRICT;
+
+CREATE TABLE im_v2.group_invite_directory (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    invite_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    token_digest bytea NOT NULL,
+    requested_lifetime_seconds bigint NOT NULL,
+    maximum_approved_uses bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    state text NOT NULL,
+    ready_at timestamptz,
+    CONSTRAINT group_invite_directory_pkey PRIMARY KEY (actor_user_id, operation_id),
+    CONSTRAINT group_invite_directory_token_key UNIQUE (token_digest),
+    CONSTRAINT group_invite_directory_invite_key UNIQUE (invite_id),
+    CONSTRAINT group_invite_directory_digest_check CHECK (octet_length(token_digest) = 32),
+    CONSTRAINT group_invite_directory_lifetime_check CHECK (requested_lifetime_seconds > 0),
+    CONSTRAINT group_invite_directory_uses_check CHECK (maximum_approved_uses > 0),
+    CONSTRAINT group_invite_directory_expiry_check CHECK (expires_at > created_at),
+    CONSTRAINT group_invite_directory_state_check CHECK (state IN ('prepared', 'ready')),
+    CONSTRAINT group_invite_directory_ready_check CHECK ((state = 'ready') = (ready_at IS NOT NULL))
+);
+
+CREATE FUNCTION im_v2.reject_group_invite_directory_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'invite directory bindings cannot be deleted';
+    END IF;
+    IF (to_jsonb(NEW) - 'state' - 'ready_at') IS DISTINCT FROM (to_jsonb(OLD) - 'state' - 'ready_at')
+       OR OLD.state = 'ready'
+       OR NEW.state <> 'ready' THEN
+        RAISE EXCEPTION 'invite directory permits only prepared to ready';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER group_invite_directory_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invite_directory
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invite_directory_mutation();
+
+CREATE TABLE im_v2.group_invite_creation_recovery (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    state text NOT NULL,
+    attempt_count bigint NOT NULL,
+    next_attempt_at timestamptz NOT NULL,
+    claim_token uuid,
+    lease_expires_at timestamptz,
+    last_error_code text,
+    updated_at timestamptz NOT NULL,
+    completed_at timestamptz,
+    CONSTRAINT group_invite_creation_recovery_pkey PRIMARY KEY (actor_user_id, operation_id),
+    CONSTRAINT group_invite_creation_recovery_intent_fkey FOREIGN KEY (actor_user_id, operation_id)
+        REFERENCES im_v2.group_invite_directory(actor_user_id, operation_id) ON DELETE RESTRICT,
+    CONSTRAINT group_invite_creation_recovery_state_check CHECK (state IN ('pending','claimed','completed','paused')),
+    CONSTRAINT group_invite_creation_recovery_attempt_check CHECK (attempt_count >= 0 AND attempt_count <= 1000),
+    CONSTRAINT group_invite_creation_recovery_claim_check CHECK ((state = 'claimed') = (claim_token IS NOT NULL)),
+    CONSTRAINT group_invite_creation_recovery_lease_check CHECK ((state = 'claimed') = (lease_expires_at IS NOT NULL)),
+    CONSTRAINT group_invite_creation_recovery_completed_check CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
+    CONSTRAINT group_invite_creation_recovery_paused_check CHECK (state <> 'paused' OR last_error_code IS NOT NULL),
+    CONSTRAINT group_invite_creation_recovery_error_check CHECK (last_error_code IN ('dependency_unavailable','owner_changed','rate_limited','permission_denied','creation_expired','conflicting_evidence'))
+);
+CREATE INDEX group_invite_creation_recovery_pending_idx ON im_v2.group_invite_creation_recovery
+    (next_attempt_at, actor_user_id, operation_id) WHERE state = 'pending';
+CREATE INDEX group_invite_creation_recovery_lease_idx ON im_v2.group_invite_creation_recovery
+    (lease_expires_at, actor_user_id, operation_id) WHERE state = 'claimed';
+
+CREATE TABLE im_v2.group_invite_directory_import_audit (
+    operation_id uuid PRIMARY KEY,
+    operator_principal text NOT NULL,
+    shard_id text NOT NULL,
+    owner_epoch bigint NOT NULL,
+    room_id uuid NOT NULL,
+    after_invite_id uuid,
+    page_size bigint NOT NULL,
+    reason_code text NOT NULL,
+    requested_at timestamptz NOT NULL,
+    outcome text NOT NULL,
+    source_snapshot jsonb NOT NULL,
+    source_digest bytea NOT NULL,
+    source_count bigint NOT NULL,
+    inserted_count bigint NOT NULL,
+    published_count bigint NOT NULL,
+    unchanged_count bigint NOT NULL,
+    next_cursor uuid,
+    conflicting_invite_ids uuid[] NOT NULL,
+    CONSTRAINT group_invite_import_principal_check CHECK (operator_principal ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+    CONSTRAINT group_invite_import_shard_check CHECK (octet_length(shard_id) BETWEEN 1 AND 128 AND shard_id = btrim(shard_id)),
+    CONSTRAINT group_invite_import_epoch_check CHECK (owner_epoch >= 0),
+    CONSTRAINT group_invite_import_page_check CHECK (page_size BETWEEN 1 AND 100),
+    CONSTRAINT group_invite_import_reason_check CHECK (reason_code IN ('dependency_recovered','data_repaired','false_positive')),
+    CONSTRAINT group_invite_import_outcome_check CHECK (outcome IN ('applied','conflict')),
+    CONSTRAINT group_invite_import_snapshot_check CHECK (jsonb_typeof(source_snapshot) = 'array' AND jsonb_array_length(source_snapshot) = source_count AND source_count BETWEEN 0 AND page_size),
+    CONSTRAINT group_invite_import_digest_check CHECK (source_digest = sha256(convert_to(source_snapshot::text, 'UTF8'))),
+    CONSTRAINT group_invite_import_counts_check CHECK (
+        inserted_count >= 0 AND published_count >= 0 AND unchanged_count >= 0
+        AND ((outcome = 'applied' AND inserted_count + published_count + unchanged_count = source_count AND cardinality(conflicting_invite_ids) = 0)
+          OR (outcome = 'conflict' AND inserted_count = 0 AND published_count = 0 AND unchanged_count = 0 AND cardinality(conflicting_invite_ids) BETWEEN 1 AND source_count))),
+    CONSTRAINT group_invite_import_cursor_check CHECK (next_cursor IS NULL OR (source_count = page_size AND next_cursor = (source_snapshot->-1->>'invite_id')::uuid))
+);
+CREATE FUNCTION im_v2.reject_group_invite_import_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'invite directory import audit is immutable';
+END;
+$$;
+CREATE TRIGGER group_invite_import_audit_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invite_directory_import_audit
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invite_import_audit_mutation();
+CREATE INDEX group_invite_links_import_page_idx ON im_v2.group_invite_links (room_id, invite_id);
+
+CREATE TABLE im_v2.device_revocation_capabilities (
+    device_id uuid PRIMARY KEY,
+    user_id uuid NOT NULL,
+    credential_digest text NOT NULL UNIQUE,
+    session_created_at timestamptz NOT NULL,
+    session_expires_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    CONSTRAINT device_revocation_capability_device FOREIGN KEY (user_id, device_id)
+        REFERENCES im_v2.auth_devices (user_id, device_id) ON DELETE CASCADE,
+    CONSTRAINT device_revocation_capability_digest CHECK (credential_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT device_revocation_capability_expiry CHECK (
+        isfinite(session_created_at) AND isfinite(session_expires_at) AND isfinite(expires_at)
+        AND session_expires_at > session_created_at
+        AND expires_at = session_expires_at + interval '10 minutes')
+);
+
 COMMIT;
+
+CREATE TABLE im_v2.device_registration_cancellations (
+    request_digest text PRIMARY KEY,
+    device_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    issue_before timestamptz NOT NULL,
+    created_at timestamptz NOT NULL,
+    cancelled_at timestamptz,
+    user_id uuid,
+    session_created_at timestamptz,
+    session_expires_at timestamptz,
+    CONSTRAINT registration_cancellation_digest CHECK (request_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT registration_cancellation_times CHECK (
+        isfinite(created_at) AND isfinite(issue_before) AND issue_before > created_at
+        AND issue_before <= created_at + interval '1 day'
+        AND (cancelled_at IS NULL OR isfinite(cancelled_at))),
+    CONSTRAINT registration_cancellation_binding CHECK (
+        (user_id IS NULL AND session_created_at IS NULL AND session_expires_at IS NULL AND cancelled_at IS NOT NULL)
+        OR (user_id IS NOT NULL AND session_created_at IS NOT NULL AND session_expires_at IS NOT NULL
+            AND isfinite(session_created_at) AND isfinite(session_expires_at) AND session_expires_at > session_created_at)),
+    CONSTRAINT registration_cancellation_device FOREIGN KEY (user_id, device_id)
+        REFERENCES im_v2.auth_devices (user_id, device_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX registration_cancellation_issued_device_idx ON im_v2.device_registration_cancellations (device_id) WHERE user_id IS NOT NULL;
+CREATE INDEX registration_cancellation_pending_expiry_idx ON im_v2.device_registration_cancellations (issue_before) WHERE user_id IS NULL;
+
+CREATE TABLE im_v2.legacy_device_registration_cancellations (
+    user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    cancelled_at timestamptz NOT NULL,
+    CONSTRAINT legacy_registration_cancellation_pkey PRIMARY KEY (user_id, device_id),
+    CONSTRAINT legacy_registration_cancellation_operation UNIQUE (user_id, operation_id),
+    CONSTRAINT legacy_registration_cancellation_time CHECK (isfinite(cancelled_at))
+);

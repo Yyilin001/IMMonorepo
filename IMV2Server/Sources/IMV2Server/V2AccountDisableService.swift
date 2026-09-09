@@ -86,21 +86,51 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
                 return .alreadyDisabled(disabledAt: prior.disabledAt)
             }
 
-            try await sql.raw("INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at) VALUES (\(bind: userUUID), \(bind: command.operationID), \(bind: command.reason.rawValue), \(bind: operatorPrincipal), \(bind: occurredAt))").run()
-            try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at) VALUES (\(bind: userUUID), 2, \(bind: occurredAt)) ON CONFLICT (user_id) DO UPDATE SET revision = version.revision + 1, updated_at = EXCLUDED.updated_at").run()
+            guard v2PostgresTimestampCanEncode(occurredAt) else { throw V2AccountDisableError.unavailable }
+
+            guard let persisted = try await sql.raw("""
+                INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at)
+                VALUES (\(bind: userUUID), \(bind: command.operationID), \(bind: command.reason.rawValue), \(bind: operatorPrincipal), \(bind: occurredAt))
+                RETURNING user_id, disabled_at
+                """).first(decoding: DisableRecord.self) else { throw V2AccountDisableError.unavailable }
+            guard try await sql.raw("""
+                INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at)
+                VALUES (\(bind: userUUID), 2, \(bind: occurredAt))
+                ON CONFLICT (user_id) DO UPDATE
+                SET revision = version.revision + 1, updated_at = EXCLUDED.updated_at
+                WHERE version.revision < \(bind: Int64.max)
+                RETURNING user_id
+                """).first() != nil else { throw V2AccountDisableError.unavailable }
             try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_refresh_sessions SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             try await sql.raw("UPDATE im_v2.device_access_tokens SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             if let profile = try await sql.raw("""
-                UPDATE im_v2.public_user_profiles
-                SET state = 'suspended', avatar_media_id = NULL,
-                    revision = revision + 1,
-                    visibility_revision = visibility_revision + 1,
-                    updated_at = \(bind: occurredAt)
-                WHERE user_id = \(bind: userUUID) AND state <> 'deleted'
-                  AND state <> 'suspended'
-                RETURNING public_handle, display_name, account_kind, revision
+                WITH candidate AS MATERIALIZED (
+                    SELECT user_id, public_handle, display_name, account_kind
+                    FROM im_v2.public_user_profiles
+                    WHERE user_id = \(bind: userUUID) AND state <> 'deleted'
+                      AND state <> 'suspended'
+                    FOR UPDATE
+                ), updated AS (
+                    UPDATE im_v2.public_user_profiles AS profile
+                    SET state = 'suspended', avatar_media_id = NULL,
+                        revision = profile.revision + 1,
+                        visibility_revision = profile.visibility_revision + 1,
+                        updated_at = \(bind: occurredAt)
+                    FROM candidate
+                    WHERE profile.user_id = candidate.user_id
+                      AND profile.revision < \(bind: Int64.max)
+                      AND profile.visibility_revision < \(bind: Int64.max)
+                    RETURNING profile.revision
+                )
+                SELECT candidate.public_handle, candidate.display_name,
+                       candidate.account_kind, updated.revision
+                FROM candidate LEFT JOIN updated ON TRUE
                 """).first(decoding: DisabledProfileRow.self) {
+                // An eligible profile must actually be suspended. A missing
+                // revision distinguishes exhausted counters from no profile
+                // transition being necessary.
+                guard let revision = profile.revision else { throw V2AccountDisableError.unavailable }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
                         (source_event_id, source_user_id, public_handle,
@@ -109,13 +139,15 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
                     VALUES (\(bind: command.operationID), \(bind: userUUID),
                             \(bind: profile.publicHandle), \(bind: profile.displayName),
                             \(bind: profile.accountKind), 'suspended',
-                            \(bind: profile.revision), \(bind: occurredAt), \(bind: occurredAt))
+                            \(bind: revision), \(bind: occurredAt), \(bind: occurredAt))
                     """).run()
             }
             // The durable gateway worker consumes this per-device stream on
             // every gateway replica and closes already-authenticated sockets.
             try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) SELECT user_id, device_id, \(bind: occurredAt) FROM im_v2.auth_devices WHERE user_id = \(bind: userUUID) ON CONFLICT (device_id) DO NOTHING").run()
-            return .disabled(disabledAt: occurredAt)
+            // Keep native time binds above, while returning exactly the
+            // committed receipt time that a later replay will decode.
+            return .disabled(disabledAt: persisted.disabledAt)
         }
     }
 
@@ -140,7 +172,7 @@ private struct DisabledProfileRow: Decodable {
     let publicHandle: String
     let displayName: String
     let accountKind: String
-    let revision: Int64
+    let revision: Int64?
     enum CodingKeys: String, CodingKey {
         case publicHandle = "public_handle"
         case displayName = "display_name"

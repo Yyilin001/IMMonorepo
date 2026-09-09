@@ -1,10 +1,151 @@
 import Foundation
+import GRDB
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
 
 @Suite("V2 message character search")
 struct V2MessageSearchTests {
+    @Test("search preserves the largest persistent room sequence and rejects invalid source positions", arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
+    func roomSequencePersistenceBounds(sequence: UInt64) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-search-bounds-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
+        // Keep the integer decimal exact; an intermediate JSON number must
+        // not round Int64.max into the first rejected value.
+        let payload = Data("""
+            {"event_type":"message.accepted","message_id":"\(message.rawValue)","room_id":"\(room.rawValue)","room_sequence":\(sequence),"message_revision":1,"sender_user_id":"\(sender.rawValue)","text":"boundary search","server_created_at_ms":1750000000000}
+            """.utf8)
+        let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: payload)
+        do {
+            if sequence == 0 || sequence > UInt64(Int64.max) {
+                if sequence == 0 {
+                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await apply(store, records: [record], token: "bounds") }
+                } else {
+                    await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await apply(store, records: [record], token: "bounds") }
+                }
+                #expect(try await store.cursor() == nil)
+                #expect(try await store.events().isEmpty)
+                try await store.rebuildMessageSearchIndex()
+                #expect(try await store.searchMessages(.init(query: "boundary", scope: .allMessages)).hits.isEmpty)
+            } else {
+                try await apply(store, records: [record], token: "bounds")
+                try await store.rebuildMessageSearchIndex()
+                for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
+                    let result = try await store.searchMessages(.init(query: "boundary", scope: scope))
+                    #expect(result.hits.map(\.messageID) == [message])
+                    #expect(result.hits.map(\.roomSequence) == [sequence])
+                }
+            }
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("a corrupt derived search sequence fails safely and rebuilding restores search", arguments: [Int64.min, -1, 0])
+    func corruptSearchSequenceRecovers(sequence: Int64) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-search-corrupt-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
+        do {
+            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+                roomID: room, senderID: sender, messageID: message, roomSequence: 1,
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "corrupt-index")
+            try await store.rebuildMessageSearchIndex()
+            let pool = await store.messageSearchDatabasePool
+            try await pool.write { db in
+                // Model a damaged derived file; normal writes keep CHECK constraints enabled.
+                try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
+                defer { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") }
+                try db.execute(sql: "UPDATE v2_search_documents SET room_sequence = ? WHERE message_id = ?", arguments: [sequence, message.rawValue])
+            }
+            for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+                    try await store.searchMessages(.init(query: "boundary", scope: scope))
+                }
+            }
+            try await store.rebuildMessageSearchIndex()
+            let recovered = try await store.searchMessages(.init(query: "boundary", scope: .room(room)))
+            #expect(recovered.hits.map(\.messageID) == [message])
+            #expect(recovered.hits.map(\.roomSequence) == [1])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("search generation boundaries reject corrupt state before reading or rebuilding", arguments: [Int64.min, -1, 0, 1, Int64.max - 1, Int64.max])
+    func searchGenerationBounds(generation: Int64) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-search-generation-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
+        do {
+            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+                roomID: room, senderID: sender, messageID: message, roomSequence: 1,
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "generation-index")
+            try await store.rebuildMessageSearchIndex()
+            let pool = await store.databasePool
+            let original = try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) }
+            try await pool.write { db in
+                try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
+                defer { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") }
+                try db.execute(sql: "UPDATE v2_message_search_state SET generation = ?", arguments: [generation])
+            }
+            if generation <= 0 {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+                    try await store.searchMessages(.init(query: "boundary", scope: .room(room)))
+                }
+                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await updates.next() }
+            } else {
+                #expect(try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) } == generation)
+                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                #expect(try await updates.next()?.generation == UInt64(generation))
+            }
+            if generation <= 0 || generation == Int64.max {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.rebuildMessageSearchIndex() }
+                #expect(try await pool.read { try Int64.fetchOne($0, sql: "SELECT generation FROM v2_message_search_state") } == generation)
+            } else {
+                try await store.rebuildMessageSearchIndex()
+                #expect(try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) } == generation + 1)
+                #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+            }
+            try await pool.write { db in
+                try db.execute(sql: "UPDATE v2_message_search_state SET generation = ?", arguments: [original])
+            }
+            try await store.rebuildMessageSearchIndex()
+            #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("index observation includes current state and the completed rebuild generation")
+    func indexObservationTracksRebuild() async throws {
+        let store = try makeStore()
+        var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+        let initial = try #require(try await updates.next())
+        #expect(initial.state == .building)
+        try await store.rebuildMessageSearchIndex()
+        var latest = try #require(try await updates.next())
+        if latest.state == .building { latest = try #require(try await updates.next()) }
+        #expect(latest.state == .ready)
+        #expect(latest.generation > initial.generation)
+        var alreadyReady = store.messageSearchIndexUpdates().makeAsyncIterator()
+        #expect(try await alreadyReady.next()?.state == .ready)
+    }
+
     @Test("character grams preserve exact contiguous-substring semantics")
     func characterGrams() {
         let tokens = V2CharacterGramTokenizer().tokenize("你好啊")
@@ -57,6 +198,13 @@ struct V2MessageSearchTests {
         let secondPage = try await store.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
         #expect(secondPage.hits.map(\.messageID) == [first])
         #expect(secondPage.nextCursor == nil)
+        await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
+            try await store.searchMessages(.init(query: "好啊", scope: .room(roomA), limit: 1, cursor: cursor))
+        }
+        try await store.rebuildMessageSearchIndex()
+        await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
+            try await store.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
+        }
     }
 
     @Test("edits replace indexed text and withdrawals remove it")

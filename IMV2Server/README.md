@@ -34,8 +34,8 @@ and the [V2 document entry](../IMV2/docs/README.md).
    The selected primary factor is a production WebAuthn verifier. The provided
    `V2HMACAccountAssertionIssuer` makes a 90-second, device-bound hand-off to
    the device issuer; it is not a passkey verifier itself. The fallback
-   `V2PasswordAccountRoutes` stores bcrypt verifiers only and requires an
-   equal-cost dummy bcrypt digest for unknown-account timing resistance.
+   `V2PasswordAccountRoutes` stores Argon2id PHC verifiers and uses the
+   bounded application password worker for same-cost unknown-account rejection.
    The account service also requires its own Push endpoint envelope key, used
    to encrypt the opaque APNs token at rest; do not place this key in the iOS
    app or a client-visible configuration file.
@@ -82,9 +82,19 @@ expensive route cannot be reached by a direct loopback caller. The iOS app
 accepts only an HTTPS account base URL; it must never be pointed directly at
 the internal HTTP listener.
 
-The password factor uses bcrypt cost 12. Generate
-`IM_V2_PASSWORD_DUMMY_BCRYPT_HASH` once with the same cost so an unknown
-account executes the same expensive comparison as a wrong password. Keep the
+The password factor uses Argon2id v19 (64 MiB, three passes, one lane), a
+16-byte random salt and a 32-byte digest. Inputs are 12–1024 UTF-8 bytes;
+NUL is rejected, with no trimming, normalization or truncation. The fixed
+non-account dummy verifier uses the same policy; no dummy-hash environment
+variable is required. One application-owned pool admits two KDF calls and
+returns no-store 503/Retry-After on saturation; a cancelled running KDF retains
+its slot until it returns. Unsupported/legacy bcrypt records receive the same
+KDF work and cannot issue password assertions or be silently rehashed.
+Existing records remain intact. This greenfield deployment must rebuild test
+accounts or use independently trusted account recovery before resetting a
+legacy password; knowing a bcrypt-equivalent prefix is insufficient.
+
+Keep the
 account assertion HMAC key and the device-credential replay-envelope key in
 this service's secret scope only; neither belongs in the realtime gateway.
 Each failed password assertion also updates the canonical-account failure
@@ -252,6 +262,16 @@ evidence remains local-stack coverage, not a production deployment approval.
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;
   it requires a controlled operator replay and never becomes a skipped target.
+- Ordinary message edits, author withdrawals, and reactions use each message's
+  immutable send completion to choose personal fan-out or ordered room-log
+  delivery. Current room defaults and accepted payload placement do not decide
+  this choice. Missing acceptance metadata rejects a new mutation before
+  changing state; completed operation replay remains idempotent. New personal mutation plans intersect accepted and mutation membership and
+  settle the exact reservation after paged enumeration. Other read surfaces,
+  content revocation, and dependency recovery remain open; see the
+  [audience contract](../docs/reviews/message-mutation-audience-contract.md) and [delivery authority contract](../docs/reviews/message-mutation-delivery-authority-contract.md).
+  Reaction commands and ordinary mutation room pulls also require accepted-time membership; protocol 26 permits scanned-through invisible tails. See the [read contract](../docs/reviews/message-mutation-read-contract.md).
+  Protocol 27 new edits carry complete state and acceptance identity to bridge authorized revision gaps; late accepted events preserve newer projections. See the [replacement contract](../docs/reviews/message-edit-replacement-contract.md).
 - Membership add/remove is owner-authorized and revision-fenced. Its source
   transaction records the durable operation result, room event, exact frozen
   audience, fan-out plan, and room outbox together; a lost response may replay
@@ -315,3 +335,6 @@ run:
 ```sh
 bash scripts/run_v2_postgres_integration.sh
 ```
+
+
+Legacy registration recovery uses `POST /v2/device-credentials/cancel-legacy-registration` on the Account listener. A freshly verified, new-device-bound account assertion authorizes cleanup of an old device only within that account. Only empty 204 confirms completion; 404 retains the unresolved target, 409 is a conflicting operation, 507 is the permanent ledger capacity boundary, and address throttling remains 429. See the [HTTP contract](../docs/reviews/legacy-registration-http-contract.md). ClientKit/App login integration is described in the [client recovery contract](../docs/reviews/legacy-registration-client-recovery-contract.md); old issuer processes must be drained before enabling cleanup.

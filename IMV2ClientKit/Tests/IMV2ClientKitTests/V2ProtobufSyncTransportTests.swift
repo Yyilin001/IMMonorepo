@@ -4,6 +4,76 @@ import IMV2Core
 import Testing
 
 struct V2ProtobufSyncTransportTests {
+    @Test("snapshot expiry checks reject invalid local clocks and preserve the exact expiry boundary", arguments: ["nan", "negativeInfinity", "positiveInfinity", "belowMinimum", "aboveMaximum", "negative", "epoch", "beforeExpiry", "atExpiry", "afterExpiry"])
+    func snapshotExpiryClockBounds(scenario: String) async throws {
+        let expiry = Date.distantFuture
+        let clock: Date
+        switch scenario {
+        case "nan": clock = Date(timeIntervalSince1970: .nan)
+        case "negativeInfinity": clock = Date(timeIntervalSince1970: -.infinity)
+        case "positiveInfinity": clock = Date(timeIntervalSince1970: .infinity)
+        case "belowMinimum": clock = Date(timeIntervalSince1970: Double(Int64.min) / 1000 - 10)
+        case "aboveMaximum": clock = Date(timeIntervalSince1970: Double(Int64.max) / 1000 + 10)
+        case "negative": clock = Date(timeIntervalSince1970: -1)
+        case "epoch": clock = Date(timeIntervalSince1970: 0)
+        case "beforeExpiry": clock = expiry.addingTimeInterval(-1)
+        case "atExpiry": clock = expiry
+        default: clock = expiry.addingTimeInterval(1)
+        }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 7, expiresAt: expiry)
+        let wire = ScriptedSyncWire(reset: reset)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1, now: { clock })
+        if ["negative", "epoch", "beforeExpiry"].contains(scenario) {
+            #expect(try await transport.fetchSnapshotManifest(for: reset).reset == reset)
+        } else {
+            await #expect(throws: V2RealtimeTransportError.invalidSnapshotManifest) {
+                try await transport.fetchSnapshotManifest(for: reset)
+            }
+        }
+        #expect(await wire.commands() == [.syncSnapshot])
+    }
+
+    @Test("room event wire validates scanned boundaries and forward progress", arguments: ["empty", "payload", "emptyMore", "badBound", "stalled", "regressed"])
+    func scannedRoomCursorWire(_ scenario: String) async throws {
+        let room = RoomID(uuid: UUID())
+        let transport = V2ProtobufSyncTransport(wire: ScannedRoomCursorWire(scenario: scenario), protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        if ["badBound", "stalled", "regressed"].contains(scenario) {
+            await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+                try await transport.pullGroupEvents(roomID: room, afterRoomSequence: 2, pageSize: 2)
+            }
+        } else {
+            let page = try await transport.pullGroupEvents(roomID: room, afterRoomSequence: 2, pageSize: 2)
+            #expect(page.nextRoomSequence == 5)
+            #expect(page.events.count == (scenario == "payload" ? 1 : 0))
+            #expect(page.hasMore == (scenario == "emptyMore"))
+        }
+    }
+
+
+    @Test("explicit rebuild intent is encoded on the authenticated sync pull")
+    func rebuildIntentUsesWire() async throws {
+        let wire = SnapshotRebuildWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        _ = try await transport.pull(syncToken: nil, maxRecords: 20, requireSnapshot: true)
+        #expect(await wire.observedRebuild())
+    }
+
+    @Test("snapshot wire rejects counts beyond the codec page limit", arguments: [UInt32(0), 1, 500, 501, UInt32.max])
+    func snapshotWireItemCountBounds(value: UInt32) async throws {
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 7, expiresAt: .distantFuture)
+        let wire = ScriptedSyncWire(reset: reset, responseItemCount: value)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        let manifest = try await transport.fetchSnapshotManifest(for: reset)
+        if value == 0 || value > V2SnapshotProjectionV3Codec.maximumPageItems {
+            await #expect(throws: V2RealtimeTransportError.snapshotDigestMismatch) {
+                try await transport.fetchSnapshotPage(for: manifest, index: 0)
+            }
+        } else {
+            #expect(try await transport.fetchSnapshotPage(for: manifest, index: 0).itemCount == Int(value))
+        }
+        #expect(await wire.commands() == [.syncSnapshot, .snapshotPagePull])
+    }
+
     @Test("snapshot manifest pages are correlated and SHA-256 verified before acknowledgement")
     func snapshotRoundTrip() async throws {
         let reset = try V2ClientResetRequired(
@@ -243,7 +313,7 @@ struct V2ProtobufSyncTransportTests {
         let subscription = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 21)
         try await transport.unsubscribeFromGroupEvents(roomID: roomID)
 
-        #expect(subscription == .init(roomID: roomID, highWatermark: 34))
+        #expect(subscription == (try .init(roomID: roomID, highWatermark: 34)))
         #expect(await wire.commands() == [.groupEventSubscribe, .groupEventUnsubscribe])
         #expect(await wire.afterRoomSequence() == 21)
     }
@@ -563,12 +633,14 @@ private actor ScriptedSyncWire: V2AuthenticatedFrameTransport {
     private let schemaVersion: UInt32
     private var recorded: [V2FrameCommand] = []
     private let pagePayload: Data
+    private let responseItemCount: UInt32
     private let pageDigest: String
     private let rootDigest: String
     private let firstKey: V2SnapshotProjectionKey
     private let lastKey: V2SnapshotProjectionKey
 
-    init(reset: V2ClientResetRequired, schemaVersion: UInt32 = V2SnapshotProjectionV3Codec.schemaVersion) {
+    init(reset: V2ClientResetRequired, schemaVersion: UInt32 = V2SnapshotProjectionV3Codec.schemaVersion, responseItemCount: UInt32 = 1) {
+        self.responseItemCount = responseItemCount
         self.reset = reset
         self.schemaVersion = schemaVersion
         let key = try! V2SnapshotProjectionKey(
@@ -632,7 +704,7 @@ private actor ScriptedSyncWire: V2AuthenticatedFrameTransport {
             response.snapshotPage.firstEntityKey = firstKey.entityKey
             response.snapshotPage.lastProjectionKind = lastKey.projectionKind
             response.snapshotPage.lastEntityKey = lastKey.entityKey
-            response.snapshotPage.itemCount = 1
+            response.snapshotPage.itemCount = responseItemCount
             response.snapshotPage.payload = pagePayload
         case .snapshotAck:
             response.acknowledged = .init()
@@ -653,5 +725,46 @@ private struct WrongCorrelationWire: V2AuthenticatedFrameTransport {
         response.protocolVersion = 1
         response.acknowledged = .init()
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+    }
+}
+
+private actor SnapshotRebuildWire: V2AuthenticatedFrameTransport {
+    private var rebuild = false
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .syncPull(let pull)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        rebuild = pull.requireSnapshot && pull.syncToken.isEmpty
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = request.protocolVersion
+        response.resetRequired = .init()
+        response.resetRequired.snapshotID = "00000000-0000-0000-0000-000000009006"
+        response.resetRequired.generation = 2
+        response.resetRequired.baseUserSyncSequence = 10
+        response.resetRequired.expiresAtMs = 2_000_000_000_000
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+    }
+    func observedRebuild() -> Bool { rebuild }
+}
+
+private struct ScannedRoomCursorWire: V2AuthenticatedFrameTransport {
+    let scenario: String
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .groupEventPull(let pull)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        var response = IMV2Envelope()
+        response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        response.groupEventPage = .init()
+        response.groupEventPage.roomID = pull.roomID
+        response.groupEventPage.nextRoomSequence = scenario == "regressed" ? 1 : (scenario == "stalled" ? 2 : 5)
+        response.groupEventPage.hasMore_p = scenario == "emptyMore" || scenario == "stalled"
+        if scenario == "payload" || scenario == "badBound" {
+            var event = IMV2GroupEvent()
+            event.sourceEventID = UUID().uuidString
+            event.roomSequence = scenario == "badBound" ? 6 : 3
+            event.projectionKind = "message"; event.payload = Data("{}".utf8)
+            response.groupEventPage.events = [event]
+        }
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: UInt8(request.protocolVersion))
     }
 }

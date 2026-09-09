@@ -142,14 +142,12 @@ public struct V2MediaDownloadTargetEnvelope: Codable, Equatable, Sendable {
         else { throw V2MediaValidationError.invalidDownloadTarget }
 
         let milliseconds = (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)
-        guard milliseconds.isFinite,
-              milliseconds >= Double(Int64.min),
-              milliseconds <= Double(Int64.max)
+        guard let signedMilliseconds = Int64(exactly: milliseconds)
         else { throw V2MediaValidationError.invalidDownloadTarget }
 
         self.url = url.absoluteString
         self.headers = headers
-        self.expiresAtUnixMilliseconds = Int64(milliseconds)
+        self.expiresAtUnixMilliseconds = signedMilliseconds
         self.expectedByteCount = expectedByteCount
     }
 
@@ -187,14 +185,12 @@ public struct V2MediaUploadTargetEnvelope: Codable, Equatable, Sendable {
         else { throw V2MediaValidationError.invalidUploadTarget }
 
         let milliseconds = (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)
-        guard milliseconds.isFinite,
-              milliseconds >= Double(Int64.min),
-              milliseconds <= Double(Int64.max)
+        guard let signedMilliseconds = Int64(exactly: milliseconds)
         else { throw V2MediaValidationError.invalidUploadTarget }
 
         self.url = url.absoluteString
         self.headers = headers
-        self.expiresAtUnixMilliseconds = Int64(milliseconds)
+        self.expiresAtUnixMilliseconds = signedMilliseconds
         self.expectedByteCount = expectedByteCount
     }
 

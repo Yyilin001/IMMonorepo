@@ -1,10 +1,110 @@
 import Foundation
 import IMV2Core
+import Synchronization
 @testable import IMV2Server
 import Testing
 
 @Suite("V2 local filesystem media provider")
 struct V2LocalFilesystemMediaProviderTests {
+    @Test("Media deadline rounding cannot make expired or submillisecond targets usable",
+          arguments: [Double(-1.0005), -1_000_000_000.1255, 1_750_000_000.1255])
+    func signedDeadlineRounding(seconds: Double) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-v2-media-rounding-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: seconds)
+        let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root,
+            targetBaseURL: #require(URL(string: "https://media.local.test")),
+            signingKey: Data(repeating: 13, count: 32), now: { now })
+        let media = MediaID(uuid: UUID())
+        for remaining in [-0.0001, 0, 0.0001] {
+            let expiry = now.addingTimeInterval(remaining)
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                _ = try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1, expiresAt: expiry)
+            }
+            // Invalid deadlines must be rejected before metadata lookup,
+            // even though this fixture deliberately has no stored object.
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                _ = try await provider.issueDownloadTarget(mediaID: media, expiresAt: expiry)
+            }
+        }
+        let expiry = now.addingTimeInterval(0.5)
+        let valid = try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1, expiresAt: expiry)
+        #expect(valid.expiresAt == expiry)
+        await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
+            _ = try await provider.issueDownloadTarget(mediaID: media, expiresAt: expiry)
+        }
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    @Test("Invalid media deadlines and clock samples fail without altering an existing object")
+    func nonFiniteAndOverflowingClock() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-v2-media-clock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 1_750_000_000.125)
+        let clock = MediaTargetTestClock(now)
+        let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root,
+            targetBaseURL: #require(URL(string: "https://media.local.test")),
+            signingKey: Data(repeating: 13, count: 32), now: { clock.read() })
+        let media = MediaID(uuid: UUID()), expiry = now.addingTimeInterval(30)
+        let upload = try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1, expiresAt: expiry)
+        try await provider.storeUploadedObject(mediaID: media, targetURL: upload.url, contentType: "text/plain", bytes: Data([42]))
+        let download = try await provider.issueDownloadTarget(mediaID: media, expiresAt: expiry)
+        for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, Double(Int64.max) / 1_000] {
+            let invalid = Date(timeIntervalSince1970: seconds)
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1, expiresAt: invalid)
+            }
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                try await provider.issueDownloadTarget(mediaID: media, expiresAt: invalid)
+            }
+            clock.set([invalid])
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1, expiresAt: expiry)
+            }
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                try await provider.issueDownloadTarget(mediaID: media, expiresAt: expiry)
+            }
+            await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+                try await provider.readDownloadedObject(mediaID: media, targetURL: download.url)
+            }
+            clock.set([now])
+        }
+        #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: download.url) == Data([42]))
+        clock.set([expiry])
+        await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+            try await provider.readDownloadedObject(mediaID: media, targetURL: download.url)
+        }
+    }
+
+    @Test("Media targets reject an elapsed encoded deadline and recheck after metadata lookup")
+    func targetDeadlineBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-v2-media-clock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let clock = MediaTargetTestClock(now)
+        let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root,
+            targetBaseURL: #require(URL(string: "https://media.local.test")),
+            signingKey: Data(repeating: 13, count: 32), now: { clock.read() })
+        let media = MediaID(uuid: UUID())
+        await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+            try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain", byteCount: 1,
+                expiresAt: now.addingTimeInterval(0.0001))
+        }
+        let upload = try await provider.issueUploadTarget(mediaID: media, contentType: "text/plain",
+            byteCount: 1, expiresAt: now.addingTimeInterval(30))
+        try await provider.storeUploadedObject(mediaID: media, targetURL: upload.url,
+            contentType: "text/plain", bytes: Data([42]))
+        // First sample is before the awaited metadata lookup; the second is
+        // when the target is signed. No file-system scheduling race is needed.
+        clock.set([now, now.addingTimeInterval(60)])
+        await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+            try await provider.issueDownloadTarget(mediaID: media, expiresAt: now.addingTimeInterval(30))
+        }
+        clock.set([now])
+        let download = try await provider.issueDownloadTarget(mediaID: media, expiresAt: now.addingTimeInterval(30))
+        #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: download.url) == Data([42]))
+    }
+
     @Test("a signed local target stores, scans, downloads and purges opaque media bytes")
     func localMediaLifecycle() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-v2-media-\(UUID().uuidString)", isDirectory: true)
@@ -164,5 +264,17 @@ struct V2LocalFilesystemMediaProviderTests {
         try await restartedProcess.prepare()
         #expect(FileManager.default.fileExists(atPath: active.fileURL.path))
         await restartedProcess.discardUploadedObject(active)
+    }
+}
+
+private final class MediaTargetTestClock: Sendable {
+    private let samples: Mutex<[Date]>
+    init(_ date: Date) { samples = Mutex([date]) }
+    func set(_ dates: [Date]) { samples.withLock { $0 = dates } }
+    func read() -> Date {
+        samples.withLock { values in
+            if values.count > 1 { return values.removeFirst() }
+            return values[0]
+        }
     }
 }

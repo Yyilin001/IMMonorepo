@@ -6,7 +6,8 @@ import SQLKit
 /// that was durably assigned to the requester, or for an avatar whose profile
 /// is currently visible to that requester. A shared message state never grants
 /// access by itself: the requester must still hold a live user projection
-/// reference. During migration, shared and inline payloads are both readable.
+/// reference plus current and historical content authorization. A stale
+/// projection alone is insufficient. Shared and inline payloads are readable.
 enum V2PostgresMediaVisibilityAuthorization {
     static func isAuthorized(
         mediaID: UUID,
@@ -41,9 +42,16 @@ enum V2PostgresMediaVisibilityAuthorization {
                   AND EXISTS (
                       SELECT 1
                       FROM im_v2.auth_devices AS authenticated_device
+                      JOIN im_v2.public_user_profiles AS authenticated_profile
+                        ON authenticated_profile.user_id = authenticated_device.user_id
+                       AND authenticated_profile.state = 'active'
                       WHERE authenticated_device.user_id = \(bind: requesterUserID)
                         AND authenticated_device.device_id = \(bind: deviceID)
-                        AND authenticated_device.revoked_at IS NULL
+                        AND authenticated_device.revoked_at IS NULL AND authenticated_device.session_expires_at > clock_timestamp()
+                        AND NOT EXISTS (
+                            SELECT 1 FROM im_v2.account_disables AS disabled
+                            WHERE disabled.user_id = authenticated_device.user_id
+                        )
                   )
                   AND (
                       EXISTS (
@@ -53,14 +61,10 @@ enum V2PostgresMediaVisibilityAuthorization {
                             ON message.message_id = reference.message_id
                           JOIN im_v2.rooms AS room
                             ON room.room_id = message.room_id
-                          JOIN im_v2.room_memberships AS membership
-                            ON membership.room_id = room.room_id
-                           AND membership.user_id = \(bind: requesterUserID)
-                           AND membership.joined_revision <= room.membership_revision
-                           AND (membership.left_revision IS NULL OR membership.left_revision > room.membership_revision)
                           WHERE reference.media_id = media.media_id
                             AND message.withdrawn_at IS NULL
                             AND reference.revoked_at IS NULL
+                            AND (\(v2ForwardSourceVisibility(actorID: requesterUserID)))
                             -- Current projection state is the durable delivery
                             -- authority after incremental log compaction. A
                             -- withdrawn/redacted message closes this version,
@@ -72,15 +76,20 @@ enum V2PostgresMediaVisibilityAuthorization {
                                   ON state.state_id = delivery.message_state_id
                                 WHERE delivery.user_id = \(bind: requesterUserID)
                                   AND delivery.projection_kind = 'message'
-                                  AND delivery.entity_key = message.message_id::text
+                                  AND delivery.entity_key IN (message.message_id::text, upper(message.message_id::text))
                                   AND delivery.valid_to_sequence IS NULL
+                                  AND delivery.scope_room_id = message.room_id
+                                  AND lower(COALESCE(state.payload, delivery.payload)->>'message_id') = message.message_id::text
+                                  AND lower(COALESCE(state.payload, delivery.payload)->>'room_id') = message.room_id::text
                                   AND COALESCE(state.payload, delivery.payload)->>'event_type' = 'message.accepted'
                                   AND COALESCE(
                                       (COALESCE(state.payload, delivery.payload)->>'is_withdrawn')::boolean,
                                       FALSE
                                   ) = FALSE
-                                  AND COALESCE(state.payload, delivery.payload)->'media_ids'
+                                  AND (COALESCE(state.payload, delivery.payload)->'media_ids'
                                       @> jsonb_build_array(media.media_id::text)
+                                    OR COALESCE(state.payload, delivery.payload)->'media_ids'
+                                      @> jsonb_build_array(upper(media.media_id::text)))
                             )
                       )
                       OR EXISTS (

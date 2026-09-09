@@ -80,7 +80,7 @@ private actor ScriptedWithdrawalTransport: V2ClientMessageWithdrawalTransport {
         switch results.removeFirst() {
         case .offline: throw V2RealtimeTransportError.unexpectedResponse
         case .conflict: throw V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 2)
-        case .accepted: return .init(roomID: roomID, messageID: messageID, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
+        case .accepted: return try .init(roomID: roomID, messageID: messageID, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
         }
     }
     func operationIDs() -> [MessageWithdrawalOperationID] { received }

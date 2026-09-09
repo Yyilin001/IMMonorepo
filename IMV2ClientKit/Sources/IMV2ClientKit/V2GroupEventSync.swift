@@ -3,13 +3,16 @@ import IMV2Core
 
 public struct V2ClientGroupEvent: Equatable, Sendable {
     public let sourceEventID: EventID
-    public let roomSequence: UInt64
+    private let roomSequenceValue: V2RoomCursor
+    public var roomSequence: UInt64 { roomSequenceValue.rawValue }
     public let projectionKind: String
     public let payload: Data
 
-    public init(sourceEventID: EventID, roomSequence: UInt64, projectionKind: String, payload: Data) {
+    public init(sourceEventID: EventID, roomSequence: UInt64, projectionKind: String, payload: Data) throws {
+        guard let cursor = try? V2RoomCursor(roomSequence) else { throw V2ClientSyncError.storageRangeExceeded }
+        guard roomSequence > 0 else { throw V2ClientSyncError.invalidRecordOrdering }
         self.sourceEventID = sourceEventID
-        self.roomSequence = roomSequence
+        self.roomSequenceValue = cursor
         self.projectionKind = projectionKind
         self.payload = payload
     }
@@ -18,13 +21,15 @@ public struct V2ClientGroupEvent: Equatable, Sendable {
 public struct V2ClientGroupEventPage: Equatable, Sendable {
     public let roomID: RoomID
     public let events: [V2ClientGroupEvent]
-    public let nextRoomSequence: UInt64
+    private let nextRoomSequenceValue: V2RoomCursor
+    public var nextRoomSequence: UInt64 { nextRoomSequenceValue.rawValue }
     public let hasMore: Bool
 
-    public init(roomID: RoomID, events: [V2ClientGroupEvent], nextRoomSequence: UInt64, hasMore: Bool) {
+    public init(roomID: RoomID, events: [V2ClientGroupEvent], nextRoomSequence: UInt64, hasMore: Bool) throws {
+        guard let cursor = try? V2RoomCursor(nextRoomSequence) else { throw V2ClientSyncError.storageRangeExceeded }
         self.roomID = roomID
         self.events = events
-        self.nextRoomSequence = nextRoomSequence
+        self.nextRoomSequenceValue = cursor
         self.hasMore = hasMore
     }
 }
@@ -45,11 +50,23 @@ public struct V2GroupEventSyncProgress: Equatable, Sendable {
 /// Bounded maintenance work completed after a personal-sync cycle.  This is
 /// intentionally page-based rather than room-based: a single large history
 /// cannot consume the entire foreground reconnect budget.
+public struct V2GroupEventPageCommit: Equatable, Sendable {
+    private let appliedThroughValue: V2RoomCursor
+    public var appliedThrough: UInt64 { appliedThroughValue.rawValue }
+    public let insertedEventCount: Int
+    public init(appliedThrough: UInt64, insertedEventCount: Int) throws {
+        guard let cursor = try? V2RoomCursor(appliedThrough) else { throw V2ClientSyncError.storageRangeExceeded }
+        guard insertedEventCount >= 0 else { throw V2ClientSyncError.invalidRecordOrdering }
+        self.appliedThroughValue = cursor
+        self.insertedEventCount = insertedEventCount
+    }
+}
+
 public struct V2GroupEventBackgroundSyncProgress: Equatable, Sendable {
     public let processedPageCount: Int
     public let appliedEventCount: Int
-    /// `true` means the caller used its complete page budget and should allow
-    /// a later availability cycle to continue from the persisted cursors.
+    /// Continue this finite directory scan or known page backlog after yielding.
+    /// Once false, a new availability cycle may request a fresh directory scan.
     public let mayHaveRemainingWork: Bool
 
     public init(processedPageCount: Int, appliedEventCount: Int, mayHaveRemainingWork: Bool) {
@@ -65,11 +82,13 @@ public protocol V2ClientGroupEventTransport: Sendable {
 
 public struct V2ClientGroupEventSubscription: Equatable, Sendable {
     public let roomID: RoomID
-    public let highWatermark: UInt64
+    private let highWatermarkValue: V2RoomCursor
+    public var highWatermark: UInt64 { highWatermarkValue.rawValue }
 
-    public init(roomID: RoomID, highWatermark: UInt64) {
+    public init(roomID: RoomID, highWatermark: UInt64) throws {
+        guard let cursor = try? V2RoomCursor(highWatermark) else { throw V2ClientSyncError.storageRangeExceeded }
         self.roomID = roomID
-        self.highWatermark = highWatermark
+        self.highWatermarkValue = cursor
     }
 }
 
@@ -105,6 +124,8 @@ public protocol V2LocalGroupEventStore: Sendable {
     /// large-group hybrid rooms and private rooms; standard fan-out groups
     /// deliberately stay out of this background scheduler.
     func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) async throws -> [RoomID]
+    /// Captures the inclusive end marker of one finite directory scan.
+    func lastKnownRoomLogRoomID() async throws -> RoomID?
     /// Durable keyset cursor for fair background scheduling. This cursor is
     /// only a scheduling hint; per-room event cursors remain the delivery
     /// authority.
@@ -117,6 +138,8 @@ public protocol V2LocalGroupEventStore: Sendable {
     func markRoomEventUnauthorized(roomID: RoomID) async throws
     func groupEventCursor(roomID: RoomID) async throws -> UInt64
     func applyGroupEventPage(_ page: V2ClientGroupEventPage) async throws -> UInt64
+    /// Count only rows inserted by this transaction, excluding exact replay.
+    func applyGroupEventPageReportingChanges(_ page: V2ClientGroupEventPage) async throws -> V2GroupEventPageCommit
 }
 
 /// Foreground preview for a standard fan-out group deliberately has a
@@ -150,12 +173,54 @@ public actor V2GroupEventSyncEngine {
         self.pageSize = pageSize
     }
 
+    private struct PageFlight {
+        let id: UUID
+        let task: Task<V2GroupEventSyncProgress, any Error>
+    }
+    private var pageFlights: [RoomID: PageFlight] = [:]
+    private var backgroundFlight: (id: UUID, task: Task<V2GroupEventBackgroundSyncProgress, any Error>)?
+
+    private struct DirectoryRange {
+        var after: RoomID?
+        let through: RoomID
+    }
+    private struct Scan {
+        var ranges: [DirectoryRange]
+        var pendingRooms: [RoomID] = []
+        var backlog: [RoomID] = []
+        var backlogHead = 0
+        var hasWork: Bool { !ranges.isEmpty || !pendingRooms.isEmpty || backlogHead < backlog.count }
+    }
+    private var scan: Scan?
+
     public func synchronizeOnePage(roomID: RoomID) async throws -> V2GroupEventSyncProgress {
-        let cursor = try await store.groupEventCursor(roomID: roomID)
-        let page = try await transport.pullGroupEvents(roomID: roomID, afterRoomSequence: cursor, pageSize: pageSize)
-        guard page.roomID == roomID else { throw V2RealtimeTransportError.unexpectedResponse }
-        _ = try await store.applyGroupEventPage(page)
-        return .init(appliedEventCount: page.events.count, hasMore: page.hasMore)
+        // Actor methods can interleave at network awaits. Serialize the entire
+        // read/pull/apply sequence for this room, including foreground callers.
+        while let previous = pageFlights[roomID] {
+            _ = await previous.task.result
+            try Task.checkCancellation()
+            if pageFlights[roomID]?.id == previous.id { pageFlights[roomID] = nil }
+        }
+        try Task.checkCancellation()
+        let current = PageFlight(id: UUID(), task: Task { [store, transport, pageSize] in
+            let cursor = try await store.groupEventCursor(roomID: roomID)
+            try Task.checkCancellation()
+            let page = try await transport.pullGroupEvents(roomID: roomID, afterRoomSequence: cursor, pageSize: pageSize)
+            try Task.checkCancellation()
+            guard page.roomID == roomID,
+                  page.nextRoomSequence >= cursor,
+                  !page.hasMore || page.nextRoomSequence > cursor
+            else { throw V2RealtimeTransportError.unexpectedResponse }
+            let commit = try await store.applyGroupEventPageReportingChanges(page)
+            return .init(appliedEventCount: commit.insertedEventCount, hasMore: page.hasMore)
+        })
+        pageFlights[roomID] = current
+        defer { if pageFlights[roomID]?.id == current.id { pageFlights[roomID] = nil } }
+        return try await withTaskCancellationHandler(operation: {
+            let result = await current.task.result
+            try Task.checkCancellation()
+            return try result.get()
+        }, onCancel: { current.task.cancel() })
     }
 
     public func synchronizeUntilCaughtUp(roomID: RoomID) async throws {
@@ -164,57 +229,102 @@ public actor V2GroupEventSyncEngine {
         }
     }
 
-    /// Performs a fair, bounded maintenance pass over known hybrid groups.
-    /// Active conversations use `synchronizeOnePage(roomID:)` directly and
-    /// therefore never wait behind this background work.  One page is taken
-    /// per room before moving to the next, preserving bounded network/SQLite
-    /// work while preventing a large backlog from starving quieter rooms.
+    /// Continues one finite scan from the durable round-robin position. Rooms
+    /// discovered after the captured upper bound wait for the next wake. Only
+    /// a server page with hasMore enters the FIFO backlog; empty rooms never
+    /// cycle indefinitely merely because the directory exceeds this budget.
     public func synchronizeBackgroundKnownRooms(maximumPages: Int) async throws -> V2GroupEventBackgroundSyncProgress {
         precondition(maximumPages > 0 && maximumPages <= 10_000)
-        let cursor = try await store.hybridGroupBackgroundCursor()
-        let probeLimit = maximumPages + 1
-        var roomIDs = try await store.knownRoomLogRoomIDs(after: cursor, limit: probeLimit)
-        if cursor != nil, roomIDs.count < probeLimit {
-            let wrapped = try await store.knownRoomLogRoomIDs(after: nil, limit: probeLimit - roomIDs.count)
-            var seen = Set(roomIDs)
-            roomIDs.append(contentsOf: wrapped.filter { seen.insert($0).inserted })
+        while let previous = backgroundFlight {
+            _ = await previous.task.result
+            try Task.checkCancellation()
+            if backgroundFlight?.id == previous.id { backgroundFlight = nil }
         }
-        guard !roomIDs.isEmpty else {
-            try await store.setHybridGroupBackgroundCursor(nil)
-            return .init(processedPageCount: 0, appliedEventCount: 0, mayHaveRemainingWork: false)
+        try Task.checkCancellation()
+        let id = UUID()
+        let task = Task { try await self.synchronizeBackgroundPass(maximumPages: maximumPages) }
+        backgroundFlight = (id, task)
+        defer { if backgroundFlight?.id == id { backgroundFlight = nil } }
+        return try await withTaskCancellationHandler(operation: {
+            let result = await task.result
+            try Task.checkCancellation()
+            return try result.get()
+        }, onCancel: { task.cancel() })
+    }
+
+    private func synchronizeBackgroundPass(maximumPages: Int) async throws -> V2GroupEventBackgroundSyncProgress {
+        if scan == nil {
+            let pivot = try await store.hybridGroupBackgroundCursor()
+            guard let upper = try await store.lastKnownRoomLogRoomID() else {
+                try await store.setHybridGroupBackgroundCursor(nil)
+                return .init(processedPageCount: 0, appliedEventCount: 0, mayHaveRemainingWork: false)
+            }
+            var ranges: [DirectoryRange] = []
+            if let pivot {
+                if pivot.rawValue < upper.rawValue { ranges.append(.init(after: pivot, through: upper)) }
+            } else {
+                ranges.append(.init(after: nil, through: upper))
+            }
+            if let pivot {
+                ranges.append(.init(after: nil, through: pivot.rawValue < upper.rawValue ? pivot : upper))
+            }
+            scan = .init(ranges: ranges)
         }
-        let hasUnscheduledRoom = roomIDs.count > maximumPages
-        if hasUnscheduledRoom {
-            roomIDs.removeLast(roomIDs.count - maximumPages)
-        }
+        guard var scan else { throw V2RealtimeTransportError.unexpectedResponse }
+        defer { self.scan = scan.hasWork ? scan : nil }
         var processedPages = 0
         var appliedEvents = 0
-        var roomHasMoreEvents = false
-        for roomID in roomIDs {
+        var visited = Set<RoomID>()
+        while processedPages < maximumPages {
             try Task.checkCancellation()
-            // A forbidden response is still one bounded background attempt;
-            // otherwise a batch containing only revoked rooms could loop
-            // forever while repeatedly revoking the same stale entry.
-            processedPages += 1
+            // Keep only a bounded keyset page in memory. Each range advances
+            // once; the head range ends at the original persisted pivot.
+            while scan.pendingRooms.isEmpty, let range = scan.ranges.first {
+                let rows = try await store.knownRoomLogRoomIDs(after: range.after, limit: maximumPages)
+                try Task.checkCancellation()
+                let bounded = rows.prefix { $0.rawValue <= range.through.rawValue }
+                scan.pendingRooms = Array(bounded)
+                if rows.count < maximumPages || bounded.count < rows.count || bounded.last == range.through {
+                    scan.ranges.removeFirst()
+                } else if let last = bounded.last {
+                    scan.ranges[0].after = last
+                }
+            }
+            let isDirectory = !scan.pendingRooms.isEmpty
+            let roomID: RoomID
+            if let first = scan.pendingRooms.first {
+                roomID = first
+            } else if scan.backlogHead < scan.backlog.count {
+                roomID = scan.backlog[scan.backlogHead]
+            } else { break }
+            // One page per room per quantum, even at the directory/backlog boundary.
+            guard visited.insert(roomID).inserted else { break }
+            var hasMore = false
             do {
-                let progress = try await synchronizeOnePage(roomID: roomID)
-                appliedEvents += progress.appliedEventCount
-                roomHasMoreEvents = roomHasMoreEvents || progress.hasMore
+                if try await store.isKnownRoomLogRoom(roomID: roomID) {
+                    let progress = try await synchronizeOnePage(roomID: roomID)
+                    appliedEvents += progress.appliedEventCount
+                    hasMore = progress.hasMore
+                }
             } catch let error as V2RealtimeTransportError {
                 guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
                 try await store.markRoomEventUnauthorized(roomID: roomID)
             }
-            // Persist after each bounded attempt. A crash can repeat the last
-            // room but cannot reset every restart to the lexicographically
-            // first room and starve the tail of a large room set.
+            try Task.checkCancellation()
             try await store.setHybridGroupBackgroundCursor(roomID)
+            processedPages += 1
+            if isDirectory { scan.pendingRooms.removeFirst() }
+            else { scan.backlogHead += 1 }
+            if hasMore { scan.backlog.append(roomID) }
         }
-        return .init(
-            processedPageCount: processedPages,
-            appliedEventCount: appliedEvents,
-            mayHaveRemainingWork: hasUnscheduledRoom || roomHasMoreEvents
-        )
+        let remaining = scan.hasWork
+        if scan.backlogHead > 64 {
+            scan.backlog.removeFirst(scan.backlogHead)
+            scan.backlogHead = 0
+        }
+        return .init(processedPageCount: processedPages, appliedEventCount: appliedEvents, mayHaveRemainingWork: remaining)
     }
+
 }
 
 /// Best-effort, view-owned acceleration for a standard fan-out group. The
@@ -249,7 +359,8 @@ public actor V2ForegroundGroupEventPreviewEngine {
         let page = try await transport.pullGroupEvents(roomID: roomID, afterRoomSequence: cursor, pageSize: pageSize)
         guard page.roomID == roomID,
               page.nextRoomSequence >= cursor,
-              (page.events.last?.roomSequence ?? cursor) == page.nextRoomSequence,
+              (page.events.last?.roomSequence ?? cursor) <= page.nextRoomSequence,
+              !page.hasMore || page.nextRoomSequence > cursor,
               zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence })
         else { throw V2RealtimeTransportError.unexpectedResponse }
         _ = try await store.applyForegroundGroupEventPreviewPage(page)

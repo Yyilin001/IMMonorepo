@@ -511,6 +511,7 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable 
     case snapshotPagePull = "snapshot_page_pull"
     case snapshotAck = "snapshot_ack"
     case listRoomMembers = "list_room_members"
+    case getGroupRolePolicyBaseline = "get_group_role_policy_baseline"
     case groupEventPull = "group_event_pull"
     case groupEventSubscribe = "group_event_subscribe"
     case groupEventUnsubscribe = "group_event_unsubscribe"
@@ -840,6 +841,7 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .snapshotPagePull: .snapshotPagePull
     case .snapshotAck: .snapshotAck
     case .listRoomMembers: .listRoomMembers
+    case .getGroupRolePolicyBaseline: .getGroupRolePolicyBaseline
     case .groupEventPull: .groupEventPull
     case .groupEventSubscribe: .groupEventSubscribe
     case .groupEventUnsubscribe: .groupEventUnsubscribe
@@ -847,6 +849,17 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     }
 }
 
-func v2ElapsedMilliseconds(since startedAt: Date, now: Date) -> UInt64 {
-    UInt64(max(0, (now.timeIntervalSince(startedAt) * 1_000).rounded(.down)))
+func v2ElapsedMilliseconds(since startedAt: ContinuousClock.Instant, now: ContinuousClock.Instant) -> UInt64 {
+    v2ElapsedMilliseconds(startedAt.duration(to: now))
+}
+
+/// Timing metrics floor positive elapsed durations to whole milliseconds.
+/// Keep unavailable/overflowing observations from failing business reporting.
+func v2ElapsedMilliseconds(_ elapsed: Duration) -> UInt64 {
+    guard elapsed > .zero else { return 0 }
+    let components = elapsed.components
+    let (whole, overflow) = UInt64(components.seconds).multipliedReportingOverflow(by: 1_000)
+    let fraction = UInt64(components.attoseconds / 1_000_000_000_000_000)
+    let (milliseconds, sumOverflow) = whole.addingReportingOverflow(fraction)
+    return overflow || sumOverflow ? 0 : milliseconds
 }

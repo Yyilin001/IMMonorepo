@@ -6,6 +6,7 @@ public enum V2AccountAssertionError: Error, Equatable, Sendable {
     case invalidKeyMaterial
     case invalidLifetime
     case invalidAssertion
+    case invalidClock
 }
 
 /// Short-lived account-factor result, bound to the exact V2 device that is
@@ -42,10 +43,18 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
 
     public func issue(userID: UserID, deviceID: DeviceID) throws -> String {
         let issuedAt = now()
+        let issuedMilliseconds = issuedAt.timeIntervalSince1970 * 1_000
+        let expiry = issuedAt.addingTimeInterval(lifetime).timeIntervalSince1970 * 1_000
+        // A signed deadline must not extend the configured lifetime when
+        // the server clock is before the Unix epoch.
+        guard Int64(exactly: issuedMilliseconds.rounded(.towardZero)) != nil,
+              let expiresAtMilliseconds = Int64(exactly: expiry.rounded(.down)),
+              Double(expiresAtMilliseconds) > issuedMilliseconds
+        else { throw V2AccountAssertionError.invalidClock }
         let claims = Claims(
             userID: userID.rawValue,
             deviceID: deviceID.rawValue,
-            expiresAtMilliseconds: Int64((issuedAt.addingTimeInterval(lifetime).timeIntervalSince1970 * 1_000).rounded(.towardZero))
+            expiresAtMilliseconds: expiresAtMilliseconds
         )
         let payload = try JSONEncoder().encode(claims)
         let encodedPayload = base64URL(payload)
@@ -73,8 +82,8 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
               let assertionDeviceID = try? DeviceID(claims.deviceID)
         else { throw V2AccountAssertionError.invalidAssertion }
         let nowMilliseconds = now().timeIntervalSince1970 * 1_000
-        guard nowMilliseconds.isFinite,
-              Double(claims.expiresAtMilliseconds) > nowMilliseconds,
+        guard Int64(exactly: nowMilliseconds.rounded(.towardZero)) != nil else { throw V2AccountAssertionError.invalidClock }
+        guard Double(claims.expiresAtMilliseconds) > nowMilliseconds,
               expectedDeviceID.map({ $0 == assertionDeviceID }) ?? true
         else { throw V2AccountAssertionError.invalidAssertion }
         return userID

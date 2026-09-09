@@ -85,7 +85,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         byteCount: Int64,
         expiresAt: Date
     ) async throws -> V2MediaProviderObjectTarget {
-        guard byteCount >= 0, expiresAt > now(), !contentType.isEmpty else {
+        guard byteCount >= 0, !contentType.isEmpty else {
             throw V2LocalFilesystemMediaProviderError.invalidTarget
         }
         _ = try objectURL(for: mediaID)
@@ -105,7 +105,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     }
 
     public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
-        guard expiresAt > now() else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
+        _ = try validatedExpiryMilliseconds(expiresAt)
         let objectURL = try objectURL(for: mediaID)
         let byteCount = try await Self.performBlocking { () throws -> Int64 in
             guard FileManager.default.fileExists(atPath: objectURL.path) else {
@@ -187,6 +187,39 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
                 ofItemAtPath: upload.fileURL.path
             )
             try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+        }
+    }
+
+    package func verifyForwardImportedObject(mediaID: MediaID, byteCount: Int64, digest: Data) async throws -> Bool {
+        let object = try objectURL(for: mediaID)
+        return try await Self.performBlocking {
+            guard FileManager.default.fileExists(atPath: object.path) else { return false }
+            guard try ForwardMediaFileIO.digest(object, byteCount: byteCount) == digest else { throw V2ForwardMediaCopyError.contentConflict }
+            return true
+        }
+    }
+
+    /// Atomically install without replacement. A crash after linking but
+    /// before acknowledging is recovered by verifying the same object's hash.
+    package func commitForwardImportedObject(_ upload: V2LocalFilesystemStagedUpload, receipt: V2ForwardMediaCopyReceipt) async throws {
+        let claims = try verify(targetURL: upload.targetURL, kind: .upload, mediaID: upload.mediaID)
+        guard claims.contentType == upload.contentType, claims.byteCount == receipt.byteCount,
+              receipt.byteCount == upload.expectedByteCount, isValidStagingURL(upload.fileURL)
+        else { throw V2ForwardMediaCopyError.byteCountMismatch }
+        let object = try objectURL(for: upload.mediaID)
+        let root = rootDirectory
+        try await Self.performBlocking {
+            guard try ForwardMediaFileIO.digest(upload.fileURL, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            do {
+                // link(2) fails if another worker won; unlike replacement,
+                // it cannot overwrite a previously installed different blob.
+                try FileManager.default.linkItem(at: upload.fileURL, to: object)
+            } catch {
+                guard FileManager.default.fileExists(atPath: object.path) else { throw error }
+            }
+            guard try ForwardMediaFileIO.digest(object, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+            try ForwardMediaFileIO.syncDirectory(root)
         }
     }
 
@@ -281,7 +314,9 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         byteCount: Int64,
         expiresAt: Date
     ) throws -> URL {
-        let milliseconds = Int64((expiresAt.timeIntervalSince1970 * 1_000).rounded(.towardZero))
+        // Download metadata lookup suspends the actor. Validate again here so
+        // the encoded target is still usable when it is actually signed.
+        let milliseconds = try validatedExpiryMilliseconds(expiresAt)
         let claims = TargetClaims(
             kind: kind.rawValue,
             mediaID: mediaID.rawValue,
@@ -327,10 +362,30 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
               ),
               let claims = try? JSONDecoder().decode(TargetClaims.self, from: payload),
               claims.kind == kind.rawValue,
-              claims.mediaID == mediaID.rawValue,
-              Double(claims.expiresAtMilliseconds) > now().timeIntervalSince1970 * 1_000
+              claims.mediaID == mediaID.rawValue
         else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
+        guard Double(claims.expiresAtMilliseconds) > (try currentMilliseconds()) else {
+            throw V2LocalFilesystemMediaProviderError.invalidTarget
+        }
         return claims
+    }
+
+    private func validatedExpiryMilliseconds(_ expiresAt: Date) throws -> Int64 {
+        // A target's encoded deadline must never outlive the requested one.
+        // Truncating toward zero would extend negative Unix timestamps.
+        guard let milliseconds = Int64(exactly: (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)),
+              Double(milliseconds) > (try currentMilliseconds()) else {
+            throw V2LocalFilesystemMediaProviderError.invalidTarget
+        }
+        return milliseconds
+    }
+
+    private func currentMilliseconds() throws -> Double {
+        let milliseconds = now().timeIntervalSince1970 * 1_000
+        guard Int64(exactly: milliseconds.rounded(.towardZero)) != nil else {
+            throw V2LocalFilesystemMediaProviderError.invalidTarget
+        }
+        return milliseconds
     }
 
     private func objectURL(for mediaID: MediaID) throws -> URL {

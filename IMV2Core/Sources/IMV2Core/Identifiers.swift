@@ -148,6 +148,11 @@ public enum ContactAliasOperationIDTag: V2IdentifierTag {}
 public enum GroupNicknameOperationIDTag: V2IdentifierTag {}
 public enum MediaUploadSessionIDTag: V2IdentifierTag {}
 public enum MediaDownloadSessionIDTag: V2IdentifierTag {}
+public enum GroupInviteIDTag: V2IdentifierTag {}
+public enum GroupInviteOperationIDTag: V2IdentifierTag {}
+public enum GroupJoinRequestIDTag: V2IdentifierTag {}
+public enum GroupJoinRequestOperationIDTag: V2IdentifierTag {}
+public enum GroupJoinDecisionOperationIDTag: V2IdentifierTag {}
 
 public typealias RoomID = V2Identifier<RoomIDTag>
 public typealias UserID = V2Identifier<UserIDTag>
@@ -187,3 +192,8 @@ public typealias ContactAliasOperationID = V2Identifier<ContactAliasOperationIDT
 public typealias GroupNicknameOperationID = V2Identifier<GroupNicknameOperationIDTag>
 public typealias MediaUploadSessionID = V2Identifier<MediaUploadSessionIDTag>
 public typealias MediaDownloadSessionID = V2Identifier<MediaDownloadSessionIDTag>
+public typealias GroupInviteID = V2Identifier<GroupInviteIDTag>
+public typealias GroupInviteOperationID = V2Identifier<GroupInviteOperationIDTag>
+public typealias GroupJoinRequestID = V2Identifier<GroupJoinRequestIDTag>
+public typealias GroupJoinRequestOperationID = V2Identifier<GroupJoinRequestOperationIDTag>
+public typealias GroupJoinDecisionOperationID = V2Identifier<GroupJoinDecisionOperationIDTag>

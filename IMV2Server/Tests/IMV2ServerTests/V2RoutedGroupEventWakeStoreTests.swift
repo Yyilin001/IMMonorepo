@@ -5,6 +5,45 @@ import Testing
 
 @Suite("Routed group-event wake store")
 struct V2RoutedGroupEventWakeStoreTests {
+    @Test("invalid clocks preserve lease ownership and owner rotation")
+    func clockBoundsPreserveOwners() async throws {
+        let firstLease = try makeLease(roomSuffix: 601, tokenSuffix: 7)
+        let secondLease = try makeLease(roomSuffix: 602, tokenSuffix: 8)
+        let first = RoutedWakeOwnerStoreFake(leases: [firstLease])
+        let second = RoutedWakeOwnerStoreFake(leases: [secondLease])
+        let store = try V2RoutedGroupEventWakeStore(ownerStores: ["a": first, "b": second])
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        #expect(try await store.claimPending(now: now, leaseDuration: 15, limit: 1) == [firstLease])
+        for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12] {
+            let invalid = Date(timeIntervalSince1970: seconds)
+            await #expect(throws: V2GroupEventWakeStoreError.corruptPersistenceState) { try await store.claimPending(now: invalid, leaseDuration: 15, limit: 1) }
+            await #expect(throws: V2GroupEventWakeStoreError.corruptPersistenceState) { try await store.scheduleRetry(firstLease, nextAttemptAt: invalid) }
+        }
+        for duration in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, .leastNonzeroMagnitude, 0.0000001, 0, -1] {
+            await #expect(throws: V2GroupEventWakeStoreError.corruptPersistenceState) { try await store.claimPending(now: now, leaseDuration: duration, limit: 1) }
+        }
+        let upper = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)
+        await #expect(throws: V2GroupEventWakeStoreError.corruptPersistenceState) { try await store.claimPending(now: upper, leaseDuration: 15, limit: 1) }
+        #expect(await first.claimLimits() == [1])
+        #expect(await second.claimLimits().isEmpty)
+        #expect(await first.retriedRooms().isEmpty)
+        try await store.scheduleRetry(firstLease, nextAttemptAt: now.addingTimeInterval(-1))
+        #expect(await first.retriedRooms() == [firstLease.wake.roomID])
+        #expect(try await store.claimPending(now: now, leaseDuration: 15, limit: 1) == [secondLease])
+        try await store.markPublished(secondLease)
+        #expect(await second.publishedRooms() == [secondLease.wake.roomID])
+    }
+
+    @Test("an empty claim allocates for returned work instead of the requested maximum")
+    func maximumLimitWithEmptyOwners() async throws {
+        let first = RoutedWakeOwnerStoreFake(leases: [])
+        let second = RoutedWakeOwnerStoreFake(leases: [])
+        let store = try V2RoutedGroupEventWakeStore(ownerStores: ["a": first, "b": second])
+        #expect(try await store.claimPending(now: .init(timeIntervalSince1970: 0), leaseDuration: 15, limit: Int.max).isEmpty)
+        #expect(await first.claimLimits() == [Int.max / 2 + 1])
+        #expect(await second.claimLimits() == [Int.max / 2])
+    }
+
     @Test("claims owners concurrently and completes every lease on its issuing store")
     func routesLeaseCompletionToIssuingOwner() async throws {
         let first = RoutedWakeOwnerStoreFake(leases: try [

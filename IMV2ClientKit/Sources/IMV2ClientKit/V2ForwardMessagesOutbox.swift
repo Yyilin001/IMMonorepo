@@ -17,10 +17,16 @@ public protocol V2LocalForwardMessagesStore: Sendable {
 public enum V2ForwardMessagesFlushResult: Equatable, Sendable { case idle, acknowledged(MessageForwardOperationID, [V2ForwardMessageResult]), retryScheduled(MessageForwardOperationID), rejected(MessageForwardOperationID, code: String) }
 
 public actor V2ForwardMessagesOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2ForwardMessagesFlushResult>()
+
     private let store: any V2LocalForwardMessagesStore; private let transport: any V2ClientForwardMessagesTransport; private let makeUUID: @Sendable () -> UUID; private let now: @Sendable () -> Date; private let retryDelay: TimeInterval
     public init(store: any V2LocalForwardMessagesStore, transport: any V2ClientForwardMessagesTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) { self.store = store; self.transport = transport; self.makeUUID = makeUUID; self.now = now; self.retryDelay = retryDelay }
-    public func enqueue(sourceMessageIDs: [MessageID], targetRoomIDs: [RoomID]) async throws -> V2PendingForwardMessagesCommand { let command = try V2ForwardMessagesCommand(operationID: .init(makeUUID().uuidString), sourceMessageIDs: sourceMessageIDs, targetRoomIDs: targetRoomIDs); return try await store.enqueueOrReuseForwardMessages(.init(command: command, state: .pending, attemptCount: 0, nextAttemptAt: now(), terminalCode: nil)) }
-    public func flushOnce() async throws -> V2ForwardMessagesFlushResult { guard let pending = try await store.nextReadyForwardMessages(now: now()) else { return .idle }; do { let results = try await transport.forwardMessages(command: pending.command); try Task.checkCancellation(); try await store.markForwardMessagesAcknowledged(operationID: pending.command.operationID); return .acknowledged(pending.command.operationID, results) } catch is CancellationError { throw CancellationError() } catch let error as V2RealtimeTransportError { if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectForwardMessages(operationID: pending.command.operationID, code: code); return .rejected(pending.command.operationID, code: code) }; let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }(); try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(delay)); return .retryScheduled(pending.command.operationID) } catch { try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay)); return .retryScheduled(pending.command.operationID) } }
+    public func enqueue(sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID]) async throws -> V2PendingForwardMessagesCommand { let command = try V2ForwardMessagesCommand(operationID: .init(makeUUID().uuidString), sources: sources, targetRoomIDs: targetRoomIDs); return try await store.enqueueOrReuseForwardMessages(.init(command: command, state: .pending, attemptCount: 0, nextAttemptAt: now(), terminalCode: nil)) }
+    public func flushOnce() async throws -> V2ForwardMessagesFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2ForwardMessagesFlushResult { guard let pending = try await store.nextReadyForwardMessages(now: now()) else { return .idle }; do { let results = try await transport.forwardMessages(command: pending.command); try Task.checkCancellation(); try await store.markForwardMessagesAcknowledged(operationID: pending.command.operationID); return .acknowledged(pending.command.operationID, results) } catch is CancellationError { throw CancellationError() } catch let error as V2RealtimeTransportError { if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectForwardMessages(operationID: pending.command.operationID, code: code); return .rejected(pending.command.operationID, code: code) }; let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }(); try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(pending.command.operationID) } catch { try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(pending.command.operationID) } }
 }
 
 /// A parent plan permits a user to forward more than the wire command's
@@ -36,12 +42,13 @@ public struct V2ForwardMessagesPlan: Equatable, Sendable, Identifiable {
     public let succeededCount: Int
     public let failedCount: Int
     public let state: State
+    public let terminalCode: String?
 
     public var id: MessageForwardOperationID { operationID }
 }
 
 public protocol V2BulkForwardMessagesStore: Sendable {
-    func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sourceMessageIDs: [MessageID], targetRoomIDs: [RoomID], now: Date) async throws -> V2ForwardMessagesPlan
+    func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID], now: Date) async throws -> V2ForwardMessagesPlan
     func nextReadyForwardPlanChunk(now: Date) async throws -> V2PendingForwardMessagesCommand?
     func markForwardPlanChunkAcknowledged(operationID: MessageForwardOperationID, results: [V2ForwardMessageResult], now: Date) async throws -> MessageForwardOperationID?
     func scheduleForwardPlanChunkRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) async throws
@@ -58,6 +65,8 @@ public enum V2BulkForwardMessagesFlushResult: Equatable, Sendable {
 }
 
 public actor V2BulkForwardMessagesOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2BulkForwardMessagesFlushResult>()
+
     public static let sourceMessagesPerChunk = 20
 
     private let store: any V2BulkForwardMessagesStore
@@ -75,28 +84,33 @@ public actor V2BulkForwardMessagesOutboxEngine {
         self.retryDelay = retryDelay
     }
 
-    public func enqueue(sourceMessageIDs: [MessageID], targetRoomIDs: [RoomID]) async throws -> V2ForwardMessagesPlan {
-        guard !sourceMessageIDs.isEmpty, !targetRoomIDs.isEmpty,
-              Set(sourceMessageIDs).count == sourceMessageIDs.count,
+    public func enqueue(sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID]) async throws -> V2ForwardMessagesPlan {
+        guard !sources.isEmpty, !targetRoomIDs.isEmpty,
+              Set(sources.map(\.messageID)).count == sources.count,
               Set(targetRoomIDs).count == targetRoomIDs.count,
-              sourceMessageIDs.count <= 10_000,
+              sources.count <= 10_000,
               targetRoomIDs.count <= 100,
-              sourceMessageIDs.count <= Int.max / targetRoomIDs.count
+              sources.count <= Int.max / targetRoomIDs.count
         else { throw V2CoreError.invalidPositiveValue }
-        let total = sourceMessageIDs.count * targetRoomIDs.count
+        let total = sources.count * targetRoomIDs.count
         let plan = V2ForwardMessagesPlan(
             operationID: try .init(makeUUID().uuidString),
-            sourceMessageCount: sourceMessageIDs.count,
+            sourceMessageCount: sources.count,
             targetRoomCount: targetRoomIDs.count,
             totalForwardCount: total,
             succeededCount: 0,
             failedCount: 0,
-            state: .active
+            state: .active,
+            terminalCode: nil
         )
-        return try await store.enqueueForwardPlan(plan, sourceMessageIDs: sourceMessageIDs, targetRoomIDs: targetRoomIDs, now: now())
+        return try await store.enqueueForwardPlan(plan, sources: sources, targetRoomIDs: targetRoomIDs, now: now())
     }
 
     public func flushOnce() async throws -> V2BulkForwardMessagesFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2BulkForwardMessagesFlushResult {
         guard let pending = try await store.nextReadyForwardPlanChunk(now: now()) else { return .idle }
         do {
             let results = try await transport.forwardMessages(command: pending.command)
@@ -107,6 +121,12 @@ public actor V2BulkForwardMessagesOutboxEngine {
             return .chunkAcknowledged(planID: planID, operationID: pending.command.operationID, results: results)
         } catch is CancellationError {
             throw CancellationError()
+        } catch is V2ForwardMessageResultValidationError {
+            throw V2ClientCommandError.commandConflict
+        } catch let error as V2ClientCommandError {
+            // Local consistency failures are not network retries. In
+            // particular, never reschedule an already completed chunk.
+            throw error
         } catch let error as V2RealtimeTransportError {
             if case .server(let code, let retryable, _, _) = error, !retryable {
                 guard let planID = try await store.rejectForwardPlanChunk(operationID: pending.command.operationID, code: code, now: now()) else {
@@ -118,10 +138,10 @@ public actor V2BulkForwardMessagesOutboxEngine {
                 if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }
                 return retryDelay
             }()
-            try await store.scheduleForwardPlanChunkRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(delay))
+            try await store.scheduleForwardPlanChunkRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay))
             return .retryScheduled(pending.command.operationID)
         } catch {
-            try await store.scheduleForwardPlanChunkRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay))
+            try await store.scheduleForwardPlanChunkRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay))
             return .retryScheduled(pending.command.operationID)
         }
     }
@@ -133,4 +153,14 @@ public actor V2BulkForwardMessagesOutboxEngine {
     public func plan(operationID: MessageForwardOperationID) async throws -> V2ForwardMessagesPlan? {
         try await store.forwardPlan(operationID: operationID)
     }
+}
+
+extension V2BulkForwardMessagesOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
+}
+
+extension V2ForwardMessagesOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

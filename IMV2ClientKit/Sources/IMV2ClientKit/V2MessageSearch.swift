@@ -113,6 +113,20 @@ public enum V2MessageSearchIndexState: Equatable, Sendable {
     }
 }
 
+/// Small observation value: no message bodies or backlog COUNT in the
+/// observation region. A new generation invalidates existing page cursors.
+public struct V2MessageSearchIndexSnapshot: Equatable, Sendable {
+    public let state: V2MessageSearchIndexState
+    public let generation: UInt64
+    public let indexVersion: Int
+
+    public init(state: V2MessageSearchIndexState, generation: UInt64, indexVersion: Int) {
+        self.state = state
+        self.generation = generation
+        self.indexVersion = indexVersion
+    }
+}
+
 /// The UI may keep serving verified historical hits while this reports a
 /// backlog. `building` means no complete generation is available; `isCatchingUp`
 /// only means very recent accepted/edited messages may not be indexed yet.

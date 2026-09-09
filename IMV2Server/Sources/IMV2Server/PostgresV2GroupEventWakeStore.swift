@@ -11,11 +11,10 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     public init(database: any Database) { self.database = database }
 
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2GroupEventWakeLease] {
-        guard leaseDuration > 0,
-              limit > 0
+        guard limit > 0,
+              let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration)
         else { throw V2GroupEventWakeStoreError.corruptPersistenceState }
         let token = UUID()
-        let expiry = now.addingTimeInterval(leaseDuration)
         let rows = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2GroupEventWakeStoreError.corruptPersistenceState
@@ -34,7 +33,8 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
                 SET state = 'leased',
                     lease_token = \(bind: token),
                     lease_expires_at = \(bind: expiry),
-                    attempt_count = wake.attempt_count + 1,
+                    attempt_count = CASE WHEN wake.attempt_count = 2147483647
+                        THEN wake.attempt_count ELSE wake.attempt_count + 1 END,
                     updated_at = \(bind: now)
                 FROM candidates
                 WHERE wake.room_id = candidates.room_id
@@ -91,7 +91,8 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     public func scheduleRetry(_ lease: V2GroupEventWakeLease, nextAttemptAt: Date) async throws {
         guard let sql = database as? any SQLDatabase,
               let roomID = UUID(uuidString: lease.wake.roomID.rawValue),
-              lease.revision <= UInt64(Int64.max)
+              lease.revision <= UInt64(Int64.max),
+              v2PostgresTimestampCanEncode(nextAttemptAt)
         else { throw V2GroupEventWakeStoreError.corruptPersistenceState }
         try await sql.raw("""
             UPDATE im_v2.group_event_wake_outbox

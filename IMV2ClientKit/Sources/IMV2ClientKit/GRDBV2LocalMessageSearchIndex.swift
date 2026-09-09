@@ -6,6 +6,32 @@ import IMV2Core
 /// The primary V2 database owns these durable jobs, making a search write
 /// replay-safe after a process crash and keeping FTS work off the sync writer.
 extension GRDBV2LocalSyncStore {
+    public nonisolated func messageSearchIndexUpdates() -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
+        let pool = databasePool
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                do {
+                    let observation = ValueObservation.tracking { db in
+                        guard let row = try Row.fetchOne(db, sql: "SELECT state, generation, index_version FROM v2_message_search_state WHERE singleton = 1"),
+                              let state = V2MessageSearchIndexState(storageValue: row["state"]),
+                              let generation = UInt64(exactly: row["generation"] as Int64), generation > 0
+                        else { throw V2ClientProjectionError.invalidMessagePayload }
+                        let version: Int = row["index_version"]
+                        return V2MessageSearchIndexSnapshot(
+                            state: version == V2CharacterGramTokenizer.version ? state : .building,
+                            generation: generation, indexVersion: version
+                        )
+                    }.removeDuplicates()
+                    for try await snapshot in observation.values(in: pool, bufferingPolicy: .bufferingNewest(1)) {
+                        continuation.yield(snapshot)
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     public func messageSearchIndexProgress() throws -> V2MessageSearchIndexProgress {
         try databasePool.read { db in
             let state = try Self.readMessageSearchIndexState(db: db)
@@ -154,6 +180,14 @@ extension GRDBV2LocalSyncStore {
         return jobs.count
     }
 
+    /// Commit before retiring a derived FTS file, so a process restart cannot
+    /// mistake a newly empty search database for a previously ready index.
+    public func requireMessageSearchIndexRebuild() throws {
+        try databasePool.write { db in
+            try db.execute(sql: "UPDATE v2_message_search_state SET state = 'building' WHERE singleton = 1")
+        }
+    }
+
     public func messageSearchIndexState() throws -> V2MessageSearchIndexState {
         try databasePool.read { db in try Self.readMessageSearchIndexState(db: db) }
     }
@@ -188,7 +222,7 @@ extension GRDBV2LocalSyncStore {
     }
 
     static func messageSearchIndexGeneration(db: Database) throws -> Int64 {
-        guard let generation: Int64 = try Row.fetchOne(db, sql: "SELECT generation FROM v2_message_search_state WHERE singleton = 1")?["generation"]
+        guard let generation: Int64 = try Row.fetchOne(db, sql: "SELECT generation FROM v2_message_search_state WHERE singleton = 1")?["generation"], generation > 0
         else { throw V2ClientProjectionError.invalidMessagePayload }
         return generation
     }
@@ -329,7 +363,7 @@ extension GRDBV2LocalSyncStore {
 
     private static func searchMessages(_ request: V2MessageSearchRequest, query: V2CharacterGramTokenizer.Tokens, generation: Int64, primaryDatabasePool: DatabasePool, db: Database) throws -> V2MessageSearchPage {
         let match = messageSearchMatch(scope: request.scope, query: query)
-        let filterFingerprint = searchFilterFingerprint(request)
+        let filterFingerprint = searchFilterFingerprint(request, generation: generation)
         var cursor = try validatedSearchCursor(request.cursor, for: request.scope, filterFingerprint: filterFingerprint)
         var scanCursor = cursor
         var hits: [V2MessageSearchHit] = []
@@ -473,7 +507,10 @@ extension GRDBV2LocalSyncStore {
     }
 
     private static func searchCandidate(_ row: Row) throws -> IndexedCandidate {
-        let hit = try V2MessageSearchHit(messageID: .init(row["message_id"] as String), roomID: .init(row["room_id"] as String), roomSequence: UInt64(row["room_sequence"] as Int64), senderUserID: .init(row["sender_user_id"] as String), text: row["text_body"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
+        guard let sequence = UInt64(exactly: row["room_sequence"] as Int64), sequence > 0 else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        let hit = try V2MessageSearchHit(messageID: .init(row["message_id"] as String), roomID: .init(row["room_id"] as String), roomSequence: sequence, senderUserID: .init(row["sender_user_id"] as String), text: row["text_body"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
         return .init(hit: hit, revision: row["message_revision"], generation: row["generation"])
     }
 
@@ -484,12 +521,13 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    private static func searchFilterFingerprint(_ request: V2MessageSearchRequest) -> String {
+    private static func searchFilterFingerprint(_ request: V2MessageSearchRequest, generation: Int64) -> String {
         let scope: String = switch request.scope {
         case .room(let roomID): "room:\(roomID.rawValue)"
         case .allMessages: "all"
         case .sender(let userID): "sender:\(userID.rawValue)"
         }
-        return "\(scope)|\(request.contentFilter.rawValue)|\(request.senderUserID?.rawValue ?? "")"
+        let query = Data(V2CharacterGramTokenizer.normalize(request.query).utf8).base64EncodedString()
+        return "v\(V2CharacterGramTokenizer.version)|g\(generation)|\(scope)|\(request.contentFilter.rawValue)|\(request.senderUserID?.rawValue ?? "")|\(query)"
     }
 }

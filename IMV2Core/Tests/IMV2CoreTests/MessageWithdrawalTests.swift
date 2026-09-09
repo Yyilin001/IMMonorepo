@@ -6,7 +6,7 @@ import Testing
 struct MessageWithdrawalTests {
     @Test("withdrawal command preserves its durable operation and revision fence")
     func commandValue() throws {
-        let command = V2WithdrawMessageCommand(
+        let command = try V2WithdrawMessageCommand(
             roomID: try .init("00000000-0000-0000-0000-000000000901"),
             actorUserID: try .init("00000000-0000-0000-0000-000000000902"),
             operationID: try .init("00000000-0000-0000-0000-000000000903"),

@@ -33,9 +33,9 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
         }
     }
 
-    public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, now: Date) async throws -> V2SyncPullResult {
+    public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool = false, now: Date) async throws -> V2SyncPullResult {
         try await withStore(for: userID) {
-            try await $0.pull(userID: userID, deviceID: deviceID, syncToken: syncToken, maxRecords: maxRecords, now: now)
+            try await $0.pull(userID: userID, deviceID: deviceID, syncToken: syncToken, maxRecords: maxRecords, requireSnapshot: requireSnapshot, now: now)
         }
     }
 

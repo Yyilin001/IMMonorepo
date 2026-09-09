@@ -53,16 +53,29 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let edgeAuthorizationSecret: V2AccountEdgeAuthorizationSecret
     public let edgeClientRateLimitKey: V2AccountEdgeClientRateLimitKey
     public let accountAssertionKey: Data
-    public let dummyPasswordHash: String
+    public let groupInviteTokenHMACKey: Data
+    public let capacityProfile: V2CapacityProfile
     public let passwordLoginRateLimit: V2PasswordLoginRateLimitPolicy
     public let edgeClientRateLimit: V2AccountEdgeClientRateLimitPolicy
     public let publicIdentityLookupRateLimit: V2PublicIdentityLookupRateLimitPolicy
     public let deviceRegistrationPolicy: V2DeviceRegistrationPolicy
+    public let roomShardStorage: [V2RoomShardStorageConfiguration]
+    public let userShardStorage: [V2UserShardStorageConfiguration]
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
-        try databasePolicy.validate(databaseURLs: [databaseURL])
+        if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
+            roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
+        } else { throw V2GatewayRuntimeConfigurationError.missing("IM_V2_ROOM_SHARD_STORES_JSON") }
+        if let raw = environment.value(for: "IM_V2_USER_SHARD_STORES_JSON") {
+            userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(raw)
+        } else { userShardStorage = [] }
+        guard roomShardStorage.isEmpty || !userShardStorage.isEmpty else {
+            throw V2GatewayRuntimeConfigurationError.missing("IM_V2_USER_SHARD_STORES_JSON")
+        }
+        try databasePolicy.validate(primaryDatabaseURL: databaseURL, userShardStorage: userShardStorage)
+        try databasePolicy.validate(databaseURLs: [databaseURL] + roomShardStorage.map(\.databaseURL) + userShardStorage.map(\.databaseURL))
         listener = try .init(
             host: Self.required("IM_V2_ACCOUNT_LISTEN_HOST", environment: environment),
             port: Self.integer("IM_V2_ACCOUNT_LISTEN_PORT", environment: environment)
@@ -81,11 +94,25 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64")
         }
         self.accountAssertionKey = accountAssertionKey
-        let dummy = try Self.required("IM_V2_PASSWORD_DUMMY_BCRYPT_HASH", environment: environment)
-        guard dummy.utf8.count <= 255, dummy.hasPrefix("$2") else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_DUMMY_BCRYPT_HASH")
+        let rawGroupInviteKey = try Self.required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment)
+        guard let groupInviteTokenHMACKey = Data(base64Encoded: rawGroupInviteKey), groupInviteTokenHMACKey.count >= 32 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")
         }
-        dummyPasswordHash = dummy
+        self.groupInviteTokenHMACKey = groupInviteTokenHMACKey
+        capacityProfile = try .init(
+            id: Self.required("IM_V2_CAPACITY_PROFILE_ID", environment: environment),
+            limits: .init(
+                maxEligibleMembers: Self.integer("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
+                maxCommandsPerWindow: Self.integer("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
+                maxFanoutUnitsPerWindow: Self.integer("IM_V2_MAX_FANOUT_UNITS_PER_WINDOW", environment: environment),
+                maxOutstandingFanoutUnits: Self.integer("IM_V2_MAX_OUTSTANDING_FANOUT_UNITS", environment: environment),
+                maxOutstandingPlans: Self.integer("IM_V2_MAX_OUTSTANDING_PLANS", environment: environment),
+                maxEnumerationPageSize: Self.integer("IM_V2_MAX_ENUMERATION_PAGE_SIZE", environment: environment),
+                maxPlannerConcurrency: Self.integer("IM_V2_MAX_PLANNER_CONCURRENCY", environment: environment),
+                maxDeliveryConcurrency: Self.integer("IM_V2_MAX_DELIVERY_CONCURRENCY", environment: environment),
+                retryAfterSeconds: Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
+            )
+        )
         let maximumFailures = try Self.integer("IM_V2_PASSWORD_LOGIN_MAX_FAILURES", environment: environment)
         let windowSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS", environment: environment)
         let lockoutSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", environment: environment)

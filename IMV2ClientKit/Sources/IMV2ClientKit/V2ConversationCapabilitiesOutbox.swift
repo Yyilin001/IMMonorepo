@@ -51,6 +51,8 @@ public enum V2ConversationCapabilitiesFlushResult: Equatable, Sendable {
 /// large favourite batch; the common runtime scheduler supplies cross-feature
 /// fairness.
 public actor V2ConversationCapabilitiesOutboxEngine {
+    private let flushFlight = V2CommandFlushFlight<V2ConversationCapabilitiesFlushResult>()
+
     private let store: any V2LocalConversationCapabilitiesStore
     private let transport: any V2ClientConversationCapabilitiesTransport
     private let makeUUID: @Sendable () -> UUID
@@ -73,6 +75,10 @@ public actor V2ConversationCapabilitiesOutboxEngine {
     }
 
     public func flushOnce() async throws -> V2ConversationCapabilitiesFlushResult {
+        try await flushFlight.run { try await self.flushNextReadyCommand() }
+    }
+
+    private func flushNextReadyCommand() async throws -> V2ConversationCapabilitiesFlushResult {
         let clock = now()
         if let pending = try await store.nextReadyConversationState(now: clock) {
             return try await flush(pending)
@@ -96,7 +102,7 @@ public actor V2ConversationCapabilitiesOutboxEngine {
                 try await store.rejectConversationState(operationID: pending.command.operationID, code: code)
                 return .conversationStateRejected(pending.command.operationID, code: code)
             }
-            try await store.scheduleConversationStateRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay(for: error)))
+            try await store.scheduleConversationStateRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay(for: error)))
             return .conversationStateRetryScheduled(pending.command.operationID)
         }
     }
@@ -114,7 +120,7 @@ public actor V2ConversationCapabilitiesOutboxEngine {
                 try await store.rejectMessageFavorite(operationID: pending.command.operationID, code: code)
                 return .messageFavoriteRejected(pending.command.operationID, code: code)
             }
-            try await store.scheduleMessageFavoriteRetry(operationID: pending.command.operationID, nextAttemptAt: now().addingTimeInterval(retryDelay(for: error)))
+            try await store.scheduleMessageFavoriteRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay(for: error)))
             return .messageFavoriteRetryScheduled(pending.command.operationID)
         }
     }
@@ -128,4 +134,9 @@ public actor V2ConversationCapabilitiesOutboxEngine {
         if case let V2RealtimeTransportError.server(_, _, retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }
         return retryDelay
     }
+}
+
+extension V2ConversationCapabilitiesOutboxEngine: V2CommandFlushControlling {
+    public func suspendCommandFlushing() async { await flushFlight.suspend() }
+    public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

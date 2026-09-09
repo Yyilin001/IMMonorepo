@@ -23,7 +23,8 @@ public struct V2ChangeRoomMembershipCommand: Equatable, Sendable {
     public let operationID: MembershipOperationID
     public let targetUserID: UserID
     public let action: V2RoomMembershipAction
-    public let expectedMembershipRevision: UInt64
+    public let expectedRevision: V2MembershipRevision
+    public var expectedMembershipRevision: UInt64 { expectedRevision.rawValue }
 
     public init(
         roomID: RoomID,
@@ -39,7 +40,7 @@ public struct V2ChangeRoomMembershipCommand: Equatable, Sendable {
         self.operationID = operationID
         self.targetUserID = targetUserID
         self.action = action
-        self.expectedMembershipRevision = expectedMembershipRevision
+        self.expectedRevision = try .init(expectedMembershipRevision)
     }
 }
 
@@ -53,7 +54,10 @@ public struct V2RoomMembershipChange: Equatable, Sendable {
     public let fanoutPlanID: FanoutPlanID
     public let createdAt: Date
 
-    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) {
+    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+        guard membershipRevision > 0, membershipRevision <= UInt64(Int64.max),
+              roomSequence > 0, roomSequence <= UInt64(Int64.max)
+        else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.targetUserID = targetUserID
         self.action = action

@@ -1,10 +1,112 @@
 import Foundation
+import GRDB
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
 
 @Suite("V2 durable group room creation outbox")
 struct V2GroupRoomCommandOutboxTests {
+    @Test("noninteger upload counts are rejected without truncation", arguments: [1.5, Double(Int64.max)])
+    func nonintegerUploadedCount(count: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-group-upload-real-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        do {
+            let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []))
+            let command = try await engine.enqueueCreation(title: "upload recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
+            let pool = await store.databasePool
+            try await pool.write { try $0.execute(sql: "UPDATE v2_pending_group_room_creations SET uploaded_member_count = ?", arguments: [count]) }
+            #expect(try await pool.read { try String.fetchOne($0, sql: "SELECT typeof(uploaded_member_count) FROM v2_pending_group_room_creations") } == "real")
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await store.pendingGroupRoomCreations() }
+            await #expect(throws: V2ClientCommandError.commandConflict) { try await store.markGroupRoomCreationMembersUploaded(operationID: command.operationID, uploadedMemberCount: 2) }
+            #expect(try await pool.read { try Double.fetchOne($0, sql: "SELECT uploaded_member_count FROM v2_pending_group_room_creations") } == count)
+            try await store.resetGroupRoomCreationUploadProgress(operationID: command.operationID)
+            try await store.markGroupRoomCreationMembersUploaded(operationID: command.operationID, uploadedMemberCount: 2)
+            let recovered = try #require(try await store.pendingGroupRoomCreations().first)
+            #expect(recovered.operationID == command.operationID && recovered.uploadedMemberCount == 2)
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("upload progress rejects corrupt counts before advancing", arguments: [Int64.min, -1, 0, 1, 2, 3, Int64.max])
+    func uploadedCountBounds(count: Int64) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-group-upload-count-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        do {
+            let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []))
+            let command = try await engine.enqueueCreation(title: "upload recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
+            let pool = await store.databasePool
+            try await pool.write { db in
+                try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
+                defer { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") }
+                try db.execute(sql: "UPDATE v2_pending_group_room_creations SET uploaded_member_count = ?", arguments: [count])
+            }
+            if count < 0 || count > 2 {
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await store.pendingGroupRoomCreations() }
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await store.markGroupRoomCreationMembersUploaded(operationID: command.operationID, uploadedMemberCount: 2) }
+                #expect(try await pool.read { try Int64.fetchOne($0, sql: "SELECT uploaded_member_count FROM v2_pending_group_room_creations") } == count)
+                try await store.resetGroupRoomCreationUploadProgress(operationID: command.operationID)
+            } else {
+                #expect(try await store.pendingGroupRoomCreations().first?.uploadedMemberCount == Int(count))
+            }
+            try await store.markGroupRoomCreationMembersUploaded(operationID: command.operationID, uploadedMemberCount: 2)
+            let recovered = try #require(try await store.pendingGroupRoomCreations().first)
+            #expect(recovered.operationID == command.operationID && recovered.initialMemberUserIDs == command.initialMemberUserIDs)
+            #expect(recovered.uploadedMemberCount == 2)
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
+    @Test("group transitions reject invalid clocks and preserve their original phase", arguments: ["cancel", "resume"], [Double.nan, .infinity, -.infinity, -1, 0, 2_000])
+    func transitionClockBounds(path: String, seconds: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-group-transition-clock-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        do {
+            let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []), now: { Date(timeIntervalSince1970: 1_000) })
+            let command = try await engine.enqueueCreation(title: "clock recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+            if path == "resume" { try await store.beginCancellingGroupRoomCreation(operationID: command.operationID, now: Date(timeIntervalSince1970: 1_000)) }
+            let before = try await store.pendingGroupRoomCreations()
+            func transition(at date: Date) async throws {
+                if path == "cancel" { try await store.beginCancellingGroupRoomCreation(operationID: command.operationID, now: date) }
+                else { try await store.resumeGroupRoomCreationAfterCancellationRefusal(operationID: command.operationID, now: date) }
+            }
+            if seconds.isFinite {
+                try await transition(at: Date(timeIntervalSince1970: seconds))
+            } else {
+                await #expect(throws: V2ClientCommandError.commandConflict) { try await transition(at: Date(timeIntervalSince1970: seconds)) }
+                #expect(try await store.pendingGroupRoomCreations() == before)
+                try await transition(at: Date(timeIntervalSince1970: 1_000))
+            }
+            let updated = try #require(try await store.pendingGroupRoomCreations().first)
+            #expect(updated.operationID == command.operationID)
+            #expect(updated.nextAttemptAt == Date(timeIntervalSince1970: seconds.isFinite ? seconds : 1_000))
+            #expect(updated.state == (path == "cancel" ? .cancelling : .finalizing))
+            if path == "cancel" {
+                try await store.markGroupRoomCreationCancelled(operationID: command.operationID)
+                #expect(try await store.pendingGroupRoomCreations().first?.state == .cancelled)
+            } else {
+                let room = RoomID(uuid: UUID())
+                try await store.markGroupRoomCreationAcknowledged(operationID: command.operationID, roomID: room)
+                #expect(try await store.pendingGroupRoomCreations().first?.createdRoomID == room)
+            }
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
+
     @Test("retry survives a local-store restart and keeps the original operation")
     func retrySurvivesRestart() async throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-group-create-\(UUID().uuidString).sqlite")

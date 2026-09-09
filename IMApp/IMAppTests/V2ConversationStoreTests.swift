@@ -2,6 +2,8 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Testing
+import SwiftUI
+import UIKit
 @testable import IMApp
 
 @MainActor
@@ -184,6 +186,154 @@ struct V2ConversationStoreTests {
         #expect(!store.isBrowsingHistoricalTimeline)
     }
 
+    @Test("deep search jumps use one window read and can move to newer history")
+    func directTimelineLocation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: Self.locationHistory())
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        await store.loadTimeline(containing: "location-5")
+        #expect(store.messages.first?.roomSequence == 1 && store.messages.last?.roomSequence == 44)
+        #expect(await source.messageRequestCount() == 2)
+        #expect(store.isBrowsingHistoricalTimeline && !store.canLoadOlderTimeline)
+        await store.loadTimeline(containing: "location-4500")
+        #expect(store.messages.first?.roomSequence == 4460 && store.messages.last?.roomSequence == 4539)
+        #expect(store.timeline.count == 80 && store.canLoadOlderTimeline)
+        #expect(await source.messageRequestCount() == 3)
+        await store.returnToLatestTimeline()
+        #expect(store.messages.last?.roomSequence == 5000 && !store.isBrowsingHistoricalTimeline)
+    }
+
+    @Test("a later navigation owns the window even when the old read ignores cancellation")
+    func supersededTimelineLocation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: Self.locationHistory())
+        let gate = V2ListWindowReadGate()
+        let store = makeConversationDetailStore(dataSource: V2GatedTimelineLocations(source: source, gate: gate), sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        await gate.arm()
+        let old = Task { await store.loadTimeline(containing: "location-5") }
+        await gate.waitForRead()
+        await store.loadTimeline(containing: "location-4500")
+        let current = store.timeline
+        await gate.release()
+        await old.value
+        #expect(store.timeline == current && store.messages.contains { $0.id == "location-4500" })
+        await store.refresh()
+        #expect(store.timeline == current)
+    }
+
+    @Test("refresh during location is deferred, and cancellation releases the location owner")
+    func refreshDuringTimelineLocation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: Self.locationHistory())
+        let gate = V2ListWindowReadGate()
+        let store = makeConversationDetailStore(dataSource: V2GatedTimelineLocations(source: source, gate: gate), sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        await gate.arm()
+        let locating = Task { await store.loadTimeline(containing: "location-500") }
+        await gate.waitForRead()
+        await store.refresh()
+        #expect(await source.messageRequestCount() == 2)
+        await gate.release()
+        await locating.value
+        #expect(await source.messageRequestCount() == 3)
+        #expect(store.messages.first?.roomSequence == 460 && store.messages.last?.roomSequence == 539)
+        let current = store.timeline
+        await gate.arm()
+        let cancelled = Task { await store.loadTimeline(containing: "location-5") }
+        await gate.waitForRead()
+        cancelled.cancel()
+        await gate.release()
+        await cancelled.value
+        #expect(store.timeline == current && store.messageActionFeedback == nil)
+        await store.loadTimeline(containing: "location-4500")
+        #expect(store.messages.first?.roomSequence == 4460)
+    }
+
+    @Test("missing and withdrawn search results retain the current window with explicit feedback")
+    func unavailableTimelineLocation() async {
+        let history = Self.locationHistory()
+        let source = V2ConversationDataSourceFake(summaries: [], messages: history)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        let current = store.timeline
+        await store.loadTimeline(containing: "missing")
+        #expect(store.timeline == current && store.messageActionFeedback != nil)
+        let withdrawn = V2ConversationMessageItem(id: "withdrawn", roomSequence: 1, revision: 2, text: "", createdAt: .now, isOutgoing: false, isWithdrawn: true)
+        let other = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: [withdrawn]), sender: nil, userID: "current-user", roomID: "room-a")
+        await other.loadTimeline(containing: "withdrawn")
+        #expect(other.state == .failed && other.messageActionFeedback != nil)
+    }
+
+    @Test("production SQLite and App rendering directly locate mixed history beyond 800 items")
+    func productionTimelineLocation() async throws {
+        let user = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let directory = FileManager.default.temporaryDirectory.appending(path: "app-timeline-\(UUID())", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let local = try await V2LocalStoreBootstrapper(bindingStore: V2RuntimeInstallationBindingStoreFake()).open(databaseURL: directory.appending(path: "local.sqlite"), userID: user)
+        func messageID(_ n: Int) -> String { String(format: "00000000-0000-0000-0003-%012d", n) }
+        let records: [V2ClientSyncRecord] = try (1...1_000).map { n in
+            let activity = n.isMultiple(of: 5)
+            var payload: [String: Any] = ["event_type": activity ? "direct_message_restricted" : "message.accepted", "room_id": room.rawValue, "timeline_sequence": n, "server_created_at_ms": 1_750_000_000_000 + n]
+            if !activity {
+                payload["message_id"] = messageID(n); payload["room_sequence"] = n; payload["message_revision"] = 1
+                payload["sender_user_id"] = user.rawValue; payload["text"] = "message \(n)"
+            }
+            return try .init(sequence: UInt64(n), sourceEventID: .init(String(format: "00000000-0000-0000-0004-%012d", n)), projectionKind: activity ? "timeline_activity" : "message", payload: JSONSerialization.data(withJSONObject: payload))
+        }
+        _ = try await local.apply(.init(generation: 1, records: records, nextSyncToken: .init("location-token"), receipt: .init("location-receipt"), hasMore: false, capabilityProfile: "base"))
+        let store = makeConversationDetailStore(dataSource: V2GRDBConversationDataSource(localStore: local), sender: nil, userID: user.rawValue, roomID: room.rawValue)
+        await store.refresh()
+        await store.loadTimeline(containing: messageID(1))
+        #expect(store.timeline.map(\.timelineSequence) == (1...40).map(UInt64.init))
+        #expect(store.messages.contains { $0.id == messageID(1) })
+        await store.loadTimeline(containing: messageID(501))
+        #expect(store.timeline.map(\.timelineSequence) == (461...540).map(UInt64.init))
+        let historical = store.timeline
+        await store.refresh()
+        #expect(store.timeline == historical)
+        await store.loadOlderTimeline()
+        #expect(store.timeline.count == 160 && store.timeline.first?.timelineSequence == 381)
+        await store.returnToLatestTimeline()
+        #expect(store.timeline.last?.timelineSequence == 1000 && !store.isBrowsingHistoricalTimeline)
+        try await local.close()
+    }
+
+    @Test("the actual detail ScrollView moves to the loaded search target")
+    func actualTimelineSearchScroll() async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let source = V2ConversationDataSourceFake(summaries: [], messages: Self.locationHistory())
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        let host = UIHostingController(rootView: NavigationStack { V2ConversationDetailView(store: store, initiallyFocusedMessageID: "location-4500") })
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func timelineScroll(in view: UIView) -> UIScrollView? {
+            if let scroll = view as? UIScrollView, !(scroll is UITextView), scroll.contentSize.height > 2000 { return scroll }
+            for child in view.subviews { if let scroll = timelineScroll(in: child) { return scroll } }
+            return nil
+        }
+        var moved = false
+        for _ in 0..<250 {
+            host.view.layoutIfNeeded()
+            if store.messages.first?.roomSequence == 4460, let scroll = timelineScroll(in: host.view) {
+                let visibleCenter = (scroll.contentOffset.y + scroll.bounds.height / 2) / scroll.contentSize.height
+                if scroll.contentOffset.y > 1000 && (0.35...0.65).contains(visibleCenter) { moved = true; break }
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(moved, "The loaded middle target must move the real ScrollView away from its initial top position")
+    }
+
+    private static func locationHistory() -> [V2ConversationMessageItem] {
+        (1...5_000).map { V2ConversationMessageItem(id: "location-\($0)", roomSequence: UInt64($0), revision: 1, text: "history", createdAt: .distantPast, isOutgoing: false, isWithdrawn: false) }
+    }
+
     @Test func detailRefreshesItsLocalProjectionAfterASynchronizedUpdate() async {
         let source = V2SequencedConversationDataSource()
         let notifier = V2ProjectionChangeNotifier()
@@ -211,12 +361,21 @@ struct V2ConversationStoreTests {
             isWithdrawn: false
         )
 
+        func waitForMessages(_ expected: [V2ConversationMessageItem]) async {
+            for _ in 0..<1_000 {
+                if store.messages == expected { return }
+                await Task.yield()
+            }
+            #expect(store.messages == expected)
+        }
         let observer = Task { await store.observeProjectionChanges() }
         await source.waitUntilMessageRequestCount(1)
         await source.completeMessageRequest(at: 0, with: [initialMessage])
+        await waitForMessages([initialMessage])
         await notifier.publish()
         await source.waitUntilMessageRequestCount(2)
         await source.completeMessageRequest(at: 1, with: [initialMessage, synchronizedMessage])
+        await waitForMessages([initialMessage, synchronizedMessage])
         await notifier.publish()
         await source.waitUntilMessageRequestCount(3)
 
@@ -284,6 +443,7 @@ struct V2ConversationStoreTests {
         await store.downloadMedia(reference, from: message)
 
         #expect(await downloader.requests() == [reference])
+        #expect(await downloader.lastMessageLocation == (try V2MediaMessageLocation(roomID: .init("room-a"), messageID: .init(message.id))))
         #expect(store.mediaDownloadState(for: reference) == .downloaded(downloaded))
         #expect(store.messageActionFeedback == nil)
     }
@@ -1848,7 +2008,7 @@ struct V2ConversationStoreTests {
             kind: .group,
             activeHybridGroupSynchronizer: synchronizer
         )
-        let event = V2ClientGroupEvent(
+        let event = try V2ClientGroupEvent(
             sourceEventID: try .init("00000000-0000-0000-0000-000000000e81"),
             roomSequence: 8,
             projectionKind: "message",
@@ -1877,6 +2037,94 @@ struct V2ConversationStoreTests {
             highWatermark: 8
         ))
         await task.value
+    }
+
+    @Test(.timeLimit(.minutes(1))) func sharedRoomPageReceivesPayloadAfterGraceTimeoutAndReconnect() async throws {
+        let wire = AppSubscriptionWire()
+        let owner = makeAppSubscriptionOwner(wire)
+        let room = try RoomID("page-reconnect-room")
+        let synchronizer = V2SubscribedHybridGroupSynchronizerFake(appliesLiveEvents: true)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil,
+            userID: "current-user", roomID: room.rawValue, kind: .group,
+            activeHybridGroupSynchronizer: synchronizer, roomSubscriptions: owner
+        )
+        let page = Task { await store.pollVisibleHybridGroupEvents() }
+        let firstRun = Task { try await owner.run(connectionID: UUID()) }
+        // Initial pull plus subscribe acknowledgement recovery expires its
+        // 100 ms grace. The next wake must still reach the same page lease.
+        await synchronizer.waitForSynchronizationCount(2)
+        await wire.emitGroup(room: room, watermark: 8, events: [try appSubscriptionEvent(8)])
+        try await waitForSubscriptionPage { await synchronizer.liveApplications() == 1 }
+        #expect(await synchronizer.synchronizations() == 2)
+        let secondRun = Task { try await owner.run(connectionID: UUID()) }
+        _ = await firstRun.result
+        await synchronizer.waitForSynchronizationCount(3)
+        await wire.emitGroup(room: room, watermark: 9, events: [try appSubscriptionEvent(9)])
+        try await waitForSubscriptionPage { await synchronizer.liveApplications() == 2 }
+        #expect(await wire.count("subscribe-room") == 2)
+        // The base adapter never owns a wire subscription in the new path.
+        #expect(await synchronizer.subscribedRoomIDs().isEmpty)
+        page.cancel()
+        await page.value
+        await wire.waitFor("unsubscribe-room", count: 1)
+        secondRun.cancel()
+        _ = await secondRun.result
+    }
+
+    @Test(.timeLimit(.minutes(1))) func sharedActivityRoutesRoomsAndSurvivesOneSceneClosing() async throws {
+        let wire = AppSubscriptionWire()
+        let owner = makeAppSubscriptionOwner(wire)
+        let room = try RoomID("activity-room")
+        func makeStore(_ id: String) -> V2ConversationDetailStore {
+            makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+                                        sender: nil, userID: "current-user", roomID: id, roomSubscriptions: owner)
+        }
+        let first = makeStore(room.rawValue)
+        let second = makeStore(room.rawValue)
+        let other = makeStore("other-room")
+        let firstPage = Task { await first.observeLiveActivity() }
+        let secondPage = Task { await second.observeLiveActivity() }
+        let otherPage = Task { await other.observeLiveActivity() }
+        let firstRun = Task { try await owner.run(connectionID: UUID()) }
+        try await waitForSubscriptionPage { first.peerPresence != nil && second.peerPresence != nil && other.peerPresence != nil }
+        try await wire.emitTyping(room: room)
+        try await waitForSubscriptionPage { !first.typingUserIDs.isEmpty && !second.typingUserIDs.isEmpty }
+        #expect(other.typingUserIDs.isEmpty)
+        #expect(await wire.count("subscribe-typing") == 2)
+        firstPage.cancel()
+        await firstPage.value
+        #expect(await wire.count("unsubscribe-typing") == 0)
+        second.draft = "typing before reconnect"
+        second.updateTypingForDraft()
+        await wire.waitFor("set-typing", count: 1)
+        firstRun.cancel()
+        _ = await firstRun.result
+        try await waitForSubscriptionPage { second.typingUserIDs.isEmpty && second.peerPresence == nil && other.peerPresence == nil }
+        let secondRun = Task { try await owner.run(connectionID: UUID()) }
+        try await waitForSubscriptionPage { second.peerPresence != nil && other.peerPresence != nil }
+        try await wire.emitTyping(room: room)
+        try await waitForSubscriptionPage { !second.typingUserIDs.isEmpty }
+        #expect(first.typingUserIDs.isEmpty && first.peerPresence == nil)
+        #expect(await wire.count("subscribe-typing") == 4)
+        #expect(await wire.count("set-typing") == 1)
+        second.draft += " with a new keystroke"
+        second.updateTypingForDraft()
+        await wire.waitFor("set-typing", count: 2)
+        secondPage.cancel()
+        otherPage.cancel()
+        await secondPage.value
+        await otherPage.value
+        await wire.waitFor("unsubscribe-typing", count: 2)
+        secondRun.cancel()
+        _ = await secondRun.result
+    }
+
+    private func waitForSubscriptionPage(_ predicate: () async -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !(await predicate()), clock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        #expect(await predicate())
     }
 
     @Test func messageSearchStorePublishesHitsAndPreservesTheNextPageCursor() async throws {
@@ -1975,6 +2223,64 @@ struct V2ConversationStoreTests {
         #expect(store.items.count == 51)
         #expect(Set(store.items.map(\.id)).count == 51)
         #expect(store.conversationNextCursor == nil)
+        await store.refresh()
+        #expect(store.items.count == 51)
+        #expect(store.conversationNextCursor == nil)
+    }
+
+    @Test func conversationRefreshRetainsLoadedWindowAndListWhileReading() async {
+        let summaries = (1...151).map { index in
+            V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", index), title: "Room \(index)", preview: "Message",
+                lastActivity: Date(timeIntervalSince1970: Double(index)), isOutgoing: false, kind: .unknown)
+        }
+        let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+        await store.refresh()
+        await store.loadMoreConversations()
+        await store.loadMoreConversations()
+        let loadedIDs = store.items.map(\.id)
+        #expect(loadedIDs.count == 150)
+        await source.pauseNextSummaryRead()
+        let refreshing = Task { await store.refresh() }
+        await source.waitForPausedSummaryRead()
+        #expect(store.state == .loaded)
+        #expect(store.items.map(\.id) == loadedIDs)
+        await store.loadMoreConversations()
+        #expect(!store.isLoadingMoreConversations)
+        await source.resumeSummaryRead()
+        await refreshing.value
+        #expect(store.items.map(\.id) == loadedIDs)
+        await source.removeSummary(id: loadedIDs[75])
+        await store.refresh()
+        #expect(store.items.count == 150)
+        #expect(!store.items.contains { $0.id == loadedIDs[75] })
+        await store.refresh(resetWindow: true)
+        #expect(store.items.count == 50)
+    }
+
+    @Test func oldConversationPageCannotReleaseReplacementPageOwnership() async {
+        let summaries = (1...101).map { index in
+            V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", index), title: "Room \(index)", preview: "Message",
+                lastActivity: Date(timeIntervalSince1970: Double(index)), isOutgoing: false, kind: .unknown)
+        }
+        let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+        await store.refresh()
+        await source.pauseNextSummaryRead()
+        let oldPage = Task { await store.loadMoreConversations() }
+        await source.waitForPausedSummaryRead()
+        await store.refresh()
+        await source.pauseNextSummaryRead()
+        let newPage = Task { await store.loadMoreConversations() }
+        await source.waitForPausedSummaryRead(1)
+        await source.resumeSummaryRead()
+        await oldPage.value
+        #expect(store.items.count == 50 && store.isLoadingMoreConversations)
+        await store.loadMoreConversations()
+        await source.resumeSummaryRead(1)
+        await newPage.value
+        #expect(store.items.count == 100 && !store.isLoadingMoreConversations)
+        #expect(Set(store.items.map(\.id)).count == 100)
     }
 
     @Test func messageSearchStoreShowsIndexingUntilTheBackgroundBuildCompletes() async {
@@ -2103,7 +2409,7 @@ struct V2ConversationStoreTests {
         ))
 
         let events = try (UInt64(1) ... 2).map { sequence in
-            V2ClientGroupEvent(
+            try V2ClientGroupEvent(
                 sourceEventID: try .init(
                     String(format: "00000000-0000-0000-0000-%012llu", 0xf40 + sequence)
                 ),
@@ -2164,7 +2470,7 @@ private func makeConversationDetailStore(
     groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil,
     groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil,
     groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil,
-    groupRolePolicyReader: (any V2GroupRolePolicyReading)? = nil,
+    groupRolePolicyReader: (any V2GroupRolePolicyAccessing)? = nil,
     groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil,
     groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil,
     conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil,
@@ -2182,6 +2488,7 @@ private func makeConversationDetailStore(
     mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
     projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
     activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil,
+    roomSubscriptions: V2RoomSubscriptionCoordinator? = nil,
     initialDraft: String? = nil,
     initialMentionHandles: String? = nil
 ) -> V2ConversationDetailStore {
@@ -2222,7 +2529,8 @@ private func makeConversationDetailStore(
         runtime: .init(
             liveActivity: conversationLiveActivity,
             projectionChangeNotifier: projectionChangeNotifier,
-            activeHybridGroupSynchronizer: activeHybridGroupSynchronizer
+            activeHybridGroupSynchronizer: activeHybridGroupSynchronizer,
+            roomSubscriptions: roomSubscriptions
         )
     )
     return .init(
@@ -2350,6 +2658,7 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
 
 private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
     private let appliesLiveEvents: Bool
+    private var liveApplicationCount = 0
     private var synchronizationCount = 0
     private var wakeCount = 0
     private var synchronizationWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
@@ -2373,8 +2682,11 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
         return .subscribed(highWatermark: 0)
     }
 
+    func liveApplications() -> Int { liveApplicationCount }
     func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) -> Bool {
-        appliesLiveEvents && !wake.liveEvents.isEmpty
+        let applied = appliesLiveEvents && !wake.liveEvents.isEmpty
+        if applied { liveApplicationCount += 1 }
+        return applied
     }
     func nextWake() async throws -> V2ActiveHybridGroupWake {
         try Task.checkCancellation()
@@ -2435,9 +2747,21 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
 }
 
 private actor V2ConversationDataSourceFake: V2ConversationDataSource {
-    private let summaries: [V2ConversationListItem]
+    private var summaries: [V2ConversationListItem]
     private let messages: [V2ConversationMessageItem]
     private var requestedMessageCount = 0
+    private var pausesSummaryRead = false
+    private var pausedSummaryReadCount = 0
+    private var summaryReads: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var summaryReadWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func pauseNextSummaryRead() { pausesSummaryRead = true }
+    func waitForPausedSummaryRead(_ index: Int = 0) async {
+        guard summaryReads[index] == nil else { return }
+        await withCheckedContinuation { summaryReadWaiters[index] = $0 }
+    }
+    func resumeSummaryRead(_ index: Int = 0) { summaryReads.removeValue(forKey: index)?.resume() }
+    func removeSummary(id: String) { summaries.removeAll { $0.id == id } }
 
     init(summaries: [V2ConversationListItem], messages: [V2ConversationMessageItem]) {
         self.summaries = summaries
@@ -2450,6 +2774,15 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
         before cursor: V2ClientConversationListCursor?,
         limit: Int
     ) async throws -> V2ConversationListPage {
+        if pausesSummaryRead {
+            pausesSummaryRead = false
+            let index = pausedSummaryReadCount
+            pausedSummaryReadCount += 1
+            await withCheckedContinuation {
+                summaryReads[index] = $0
+                summaryReadWaiters.removeValue(forKey: index)?.resume()
+            }
+        }
         let candidates = summaries
             .filter { $0.isArchived == isArchived }
             .filter { item in
@@ -2472,6 +2805,17 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
             )
         } : nil
         return .init(items: items, nextCursor: nextCursor)
+    }
+
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
+        requestedMessageCount += 1
+        let items = messages.sorted { $0.roomSequence < $1.roomSequence }
+        guard let index = items.firstIndex(where: { $0.id == messageID }) else { return .unavailable }
+        guard !items[index].isWithdrawn else { return .withdrawn }
+        let lower = max(0, index - before), upper = min(items.count, index + after + 1)
+        let selected = items[lower..<upper].map { V2ConversationTimelineItem.message($0, timelineSequence: $0.roomSequence) }
+        let boundary = upper < items.count ? V2ConversationTimelineCursor(timelineSequence: items[upper].roomSequence, itemID: items[upper].id) : nil
+        return .found(page: .init(items: selected, olderCursor: lower > 0 ? selected.first?.cursor : nil), newerBoundary: boundary)
     }
 
     func timelinePage(
@@ -2524,6 +2868,11 @@ private actor V2SequencedConversationDataSource: V2ConversationDataSource {
         return await withCheckedContinuation { continuation in
             summaryContinuations.append(continuation)
         }
+    }
+
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
+        Issue.record("Refresh sequencing tests do not request timeline location")
+        return .unavailable
     }
 
     func timelinePage(
@@ -2749,7 +3098,10 @@ private actor V2ConversationMediaDownloaderFake: V2ConversationMediaDownloading 
         self.result = result
     }
 
-    func download(_ media: V2MediaReference) throws -> V2DownloadedConversationMedia {
+    private(set) var lastMessageLocation: V2MediaMessageLocation?
+
+    func download(_ media: V2MediaReference, message: V2MediaMessageLocation?) throws -> V2DownloadedConversationMedia {
+        lastMessageLocation = message
         requestsValue.append(media)
         switch result {
         case .success(let downloaded): return downloaded
@@ -2763,7 +3115,7 @@ private actor V2ConversationMediaDownloaderFake: V2ConversationMediaDownloading 
 private actor V2ConversationMediaCacheDiscardingFake: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
     private var discarded: [V2MediaReference] = []
 
-    func download(_: V2MediaReference) async throws -> V2DownloadedConversationMedia {
+    func download(_: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia {
         throw V2ConversationMediaDownloadFailure.failed
     }
 
@@ -2782,7 +3134,7 @@ private actor V2MediaDownloadTargetResolverFake: V2ClientMediaDownloadTargetReso
         self.target = target
     }
 
-    func resolveDownloadTarget(mediaID: MediaID) -> V2ClientMediaTransferTarget {
+    func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) -> V2ClientMediaTransferTarget {
         requestsValue.append(mediaID)
         return target
     }
@@ -3575,5 +3927,185 @@ private actor V2LateUserBlockChanger: V2UserBlockChanging {
         guard let responseWaiter else { return }
         self.responseWaiter = nil
         responseWaiter.resume(returning: .accepted)
+    }
+}
+
+extension V2ConversationStoreTests {
+    @Test func groupPolicyRefreshAcceptsRecoveryAndRejectsAnOlderExplicitRead() async throws {
+        let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
+        let reader = SequencedRolePolicyReader()
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: reader, userID: "current-user", roomID: room.rawValue, kind: .group)
+        let oldRead = Task { await store.loadGroupRolePolicies() }
+        await reader.waitForCount(1)
+        let refresh = Task { await store.refresh() }
+        await reader.waitForCount(2)
+        let recovered = V2ClientGroupRolePolicy(roomID: room, role: .member, permissions: [], revision: 8)
+        await reader.complete(index: 1, policies: [recovered])
+        await refresh.value
+        #expect(store.groupRolePolicies == [recovered])
+        await reader.complete(index: 0, policies: [.init(roomID: room, role: .member, permissions: [.sendMessages], revision: 2)])
+        await oldRead.value
+        #expect(store.groupRolePolicies == [recovered])
+        #expect(store.isLoadingGroupRolePolicies == false)
+    }
+}
+
+private actor SequencedRolePolicyReader: V2GroupRolePolicyAccessing {
+    var requests: [CheckedContinuation<[V2ClientGroupRolePolicy], Never>] = []
+    var observers: [(Int, CheckedContinuation<Void, Never>)] = []
+    func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        let policies: [V2ClientGroupRolePolicy] = await withCheckedContinuation { continuation in
+            requests.append(continuation)
+            let ready = observers.filter { $0.0 <= requests.count }
+            observers.removeAll { $0.0 <= requests.count }
+            for item in ready { item.1.resume() }
+        }
+        return .init(policies: policies, recovery: .ready)
+    }
+    func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        throw V2RolePolicyRecoveryError.roomUnauthorized
+    }
+    func waitForCount(_ count: Int) async {
+        if requests.count >= count { return }
+        await withCheckedContinuation { observers.append((count, $0)) }
+    }
+    func complete(index: Int, policies: [V2ClientGroupRolePolicy]) { requests[index].resume(returning: policies) }
+}
+
+extension V2ConversationStoreTests {
+    @Test func pausedPolicyRecoveryRetriesOnceAndPreservesVisiblePolicies() async throws {
+        let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
+        let policies = [V2ClientGroupRolePolicy(roomID: room, role: .member, permissions: [], revision: 8)]
+        let access = PolicyRecoveryAccessFake(state: .init(policies: policies, recovery: .paused))
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
+        await store.loadGroupRolePolicies()
+        #expect(store.groupRolePolicyState.recovery == .paused)
+        let retry = Task { await store.retryGroupRolePolicyRecovery() }
+        await access.waitForRetry()
+        #expect(store.policyRecoveryAction == .requesting)
+        await store.retryGroupRolePolicyRecovery()
+        #expect(await access.retryCount() == 1)
+        let pending = V2ClientGroupRolePolicyState(policies: policies, recovery: .pending(nextAttemptAt: Date(timeIntervalSince1970: 0)))
+        await access.finish(.success(pending))
+        await retry.value
+        #expect(store.groupRolePolicyState == pending)
+        #expect(store.policyRecoveryAction == .idle)
+        await store.retryGroupRolePolicyRecovery()
+        #expect(await access.retryCount() == 1)
+    }
+
+    @Test func failedPolicyRecoveryRetryKeepsPausedStateAndAllowsAnotherAttempt() async throws {
+        let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
+        let paused = V2ClientGroupRolePolicyState(policies: [], recovery: .paused)
+        let access = PolicyRecoveryAccessFake(state: paused)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
+        await store.loadGroupRolePolicies()
+        let first = Task { await store.retryGroupRolePolicyRecovery() }
+        await access.waitForRetry()
+        await access.finish(.failure(.accountUnavailable))
+        await first.value
+        #expect(store.policyRecoveryAction == .failed)
+        #expect(store.groupRolePolicyState == paused)
+        let second = Task { await store.retryGroupRolePolicyRecovery() }
+        await access.waitForRetry(count: 2)
+        let ready = V2ClientGroupRolePolicyState(policies: [], recovery: .ready)
+        await access.finish(.success(ready))
+        await second.value
+        #expect(store.groupRolePolicyState == ready)
+        #expect(store.policyRecoveryAction == .idle)
+    }
+
+    @Test func policyRecoveryDoesNotSubmitWithoutARecoverableState() async throws {
+        let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
+        for recovery in [V2ClientRolePolicyRecoveryState.unavailable, .waitingForSynchronization, .ready, .pending(nextAttemptAt: Date(timeIntervalSince1970: 9_000))] {
+            let access = PolicyRecoveryAccessFake(state: .init(policies: [], recovery: recovery))
+            let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
+            await store.loadGroupRolePolicies()
+            await store.retryGroupRolePolicyRecovery()
+            #expect(await access.retryCount() == 0)
+        }
+    }
+}
+
+private actor PolicyRecoveryAccessFake: V2GroupRolePolicyAccessing {
+    var state: V2ClientGroupRolePolicyState
+    var retries = 0
+    var observer: (Int, CheckedContinuation<Void, Never>)?
+    var completion: CheckedContinuation<V2ClientGroupRolePolicyState, any Error>?
+    init(state: V2ClientGroupRolePolicyState) { self.state = state }
+    func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState { state }
+    func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        try await withCheckedThrowingContinuation { continuation in
+            completion = continuation
+            retries += 1
+            if let observer, retries >= observer.0 { observer.1.resume(); self.observer = nil }
+        }
+    }
+    func waitForRetry(count: Int = 1) async {
+        if retries >= count { return }
+        await withCheckedContinuation { observer = (count, $0) }
+    }
+    func retryCount() -> Int { retries }
+    func setState(_ value: V2ClientGroupRolePolicyState) { state = value }
+    func finish(_ result: Result<V2ClientGroupRolePolicyState, V2RolePolicyRecoveryError>) {
+        completion?.resume(with: result.mapError { $0 as any Error }); completion = nil
+    }
+}
+
+extension V2ConversationStoreTests {
+    @Test func missingPolicyCapabilityIsUnavailableInsteadOfOfferingAnIneffectiveRetry() async {
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, userID: "current-user", roomID: "room-a", kind: .group)
+        await store.loadGroupRolePolicies()
+        #expect(store.groupRolePolicyState.recovery == .unavailable)
+        await store.retryGroupRolePolicyRecovery()
+        #expect(store.groupRolePolicyState.recovery == .unavailable)
+        #expect(store.policyRecoveryAction == .idle)
+    }
+}
+
+extension V2ConversationStoreTests {
+    @Test func policyRetryFailureCannotReplaceANewerRecoveryStateOrPersistIntoAnotherPhase() async throws {
+        let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
+        let paused = V2ClientGroupRolePolicyState(policies: [], recovery: .paused)
+        let ready = V2ClientGroupRolePolicyState(policies: [.init(roomID: room, role: .admin, permissions: [], revision: 8), .init(roomID: room, role: .member, permissions: [], revision: 8)], recovery: .ready)
+        let access = PolicyRecoveryAccessFake(state: paused)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
+        await store.loadGroupRolePolicies()
+        let old = Task { await store.retryGroupRolePolicyRecovery() }
+        await access.waitForRetry()
+        await access.setState(ready)
+        await store.refresh()
+        await access.finish(.failure(.accountUnavailable))
+        await old.value
+        #expect(store.groupRolePolicyState == ready)
+        #expect(store.policyRecoveryAction == .idle)
+        await access.setState(paused)
+        await store.loadGroupRolePolicies()
+        let failed = Task { await store.retryGroupRolePolicyRecovery() }
+        await access.waitForRetry(count: 2)
+        await access.finish(.failure(.accountUnavailable))
+        await failed.value
+        #expect(store.policyRecoveryAction == .failed)
+        let pending = V2ClientGroupRolePolicyState(policies: [], recovery: .pending(nextAttemptAt: Date(timeIntervalSince1970: 5_000)))
+        await access.setState(pending)
+        await store.refresh()
+        #expect(store.groupRolePolicyState == pending)
+        #expect(store.policyRecoveryAction == .idle)
+    }
+}
+
+private struct V2GatedTimelineLocations: V2ConversationDataSource {
+    let source: any V2ConversationDataSource
+    let gate: V2ListWindowReadGate
+    func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage {
+        try await source.conversationSummaryPage(for: userID, isArchived: isArchived, before: cursor, limit: limit)
+    }
+    func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage {
+        try await source.timelinePage(in: roomID, for: userID, before: cursor, limit: limit)
+    }
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
+        let result = try await source.timelineWindow(in: roomID, for: userID, around: messageID, before: before, after: after)
+        await gate.holdResult()
+        return result
     }
 }

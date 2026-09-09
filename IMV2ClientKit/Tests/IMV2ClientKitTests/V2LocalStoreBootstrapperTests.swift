@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -16,6 +17,7 @@ struct V2LocalStoreBootstrapperTests {
         let store = try await bootstrapper.open(databaseURL: url)
 
         #expect(try await store.pendingMessageCommands().isEmpty)
+        #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == replacement)
     }
 
@@ -30,6 +32,7 @@ struct V2LocalStoreBootstrapperTests {
         let store = try await bootstrapper.open(databaseURL: url)
 
         #expect(try await store.pendingMessageCommands().isEmpty)
+        #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == trusted)
     }
 
@@ -69,6 +72,7 @@ struct V2LocalStoreBootstrapperTests {
             _ = try await bootstrapper.open(databaseURL: url)
         }
         #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(FileManager.default.fileExists(atPath: V2LocalDatabaseArtifacts(primary: url).search.path))
     }
 
     private func persistPendingCommand(in url: URL, binding: V2LocalInstallationBinding) async throws {
@@ -84,6 +88,11 @@ struct V2LocalStoreBootstrapperTests {
             acceptedRoomSequence: nil,
             terminalCode: nil
         ))
+        try await store.messageSearchDatabasePool.write { db in
+            try db.execute(sql: "CREATE TABLE imported_search_probe (body TEXT)")
+            try db.execute(sql: "INSERT INTO imported_search_probe VALUES ('untrusted search body')")
+        }
+        try await store.close()
     }
 }
 

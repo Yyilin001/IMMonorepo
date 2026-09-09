@@ -131,6 +131,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         memberUserIDs: [UserID],
         now: Date
     ) async throws -> V2PrepareGroupRoomCreationIntentOutcome {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState }
         guard candidate.state == .prepared else {
             throw V2GroupRoomCreationIntentStoreError.invalidIntent
         }
@@ -239,6 +240,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         command: V2StagedGroupRoomCommand,
         now: Date
     ) async throws -> V2PrepareGroupRoomCreationIntentOutcome {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState }
         guard candidate.state == .prepared,
               candidate.actorUserID == command.actorUserID,
               candidate.operationID == command.operationID,
@@ -359,6 +361,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         _ intent: V2GroupRoomCreationIntent,
         now: Date
     ) async throws -> V2GroupRoomCreationIntent {
+        guard v2PostgresTimestampCanEncode(now) else { throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState }
         let expected = try IntentValues(intent)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {

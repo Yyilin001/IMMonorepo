@@ -143,10 +143,10 @@ public struct V2ShardAdmissionLeaseService: Sendable {
     }
 
     private func expiry(after lifetime: TimeInterval, from instant: Date) throws -> Date {
-        guard lifetime > 0, lifetime.isFinite else {
+        guard let expiry = v2PostgresFutureTimestamp(now: instant, interval: lifetime) else {
             throw V2ShardAdmissionLeaseControlError.invalidLifetime
         }
-        return instant.addingTimeInterval(lifetime)
+        return expiry
     }
 }
 

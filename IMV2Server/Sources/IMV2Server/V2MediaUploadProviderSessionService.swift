@@ -67,7 +67,7 @@ public struct V2MediaUploadProviderSessionService: Sendable {
         leaseDuration: TimeInterval = 15,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
-        guard leaseDuration > 0 else { throw V2MediaUploadProviderSessionError.invalidLeaseDuration }
+        guard leaseDuration.isFinite, leaseDuration > 0 else { throw V2MediaUploadProviderSessionError.invalidLeaseDuration }
         self.store = store
         self.provider = provider
         self.leaseDuration = leaseDuration
@@ -79,7 +79,9 @@ public struct V2MediaUploadProviderSessionService: Sendable {
         deviceID: DeviceID,
         uploadSessionID: MediaUploadSessionID
     ) async throws -> V2MediaProviderObjectTarget {
+        try Task.checkCancellation()
         let instant = now()
+        guard v2PostgresTimestampCanEncode(instant) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let claim = try await store.claimUpload(
             ownerUserID: actorUserID,
             deviceID: deviceID,
@@ -88,14 +90,20 @@ public struct V2MediaUploadProviderSessionService: Sendable {
             leaseDuration: leaseDuration
         )
         do {
-            guard claim.expiresAt > instant else { throw V2MediaUploadProviderSessionError.expiredSession }
+            try Task.checkCancellation()
+            let claimedAt = now()
+            guard v2PostgresTimestampCanEncode(claimedAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard claim.expiresAt > claimedAt else { throw V2MediaUploadProviderSessionError.expiredSession }
             let target = try await provider.issueUploadTarget(
                 mediaID: claim.mediaID,
                 contentType: claim.contentType,
                 byteCount: claim.byteCount,
                 expiresAt: claim.expiresAt
             )
-            guard target.expiresAt > instant,
+            try Task.checkCancellation()
+            let completionTime = now()
+            guard v2PostgresTimestampCanEncode(completionTime) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard target.expiresAt > completionTime,
                   target.expiresAt <= claim.expiresAt,
                   target.url.scheme?.lowercased() == "https",
                   target.url.host != nil,
@@ -107,7 +115,11 @@ public struct V2MediaUploadProviderSessionService: Sendable {
                       V2MediaProviderTargetHeaderPolicy.isAllowed(name: name, value: value)
                   })
             else { throw V2MediaUploadProviderSessionError.invalidProviderTarget }
-            try await store.completeUploadTarget(claim, now: now())
+            try await store.completeUploadTarget(claim, now: completionTime)
+            try Task.checkCancellation()
+            let returnedAt = now()
+            guard v2PostgresTimestampCanEncode(returnedAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard target.expiresAt > returnedAt else { throw V2MediaUploadProviderSessionError.expiredSession }
             return target
         } catch {
             try? await store.releaseUploadTarget(claim)

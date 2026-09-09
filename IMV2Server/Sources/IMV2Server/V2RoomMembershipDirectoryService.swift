@@ -76,7 +76,11 @@ public struct V2RoomMembershipDirectoryService: Sendable {
     }
 
     public func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
-        try await store.list(request)
+        let page = try await store.list(request)
+        guard page.membershipRevision <= UInt64(Int64.max) else {
+            throw V2RoomMembershipDirectoryError.corruptPersistenceState
+        }
+        return page
     }
 }
 
