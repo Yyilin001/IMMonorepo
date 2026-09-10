@@ -2,16 +2,35 @@ import Fluent
 import Foundation
 import SQLKit
 
-/// PostgreSQL retention authority. Metadata remains available for message and
-/// audit replay; only the object becomes terminal and a provider cleanup task
-/// is emitted. `SKIP LOCKED` makes concurrent worker instances safe.
+/// PostgreSQL 媒体保留的权威实现。
+///
+/// 元数据继续保留以支持消息与审计重放：这里只把对象置为终态并产生一条提供方清理任务。
+/// 候选行使用 `SKIP LOCKED` 选取，因此多个工作器实例可安全并行。
 public struct PostgresV2MediaRetentionStore: V2MediaRetentionStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放媒体对象、引用与清理发件箱的数据库。
     public init(database: any Database) {
         self.database = database
     }
 
+    /// 使满足条件的媒体进入过期状态并登记清理任务。
+    ///
+    /// 判定条件为：对象尚未过期；不属于任何未收到回执的转发导出；不被待处理或已接受的
+    /// 转发导入引用；并且要么自身已过期且没有任何消息引用，要么其全部消息引用都已超过
+    /// 撤回保留期。候选行先加锁选取，再在 `READ COMMITTED` 的新语句中重新判定，
+    /// 避免单条 CTE 的 MVCC 快照漏掉加锁期间提交的导出。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - withdrawnRetention: 已撤回媒体在清理前保留的秒数，需大于零。
+    ///   - limit: 本轮最多处理的媒体数，需大于零。
+    /// - Returns: 实际标记过期的媒体数。
+    /// - Throws: 参数非正或保留截止点不可编码时抛出
+    ///   ``V2MediaRetentionStoreError/invalidRequest``；事务连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func expireEligibleMedia(now: Date, withdrawnRetention: TimeInterval, limit: Int) async throws -> Int {
         guard limit > 0, withdrawnRetention > 0 else {
             throw V2MediaRetentionStoreError.invalidRequest
@@ -107,7 +126,9 @@ public struct PostgresV2MediaRetentionStore: V2MediaRetentionStore {
     }
 }
 
+/// 媒体保留存储错误。
 public enum V2MediaRetentionStoreError: Error, Equatable, Sendable {
+    /// 请求参数不满足约束。
     case invalidRequest
 }
 

@@ -6,43 +6,85 @@ import Synchronization
 @preconcurrency import NIOPosix
 @preconcurrency import NIOSSL
 
-/// Dynamic room interest is deliberately separate from durable wake outbox
-/// work. A broker may forget a subscription during a network split; the
-/// client cursor and low-frequency recovery pull remain correct.
+/// 动态房间订阅与持久化唤醒发件箱工作刻意分离。
+///
+/// 网络分区期间代理可能丢失订阅，但客户端游标与低频恢复拉取依然保证正确性。
 public protocol V2GroupEventWakeInterestManaging: Sendable {
+    /// 订阅指定房间的事件唤醒。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Throws: 连接或订阅失败时抛出。
     func activate(roomID: RoomID) async throws
+
+    /// 取消指定房间的事件唤醒订阅。
+    ///
+    /// - Parameter roomID: 目标房间。
     func deactivate(roomID: RoomID) async
 }
 
+/// NATS 群事件载荷的编码方式。
 public enum V2NATSGroupEventPayloadEncoding: String, Equatable, Sendable {
-    /// Rollout-safe default understood by every currently deployed Gateway.
+    /// 兼容性最稳妥的默认值，当前部署的全部网关都能解析。
     case json
-    /// Versioned binary encoding for homogeneous, protobuf-capable replicas.
+    /// 适用于能力一致的 protobuf 副本的带版本二进制编码。
     case protobufV1 = "protobuf_v1"
 }
 
+/// NATS 群事件唤醒的发布配置。
 public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
+    /// NATS 服务地址，仅支持 `nats` 或 `tls` 方案。
     public let url: URL
+    /// 主题前缀，需符合以点分隔的标识符格式。
     public let subjectPrefix: String
+    /// 可选的认证令牌。
     public let token: String?
-    /// Per-deployment secret used to derive opaque room routing subjects. It
-    /// keeps stable room UUIDs out of broker ACLs, traces and subject names.
+    /// 用于派生不透明房间路由主题的部署级密钥。
+    ///
+    /// 它使稳定的房间 UUID 不会出现在消息代理的 ACL、链路追踪或主题名中。
     public let routingKey: Data
-    /// Optional private trust root and SNI override for an internal NATS TLS
-    /// endpoint. System trust and the URL host are used when omitted.
+    /// 内部 NATS TLS 端点可选的私有信任根与 SNI 覆盖。
+    ///
+    /// 省略时使用系统信任库与地址中的主机名。
     public let tlsCAPath: String?
+    /// 可选的 TLS 服务端名称。
     public let tlsServerName: String?
+    /// 载荷编码方式。
     public let payloadEncoding: V2NATSGroupEventPayloadEncoding
-    /// A durable wake may arrive on another publisher connection before the
-    /// corresponding foreground microbatch finishes bounded aggregation.
-    /// Delay only that recovery hint so an in-flight live payload can cover
-    /// it; PostgreSQL remains authoritative when this deadline expires.
+    /// 持久化唤醒的延迟发布毫秒数。
+    ///
+    /// 持久化唤醒可能在对应的前台微批完成有界聚合之前就经另一条发布连接到达。
+    /// 这里只延迟该恢复提示，让在途实时载荷有机会覆盖它；截止时间到期后仍以 PostgreSQL 为准。
     public let wakeDeferralDelayMilliseconds: Int
-    /// Bounds connect, command and broker PING/PONG confirmation. A TCP write
-    /// alone is not evidence that NATS accepted the preceding command.
+    /// 连接、命令与代理 PING/PONG 确认的超时秒数。
+    ///
+    /// 仅完成一次 TCP 写入并不能证明 NATS 已接受前置命令。
     public let acknowledgementTimeout: TimeInterval
     let acknowledgementTimeoutNanoseconds: Int64
 
+    /// 校验并保存 NATS 配置。
+    ///
+    /// 会校验方案、主机、主题前缀格式、令牌与 TLS 组合、路由密钥长度以及延迟与超时范围；
+    /// 非回环地址必须使用 TLS 并携带令牌，且在未启用 TLS 时不得指定 CA 或 SNI。
+    ///
+    /// - Parameters:
+    ///   - url: NATS 服务地址。
+    ///   - subjectPrefix: 主题前缀。
+    ///   - token: 认证令牌。
+    ///   - routingKey: 路由密钥，至少 32 字节。
+    ///   - tlsCAPath: 可选的私有信任根路径。
+    ///   - tlsServerName: 可选的 TLS 服务端名称。
+    ///   - payloadEncoding: 载荷编码方式，默认 JSON。
+    ///   - wakeDeferralDelayMilliseconds: 唤醒延迟毫秒数，需落在 `0...1000`。
+    ///   - acknowledgementTimeout: 确认超时秒数，需为正且不超过 30。
+    /// - Throws: 任一约束不满足时抛出
+    ///   ``V2NATSGroupEventWakeBrokerError/invalidConfiguration``。
+    /// 组合 NATS 配置、恢复记录回调与接收回调。
+    ///
+    /// - Parameters:
+    ///   - configuration: NATS 连接与主题配置。
+    ///   - recordRecoveryNotification: 记录恢复通知的回调，默认忽略。
+    ///   - metrics: 可选的传输指标记录器。
+    ///   - receiveWake: 收到前台群事件通知时的回调。
     public init(
         url: URL,
         subjectPrefix: String,
@@ -94,29 +136,35 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     var usesTLS: Bool { url.scheme?.lowercased() == "tls" }
 }
 
+/// 群事件唤醒代理错误。
 public enum V2NATSGroupEventWakeBrokerError: Error, Equatable, Sendable {
+    /// 代理配置不合法。
     case invalidConfiguration
+    /// 代理当前不可用。
     case unavailable
+    /// 载荷不满足当前编码契约。
     case invalidPayload
 }
 
-/// The NATS payload is a best-effort foreground notification.  A receiver
-/// must still treat `.wake` as a cursor-pull prompt, while `.directEvent` is
-/// usable only when the client has the immediately preceding cursor.
+/// 前台群事件通知。
+///
+/// NATS 载荷只是尽力而为的前台通知：接收方仍必须把 `.wake` 当作触发游标拉取的提示，
+/// 而 `.directEvent` 只有在客户端已持有紧邻的前一个游标时才可使用。
 public enum V2ForegroundGroupEventNotification: Equatable, Sendable {
+    /// 房间水位唤醒，需要按游标拉取。
     case wake(V2GroupEventWake)
+    /// 单条私聊实时事件。
     case directEvent(V2DirectRoomLiveEvent)
+    /// 一批群实时事件。
     case groupEvents([V2DirectRoomLiveEvent])
 }
 
-/// Core NATS preserves a publisher's subject order, but a room may be written
-/// by several Gateways. Their database commits allocate one ordered room
-/// sequence while their independent post-commit publications can reach NATS
-/// in the opposite order. Hashing a room onto one lane prevents concurrent
-/// socket fan-out, and a short bounded coalescing window restores the common
-/// cross-publisher inversion before every foreground client mistakes it for a
-/// durable-log gap. A real missing/late payload or overload still degrades to
-/// the authoritative cursor pull.
+/// 群事件通知分发器。
+///
+/// 核心 NATS 保证单个发布者的主题内顺序，但同一房间可能被多个网关写入：
+/// 数据库提交会分配唯一的房间序号，而各自独立的提交后发布却可能以相反顺序抵达 NATS。
+/// 把房间哈希到固定通道可避免并发套接字扇出，短期有界合并窗口则能在前台客户端把常见反转
+/// 误判为持久化日志缺口之前修复它。真正丢失或延迟的载荷以及过载情况仍会降级为权威游标拉取。
 final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable {
     private static let maximumGroupEventsPerNotification = 64
     private static let recentLiveRoomCapacityPerLane = 4_096
@@ -205,10 +253,11 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         let deadline: ContinuousClock.Instant
     }
 
-    /// A room is always assigned to one worker lane, so this bounded cache is
-    /// worker-local and needs no lock. It records only notifications whose
-    /// local socket fan-out has returned successfully. Eviction merely loses
-    /// an optimization: a later durable wake is delivered as before.
+    /// 最近实时高水位缓存。
+    ///
+    /// 一个房间始终只分配给单个工作通道，因此该有界缓存是工作协程本地的，无需加锁。
+    /// 它只记录本地套接字扇出已成功返回的通知。
+    /// 淘汰只会失去一次优化：之后的持久唤醒仍会照常投递。
     private struct RecentLiveHighWatermarks {
         private let capacity: Int
         private var values: [RoomID: UInt64] = [:]
@@ -414,8 +463,11 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         }
     }
 
-    /// Direct decoder/ordering tests exercise this stage after transport
-    /// authentication has already been isolated by the wrapper dispatcher.
+    /// 直接提交一段载荷。
+    ///
+    /// 解码器/顺序的定向测试在外层投递器已隔离传输认证之后，会直接走这一阶段。
+    ///
+    /// - Parameter payload: 待提交的载荷字节。
     func submit(_ payload: Data) {
         submit(subject: "imv2.test", payload: payload)
     }
@@ -424,9 +476,13 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         droppedPayloads.load(ordering: .relaxed)
     }
 
-    /// Coalesces only best-effort transport notifications. The recovery cache
-    /// has already observed every decoded input above, so suppressing a wake
-    /// covered by the same window cannot hide durable state.
+    /// 只对尽力而为的传输通知做合并。
+    ///
+    /// 恢复缓存已在上游观察到每一个已解码输入，
+    /// 因此抑制一条落在同一窗口内的唤醒不可能隐藏持久状态。
+    ///
+    /// - Parameter notifications: 本次待合并的前台群事件通知。
+    /// - Returns: 合并后的通知列表。
     private static func coalesced(
         _ notifications: [V2ForegroundGroupEventNotification]
     ) -> [V2ForegroundGroupEventNotification] {
@@ -584,30 +640,32 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
     }
 }
 
-/// One reusable Core NATS connection per Gateway. It owns only current local
-/// viewer interests, not a durable consumer per user or per room. Subject
-/// subscriptions are reference-counted by `V2DeviceConnectionRegistry`.
+/// 每个 Gateway 一条可复用的 Core NATS 连接。
+///
+/// 它只持有当前本地观看者兴趣，而不是每用户或每房间的持久消费者。
+/// 主题订阅由 `V2DeviceConnectionRegistry` 做引用计数。
 public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2ForegroundGroupEventHintPublishing, V2GroupEventWakeInterestManaging {
-    /// Foreground payloads only accelerate a room cursor that is already
-    /// durable in PostgreSQL. Requiring a broker PONG for each such payload
-    /// adds a second network round trip to every microbatch without changing
-    /// correctness. Durable outbox wakes and subscription lifecycle commands
-    /// retain broker confirmation below.
+    /// 发布保证级别。
+    ///
+    /// 前台载荷只是加速一个已在 PostgreSQL 持久化的房间游标。
+    /// 为每个此类载荷都要求 broker PONG，会给每个微批增加一次额外网络往返，
+    /// 却不改变正确性。持久发件箱唤醒与订阅生命周期命令仍在下方保留 broker 确认。
     private enum PublicationGuarantee: Sendable {
         case brokerConfirmed
         case advisory
     }
 
     private static let maximumCachedSubjects = 4_096
-    /// Core NATS defaults to a 1 MiB `max_payload`. The rollout-safe JSON mode
-    /// expands `Data` by roughly 4/3, so this conservative raw-body limit also
-    /// bounds the smaller protobuf representation without requiring an
-    /// operator to raise the broker limit.
+    /// Core NATS 默认 `max_payload` 为 1 MiB。
+    ///
+    /// 灰度安全的 JSON 模式会把 `Data` 膨胀约 4/3，
+    /// 因此这条保守的原始正文上限同样可以约束更小的 protobuf 表示，
+    /// 无需运维提高 broker 上限。
     private static let maximumGroupEventsPerPublication = 64
     private static let maximumGroupEventRawPayloadBytesPerPublication = 512 * 1_024
-    /// Keep accepting the larger legacy JSON representation while replicas
-    /// roll through the versioned protobuf decoder. Both encodings remain
-    /// below the ordinary 1 MiB Core NATS `max_payload`.
+    /// 在副本逐步切换版本化 protobuf 解码器的过程中，继续接受更大的旧版 JSON 表示。
+    ///
+    /// 两种编码都保持在 Core NATS 常规 1 MiB `max_payload` 之下。
     private static let maximumInboundNotificationPayloadBytes = 896 * 1_024
         + V2NATSAuthenticatedPayloadCodec.overheadBytes
 
@@ -706,14 +764,15 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     private var pendingActivations: [RoomID: PendingActivation] = [:]
     private var subscriptions: [RoomID: Int] = [:]
     private var subscriptionsRemovedWhileConnecting: Set<Int> = []
-    /// Subject derivation uses a deployment-secret HMAC and hexadecimal
-    /// formatting. Rooms are reused heavily on the live path, so cache the
-    /// opaque result under a hard bound instead of repeating that work for
-    /// every foreground publication.
+    /// 主题推导使用部署密钥 HMAC 与十六进制格式化。
+    ///
+    /// 房间在实时路径上会被大量复用，因此在硬上限内缓存这个不透明结果，
+    /// 而不是为每次前台发布重复计算。
     private var subjectsByRoomID: [RoomID: String] = [:]
-    /// Only subscriptions captured by the in-flight connection replay need a
-    /// compensating UNSUB. Keeping this exact set bounds cancellation state by
-    /// live interests at handshake start instead of outage-time churn.
+    /// 只有被在途连接重放捕获的订阅才需要补偿性 UNSUB。
+    ///
+    /// 精确记录这一集合，可把取消状态按握手开始时的实时兴趣量界定，
+    /// 而不是随故障期间的变化不断膨胀。
     private var pendingReplaySubscriptionIDs: Set<Int> = []
     private var nextSubscriptionID = 1
     private var isShutDown = false
@@ -742,8 +801,9 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         if !isShutDown { try? eventLoopGroup.syncShutdownGracefully() }
     }
 
-    /// Explicit service lifecycle boundary. Production shutdown must not rely
-    /// on ARC ordering for a network channel and its event-loop threads.
+    /// 显式的服务生命周期边界。
+    ///
+    /// 生产关闭流程不能依赖 ARC 析构顺序来决定网络通道与其事件循环线程的释放时机。
     public func shutdown() async {
         guard !isShutDown else { return }
         isShutDown = true
@@ -769,6 +829,12 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         try? await eventLoopGroup.shutdownGracefully()
     }
 
+    /// 订阅指定房间的事件唤醒。
+    ///
+    /// 重复订阅同一房间不会重复建立主题订阅。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Throws: 服务已关闭或订阅失败时抛出。
     public func activate(roomID: RoomID) async throws {
         if let pending = pendingActivations[roomID] {
             try await pending.task.value
@@ -806,6 +872,9 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
     }
 
+    /// 取消指定房间的事件唤醒订阅。
+    ///
+    /// - Parameter roomID: 目标房间。
     public func deactivate(roomID: RoomID) async {
         guard let subscriptionID = subscriptions.removeValue(forKey: roomID) else { return }
         if subscriptions.isEmpty {
@@ -832,6 +901,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
     }
 
+    /// 发布一条持久化唤醒。
+    ///
+    /// - Parameter wake: 待发布的唤醒内容。
+    /// - Throws: 连接或写入失败时抛出。
     public func publish(_ wake: V2GroupEventWake) async throws {
         try await publish(
             .wake(wake),
@@ -840,9 +913,14 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         )
     }
 
-    /// Like metadata hints, live payload delivery is advisory.  Any NATS
-    /// issue degrades to the normal durable cursor pull instead of affecting
-    /// an already accepted send.
+    /// 尽力而为地发布一条前台私聊实时事件。
+    ///
+    /// 与元数据提示一样，实时载荷投递是建议性的。
+    /// 任何 NATS 问题都会退化为常规的持久游标拉取，而不会影响一个已被接受的发送。
+    ///
+    /// 发布失败不会向上抛出；调用方仍以持久化游标为准。
+    ///
+    /// - Parameter event: 待发布的实时事件。
     public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
         try? await publish(
             .directEvent(event),
@@ -851,12 +929,14 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         )
     }
 
-    /// Preserve the dispatcher's ordered Hybrid-group microbatch across the
-    /// process boundary. The compatibility protocol default publishes every
-    /// event separately; doing that here multiplies NATS confirmations, JSON
-    /// work and remote Gateway scheduling by the batch width. Chunks remain
-    /// modest so one Core NATS message stays far below its ordinary payload
-    /// limit even when a room uses the largest supported message body.
+    /// 尽力而为地发布一批前台群实时事件。
+    ///
+    /// 跨进程边界保留投递器排好序的混合群组微批。兼容协议默认逐条发布每个事件；
+    /// 若在此照做，会把 NATS 确认、JSON 处理以及远端 Gateway 调度都放大到批次宽度倍。
+    /// 分块保持适度，使单条 Core NATS 消息即使面对房间允许的最大消息正文，
+    /// 也远低于其常规载荷上限。
+    ///
+    /// - Parameter events: 待发布的实时事件列表。
     public func publishForegroundGroupEvents(
         _ events: [V2DirectRoomLiveEvent]
     ) async {
@@ -962,9 +1042,12 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
     }
 
-    /// A foreground hint is intentionally lossy. Do not propagate a broker
-    /// outage back into the sender's accepted response; durable fan-out or
-    /// Hybrid wake-outbox recovery still supplies correctness.
+    /// 尽力而为地发布一条前台唤醒提示。
+    ///
+    /// 前台提示刻意允许丢失。不要把 broker 故障回传进发送方已接受的响应；
+    /// 持久扇出或混合唤醒发件箱的恢复仍能保证正确性。
+    ///
+    /// - Parameter hint: 房间水位提示。
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {
         try? await publish(
             .wake(hint),
@@ -1197,9 +1280,13 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
     }
 
-    /// Shared decoder for the production NATS handler and focused contract
-    /// tests. Invalid or partially authorized live payloads fail closed to a
-    /// metadata wake; only a malformed room envelope is discarded entirely.
+    /// 生产 NATS 处理器与聚焦契约测试共用的解码器。
+    ///
+    /// 非法或只获得部分授权的实时载荷会安全失败并降级为元数据唤醒；
+    /// 只有畸形的房间信封才会被整体丢弃。
+    ///
+    /// - Parameter payload: 待解码的通知载荷。
+    /// - Returns: 解码成功的前台群事件通知；无法安全解码时为 `nil`。
     static func decodeNotificationPayload(
         _ payload: Data
     ) -> V2ForegroundGroupEventNotification? {
@@ -1318,9 +1405,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         scheduleReconnectIfNeeded()
     }
 
-    /// Core NATS keeps subscription state only on the socket. Maintain one
-    /// bounded-backoff reconnect loop whenever this Gateway still has local
-    /// viewers; `connectedChannel` replays the complete current subject set.
+    /// Core NATS 只在套接字上保存订阅状态。
+    ///
+    /// 只要该 Gateway 仍有本地观看者，就维持唯一一条有界退避的重连循环；
+    /// `connectedChannel` 会重放当前完整主题集合。
     private func scheduleReconnectIfNeeded() {
         guard !isShutDown, !subscriptions.isEmpty, reconnectTask == nil else { return }
         reconnectTask = Task { [weak self] in
@@ -1366,12 +1454,12 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         return subject
     }
 
-    /// A foreground live payload is explicitly lossy: its room-log row and a
-    /// durable wake already exist before this call. Waiting for NIO's write
-    /// completion still detects an inactive or failed channel, while omitting
-    /// the per-publication PING/PONG removes protocol traffic and a suspended
-    /// continuation from the hot path. Core NATS preserves socket order for
-    /// the bytes that it does receive.
+    /// 把建议性写入的热路径从 continuation 中剥离：对于它确实收到的字节，
+    /// 核心 NATS 仍会保持套接字顺序。
+    ///
+    /// 前台实时载荷显式允许丢失：在本次调用之前，其房间日志行与持久唤醒就已存在。
+    /// 等待 NIO 写入完成仍能检测到失活或失败的通道，
+    /// 而省去每次发布的 PING/PONG 则消除了协议流量以及一次挂起。
     private func writeAdvisory(
         _ command: ByteBuffer,
         connection: Connection
@@ -1426,8 +1514,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     }
 }
 
-/// Its parser state is runtime-checked against its owning event loop; all
-/// application state crosses into an actor via the supplied Sendable callback.
+/// 已确认的入站处理器。
+///
+/// 其解析器状态会针对所属事件循环做运行时校验；
+/// 所有应用状态都经由所提供的 Sendable 回调跨入 actor。
 final class V2NATSConfirmedInboundHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer

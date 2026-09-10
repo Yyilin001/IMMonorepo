@@ -1,8 +1,13 @@
 import Foundation
 
 extension V2AppStore {
-    /// Constructed by the application delegate before any scene or callback.
-    /// Debug launch isolation must be identical for UI and headless starts.
+    /// 由应用委托在任何场景或回调之前构造应用存储。
+    ///
+    /// 调试期的启动隔离必须对界面启动与无界面启动保持一致，
+    /// 因此启动模式与端到端测试作用域都由同一组启动参数推导。
+    ///
+    /// - Parameter remoteNotificationRegistrar: 远程通知注册实现。
+    /// - Returns: 已按启动参数配置好的应用存储。
     static func launched(remoteNotificationRegistrar: any V2RemoteNotificationRegistering) -> V2AppStore {
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments

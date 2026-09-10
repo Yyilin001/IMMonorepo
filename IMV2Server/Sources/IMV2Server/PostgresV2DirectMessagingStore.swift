@@ -3,18 +3,37 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL direct-room and stranger-preference boundary. Pair-scoped
-/// advisory locks make an absent direct pair serializable without inventing an
-/// orphan room when two callers initiate the same conversation concurrently.
+/// 私聊房间与陌生人偏好的 PostgreSQL 边界。
+///
+/// 以用户对为范围的咨询锁使「尚不存在私聊对」的场景可串行化：
+/// 两个调用方并发发起同一会话时，不会凭空产生一个无人引用的孤立房间。
 public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     private let database: any Database
     private let shadowForwarder: any V2UserShardProjectionShadowing
 
+    /// 组合数据库与投影影子转发器。
+    ///
+    /// - Parameters:
+    ///   - database: 存放私聊房间、操作记录与偏好设置的数据库。
+    ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
     public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
         self.database = database
         self.shadowForwarder = shadowForwarder
     }
 
+    /// 打开或复用一对用户的私聊房间。
+    ///
+    /// 操作标识按发起者维度串行化，先取出锁再比对目标，使并发重试能看到已提交的房间与时间戳；
+    /// 随后按用户对加锁、校验或创建房间，并把创建结果写入操作记录。
+    ///
+    /// - Parameters:
+    ///   - command: 打开私聊房间命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - roomShardID: 创建时选定的房间归属分片。
+    ///   - roomID: 预分配的房间标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 打开结果。
+    /// - Throws: 标识非法、操作标识与目标不一致、准入不足或持久化失败时抛出。
     public func open(command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date) async throws -> V2OpenDirectRoomOutcome {
         let outcome: V2OpenDirectRoomOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
@@ -99,6 +118,13 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         return outcome
     }
 
+    /// 设置陌生人消息权限。
+    ///
+    /// - Parameters:
+    ///   - command: 权限变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     public func setStrangerMessagePermission(command: V2SetStrangerMessagePermissionCommand, now: Date) async throws -> V2SetStrangerMessagePermissionOutcome {
         let outcome: V2SetStrangerMessagePermissionOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
@@ -136,6 +162,13 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         return outcome
     }
 
+    /// 设置被添加好友权限。
+    ///
+    /// - Parameters:
+    ///   - command: 权限变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     public func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) async throws -> V2SetUserAddPermissionOutcome {
         let outcome: V2SetUserAddPermissionOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
@@ -206,7 +239,11 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 }
 
-public enum V2DirectMessagingStoreError: Error, Equatable, Sendable { case corruptPersistenceState }
+/// 私聊存储错误。
+public enum V2DirectMessagingStoreError: Error, Equatable, Sendable {
+    /// 持久化记录缺失或字段无法解码。
+    case corruptPersistenceState
+}
 
 private struct DirectOperationRow: Decodable {
     let targetUserID: UUID; let roomID: UUID; let createdAt: Date

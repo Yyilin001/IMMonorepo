@@ -1,8 +1,17 @@
 import Foundation
 
-/// A bounded whole-second retry hint for the same Date-to-PostgreSQL cutoff
-/// used by durable account budgets. Native timestamps must not round-trip
-/// through Date or epoch seconds before comparing this boundary.
+/// 为持久化账号预算计算同一 Date 到 PostgreSQL 截止点上的有界整秒重试提示。
+///
+/// 比较边界前不允许把原生的 `V2PostgresTimestamp` 经过 `Date` 或 epoch 秒往返，
+/// 因此先把窗口参数编码为 PostgreSQL 时间戳，再对整秒偏移做二分查找。
+///
+/// - Parameters:
+///   - windowStartedAt: 已持久化的窗口开始时刻。
+///   - now: 本次观测的服务端时刻。
+///   - window: 窗口长度，需能表示为整秒并编码为 PostgreSQL 时间戳。
+/// - Returns: 介于 1 与窗口整秒上界之间的重试秒数；`window` 不可表示、`now` 或截止点
+///   无法编码时返回 `nil`。窗口已经过期时返回 1；时钟回拨使存储窗口落在未来时，
+///   返回上界值且不改变已持久化的窗口。
 func v2RateLimitRetryAfterSeconds(
     windowStartedAt: V2PostgresTimestamp,
     now: Date,

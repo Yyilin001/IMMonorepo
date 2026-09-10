@@ -3,50 +3,63 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Batches only the command-window portion of per-room admission for the
-/// fixed-audience direct room-event-log fast path.
+/// 面向固定受众私聊房间日志快速路径的房间命令额度池。
 ///
-/// PostgreSQL remains authoritative. A batch is charged atomically to the
-/// room's existing `room_admission` row before a process-local token is
-/// issued. A Gateway crash can therefore conservatively waste unused credits
-/// from one room batch, but cannot admit more commands than that room's
-/// durable window. The shard-lease fence prevents stale credits surviving a
-/// room's shard lease replacement.
+/// 它只批量处理房间准入中的命令窗口部分。PostgreSQL 仍是权威：在签发进程内令牌之前，
+/// 整批额度会原子计入该房间既有的 `room_admission` 行。因此网关崩溃最多保守地浪费
+/// 一个房间批次中未使用的额度，但绝不会让该房间超出持久化窗口的准入量。
+/// 分片租约栅栏则防止陈旧额度在房间分片租约被替换后继续存活。
 public actor V2RoomAdmissionCommandCreditPool {
-  /// Immutable input for one append micro-batch reservation pass.
+  /// 一次追加微批预留的不可变输入。
   ///
-  /// The shard state remains an authoritative preflight snapshot. The pool
-  /// still fences every issued token to its exact durable shard lease; this
-  /// wrapper only removes one cross-actor job per message from the hot path.
+  /// 分片状态是权威的预检快照。额度池仍会把每个已签发令牌栅栏到其精确的持久化分片租约；
+  /// 该包装只是从热路径上减少每条消息一次跨 actor 调用。
   struct BatchRequest: Sendable {
     let roomID: UUID
     let shardState: ShardAdmissionState
     let now: Date
   }
 
+  /// 一次已签发额度的令牌。
+  ///
+  /// 令牌标识与键都只在模块内部可见：调用方只能原样持有并交回令牌，
+  /// 无法自行构造或改写其归属。
   public struct Token: Hashable, Sendable {
     fileprivate let id: UInt64
     fileprivate let key: Key
   }
 
-  /// Aggregate-only process metrics. Room IDs and lease identities are
-  /// intentionally excluded so monitoring cannot become a high-cardinality
-  /// side channel.
+  /// 仅包含聚合值的进程内指标。
+  ///
+  /// 房间标识与租约身份被刻意排除，避免监控本身变成高基数信息的侧信道。
   public struct Snapshot: Equatable, Sendable {
+    /// 当前可用额度。
     public let activeCredits: Int
+    /// 已签发但尚未提交的额度。
     public let inFlightCredits: Int
+    /// 批次预留次数。
     public let batchReservations: Int
+    /// 已向数据库预留的额度总数。
     public let databaseCreditsReserved: Int
+    /// 已提交的额度数。
     public let committedCredits: Int
+    /// 归还的额度数。
     public let returnedCredits: Int
+    /// 因过期被丢弃的额度数。
     public let expiredCreditsDiscarded: Int
+    /// 因容量不足被拒绝的次数。
     public let capacityRejections: Int
+    /// 被提升为热路径的房间数。
     public let promotedHotRooms: Int
   }
 
+  /// 额度获取结果。
   public enum Acquisition: Sendable {
+    /// 已签发一个可直接使用的令牌。
     case granted(Token)
+    /// 当前被限流。
     case rateLimited
+    /// 准入当前不可用，附带原因。
     case unavailable(FanoutAdmissionUnavailableReason)
   }
 
@@ -71,10 +84,10 @@ public actor V2RoomAdmissionCommandCreditPool {
   private let database: any Database
   private let batchSize: Int
   private let monotonicNow: @Sendable () -> ContinuousClock.Instant
-  /// Sparse direct conversations must never pay an extra reservation
-  /// transaction just to cache credits they will never use. Only a room with
-  /// this many *previously committed* plain appends in the short window is
-  /// eligible for the precharged path.
+  /// 晋升为「已预扣」路径所需的、刚刚提交的普通追加次数阈值。
+  ///
+  /// 稀疏的单聊会话绝不应为了缓存永远不会用到的额度而多付一次预留事务。
+  /// 只有短期窗口内达到该数量的*此前已提交*普通追加的房间，才有资格走预扣路径。
   private let promotionCommitCount = 4
   private let promotionWindow: Duration = .seconds(5)
   private let maximumTrackedRooms = 8_192
@@ -90,6 +103,14 @@ public actor V2RoomAdmissionCommandCreditPool {
   private var expiredCreditsDiscarded = 0
   private var capacityRejections = 0
 
+  /// 组合数据库、批量大小与单调时钟。
+  ///
+  /// - Parameters:
+  ///   - database: 执行批量预扣的数据库。
+  ///   - batchSize: 单批额度大小，需落在 `1...32`。
+  ///   - monotonicNow: 可注入的单调时钟读取函数。
+  ///
+  /// 批量大小越界时直接失败，避免出现越界预扣。
   public init(database: any Database, batchSize: Int,
               monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
     precondition((1...32).contains(batchSize))
@@ -98,11 +119,16 @@ public actor V2RoomAdmissionCommandCreditPool {
     self.monotonicNow = monotonicNow
   }
 
-  /// Returns true only for a proven locally hot room. This method is called
-  /// before the SQL preflight so cold rooms retain the original single
-  /// transaction (`rooms -> room_admission`) path with no extra database
-  /// round-trip. Heat is based only on prior committed messages, never on
-  /// untrusted request attempts.
+  /// 判断该房间是否已被确认为本进程内的热房间。
+  ///
+  /// 该判断在 SQL 预检之前执行，使冷房间仍走原有的单事务路径
+  /// （`rooms → room_admission`），不产生额外数据库往返。
+  /// 热度只依据此前成功提交的消息，绝不依据不可信的请求尝试。
+  ///
+  /// - Parameters:
+  ///   - roomID: 目标房间。
+  ///   - now: 当前时刻。
+  /// - Returns: 达到提升阈值且热度未过期时为 `true`。
   public func shouldUseCredits(roomID: UUID, now: Date) -> Bool {
     guard v2PostgresTimestampCanEncode(now) else { return false }
     guard let heat = heatByRoom[roomID] else { return false }
@@ -114,16 +140,27 @@ public actor V2RoomAdmissionCommandCreditPool {
     return heat.committedCount >= promotionCommitCount
   }
 
-  /// Resolves one append micro-batch with a single actor entry. This remains
-  /// only a process-local heat hint: every selected command still has to
-  /// acquire a revision-fenced durable room credit after PostgreSQL preflight.
+  /// 以一次 actor 进入解析一批房间的热度。
+  ///
+  /// 结果仍只是进程内热度提示：每条被选中的命令在 PostgreSQL 预检之后
+  /// 仍需获取带修订栅栏的持久化房间额度。
+  ///
+  /// - Parameters:
+  ///   - roomIDs: 目标房间列表。
+  ///   - now: 当前时刻。
+  /// - Returns: 与输入顺序对应的判断结果。
   func shouldUseCredits(roomIDs: [UUID], now: Date) -> [Bool] {
     roomIDs.map { shouldUseCredits(roomID: $0, now: now) }
   }
 
-  /// Records a successfully committed normal direct append. It is deliberately
-  /// separate from `commit(_:)`, which applies only to an already precharged
-  /// token. Failed, denied, and idempotent commands cannot promote a room.
+  /// 记录一次成功提交的普通私聊追加。
+  ///
+  /// 它与 `commit(_:)` 刻意分开：后者只作用于已预扣的令牌。
+  /// 失败、被拒绝与幂等命中的命令都不能提升房间热度。
+  ///
+  /// - Parameters:
+  ///   - roomID: 目标房间。
+  ///   - now: 提交时刻。
   public func recordNormalAdmissionCommit(roomID: UUID, now: Date) {
     guard v2PostgresTimestampCanEncode(now) else { return }
     // Heat measures elapsed process time. Wall-clock corrections must not
@@ -144,9 +181,23 @@ public actor V2RoomAdmissionCommandCreditPool {
     heatByRoom[roomID] = .init(committedCount: 1, lastCommittedAt: observed)
   }
 
-  /// Acquires one already-charged room command credit. `shardState` comes
-  /// from the same durable preflight that feeds the shard credit pool, so the
-  /// room reservation is fenced to the exact active shard lease.
+  /// 为一次追加获取房间命令额度。
+  ///
+  /// 获取一个已扣费的房间命令额度。`shardState` 来自同一份为分片额度池服务的持久预检，
+  /// 因此房间预留被精确围栏到当前活跃的分片租约上。
+  ///
+  /// 分片状态必须携带可解析的租约与有效代次，否则视为状态损坏。获取过程会按房间与租约
+  /// 复用已预扣的批次额度；无可复用额度时按批量向数据库预扣，
+  /// 容量或准入不允许时返回限流或不可用结论。
+  ///
+  /// - Parameters:
+  ///   - roomID: 目标房间。
+  ///   - shardState: 权威的分片准入预检快照。
+  ///   - now: 服务端统一授时时刻。
+  /// - Returns: 获取结果。
+  /// - Throws: 分片租约或时刻不可解析时抛出
+  ///   ``V2RoomAdmissionCommandCreditError/corruptShardState``；
+  ///   数据库不支持 SQL 时抛出 ``V2RoomAdmissionCommandCreditError/nonSQLDatabase``。
   public func acquire(
     roomID: UUID,
     shardState: ShardAdmissionState,
@@ -202,11 +253,14 @@ public actor V2RoomAdmissionCommandCreditPool {
     return .granted(token)
   }
 
-  /// Issues a bounded set of room credits with one cross-actor call.
+  /// 通过一次跨 actor 调用发放一具有界房间额度。
   ///
-  /// A throwing suffix returns every locally issued prefix token. Durable
-  /// reservations intentionally remain charged, preserving the conservative
-  /// crash and retry semantics of the scalar API.
+  /// 若尾部元素抛出，会归还此前本地已发放前缀中的每个令牌。
+  /// 持久预留刻意保持已扣费，以保留标量 API 保守的崩溃与重试语义。
+  ///
+  /// - Parameter requests: 本批次待获取额度的请求，数量上限为 128。
+  /// - Returns: 与 `requests` 顺序一致的额度获取结果。
+  /// - Throws: 时钟非法或持久预留失败时抛出。
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
@@ -239,7 +293,12 @@ public actor V2RoomAdmissionCommandCreditPool {
     }
   }
 
-  /// Call only after the enclosing canonical message transaction commits.
+  /// 将令牌标记为已提交。
+  ///
+  /// 只有在包含它的规范消息事务提交之后才可调用。
+  /// 未知令牌会被忽略，因此重复提交不会影响额度统计。
+  ///
+  /// - Parameter token: 已签发的令牌。
   public func commit(_ token: Token) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
       var entry = credits[token.key]
@@ -249,22 +308,38 @@ public actor V2RoomAdmissionCommandCreditPool {
     committedCredits += 1
   }
 
-  /// Finalizes one already-committed room-log micro-batch in one actor hop.
+  /// 批量将令牌标记为已提交。
+  ///
+  /// 通过一次 actor 跳转收尾一个已提交的房间日志微批。
+  ///
+  /// - Parameter tokens: 本批令牌。
   public func commit(_ tokens: [Token]) {
     for token in tokens { commit(token) }
   }
 
-  /// Preserves committed message order while avoiding one actor hop per cold
-  /// room observation. This remains a heat hint only; it never grants credit.
+  /// 记录一批普通准入提交。
+  ///
+  /// 在保持已提交消息顺序的同时，避免每次冷房间观察都发生一次 actor 跳转。
+  /// 它仍然只是热度提示，绝不授予额度。
+  ///
+  /// - Parameter observations: 房间标识与其提交时刻组成的观察列表。
   public func recordNormalAdmissionCommits(_ observations: [(UUID, Date)]) {
     for (roomID, now) in observations {
       recordNormalAdmissionCommit(roomID: roomID, now: now)
     }
   }
 
-  /// Returns a token if its canonical transaction did not commit. This is
-  /// process-local only; the durable reservation intentionally remains
-  /// charged so a crash/retry can never oversell the room window.
+  /// 归还令牌对应的额度。
+  ///
+  /// 仅当规范事务未提交时才归还令牌。这仅在进程本地生效；
+  /// 持久预留刻意保持已扣费，使崩溃/重试绝不会超卖房间窗口。
+  ///
+  /// 未知令牌会被忽略。当前时刻不可编码时，事务已回滚，因此会直接退休该批次额度
+  /// 而不尝试重新计时。
+  ///
+  /// - Parameters:
+  ///   - token: 已签发的令牌。
+  ///   - now: 归还时刻。
   public func release(_ token: Token, now: Date) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
       var entry = credits[token.key]
@@ -286,13 +361,21 @@ public actor V2RoomAdmissionCommandCreditPool {
     }
   }
 
-  /// Returns a failed append micro-batch with one actor hop. A distinct time
-  /// is retained for every token so expiry behavior exactly matches the scalar
-  /// path even when a batch was assembled across a timer boundary.
+  /// 归还一批失败的追加微批，只发生一次 actor 跳转。
+  ///
+  /// 每个令牌都保留各自的时间，因此即便批次跨越了计时器边界拼装，
+  /// 过期行为也与标量路径完全一致。
+  ///
+  /// - Parameter tokens: 由令牌与其归还时刻组成的列表。
   func release(_ tokens: [(token: Token, now: Date)]) {
     for item in tokens { release(item.token, now: item.now) }
   }
 
+  /// 读取当前额度池快照。
+  ///
+  /// 读取时会顺带修剪已过期的热度记录。
+  ///
+  /// - Returns: 仅含聚合值的统计快照。
   public func snapshot() -> Snapshot {
     let observed = monotonicNow()
     heatByRoom = heatByRoom.filter {
@@ -400,9 +483,13 @@ public actor V2RoomAdmissionCommandCreditPool {
   }
 }
 
+/// 房间命令额度池错误。
 public enum V2RoomAdmissionCommandCreditError: Error, Sendable {
+  /// 数据库句柄不支持 SQL。
   case nonSQLDatabase
+  /// 分片租约或时刻无法解析。
   case corruptShardState
+  /// 额度内部状态不一致。
   case corruptCreditState
 }
 

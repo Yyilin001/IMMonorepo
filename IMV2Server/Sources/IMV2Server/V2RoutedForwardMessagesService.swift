@@ -1,10 +1,10 @@
 import Foundation
 import IMV2Core
 
-/// Routes a source/target pair only to its persisted owner. Co-located logical
-/// shards share the existing atomic source authorization and target acceptance.
-/// Cross-store copies require an export/inbox protocol; they must never run the
-/// local-source SQL in the target store or report an export as an accepted send.
+/// 只把源/目标房间对路由到其已持久化的归属。
+///
+/// 同库部署的逻辑分片复用既有的源端授权与目标接受原子路径；跨库复制必须走导出与收件箱协议，
+/// 绝不能在目标存储上执行本地来源 SQL，也不能把一次导出当作已接受的发送上报。
 public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
     private let router: any V2RoomShardRouting
     private let owners: [String: any V2OwnerValidatedForwardMessagesHandling]
@@ -12,6 +12,16 @@ public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
     private let maximumTargetConcurrency: Int
     private let crossOwner: (any V2CrossOwnerForwarding)?
 
+    /// 组合路由来源、各归属实现与物理存储映射。
+    ///
+    /// - Parameters:
+    ///   - router: 房间归属路由来源。
+    ///   - owners: 逻辑分片标识到转发实现的映射。
+    ///   - physicalStoreKeyByShard: 逻辑分片到物理存储键的映射；为 `nil` 时按标识自身映射。
+    ///   - maximumTargetConcurrency: 目标房间并发上限，需大于零。
+    ///   - crossOwner: 跨库转发的可选实现；为 `nil` 时跨库转发返回不可用错误码。
+    /// - Throws: 归属映射为空、并发非正、物理键与逻辑标识不匹配或含空白标识时抛出
+    ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
     public init(
         router: any V2RoomShardRouting,
         owners: [String: any V2OwnerValidatedForwardMessagesHandling],
@@ -31,6 +41,22 @@ public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
         self.crossOwner = crossOwner
     }
 
+    /// 执行一次可能跨多个目标房间的转发。
+    ///
+    /// 先解析所有涉及房间的归属，任一归属未配置即整体失败，绝不回退到其他数据库查找。
+    /// 所有房间同属一个物理存储时走单批原子路径以保留源批与目标通道语义；否则按目标房间
+    /// 分批并发处理，源消息按物理存储连续性切分成子批。全部房间结果入队完成后才抛出
+    /// 待处理错误，避免撤销尚未入队的兄弟目标。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起转发的用户。
+    ///   - command: 转发命令。
+    /// - Returns: 与源消息和目标房间笛卡尔积顺序对应的结果。
+    /// - Throws: 归属未配置时抛出
+    ///   ``V2RoomShardStorageRegistryError/unknownShardID``；存在暂停目标时抛出
+    ///   ``V2ForwardPendingError/paused``；存在未完成目标时抛出
+    ///   ``V2ForwardPendingError/pending``；结果缺失或归属返回不一致时抛出
+    ///   ``V2RoomShardRouteError/corruptPersistenceState``。
     public func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
         let rooms = Array(Set(command.sources.map(\.roomID) + command.targetRoomIDs))
         let routes = try await resolve(rooms)
@@ -81,6 +107,14 @@ public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
         return ordered.compactMap { $0 }
     }
 
+    /// 解析批量房间的归属，容忍个别房间不存在。
+    ///
+    /// 批量查询遇到房间缺失时回退为逐个有界目录点查，绝不扫描归属数据库；
+    /// 目录本身不可用时整次调用仍然失败。
+    ///
+    /// - Parameter rooms: 待解析的房间列表。
+    /// - Returns: 房间到归属的映射；不存在的房间不会出现在结果中。
+    /// - Throws: 目录查询失败时抛出。
     private func resolve(_ rooms: [RoomID]) async throws -> [RoomID: V2RoomShardRoute] {
         do {
             return try await router.routes(for: rooms)
@@ -98,6 +132,19 @@ public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
         }
     }
 
+    /// 处理一个目标房间下的全部源消息。
+    ///
+    /// 源消息按物理存储键分组：与目标同库的连续来源合并为一个子批交给归属原子处理，
+    /// 跨库来源交给跨库转发实现，未配置时返回固定错误码。
+    ///
+    /// - Parameters:
+    ///   - actor: 发起转发的用户。
+    ///   - command: 转发命令。
+    ///   - targetIndex: 目标房间在命令中的下标。
+    ///   - routes: 本次解析出的房间归属。
+    /// - Returns: 该目标房间下的全部结果及待处理状态。
+    /// - Throws: 任务取消时抛出 `CancellationError`；归属返回值与请求不一致时抛出
+    ///   ``V2RoomShardRouteError/corruptPersistenceState``。
     private func forwardTarget(actor: UserID, command: V2ForwardMessagesCommand, targetIndex: Int, routes: [RoomID: V2RoomShardRoute]) async throws -> TargetResults {
         let target = command.targetRoomIDs[targetIndex]
         guard let targetRoute = routes[target],
@@ -149,14 +196,27 @@ public struct V2RoutedForwardMessagesService: V2ForwardMessagesHandling {
         return .init(index: targetIndex, results: results, pending: pending, paused: paused)
     }
 
+    /// 构造一个带有稳定错误码的失败结果。
+    ///
+    /// - Parameters:
+    ///   - source: 源消息引用。
+    ///   - target: 目标房间。
+    ///   - code: 稳定错误码。
+    /// - Returns: 失败结果。
+    /// - Throws: 结果构造失败时抛出。
     private func failure(_ source: V2ForwardMessageReference, target: RoomID, code: String) throws -> V2ForwardMessageResult {
         try .init(sourceMessageID: source.messageID, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: code)
     }
 
+    /// 单个目标房间的处理结果。
     private struct TargetResults: Sendable {
+        /// 目标房间在命令中的下标。
         let index: Int
+        /// 与源消息顺序对应的结果；未完成项为 `nil`。
         let results: [V2ForwardMessageResult?]
+        /// 是否存在仍未完成的源消息。
         var pending: Bool = false
+        /// 未完成项中是否存在已暂停的投递。
         var paused: Bool = false
     }
 }

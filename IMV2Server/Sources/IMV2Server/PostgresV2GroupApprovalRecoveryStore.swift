@@ -2,10 +2,28 @@ import Fluent
 import Foundation
 import SQLKit
 
+/// 群审批恢复的 PostgreSQL 实现。
+///
+/// 恢复过程会在归属事务内重建审批事实：先复核房间归属，再依据成员操作记录、
+/// 邀请可用次数与审批状态给出「已完成」「已释放」或「隔离」结论，并把结论写入审计表。
 public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore {
     private let database: any Database
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放申请、成员操作、邀请与恢复审计的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 分页读取待恢复的审批候选。
+    ///
+    /// 只返回处于审批中状态的申请，并按申请标识升序分页；多取一行用于判断是否还有后续页。
+    ///
+    /// - Parameters:
+    ///   - scope: 恢复作用域。
+    ///   - after: 上一页游标。
+    ///   - limit: 本页条数，需落在 `1...100`。
+    /// - Returns: 候选分页。
+    /// - Throws: 条数越界时抛出 ``V2GroupApprovalRecoveryError/invalidRequest``；
+    ///   归属校验失败或持久化失败时抛出对应错误。
     public func candidates(scope: V2GroupApprovalRecoveryScope, after: UUID?, limit: Int) async throws -> V2GroupApprovalRecoveryPage {
         guard (1...100).contains(limit) else { throw V2GroupApprovalRecoveryError.invalidRequest }
         return try await database.transaction { database in
@@ -23,6 +41,23 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
         }
     }
 
+    /// 恢复一条审批决策。
+    ///
+    /// 同一操作标识已存在审计记录时校验其与本次请求一致并返回原结论；否则先串行化该操作，
+    /// 再按审核人与决定操作加锁、复核房间归属、读取申请。申请已不处于审批中时记录
+    /// 「不适用」；准备修订非法时隔离；存在成员操作时逐字段校验其与申请、
+    /// 邀请可用次数及房间修订的一致性，任一不符即隔离。
+    ///
+    /// - Parameters:
+    ///   - command: 恢复请求。
+    ///   - operatorPrincipal: 已认证的运维主体标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 恢复结果。
+    /// - Throws: 运维主体非法时抛出
+    ///   ``V2GroupApprovalRecoveryError/invalidRequest``；同一操作标识载荷不一致时抛出
+    ///   ``V2GroupApprovalRecoveryError/idempotencyConflict``；审核人或决定已变化时抛出
+    ///   ``V2GroupApprovalRecoveryError/decisionChanged``；申请不存在时抛出
+    ///   ``V2GroupApprovalRecoveryError/requestNotFound``；归属变化或持久化异常时抛出对应错误。
     public func recover(_ command: V2GroupApprovalRecoveryCommand, operatorPrincipal: String, now: Date) async throws -> V2GroupApprovalRecoveryResult {
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal) else { throw V2GroupApprovalRecoveryError.invalidRequest }
         return try await database.transaction { database in
@@ -107,14 +142,43 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
         }
     }
 
+    /// 锁定房间并校验归属，返回当前成员修订。
+    ///
+    /// - Parameters:
+    ///   - scope: 恢复作用域。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 房间当前成员修订。
+    /// - Throws: 房间不存在或归属与作用域不符时抛出
+    ///   ``V2GroupApprovalRecoveryError/ownerChanged``。
     private func assertOwner(_ scope: V2GroupApprovalRecoveryScope, sql: any SQLDatabase) async throws -> Int64 {
         guard let room = try await sql.raw("SELECT room_shard_id, owner_epoch, membership_revision FROM im_v2.rooms WHERE room_id = \(bind: scope.roomID) FOR UPDATE").first(decoding: ApprovalRecoveryRoomRow.self),
               room.shardID == scope.shardID, room.epoch == scope.ownerEpoch else { throw V2GroupApprovalRecoveryError.ownerChanged }
         return room.revision
     }
+    /// 取得指定键的事务级咨询锁。
+    ///
+    /// - Parameters:
+    ///   - key: 锁键。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Throws: 加锁失败时抛出。
     private func lock(_ key: String, sql: any SQLDatabase) async throws {
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
     }
+    /// 写入一条恢复审计记录并返回非幂等结果。
+    ///
+    /// 审计会同时保存申请、准备修订与成员操作的完整事实，便于事后复核判定依据。
+    ///
+    /// - Parameters:
+    ///   - command: 恢复请求。
+    ///   - principal: 运维主体标识。
+    ///   - outcome: 恢复结论。
+    ///   - detail: 结论原因。
+    ///   - request: 申请记录。
+    ///   - member: 成员操作记录；不存在时可为空。
+    ///   - now: 记录时刻。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 结论对应的恢复结果。
+    /// - Throws: 持久化失败时抛出。
     private func record(_ command: V2GroupApprovalRecoveryCommand, principal: String,
                         outcome: V2GroupApprovalRecoveryOutcome, detail: V2GroupApprovalRecoveryDetail,
                         request: ApprovalRecoveryRequestRow, member: ApprovalRecoveryMemberRow?, now: Date, sql: any SQLDatabase) async throws -> V2GroupApprovalRecoveryResult {
@@ -137,6 +201,12 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
     }
 }
 
+/// 把事务句柄转换为 SQL 连接。
+///
+/// - Parameter database: 当前事务句柄。
+/// - Returns: 对应的 SQL 连接。
+/// - Throws: 句柄不支持 SQL 时抛出
+///   ``V2GroupApprovalRecoveryError/corruptPersistenceState``。
 private func recoverySQL(_ database: any Database) throws -> any SQLDatabase {
     guard let sql = database as? any SQLDatabase else { throw V2GroupApprovalRecoveryError.corruptPersistenceState }; return sql
 }
@@ -174,8 +244,17 @@ private struct ApprovalRecoveryAuditRow: Decodable {
     }
 }
 
-/// Shared by ordinary membership and approval writes; a released legacy
-/// operation cannot become executable again when its reviewer regains access.
+/// 判断成员操作是否已被释放栅栏标记。
+///
+/// 普通成员变更与审批写入共用该检查：已被释放的历史操作不会因为审核人重新获得权限
+/// 而重新变为可执行。
+///
+/// - Parameters:
+///   - actor: 发起者。
+///   - operation: 操作标识。
+///   - sql: 当前事务使用的数据库连接。
+/// - Returns: 存在栅栏记录时为 `true`。
+/// - Throws: 查询失败时抛出。
 func v2MembershipOperationIsFenced(actor: UUID, operation: UUID, sql: any SQLDatabase) async throws -> Bool {
     try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_membership_operation_fences WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)) AS value").first(decoding: ApprovalRecoveryBool.self)?.value == true
 }

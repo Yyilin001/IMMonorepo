@@ -3,21 +3,17 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Batches the command-window portion of shard admission for the fixed
-/// two-member direct room-event-log path.
+/// 面向固定双人私聊房间日志路径的分片准入命令窗口额度池。
 ///
-/// PostgreSQL remains the authority: a batch is atomically and irreversibly
-/// charged to `shard_admission_pools` before this actor issues any token.
-/// Consequently a process crash can only conservatively waste the remaining
-/// credits in one batch; it can never oversell a shard window. The actor is
-/// intentionally unsuitable for fan-out, outstanding-unit, or plan credits,
-/// whose release lifecycle needs durable per-work accounting.
+/// PostgreSQL 仍是权威：在该 actor 签发任何令牌之前，整批额度会被原子且不可逆地
+/// 计入 `shard_admission_pools`。因此进程崩溃最多保守地浪费一个批次中剩余额度，
+/// 绝不会超卖分片窗口。该 actor 刻意不适用于扇出、未完成单元或计划额度，
+/// 那些额度的释放生命周期需要按工作项持久化记账。
 public actor V2ShardAdmissionCommandCreditPool {
-  /// Immutable input for one bounded micro-batch reservation pass.
+  /// 一次有界微批预留的不可变输入。
   ///
-  /// The values remain advisory process-local state. Every issued token was
-  /// already durably charged by this actor and the enclosing message SQL still
-  /// verifies the lease generation and every authorization revision.
+  /// 其中的取值仍只是进程内的建议性状态。每个已签发令牌都已由本 actor 持久化计费，
+  /// 且外层消息 SQL 仍会校验租约代次与全部授权修订。
   struct BatchRequest: Sendable {
     let roomShardID: String
     let capacityProfileID: String
@@ -25,25 +21,41 @@ public actor V2ShardAdmissionCommandCreditPool {
     let now: Date
   }
 
+  /// 一次已签发额度的令牌。
+  ///
+  /// 标识与键只在模块内部可见，调用方只能原样持有并交回。
   public struct Token: Hashable, Sendable {
     fileprivate let id: UInt64
     fileprivate let key: Key
   }
 
+  /// 额度池运行快照。
   public struct Snapshot: Equatable, Sendable {
+    /// 当前可用额度。
     public let activeCredits: Int
+    /// 已签发但尚未终结的额度。
     public let inFlightCredits: Int
+    /// 批次预留次数。
     public let batchReservations: Int
+    /// 已向数据库预留的额度总数。
     public let databaseCreditsReserved: Int
+    /// 已提交的额度数。
     public let committedCredits: Int
+    /// 已归还的额度数。
     public let returnedCredits: Int
+    /// 因过期被丢弃的额度数。
     public let expiredCreditsDiscarded: Int
+    /// 因容量不足被拒绝的次数。
     public let capacityRejections: Int
   }
 
+  /// 额度获取结果。
   public enum Acquisition: Sendable {
+    /// 已签发额度，并给出扣除在途额度后的有效分片状态。
     case granted(token: Token, effectiveShardState: ShardAdmissionState)
+    /// 当前被限流。
     case rateLimited
+    /// 准入当前不可用，附带原因。
     case unavailable(FanoutAdmissionUnavailableReason)
   }
 
@@ -80,15 +92,33 @@ public actor V2ShardAdmissionCommandCreditPool {
   private var expiredCreditsDiscarded = 0
   private var capacityRejections = 0
 
+  /// 组合数据库与批量大小。
+  ///
+  /// - Parameters:
+  ///   - database: 执行批量预扣的分片准入数据库。
+  ///   - batchSize: 单批额度大小，需落在 `1...128`。
+  ///
+  /// 批量大小越界时直接失败，避免出现越界预扣。
   public init(database: any Database, batchSize: Int) {
     precondition((1...128).contains(batchSize))
     self.database = database
     self.batchSize = batchSize
   }
 
-  /// Issues one already-charged command credit. The returned shard state
-  /// subtracts this process's uncommitted credits so the pure reducer still
-  /// evaluates the same command-window invariant without double charging.
+  /// 签发一个已计费的分片命令额度。
+  ///
+  /// 返回的分片状态会扣除本进程尚未提交的额度，使纯计算式的准入评估在不重复计费的前提下
+  /// 仍按同一命令窗口不变量判断。
+  ///
+  /// - Parameters:
+  ///   - roomShardID: 目标分片标识。
+  ///   - capacityProfileID: 容量档位标识。
+  ///   - shardState: 权威的分片准入状态预检快照。
+  ///   - now: 服务端统一授时时刻。
+  /// - Returns: 额度获取结果。
+  /// - Throws: 分片租约或时刻不可解析时抛出
+  ///   ``V2ShardAdmissionCommandCreditError/corruptShardState``；
+  ///   数据库不支持 SQL 时抛出 ``V2ShardAdmissionCommandCreditError/nonSQLDatabase``。
   public func acquire(
     roomShardID: String,
     capacityProfileID: String,
@@ -127,13 +157,16 @@ public actor V2ShardAdmissionCommandCreditPool {
     return try issueCredit(for: key, shardState: shardState, now: now)
   }
 
-  /// Issues a bounded set of credits with one cross-actor call.
+  /// 通过一次跨 actor 调用发放一具有界额度。
   ///
-  /// Validates and issues already-reserved credits synchronously on the actor.
-  /// The method suspends only when a key actually needs another durable batch,
-  /// rather than once per message. This distinction is important at sustained
-  /// load: an `await acquire(...)` loop creates one serial-executor job for
-  /// every message even when 63 of 64 messages need no database work.
+  /// 已在 actor 上同步校验并发放预留好的额度。只有当某个键确实需要新的持久批次时，
+  /// 该方法才会挂起，而不是每条消息挂起一次。这一区别在持续负载下很重要：
+  /// 即使 64 条消息中有 63 条无需任何数据库操作，`await acquire(...)` 循环
+  /// 也会为每条消息创建一个串行执行器作业。
+  ///
+  /// - Parameter requests: 本批次待获取额度的请求，数量上限为 128。
+  /// - Returns: 与 `requests` 顺序一致的额度获取结果。
+  /// - Throws: 时钟非法或持久预留失败时抛出。
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
@@ -197,10 +230,12 @@ public actor V2ShardAdmissionCommandCreditPool {
     }
   }
 
-  /// Finalizes a token only after the enclosing message transaction commits.
-  /// A missing/expired entry is deliberately harmless: the durable batch was
-  /// already charged, and therefore capacity safety does not depend on this
-  /// in-memory acknowledgement surviving a process restart.
+  /// 仅在外层消息事务提交之后终结该令牌。
+  ///
+  /// 缺失或已过期的条目刻意视为无害：持久化批次已经计费，
+  /// 因此容量安全并不依赖这条进程内确认能否跨越进程重启。
+  ///
+  /// - Parameter token: 已签发的令牌。
   public func commit(_ token: Token) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
       var entry = credits[token.key]
@@ -210,15 +245,22 @@ public actor V2ShardAdmissionCommandCreditPool {
     committedCredits += 1
   }
 
-  /// Finalizes one already-committed message micro-batch with a single actor
-  /// hop. Missing tokens retain the same deliberately harmless semantics as
-  /// `commit(_:)` because their durable capacity was charged before issuance.
+  /// 以一次 actor 跳转终结一个已提交的消息微批。
+  ///
+  /// 缺失令牌与 `commit(_:)` 具有同样刻意无害的语义：其持久化容量在签发之前已经计费。
+  ///
+  /// - Parameter tokens: 本批令牌。
   public func commit(_ tokens: [Token]) {
     for token in tokens { commit(token) }
   }
 
-  /// Returns a token whose surrounding transaction did not commit. Returning
-  /// it is process-local only; the database batch remains safely charged.
+  /// 归还一个外层事务未提交的令牌。
+  ///
+  /// 归还是进程内行为；数据库侧整批额度仍保持安全计费。
+  ///
+  /// - Parameters:
+  ///   - token: 已签发的令牌。
+  ///   - now: 归还时刻。
   public func release(_ token: Token, now: Date) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
       var entry = credits[token.key]
@@ -240,12 +282,21 @@ public actor V2ShardAdmissionCommandCreditPool {
     }
   }
 
-  /// Returns a rolled-back micro-batch with one actor hop. As with the
-  /// single-token path, durable reservations remain conservatively charged.
+  /// 批量归还令牌的兼容实现。
+  ///
+  /// 通过一次 actor 跳转归还一个已回滚的微批。与单令牌路径相同，
+  /// 持久预留仍保守地保持已扣费状态。
+  ///
+  /// - Parameters:
+  ///   - tokens: 本批令牌。
+  ///   - now: 归还时刻。
   func release(_ tokens: [Token], now: Date) {
     for token in tokens { release(token, now: now) }
   }
 
+  /// 读取当前额度池快照。
+  ///
+  /// - Returns: 仅含聚合值的统计快照。
   public func snapshot() -> Snapshot {
     .init(
       activeCredits: credits.values.reduce(into: 0) { $0 += $1.available },
@@ -294,12 +345,17 @@ public actor V2ShardAdmissionCommandCreditPool {
     }
   }
 
-  /// Whichever waiter resumes first retires the completed shared task before
-  /// returning its grant. Without this hand-off, another waiter can consume
-  /// the last credit, re-enter `reserveBatchIfNeeded`, observe the same
-  /// already-completed task and spin synchronously on its old reservation ID.
-  /// That spin monopolizes this actor and prevents the original creator's
-  /// `defer` from ever removing the task — a sustained-load livelock.
+  /// 收尾一个已完成的共享预留任务。
+  ///
+  /// 先恢复执行的等待者必须先注销已完成的共享任务，再返回自己的授予结果。
+  /// 若缺少这一交接，另一个等待者可能消耗掉最后一个额度，重新进入
+  /// `reserveBatchIfNeeded`，观察到同一个已完成任务并在其旧预留 ID 上同步自旋。
+  /// 该自旋会独占本 actor，使最初创建者的 `defer` 永远无法移除该任务——
+  /// 在持续负载下形成活锁。
+  ///
+  /// - Parameters:
+  ///   - pending: 待收尾的共享预留任务。
+  ///   - key: 该预留所属的键。
   private func finishPendingReservation(
     _ pending: PendingReservation,
     for key: Key,
@@ -313,10 +369,16 @@ public actor V2ShardAdmissionCommandCreditPool {
     }
   }
 
-  /// Ensures at least one process-local credit exists for `key`. The common
-  /// path is synchronous; the actor yields only once per durable reservation
-  /// batch. Reentrant callers may consume a shared grant first, so the loop
-  /// deliberately rechecks availability after every suspension.
+  /// 确保 `key` 至少存在一个进程本地额度。
+  ///
+  /// 常规路径是同步的；actor 每个持久预留批次只让出一次。
+  /// 由于可重入调用方可能先消耗掉一个共享授予，
+  /// 该循环刻意在每次挂起之后重新检查可用性。
+  ///
+  /// - Parameters:
+  ///   - key: 目标键。
+  ///   - validUntil: 本次额度的有效截止时刻。
+  ///   - now: 当前时间。
   private func replenishIfNeeded(
     for key: Key,
     validUntil: Date,
@@ -345,7 +407,14 @@ public actor V2ShardAdmissionCommandCreditPool {
     return nil
   }
 
-  /// Consumes one already-reserved credit without any suspension point.
+  /// 消费一个已预留的额度，且不产生任何挂起点。
+  ///
+  /// - Parameters:
+  ///   - key: 目标键。
+  ///   - shardState: 与该额度绑定的分片准入状态。
+  ///   - now: 当前时间。
+  /// - Returns: 本次额度获取结果。
+  /// - Throws: 状态非法或额度不可用时抛出。
   private func issueCredit(
     for key: Key,
     shardState: ShardAdmissionState,
@@ -474,9 +543,13 @@ public actor V2ShardAdmissionCommandCreditPool {
   }
 }
 
+/// 分片命令额度池错误。
 public enum V2ShardAdmissionCommandCreditError: Error, Sendable {
+  /// 数据库句柄不支持 SQL。
   case nonSQLDatabase
+  /// 分片租约或时刻无法解析。
   case corruptShardState
+  /// 额度内部状态不一致。
   case corruptCreditState
 }
 

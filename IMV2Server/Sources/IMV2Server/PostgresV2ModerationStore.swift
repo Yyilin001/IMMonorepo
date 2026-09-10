@@ -3,10 +3,10 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// First moderation vertical: explicit moderator message redaction. It uses a
-/// distinct idempotency/audit record but writes the same visible tombstone
-/// projection shape as withdrawal, so older local timelines never treat an
-/// unknown moderation event as a valid message acceptance.
+/// 审核功能的第一条纵向实现：审核员显式屏蔽消息。
+///
+/// 它使用独立的幂等与审计记录，但写入与撤回相同的可见墓碑投影形态，
+/// 因此较旧的本地时间线不会把未知的审核事件当成一次有效的消息接受。
 public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModerationStore, V2OwnerValidatedModerationStore {
     private let database: any Database
     public init(database: any Database) { self.database = database }

@@ -4,48 +4,84 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
-/// Narrow provider set mirrored by the account edge. It is intentionally not
-/// an open string so an app update cannot opt into an unreviewed provider.
+/// 与账号边缘一致的窄提供方集合。
+///
+/// 它刻意不是开放字符串，避免应用升级后自行启用未经评审的提供方。
 public enum V2ClientPushEndpointProvider: String, Codable, Equatable, Sendable {
+    /// Apple 推送通知服务。
     case apns
 }
 
-/// APNs environment is a deployment choice, not a user-controlled label.
+/// APNs 运行环境。
+///
+/// 它属于部署选择，而不是用户可控的标签。
 public enum V2ClientPushEndpointEnvironment: String, Codable, Equatable, Sendable {
+    /// 沙盒环境。
     case development
+    /// 生产环境。
     case production
 }
 
-/// A coherent access-token/device pair used only at the authenticated account
-/// edge. The bearer token and opaque Push token must never be persisted,
-/// logged, attached to analytics, or included in a returned value.
+/// 仅在已认证账号边缘使用的一组配套访问令牌与设备标识。
+///
+/// Bearer 令牌与不透明推送令牌都绝不能持久化、写入日志、附加到分析数据，
+/// 也不能作为返回值的一部分。
 public struct V2ClientPushEndpointCredentials: Sendable {
+    /// 访问令牌。
     public let accessToken: String
+    /// 当前设备标识。
     public let deviceID: DeviceID
 
+    /// 保存边缘凭据。
+    ///
+    /// - Parameters:
+    ///   - accessToken: 访问令牌。
+    ///   - deviceID: 当前设备标识。
     public init(accessToken: String, deviceID: DeviceID) {
         self.accessToken = accessToken
         self.deviceID = deviceID
     }
 }
 
+/// 推送端点凭据提供能力。
 public protocol V2ClientPushEndpointCredentialProvider: Sendable {
+    /// 获取一次边缘凭据。
+    ///
+    /// - Returns: 访问令牌与设备标识。
+    /// - Throws: 凭据不可用时抛出。
     func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials
 }
 
-/// Isolates URLSession so endpoint registration tests remain offline and do
-/// not need a process-global URLProtocol registration.
+/// 推送端点 HTTP 传输能力。
+///
+/// 把 URLSession 隔离在此边界之后，使端点注册测试可以离线进行，
+/// 无需注册进程级 URLProtocol。
 public protocol V2ClientPushEndpointHTTPTransport: Sendable {
+    /// 执行一次 HTTP 请求。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 网络失败或响应不可解析时抛出。
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
+/// 基于 URLSession 的推送端点传输实现。
 public actor V2URLSessionPushEndpointHTTPTransport: V2ClientPushEndpointHTTPTransport {
     private let session: URLSession
 
+    /// 以会话构造传输实现。
+    ///
+    /// - Parameter session: 使用的 URL 会话，默认使用账号安全会话配置。
     public init(session: URLSession = V2SecureURLSession.account) {
         self.session = session
     }
 
+    /// 执行请求并要求返回 HTTP 响应。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 任务取消时抛出 `CancellationError`；响应不是 HTTP 响应时抛出
+    ///   ``V2ClientPushEndpointError/invalidResponse``。
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         let (data, response) = try await session.data(for: request)
@@ -56,40 +92,84 @@ public actor V2URLSessionPushEndpointHTTPTransport: V2ClientPushEndpointHTTPTran
     }
 }
 
-/// Framework-neutral account-edge contract for a device-owned endpoint.
-/// Registration and removal are deliberately non-retrying writes: callers
-/// must first obtain a current OS-provided token and explicitly decide when to
-/// repeat after failure.
+/// 设备自有端点的框架无关账号边缘契约。
+///
+/// 注册与删除刻意都是不自动重试的写操作：调用方必须先取得当前由系统提供的令牌，
+/// 并在失败后自行明确决定何时重试。
 public protocol V2ClientPushEndpointRegistering: Sendable {
+    /// 注册或更新设备的推送端点。
+    ///
+    /// - Parameters:
+    ///   - provider: 推送提供方。
+    ///   - environment: 运行环境。
+    ///   - token: 系统提供的推送令牌。
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     func register(
         provider: V2ClientPushEndpointProvider,
         environment: V2ClientPushEndpointEnvironment,
         token: String
     ) async throws
+    /// 删除当前设备的推送端点。
+    ///
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     func remove() async throws
 }
 
-/// Callers bind every operation to the durable intent's device. Epoch claims
-/// are retried with the same request ID/expected epoch; stale never auto-claims.
+/// 推送意图发布能力。
+///
+/// 调用方把每次操作都绑定到持久化意图所在的设备。代次声明重试时沿用同一请求标识与
+/// 期望代次；陈旧状态绝不会自动重新认领。
 public protocol V2ClientPushIntentPublishing: Sendable {
+    /// 读取设备当前的推送意图代次。
+    ///
+    /// - Parameter deviceID: 目标设备。
+    /// - Returns: 当前代次。
+    /// - Throws: 认证、网络或响应解析失败时抛出。
     func intentEpoch(deviceID: DeviceID) async throws -> UInt64
+
+    /// 认领会话并取得其代次。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - claim: 会话声明。
+    /// - Returns: 认领到的会话代次。
+    /// - Throws: 代次不一致、认证或网络失败时抛出。
     func claimIntentSession(deviceID: DeviceID, claim: V2PushIntentSessionClaim) async throws -> UInt64
+
+    /// 发布一次推送意图。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - version: 期望的意图版本。
+    ///   - intent: 目标意图内容。
+    /// - Throws: 版本冲突、认证或网络失败时抛出。
     func publishIntent(deviceID: DeviceID, version: V2PushIntentVersion, intent: V2ClientPushIntent) async throws
 }
 
+/// 客户端推送意图。
 public enum V2ClientPushIntent: Sendable {
+    /// 关闭推送。
     case disabled
+    /// 开启推送，并携带提供方、环境与令牌。
     case enabled(provider: V2ClientPushEndpointProvider, environment: V2ClientPushEndpointEnvironment, token: String)
 }
 
-/// HTTPS implementation of the authenticated `PUT|DELETE /v2/push-endpoint`
-/// contract. It does not expose a read API because an endpoint token is not
-/// application state and must not re-enter client persistence.
+/// 已认证 `PUT|DELETE /v2/push-endpoint` 契约的 HTTPS 实现。
+///
+/// 它不提供读取接口：端点令牌不是应用状态，也绝不能重新进入客户端持久化。
 public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2ClientPushIntentPublishing, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientPushEndpointCredentialProvider
     private let transport: any V2ClientPushEndpointHTTPTransport
 
+    /// 校验并保存端点、凭据提供方与传输实现。
+    ///
+    /// - Parameters:
+    ///   - endpoint: 推送端点，必须是带主机名的 HTTPS 地址。
+    ///   - credentials: 提供访问令牌与设备标识的凭据来源。
+    ///   - transport: HTTP 传输实现，默认使用系统 URL 会话。
+    /// - Throws: 端点不是合法 HTTPS 地址时抛出
+    ///   ``V2ClientPushEndpointError/invalidEndpoint``。
     public init(
         endpoint: URL,
         credentials: any V2ClientPushEndpointCredentialProvider,
@@ -103,6 +183,15 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         self.transport = transport
     }
 
+    /// 注册或更新设备的推送端点。
+    ///
+    /// - Parameters:
+    ///   - provider: 推送提供方。
+    ///   - environment: 运行环境。
+    ///   - token: 系统提供的推送令牌。
+    /// - Throws: 令牌非法时抛出
+    ///   ``V2ClientPushEndpointError/invalidRegistration``；
+    ///   认证、网络或服务端拒绝时抛出对应错误。
     public func register(
         provider: V2ClientPushEndpointProvider,
         environment: V2ClientPushEndpointEnvironment,
@@ -123,10 +212,21 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         try await sendNoContent(request)
     }
 
+    /// 删除当前设备的推送端点。
+    ///
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     public func remove() async throws {
         try await sendNoContent(try await authenticatedRequest(method: "DELETE"))
     }
 
+    /// 构造带 Bearer 令牌与设备标识的请求。
+    ///
+    /// - Parameters:
+    ///   - method: HTTP 方法。
+    ///   - path: 可选的路径片段。
+    ///   - deviceID: 可选的显式设备标识，用于意图发布路径。
+    /// - Returns: 可发送请求。
+    /// - Throws: 取不到凭据或地址无法构造时抛出对应错误。
     private func authenticatedRequest(method: String, path: String? = nil, deviceID: DeviceID? = nil) async throws -> URLRequest {
         try Task.checkCancellation()
         let edgeCredentials: V2ClientPushEndpointCredentials
@@ -161,11 +261,23 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         return request
     }
 
+    /// 读取设备当前的推送意图代次。
+    ///
+    /// - Parameter deviceID: 目标设备。
+    /// - Returns: 当前代次。
+    /// - Throws: 认证、网络或响应解析失败时抛出。
     public func intentEpoch(deviceID: DeviceID) async throws -> UInt64 {
         let request = try await authenticatedRequest(method: "GET", path: "session", deviceID: deviceID)
         return try await sendEpoch(request)
     }
 
+    /// 认领会话并取得其代次。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - claim: 会话声明。
+    /// - Returns: 认领到的会话代次。
+    /// - Throws: 代次不一致、认证或网络失败时抛出。
     public func claimIntentSession(deviceID: DeviceID, claim: V2PushIntentSessionClaim) async throws -> UInt64 {
         struct Body: Encodable { let requestID: UUID; let expectedEpoch: UInt64 }
         var request = try await authenticatedRequest(method: "POST", path: "session", deviceID: deviceID)
@@ -176,6 +288,13 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         return epoch
     }
 
+    /// 发布一次推送意图。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - version: 期望的意图版本。
+    ///   - intent: 目标意图内容。
+    /// - Throws: 版本冲突、认证或网络失败时抛出。
     public func publishIntent(deviceID: DeviceID, version: V2PushIntentVersion, intent: V2ClientPushIntent) async throws {
         struct Body: Encodable {
             let epoch: UInt64; let revision: UInt64; let enabled: Bool
@@ -195,6 +314,11 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         try await sendNoContent(request)
     }
 
+    /// 发送请求并解析代次响应。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应中的代次。
+    /// - Throws: 响应不合法或状态码非预期时抛出。
     private func sendEpoch(_ request: URLRequest) async throws -> UInt64 {
         struct Body: Decodable { let epoch: UInt64 }
         let (data, response) = try await send(request)
@@ -205,11 +329,21 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         return body.epoch
     }
 
+    /// 发送请求并要求 204 空响应。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Throws: 状态码非 204 时抛出对应错误。
     private func sendNoContent(_ request: URLRequest) async throws {
         let (data, response) = try await send(request)
         try checkStatus(response, expected: 204, data: data)
     }
 
+    /// 发送请求并返回响应体与 HTTP 响应。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 任务取消时抛出 `CancellationError`；网络失败时抛出
+    ///   ``V2ClientPushEndpointError/networkFailure``。
     private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         do { return try await transport.data(for: request) }
@@ -249,16 +383,27 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
     }
 }
 
+/// 推送端点客户端错误。
 public enum V2ClientPushEndpointError: Error, Equatable, Sendable {
+    /// 端点不是合法的 HTTPS 地址。
     case invalidEndpoint
+    /// 端点注册参数不合法。
     case invalidRegistration
+    /// 取不到可用凭据。
     case authorizationUnavailable
+    /// 服务端拒绝授权。
     case authorizationDenied
+    /// 响应结构不合法。
     case invalidResponse
+    /// 服务端限流，并给出建议等待秒数。
     case rateLimited(retryAfter: TimeInterval)
+    /// 服务端要求先声明意图版本。
     case intentVersionRequired
+    /// 意图版本已过期。
     case staleIntent
+    /// 意图与当前状态冲突。
     case intentConflict
+    /// 服务端返回非预期状态码。
     case serverStatus(Int)
     case networkFailure
 }

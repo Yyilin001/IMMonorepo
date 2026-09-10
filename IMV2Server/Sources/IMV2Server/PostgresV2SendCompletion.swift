@@ -3,10 +3,13 @@ import IMV2Core
 import PostgresNIO
 import SQLKit
 
-/// A conditional append can wait for the operation fence inside its single
-/// statement while retaining the older statement snapshot. Only these exact
-/// operation-key collisions mean "retry through the completed-command path";
-/// unrelated uniqueness/programming failures must still surface normally.
+/// 判断错误是否为发送完成记录的竞争冲突。
+///
+/// 条件追加可能在单条语句内等待操作栅栏，同时保留更早的语句快照。只有这几类精确的
+/// 操作键冲突才意味着「应改走已完成命令路径重试」；其他唯一约束或编程错误必须照常暴露。
+///
+/// - Parameter error: 待判断的错误。
+/// - Returns: 属于发送完成主键或消息唯一键冲突时为 `true`。
 func v2IsSendCompletionRace(_ error: any Error) -> Bool {
     let state: String?
     let constraint: String?
@@ -22,14 +25,15 @@ func v2IsSendCompletionRace(_ error: any Error) -> Bool {
     ].contains(constraint ?? "")
 }
 
-/// Shared append fragment for all columnar/JSON room-log write graphs. Input
-/// carries the validated command fingerprint. Sequence/time come from INSERT
-/// RETURNING and membership comes from the locked input/allocation. Do not
-/// re-read rooms through a statement's
-/// older MVCC snapshot after its lock query has followed a concurrent update.
-/// This stays inside the same statement and transaction as the message write.
+/// 所有列式与 JSON 房间日志写入图共用的追加片段。
+///
+/// 输入携带已校验的命令指纹；序号与时间来自 `INSERT ... RETURNING`，成员修订来自已加锁的
+/// 输入或分配结果。锁查询跟随并发更新之后，不得再用语句的更旧 MVCC 快照重读房间。
+/// 该片段始终与消息写入处于同一语句和同一事务。
 let v2DirectRoomLogSendCompletionCTE = roomLogSendCompletionCTE(isGroup: false)
+/// 混合大群房间日志写入使用的追加片段。
 let v2HybridGroupSendCompletionCTE = roomLogSendCompletionCTE(isGroup: true)
+/// 私聊快速路径使用的追加片段，成员修订取自已分配结果。
 let v2FastDirectRoomLogSendCompletionCTE = roomLogSendCompletionCTE(
     isGroup: false, acceptedSource: "eligible", membershipColumn: "expected_membership_revision"
 )
@@ -101,8 +105,9 @@ private func roomLogSendCompletionCTE(
     """
 }
 
-/// Scalar equivalent for richer content paths. No body, entity URL, media
-/// presentation or current projection is retained in the completion ledger.
+/// 面向更丰富内容路径的标量等价实现。
+///
+/// 完成台账中不保留正文、实体 URL、媒体展示信息或当前投影。
 func v2SendCompletionCTE(
     fingerprint: V2SendMessageFingerprint,
     eventID: UUID,

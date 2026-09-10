@@ -45,46 +45,51 @@ enum IMV2GatewayLoadGenerator {
     }
 }
 
-/// Defines what a weighted scenario does when its selected device already has
-/// its configured number of message requests in flight.  The default models a
-/// client that declines to buffer more user actions.  The bounded queue mode
-/// is deliberately opt-in for measuring server saturation: it retains demand
-/// locally, but records both queue pressure and overflow so it cannot disguise
-/// client-side backpressure as successful server throughput.
+/// 定义当一个加权场景选中的设备已达其配置的在途消息请求数时该如何处理。
+///
+/// 默认行为模拟拒绝继续缓冲用户操作的客户端。
+/// 有界队列模式是为测量服务端饱和而刻意选择性启用的：
+/// 它在本地保留需求，但同时记录队列压力与溢出，
+/// 因此不会把客户端背压伪装成服务端的成功吞吐。
 private enum ScenarioSendDispatch: String, Decodable, Sendable {
     case strictPerDevice = "strict_per_device"
     case boundedClientQueue = "bounded_client_queue"
 }
 
-/// Selects the room-log cursor position used after a simulated device has
-/// opened its direct rooms. `zero` exercises durable history recovery. `tail`
-/// performs an authorized subscription first and starts the steady workload at
-/// the returned high watermark, so repeated steady-state runs do not silently
-/// re-read an ever-growing test history.
+/// 选择模拟设备打开其单聊房间之后所采用的房间日志游标位置。
+///
+/// `zero` 会演练持久历史恢复。
+/// `tail` 先执行一次授权订阅，然后从返回的高水位开始稳态负载，
+/// 使重复的稳态运行不会悄悄重读一段不断增长的历史。
 private enum RoomLogInitialCursor: String, Sendable {
     case zero
     case tail
 }
 
-/// Defines why a simulated client advances an active room's durable cursor.
-/// `messageAcknowledgement` preserves the original stress mode.  Production
-/// clients normally use the post-commit availability wake delivered over the
-/// existing TLS stream, so `availabilityHint` is the faithful online mode.
+/// 定义模拟客户端推进活跃房间持久游标的原因。
+///
+/// `messageAcknowledgement` 保留最初的压测模式。
+/// 生产客户端通常使用经由既有 TLS 流送达的提交后可用性唤醒，
+/// 因此 `availabilityHint` 才是更贴近线上的模式。
 private enum RoomLogReadTrigger: String, Sendable {
     case messageAcknowledgement = "message_ack"
     case availabilityHint = "availability_hint"
 }
 
-/// Scenario peers can either form the historical ring of neighbouring users,
-/// or disjoint pairs.  Pairs make both endpoints select the same active
-/// direct room, which is required when modelling foreground websocket wakes.
+/// 场景中的对等端可以组成沿历史邻接关系构成的环，也可以组成互不相交的配对。
+///
+/// 配对会让两端选中同一个活跃单聊房间，这是模拟前台 WebSocket 唤醒所必需的。
 private enum PeerTopology: String, Sendable {
     case ring
     case pairs
 }
 
-/// Low-cardinality protocol diagnostics for a failed load assertion. Never
-/// include payloads, identifiers, tokens, or user data in operator output.
+/// 针对失败的负载断言生成低基数的协议诊断标签。
+///
+/// 运维输出中绝不能包含载荷、标识符、令牌或用户数据。
+///
+/// - Parameter body: 待分类的响应正文。
+/// - Returns: 低基数的响应类型标签。
 private func loadResponseKind(_ body: IMV2Envelope.OneOf_Body?) -> String {
     switch body {
     case .serverHello: "server_hello"
@@ -255,10 +260,11 @@ private struct LoadConfiguration: Sendable {
     }
 }
 
-/// A reproducible, weighted workload.  The scenario controls *which* of the
-/// connected devices act; the CLI still controls the transport endpoint and
-/// the number of devices assigned to this worker.  Multiple workers therefore
-/// use the same scenario with a proportional `--scenario-rate-scale`.
+/// 可复现的加权负载。
+///
+/// 场景决定已连接设备中*哪些*会行动；
+/// CLI 仍控制传输端点以及分配给本工作者的设备数量。
+/// 因此多个工作者可以配合按比例缩放的 `--scenario-rate-scale` 共用同一场景。
 private struct LoadScenario: Decodable, Sendable {
     struct Persona: Decodable, Sendable {
         let name: String
@@ -288,29 +294,29 @@ private struct LoadScenario: Decodable, Sendable {
     let name: String
     let seed: UInt64
     let roomWarmupTimeoutSeconds: Int
-    /// A capacity scenario may require that every phase finish without local
-    /// client backlog. This distinguishes a sustainable offered rate from a
-    /// rate which merely drains after the generator stops scheduling work.
+    /// 容量场景可以要求每个阶段在结束时都没有本地客户端积压。
+    ///
+    /// 这能把可持续的施加速率与「仅在生成器停止排程后才慢慢排空」的速率区分开。
     let requiresSteadyStateDrain: Bool?
-    /// Small in-flight response tails at a phase boundary are normal for a
-    /// real network client. A strict scenario sets this explicit bound so it
-    /// still rejects material accumulation instead of requiring an impossible
-    /// zero exactly on the last scheduler tick.
+    /// 在阶段边界上，真实网络客户端出现少量在途响应尾流是正常的。
+    ///
+    /// 严格场景会设置这个显式上限，
+    /// 从而仍能拒绝实质性堆积，而不必要求在最后一个调度 tick 上恰为零这种不可能的条件。
     let maximumSteadyStateQueuedMessages: Int?
-    /// Give in-flight protocol responses a short, explicit grace period
-    /// before transport teardown. This is not part of a phase's throughput:
-    /// its outcome is recorded separately in the report.
+    /// 在传输拆除之前，给在途协议响应一段简短的显式宽限期。
+    ///
+    /// 它不计入阶段的吞吐：其结果会在报告中单独记录。
     let completionDrainSeconds: Int?
-    /// Keep already-drained connections open for a bounded interval before
-    /// teardown. Partitioned runs use the same value so an early worker cannot
-    /// create a connection-close storm while a peer worker is still draining
-    /// its last protocol responses. This hold never retries or schedules
-    /// messages and therefore cannot hide an unsustainable offered rate.
+    /// 在拆除之前，把已排空的连接继续保持一段有界时间。
+    ///
+    /// 分区运行使用相同的值，使提前完成的工作者不会在同伴仍在排空最后一批协议响应时
+    /// 制造一场连接关闭风暴。
+    /// 这段保持既不重试也不排程消息，因此无法掩盖不可持续的施加速率。
     let postDrainHoldSeconds: Int?
-    /// Number of monotonic scheduler ticks used to distribute each second's
-    /// offered work. Older scenarios default to 10 Hz for report
-    /// reproducibility. Real-user capacity scenarios opt into 100 Hz so five
-    /// partition workers do not manufacture synchronized 100 ms bursts.
+    /// 用于分摊每秒施加工作的单调调度 tick 数量。
+    ///
+    /// 较旧的场景默认 10 Hz 以保证报告可复现。
+    /// 真实用户容量场景选择 100 Hz，使五个分区工作者不会制造同步的 100 ms 突发。
     let schedulerTicksPerSecond: Int?
     let sendDispatch: ScenarioSendDispatch?
     let maximumQueuedMessagesPerConnection: Int?
@@ -359,10 +365,10 @@ private struct LoadCredential: Decodable, Sendable {
     let deviceID: String
     let accessToken: String
     let accessTokenExpiresAtMilliseconds: Int64
-    /// Optional direct-room identifiers resolved during a dedicated warm-up
-    /// run.  Supplying them keeps the measured run focused on steady-state
-    /// messaging instead of repeating room-open authorization for every
-    /// simulated device.
+    /// 在专门的预热运行中解析出的可选单聊房间标识。
+    ///
+    /// 提供它们可以让被测运行专注在稳态消息上，
+    /// 而不必为每个模拟设备重复执行开房授权。
     let targetRoomIDs: [String]?
 
     static func load(from path: String) throws -> [Self] {
@@ -973,10 +979,15 @@ private struct LoadRun {
         }
     }
 
-    /// Polls the per-channel simulator state on its owning event loop before
-    /// closing TLS connections. It is intentionally bounded and is only a
-    /// teardown aid: `requiresSteadyStateDrain` evaluates the backlog sampled
-    /// *at the end of each phase*, before this drain begins.
+    /// 在关闭 TLS 连接之前，于其所属事件循环上轮询每个通道的模拟器状态。
+    ///
+    /// 它刻意是有界的，且只是拆除辅助：
+    /// `requiresSteadyStateDrain` 评估的是*每个阶段结束时*采样的积压，早于本次排空开始。
+    ///
+    /// - Parameters:
+    ///   - channels: 待排空的通道列表。
+    ///   - maximumSeconds: 本次排空的最长秒数。
+    /// - Returns: 排空报告。
     private func drainScenarioMessages(
         channels: [Channel],
         maximumSeconds: Int
@@ -1149,10 +1160,10 @@ private final class LoadConnectionSlot: @unchecked Sendable {
     }
 }
 
-/// Fixed cumulative weights make a scenario deterministic for a seed and do
-/// not retain a task per connection.  A single scheduler selects individual
-/// channels at each 100ms tick, which models a sparse active subset instead of
-/// making every connection emit at a uniform interval.
+/// 固定的累积权重让场景对给定种子保持确定性，且不会为每条连接保留一个任务。
+///
+/// 单个调度器会在每个 100ms tick 上挑选个别通道，
+/// 从而模拟稀疏的活跃子集，而不是让每条连接都以均匀间隔发送。
 private struct ScenarioAssignments {
     private struct Entry {
         let cumulativeWeight: Double
@@ -1933,10 +1944,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    /// Opening a direct room is idempotent when the same operation ID is
-    /// retained. Retry only responses that the server explicitly marks as
-    /// retryable, and keep the budget bounded so a genuine outage remains
-    /// visible to the load run instead of becoming an unbounded client queue.
+    /// 只要保留同一个操作 ID，开单聊房间就是幂等的。
+    ///
+    /// 只重试服务端显式标记为可重试的响应，并把预算保持有界，
+    /// 使真正的故障对负载运行仍然可见，而不会变成一个无界的客户端队列。
     private static let maximumDirectRoomRetries = 6
 
     private func scheduleDirectRoomRetry(
@@ -1996,10 +2007,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    /// Establishes the active-room subscription before a workload starts. A
-    /// subscription is an authorized persistent-state read, not a local
-    /// guess: a message committed after its returned watermark remains
-    /// visible to the normal cursor pull.
+    /// 在负载开始之前建立活跃房间订阅。
+    ///
+    /// 订阅是一次已授权的持久状态读取，而不是本地猜测：
+    /// 在其返回水位之后提交的消息，仍可通过常规游标拉取看到。
+    ///
+    /// - Parameter context: 目标通道上下文。
+    /// - Throws: 写入失败时抛出。
     private func initializeRoomLogCursorThenScheduleMessages(
         context: ChannelHandlerContext
     ) throws {
@@ -2029,9 +2043,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try sendNextRoomEventCursorSubscriptionOrScheduleMessages(context: context)
     }
 
-    /// Subscriptions are serialized per connection. This keeps recovery
-    /// bounded and lets the availability-hint mode faithfully model a single
-    /// foreground room while retaining the legacy all-room stress mode.
+    /// 订阅按连接串行执行。
+    ///
+    /// 这既让恢复保持有界，又使可用性提示模式能忠实模拟单个前台房间，
+    /// 同时保留旧版的「全部房间」压测模式。
+    ///
+    /// - Parameter context: 目标通道上下文。
+    /// - Throws: 状态或写入失败时抛出。
     private func sendNextRoomEventCursorSubscriptionOrScheduleMessages(
         context: ChannelHandlerContext
     ) throws {
@@ -2062,10 +2080,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    /// A subscription is a read-only cursor fence and `SERVER_BUSY` is an
-    /// explicit retryable response. Retain only a small, per-room retry budget
-    /// so tail warm-up behaves like a real client without converting an
-    /// unavailable Gateway into an unbounded hidden queue.
+    /// 订阅是一道只读游标围栏，而 `SERVER_BUSY` 是显式的可重试响应。
+    ///
+    /// 此处只保留一个很小的每房间重试预算，
+    /// 使尾部预热表现得像真实客户端，同时不会把不可用的 Gateway 变成无界的隐藏队列。
     private static let maximumRoomEventCursorSubscriptionRetries = 5
 
     private func scheduleRoomEventCursorSubscriptionRetry(
@@ -2124,10 +2142,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    /// Retain a scenario-selected action only when its per-device queue has a
-    /// hard bound.  The queue is intentionally local to the simulated device:
-    /// this preserves weighted user behaviour while allowing a saturation run
-    /// to distinguish server backlog from the previous immediate-drop model.
+    /// 仅当每设备队列存在硬性上限时才保留场景选中的动作。
+    ///
+    /// 该队列刻意只属于该模拟设备本地：
+    /// 这既保留了加权用户行为，又让饱和运行能把服务端积压与先前的立即丢弃模型区分开。
+    ///
+    /// - Parameter context: 目标通道上下文。
+    /// - Throws: 发送或写入失败时抛出。
     private func enqueueScenarioMessage(context: ChannelHandlerContext) throws {
         guard !directRoomIDs.isEmpty else { return }
         if messageRequestIDs.count < maximumInFlightMessagesPerConnection {
@@ -2142,9 +2163,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         statistics.recordScenarioMessageDeferred()
     }
 
-    /// ACKs and rejections both free a device in-flight slot.  Drain at most
-    /// the advertised window, never recursively through the event loop, and
-    /// keep `messagesSent` as the number actually written to the socket.
+    /// ACK 与拒绝都会释放一个设备的在途槽位。
+    ///
+    /// 最多排空所通告的窗口，绝不通过事件循环递归调用，
+    /// 并让 `messagesSent` 始终表示真正写入套接字的数量。
+    ///
+    /// - Parameter context: 目标通道上下文。
+    /// - Throws: 发送或写入失败时抛出。
     private func drainQueuedScenarioMessages(context: ChannelHandlerContext) throws {
         while queuedScenarioMessages > 0,
               messageRequestIDs.count < maximumInFlightMessagesPerConnection,
@@ -2155,10 +2180,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    /// A real client advances viewing state to its latest applied room-log
-    /// cursor. Multiple UI updates while one receipt is in flight collapse to
-    /// one higher watermark; the generator reports that coalescing instead of
-    /// manufacturing redundant database operations for every rendered event.
+    /// 真实客户端会把阅读状态推进到其最近应用的房间日志游标。
+    ///
+    /// 当一条回执仍在途时，多次 UI 更新会合并为一个更高的水位线；
+    /// 生成器会如实报告这种合并，而不会为每个渲染出的事件都伪造一次冗余数据库操作。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - context: 目标通道上下文。
+    /// - Throws: 发送或写入失败时抛出。
     private func scheduleReadReceipt(
         roomID: String,
         context: ChannelHandlerContext
@@ -2233,15 +2263,21 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    /// This models the durable private-room recovery contract: a sender or
-    /// recipient receives only a waterline/ack, then advances its own room
-    /// cursor. One in-flight read per room coalesces bursts; a `has_more`
-    /// response is drained immediately so recovery cannot stall after a full
-    /// page, while later messages schedule the next bounded pull.
-    /// A durable high-watermark wake can race ahead of the full foreground
-    /// batch because they may be published by independent Gateway workers.
-    /// Keep recovery bounded, but give the lossless-in-order fast path a short
-    /// cancellable window to catch up before creating a redundant pull.
+    /// 在需要时安排房间事件恢复拉取。
+    ///
+    /// 这里模拟的是持久单聊房间的恢复契约：发送方或接收方只会收到一个水位/ACK，
+    /// 然后自行推进其房间游标。每个房间只保留一次在途读取以合并突发；
+    /// `has_more` 响应会被立即排空，使恢复不会在整页之后停滞，
+    /// 而后续消息再安排下一次有界拉取。
+    ///
+    /// 持久高水位唤醒可能跑在完整前台批次之前，因为它们可能由独立的 Gateway 工作者发布。
+    /// 因此让恢复保持有界，但给无损且保序的快速路径一个简短、可取消的追赶窗口，
+    /// 以避免创建冗余拉取。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - context: 目标通道上下文。
+    /// - Throws: 写入失败时抛出。
     private func scheduleRoomEventRecoveryIfNeeded(
         roomID: String,
         context: ChannelHandlerContext
@@ -2308,10 +2344,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try sendReservedRoomEventPull(roomID: roomID, context: context)
     }
 
-    /// Sends a pull whose per-room in-flight/retry slot is already retained.
-    /// Keeping that slot across retryable overload responses is essential:
-    /// later availability hints then only raise the announced high-watermark
-    /// instead of creating a synchronized retry storm.
+    /// 发送一次拉取，其每房间在途/重试槽位已经预留。
+    ///
+    /// 在可重试的过载响应之间保持该槽位至关重要：
+    /// 这样后续可用性提示只会抬高已通告的高水位，而不会制造一场同步重试风暴。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - context: 目标通道上下文。
+    /// - Throws: 写入失败时抛出。
     private func sendReservedRoomEventPull(
         roomID: String,
         context: ChannelHandlerContext
@@ -2804,9 +2845,10 @@ private struct ScenarioDrainReport: Encodable {
     let pending: ScenarioPendingMessages
 }
 
-/// A bounded one-millisecond histogram avoids retaining millions of samples
-/// during an hours-long test.  Values above ten seconds share an overflow
-/// bucket; `maximum` still records their true largest value.
+/// 有界的 1 毫秒直方图。
+///
+/// 它避免了在长达数小时的测试中保留数百万个样本。
+/// 超过十秒的值共享一个溢出桶；`maximum` 仍记录它们真实的最大值。
 private struct LatencyHistogram: Sendable {
     private static let maximumBucketMilliseconds = 10_000
     private var buckets = Array(repeating: 0, count: maximumBucketMilliseconds + 1)
@@ -2821,13 +2863,15 @@ private struct LatencyHistogram: Sendable {
         maximum = max(maximum, milliseconds)
     }
 
-    /// Returns only samples recorded after `baseline` was captured. Load
-    /// statistics are cumulative, so subtracting bucket counts gives exact
-    /// per-phase percentiles without another lock or histogram update on the
-    /// load generator's per-message hot path. Values above the bounded
-    /// histogram range retain the best available maximum: the exact ending
-    /// maximum when it was introduced by this interval, otherwise the
-    /// overflow bucket boundary.
+    /// 只返回在捕获 `baseline` 之后记录的样本。
+    ///
+    /// 负载统计是累积的，因此相减桶计数即可得到精确的阶段分位数，
+    /// 无需在负载生成器的每消息热路径上再加锁或更新直方图。
+    /// 超过有界直方图范围的值保留可用的最佳最大值：
+    /// 若最大值就是在本区间内引入的则记精确值，否则记录溢出桶边界。
+    ///
+    /// - Parameter baseline: 相减的基线直方图。
+    /// - Returns: 表示本区间增量的直方图。
     func subtracting(_ baseline: Self) -> Self {
         var result = Self()
         var highestNonemptyBucket: Int?

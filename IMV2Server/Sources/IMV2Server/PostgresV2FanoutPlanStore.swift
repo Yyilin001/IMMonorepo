@@ -3,21 +3,36 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Plans fan-out from the membership revision committed with the source event.
-/// It never reads today's membership set for an older event. When the logical
-/// route control plane is co-located in PostgreSQL, every page is planned with
-/// one set-based statement: candidate snapshot, route snapshot, completion
-/// unit, delivery rows and durable checkpoint advance either commit together
-/// or roll back together.
+/// 依据与来源事件一同提交的成员修订来规划扇出。
+///
+/// 它绝不会为较老的事件读取今天的成员集合。当逻辑路由控制面与数据同库时，
+/// 每页都由一条集合式语句完成规划：候选快照、路由快照、完成单元、投递行与持久化检查点推进，
+/// 要么一同提交，要么一同回滚。
 public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库与标识生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放扇出计划、完成单元与投递行的数据库。
+    ///   - makeUUID: 完成单元标识生成方式。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 规划单个扇出触发。
+    ///
+    /// 标量路径与批量路径共享同一份冻结受众、持久化分页边界与结算契约，
+    /// 因此这里直接复用批量实现并取其唯一结果。
+    ///
+    /// - Parameters:
+    ///   - trigger: 待规划的触发。
+    ///   - pageSize: 成员枚举分页大小。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 本次规划结果。
+    /// - Throws: 分页大小非正、时刻不可编码或持久化失败时抛出。
     public func plan(_ trigger: V2FanoutPlanTrigger, pageSize: Int, now: Date) async throws -> V2FanoutPlanningResult {
         // Scalar and batched work share the same frozen audience, durable
         // page boundary and settlement contract.
@@ -26,12 +41,20 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
         return result
     }
 
-    /// Advances the same bounded page for many independent plans in one
-    /// transaction. This is the steady-state path for small-room traffic: a
-    /// 256-message relay claim creates all completion units and deliveries
-    /// with one PostgreSQL round trip instead of 256 serial transactions.
-    /// Large audiences retain durable page checkpoints and simply remain in
-    /// `pending` for the next set-based page pass in this method.
+    /// 在单个事务内为多个独立计划推进同一有界分页。
+    ///
+    /// 这是小房间流量的稳态路径：一次认领 256 条消息的中继只需一次 PostgreSQL 往返
+    /// 即可创建全部完成单元与投递行，而不是 256 次串行事务。
+    /// 大型受众仍保留持久化分页检查点，并在本方法的下一次集合式分页推进前保持 `pending`。
+    ///
+    /// - Parameters:
+    ///   - triggers: 待规划的触发列表。
+    ///   - pageSize: 成员枚举分页大小，需大于零。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 与输入顺序对应的规划结果；输入为空时返回空数组。
+    /// - Throws: 分页大小非正时抛出
+    ///   ``V2FanoutPlanningError/invalidPageSize``；时刻不可编码或持久化状态异常时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func planBatch(
         _ triggers: [V2FanoutPlanTrigger],
         pageSize: Int,
@@ -352,16 +375,22 @@ public struct PostgresV2FanoutPlanStore: V2FanoutPlanStore {
         }
     }
 
-    /// Each enumerated target page commits its delivery rows and checkpoint in
-    /// a separate transaction. If the planner process dies, the outbox lease
-    /// can be reclaimed and this method resumes strictly after that durable
-    /// checkpoint instead of re-enumerating the entire audience.
+    /// 分页结算说明。
+    ///
+    /// 每一个已枚举的目标分页都会在独立事务中提交其投递行与检查点。
+    /// 规划进程若中途退出，发件箱租约可被重新认领，本方法会严格从该持久化检查点之后继续，
+    /// 而不是重新枚举整个受众。
 }
 
+/// 扇出规划错误。
 public enum V2FanoutPlanningError: Error, Equatable, Sendable {
+    /// 分页大小为非正值。
     case invalidPageSize
+    /// 目标计划不存在。
     case planNotFound
+    /// 计划统计的成员数量与枚举结果不一致，参数为期望值与实际值。
     case membershipCountMismatch(expected: Int, actual: Int)
+    /// 投递覆盖数量与目标数量不一致，参数为期望值与实际值。
     case deliveryCoverageMismatch(expected: Int64, actual: Int64)
 }
 

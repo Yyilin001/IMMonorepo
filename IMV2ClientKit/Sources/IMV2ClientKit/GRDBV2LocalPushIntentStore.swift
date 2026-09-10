@@ -3,6 +3,11 @@ import GRDB
 import IMV2Core
 
 extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
+    /// 由设备标识构造推送意图作用域。
+    ///
+    /// - Parameter deviceID: 目标设备。
+    /// - Returns: 该设备的推送意图作用域。
+    /// - Throws: 设备标识非法或本地安装绑定缺失时抛出。
     public func pushIntentScope(deviceID: DeviceID) throws -> V2PushIntentScope {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT binding, user_id FROM v2_local_installation WHERE singleton = 1"),
@@ -27,6 +32,11 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 读取指定作用域的推送意图。
+    ///
+    /// - Parameter scope: 目标作用域。
+    /// - Returns: 现有意图；不存在时返回 `nil`。
+    /// - Throws: 数据库读取失败时抛出。
     public func inspectPushIntent(scope: V2PushIntentScope) throws -> V2LocalPushIntent? {
         try databasePool.read { db in
             try Self.checkPushScope(scope, db: db)
@@ -34,6 +44,15 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 激活新的推送所有者并占用更新修订。
+    ///
+    /// - Parameters:
+    ///   - scope: 目标作用域。
+    ///   - ownerID: 新所有者标识。
+    ///   - initialPreference: 初始偏好。
+    ///   - expected: 被替换的既有意图。
+    /// - Returns: 激活后的意图。
+    /// - Throws: 作用域或期望值不匹配时抛出。
     public func activatePushIntent(scope: V2PushIntentScope, ownerID: UUID, initialPreference: Bool, replacing expected: V2LocalPushIntent? = nil) throws -> V2LocalPushIntent {
         try databasePool.write { db in
             try Self.checkPushScope(scope, db: db)
@@ -59,10 +78,25 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 读取指定所有者的推送意图。
+    ///
+    /// - Parameters:
+    ///   - scope: 目标作用域。
+    ///   - ownerID: 所有者标识。
+    /// - Returns: 当前意图。
+    /// - Throws: 记录缺失或所有者已过期时抛出。
     public func pushIntent(scope: V2PushIntentScope, ownerID: UUID) throws -> V2LocalPushIntent {
         try databasePool.read { try Self.ownedPushIntent(scope: scope, ownerID: ownerID, db: $0) }
     }
 
+    /// 设置推送开关并占用新的修订。
+    ///
+    /// - Parameters:
+    ///   - enabled: 目标开关状态。
+    ///   - scope: 目标作用域。
+    ///   - ownerID: 所有者标识。
+    /// - Returns: 更新后的意图。
+    /// - Throws: 状态或所有者不匹配时抛出。
     public func setPushIntentEnabled(_ enabled: Bool, scope: V2PushIntentScope, ownerID: UUID) throws -> V2LocalPushIntent {
         try mutatePushIntent(scope: scope, ownerID: ownerID) { state in
             guard state.preferenceEnabled != enabled || state.desiredEnabled != enabled else { return }
@@ -71,6 +105,14 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 暂存内存令牌引用。
+    ///
+    /// - Parameters:
+    ///   - reference: 令牌引用。
+    ///   - scope: 目标作用域。
+    ///   - ownerID: 所有者标识。
+    /// - Returns: 更新后的意图。
+    /// - Throws: 状态或所有者不匹配时抛出。
     public func stagePushToken(reference: UUID, scope: V2PushIntentScope, ownerID: UUID) throws -> V2LocalPushIntent {
         try mutatePushIntent(scope: scope, ownerID: ownerID) { state in
             guard state.desiredEnabled else { throw V2LocalPushIntentError.invalidState }
@@ -80,6 +122,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 准备登出并清理本地推送状态。
+    ///
+    /// - Parameters:
+    ///   - scope: 目标作用域。
+    ///   - ownerID: 所有者标识。
+    /// - Returns: 更新后的意图。
+    /// - Throws: 状态或所有者不匹配时抛出。
     public func preparePushSignOut(scope: V2PushIntentScope, ownerID: UUID) throws -> V2LocalPushIntent {
         try mutatePushIntent(scope: scope, ownerID: ownerID) { state in
             guard state.desiredEnabled else { return }
@@ -88,6 +137,15 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 以期望值做条件保存推送输入。
+    ///
+    /// - Parameters:
+    ///   - preferenceEnabled: 用户偏好开关。
+    ///   - desiredEnabled: 期望推送开关。
+    ///   - tokenReference: 内存令牌引用。
+    ///   - expected: 期望的当前意图。
+    /// - Returns: 保存生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func savePushInput(preferenceEnabled: Bool, desiredEnabled: Bool, tokenReference: UUID?, expected: V2LocalPushIntent) throws -> Bool {
         guard (!desiredEnabled || preferenceEnabled), (desiredEnabled || tokenReference == nil) else { throw V2LocalPushIntentError.invalidState }
         return try comparePushIntent(expected) { state in
@@ -97,6 +155,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 以期望值做条件保存会话声明。
+    ///
+    /// - Parameters:
+    ///   - claim: 待保存的会话声明。
+    ///   - expected: 期望的当前意图。
+    /// - Returns: 保存生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func savePushClaim(_ claim: V2PushIntentSessionClaim, expected: V2LocalPushIntent) throws -> Bool {
         try comparePushIntent(expected) { state in
             guard state.claim == nil && state.epoch == nil else { throw V2LocalPushIntentError.invalidState }
@@ -104,6 +169,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 以指定代次完成当前会话声明。
+    ///
+    /// - Parameters:
+    ///   - epoch: 会话代次。
+    ///   - expected: 期望的当前意图。
+    /// - Returns: 完成生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func completePushClaim(epoch: UInt64, expected: V2LocalPushIntent) throws -> Bool {
         try comparePushIntent(expected) { state in
             guard let claim = state.claim, state.epoch == nil, epoch == claim.expectedEpoch + 1 else { throw V2LocalPushIntentError.invalidState }
@@ -111,8 +183,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
-    /// Explicit recovery after the caller has re-established current ownership;
-    /// never call automatically in response to a stale session response.
+    /// 重启推送会话并占用新的代次。
+    ///
+    /// 只在调用方已重新确认为当前所有者之后显式恢复；绝不能因为收到陈旧会话响应就自动调用。
+    ///
+    /// - Parameter expected: 期望的当前意图。
+    /// - Returns: 重启生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func restartPushIntentSession(expected: V2LocalPushIntent) throws -> Bool {
         try comparePushIntent(expected) { state in
             guard state.pauseReason != nil else { throw V2LocalPushIntentError.invalidState }
@@ -121,6 +198,11 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 确认已同步到服务端的修订。
+    ///
+    /// - Parameter expected: 期望的当前意图。
+    /// - Returns: 确认生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func acknowledgePushIntent(_ expected: V2LocalPushIntent) throws -> Bool {
         try comparePushIntent(expected) { state in
             guard state.version != nil && !state.waitingForToken else { throw V2LocalPushIntentError.invalidState }
@@ -128,6 +210,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 安排下一次重试时刻。
+    ///
+    /// - Parameters:
+    ///   - date: 下次尝试时刻。
+    ///   - expected: 期望的当前意图。
+    /// - Returns: 更新生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func retryPushIntent(at date: Date, expected: V2LocalPushIntent) throws -> Bool {
         guard date.timeIntervalSince1970.isFinite, date.timeIntervalSince1970 >= 0 else { throw V2LocalPushIntentError.invalidState }
         return try comparePushIntent(expected) { state in
@@ -136,6 +225,13 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// 暂停推送意图并记录原因。
+    ///
+    /// - Parameters:
+    ///   - reason: 暂停原因。
+    ///   - expected: 期望的当前意图。
+    /// - Returns: 更新生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     public func pausePushIntent(_ reason: V2PushIntentPauseReason, expected: V2LocalPushIntent) throws -> Bool {
         try comparePushIntent(expected) { $0.pauseReason = reason }
     }

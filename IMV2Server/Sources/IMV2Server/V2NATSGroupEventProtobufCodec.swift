@@ -2,22 +2,34 @@ import Foundation
 import IMV2Core
 import SwiftProtobuf
 
-/// Versioned process-to-process encoding for Core NATS group notifications.
-/// The five-byte prefix prevents malformed JSON or a future wire version from
-/// being interpreted as the current protobuf schema. PostgreSQL remains the
-/// authority, so an invalid acceleration body degrades to its validated room
-/// waterline while an invalid envelope is discarded.
+/// Core NATS 群通知的版本化进程间编码。
+///
+/// 五字节前缀可避免畸形 JSON 或未来的线路版本被误按当前 protobuf 解析。
+/// PostgreSQL 仍是权威来源：加速载荷非法时降级为已校验的房间水位，信封非法时直接丢弃。
 enum V2NATSGroupEventProtobufCodec {
     private static let magic: [UInt8] = [0x49, 0x4D, 0x4E, 0x47] // "IMNG"
     private static let version: UInt8 = 1
     private static let header = Data(magic + [version])
     private static let maximumGroupEvents = 64
 
+    /// 判断载荷是否带有本编解码器的魔数与版本前缀。
+    ///
+    /// - Parameter payload: 待判断载荷。
+    /// - Returns: 前缀匹配时为 `true`。
     static func recognizes(_ payload: Data) -> Bool {
         payload.count >= header.count
             && payload.prefix(header.count).elementsEqual(header)
     }
 
+    /// 编码一条前台群事件通知。
+    ///
+    /// 群批量通知要求：非空、不超过 64 条、具有相同的房间与成员修订，
+    /// 且全部事件都没有逐条受众或连接排除，以保证整批共享一次编码结果。
+    ///
+    /// - Parameter notification: 待编码通知。
+    /// - Returns: 前缀加 protobuf 载荷。
+    /// - Throws: 标识无法编码，或群批量不满足上述一致性要求时抛出
+    ///   ``V2NATSGroupEventWakeBrokerError/invalidPayload``。
     static func encode(
         _ notification: V2ForegroundGroupEventNotification
     ) throws -> Data {
@@ -65,6 +77,13 @@ enum V2NATSGroupEventProtobufCodec {
         return result
     }
 
+    /// 解码一条前台群事件通知。
+    ///
+    /// 信封、房间标识或水位不合法时返回 `nil`；正文不合法时降级为纯水位唤醒，
+    /// 使接收端仍能按持久化房间日志补齐内容。群批量要求序号严格递增且最后一条与水位一致。
+    ///
+    /// - Parameter payload: 待解码载荷。
+    /// - Returns: 解码结果；无法识别时返回 `nil`。
     static func decode(
         _ payload: Data
     ) -> V2ForegroundGroupEventNotification? {
@@ -158,6 +177,14 @@ enum V2NATSGroupEventProtobufCodec {
         }
     }
 
+    /// 编码单条私聊实时事件。
+    ///
+    /// 受众按用户标识排序后写入，使同一受众集合产生字节一致的编码结果。
+    ///
+    /// - Parameter event: 待编码事件。
+    /// - Returns: protobuf 私聊事件。
+    /// - Throws: 标识无法编码时抛出
+    ///   ``V2NATSGroupEventWakeBrokerError/invalidPayload``。
     private static func directEvent(
         _ event: V2DirectRoomLiveEvent
     ) throws -> IMV2InternalDirectEvent {
@@ -178,6 +205,12 @@ enum V2NATSGroupEventProtobufCodec {
         return wire
     }
 
+    /// 把标识编码为 16 字节 UUID。
+    ///
+    /// - Parameter identifier: 待编码标识。
+    /// - Returns: 原始 UUID 字节。
+    /// - Throws: 标识原始值不是合法 UUID 时抛出
+    ///   ``V2NATSGroupEventWakeBrokerError/invalidPayload``。
     private static func identifierBytes<Tag>(
         _ identifier: V2Identifier<Tag>
     ) throws -> Data {
@@ -187,11 +220,19 @@ enum V2NATSGroupEventProtobufCodec {
         return uuidBytes(value)
     }
 
+    /// 把 UUID 写为 16 字节数据。
+    ///
+    /// - Parameter value: 待编码 UUID。
+    /// - Returns: 原始字节。
     private static func uuidBytes(_ value: UUID) -> Data {
         var bytes = value.uuid
         return withUnsafeBytes(of: &bytes) { Data($0) }
     }
 
+    /// 从 16 字节数据还原 UUID。
+    ///
+    /// - Parameter data: 待解码数据。
+    /// - Returns: 还原的 UUID；长度不为 16 字节时返回 `nil`。
     private static func uuid(_ data: Data) -> UUID? {
         guard data.count == 16 else { return nil }
         return data.withUnsafeBytes { bytes in

@@ -5,8 +5,9 @@ import IMV2ServerHTTP
 import NIOPosix
 import Vapor
 
-/// A deliberately separate operator-only process. It has no public TLS
-/// gateway listener, account-factor route, media edge or metrics endpoint.
+/// 仅面向运维的独立进程。
+///
+/// 它刻意不提供公网 TLS 网关监听、账号认证因子路由、媒体边缘或指标端点。
 @main
 enum IMV2OperatorServerApp {
     static func main() async throws {

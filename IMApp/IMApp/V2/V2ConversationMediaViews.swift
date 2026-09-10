@@ -109,9 +109,11 @@ struct V2ConversationMediaAttachmentRow: View {
     private var playbackSymbol: String { presentation.kind == .video ? "play.rectangle" : "play.circle" }
 }
 
-/// A downloaded image may be tens of megapixels even though the conversation
-/// row is small. Decode and downsample it away from MainActor, then retain only
-/// a bounded thumbnail cache instead of reopening the file from `body`.
+/// 本地媒体图片预览。
+///
+/// 即便会话行很小，下载到的图片也可能达到数千万像素。
+/// 因此在 MainActor 之外解码并降采样，且只保留有界的缩略图缓存，
+/// 而不是在 `body` 中反复重新打开文件。
 private struct V2LocalMediaImagePreview: View {
     let fileURL: URL
     let accessibilityLabel: String
@@ -260,9 +262,10 @@ actor V2LocalMediaThumbnailCache {
     }
 }
 
-/// A privacy-preserving card: rendering a message never fetches a remote
-/// page, image, or favicon. The user explicitly chooses whether to hand the
-/// already-validated HTTP(S) URL to the system browser.
+/// 保护隐私的安全链接卡片。
+///
+/// 渲染消息时绝不抓取远端网页、图片或站点图标；
+/// 是否把已校验的 HTTP(S) URL 交给系统浏览器，完全由用户显式决定。
 struct V2SafeLinkPreview: View {
     let url: URL
     let messageID: String

@@ -2,8 +2,9 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 
-/// Boundary from the UI feature to the V2 SQLite projection. All IDs are
-/// parsed at this boundary; invalid data can never become a navigation route.
+/// 界面功能到 V2 SQLite 投影的边界。
+///
+/// 所有标识都在该边界完成解析，非法数据绝不会变成可导航的路由。
 actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
 

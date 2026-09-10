@@ -14,8 +14,9 @@ protocol V2ConversationSending: Sendable {
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome
 }
 
-/// Group receipt details are fetched only after an explicit user action; they
-/// are intentionally not retained in the normal timeline projection.
+/// 群已读回执读取能力。
+///
+/// 回执详情只在用户显式操作之后才去获取，刻意不保存在常规时间线投影中。
 protocol V2GroupReadReceiptReading: Sendable {
     func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage
 }
@@ -41,8 +42,9 @@ enum V2MessageWithdrawalOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// UI-facing withdrawal boundary. Its implementation must make the operation
-/// durable before attempting transport so a connection loss cannot drop intent.
+/// 面向界面的消息撤回边界。
+///
+/// 实现必须在尝试传输之前先把操作持久化，使连接中断不会导致意图丢失。
 protocol V2MessageWithdrawing: Sendable {
     func withdraw(messageID: String, in roomID: String, expectedMessageRevision: UInt64) async throws -> V2MessageWithdrawalOutcome
 }
@@ -53,8 +55,9 @@ enum V2MessageReactionOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// UI-facing reaction boundary. The message projection remains authoritative
-/// for the visible reaction set after the durable command is acknowledged.
+/// 面向界面的消息表情边界。
+///
+/// 持久化命令被确认之后，可见表情集合仍以消息投影为权威。
 protocol V2MessageReactionChanging: Sendable {
     func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome
 }
@@ -65,8 +68,9 @@ enum V2MessageEditOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// UI-facing edit boundary. The caller supplies the revision from its durable
-/// projection; the server remains authoritative for authorship and conflicts.
+/// 面向界面的消息编辑边界。
+///
+/// 调用方从自己的持久化投影中取得修订号；作者身份与冲突判定仍以服务端为权威。
 protocol V2MessageEditing: Sendable {
     func edit(messageID: String, in roomID: String, expectedMessageRevision: UInt64, text: String) async throws -> V2MessageEditOutcome
 }
@@ -84,8 +88,9 @@ protocol V2ConversationReadReporting: Sendable {
 
 enum V2ConversationCapabilityOutcome: Equatable, Sendable { case accepted, queuedForRetry, rejected(code: String) }
 
-/// Private per-user presentation state. The server projection, not an
-/// optimistic list mutation, remains the source of truth after reconnect.
+/// 面向界面的会话展示状态变更边界。
+///
+/// 这是私有用户维度状态；重连之后，权威来源仍是服务端投影，而不是列表上的乐观改动。
 protocol V2ConversationStateChanging: Sendable {
     func setState(roomID: String, isPinned: Bool, isArchived: Bool, muteUntil: Date?) async throws -> V2ConversationCapabilityOutcome
 }
@@ -104,8 +109,10 @@ enum V2MessageForwardingOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// The UI submits a room/message/version reference for each source. The outbox holds the
-/// actual retry record, so leaving the destination picker never loses work.
+/// 面向界面的消息转发边界。
+///
+/// 界面为每条来源提交房间、消息与修订引用；真正的重试记录保存在发件箱中，
+/// 因此离开选择目标页面也不会丢失转发工作。
 protocol V2MessageForwarding: Sendable {
     func forward(sources: [V2ForwardMessageReference], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome
 }
@@ -122,15 +129,16 @@ protocol V2GroupRolePolicyChanging: Sendable {
     func setPolicy(roomID: String, role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome
 }
 
-/// Opens the deterministic direct room for the signed-in user and a target
-/// user. Opening is idempotent on the server, so it is safe to retry after a
-/// transport interruption; no message content is at risk at this boundary.
+/// 为当前登录用户与目标用户打开确定性私聊房间的边界。
+///
+/// 开房在服务端是幂等的，因此传输中断后可以安全重试；该边界不涉及任何消息内容。
 protocol V2DirectConversationOpening: Sendable {
     func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String
 }
 
-/// Resolves an explicit public handle before the realtime protocol receives an
-/// opaque user ID. This keeps UUIDs out of all product-facing entry fields.
+/// 在实时协议收到不透明用户标识之前先解析显式公开账号名的能力。
+///
+/// 这样可以让 UUID 不出现在任何面向产品的输入字段中。
 protocol V2ConversationPublicIdentityResolving: Sendable {
     func resolve(handle: String) async throws -> V2PublicIdentity
 }
@@ -139,8 +147,9 @@ extension V2HTTPPublicIdentityDirectory: V2ConversationPublicIdentityResolving {
 
 enum V2GroupConversationCreationOutcome: Equatable, Sendable {
     case created(roomID: String)
-    /// The operation was durably saved but has not completed. The UI keeps
-    /// this ID so an explicit cancellation reaches the same durable record.
+    /// 操作已持久化保存但尚未完成。
+    ///
+    /// 界面会保留该标识，使用户显式取消时能够命中同一条持久化记录。
     case queuedForRetry(operationID: String)
     case rejected(code: String)
 }
@@ -151,9 +160,9 @@ enum V2GroupConversationCancellationOutcome: Equatable, Sendable {
     case finalizationAlreadyStarted
 }
 
-/// A durable bootstrap status restored from the local outbox after the UI has
-/// been recreated. It deliberately exposes product state, not transport or
-/// database details.
+/// 界面重建后从本地发件箱恢复的建群状态。
+///
+/// 它只暴露产品层状态，不暴露传输或数据库细节。
 enum V2RestoredGroupConversationCreationStatus: Equatable, Sendable {
     case queuedForRetry(operationID: String)
     case cancelling(operationID: String)
@@ -169,8 +178,7 @@ protocol V2GroupConversationCreating: Sendable {
 }
 
 struct V2GroupMemberItem: Equatable, Identifiable, Sendable {
-    /// Opaque identifier used only for subsequent authenticated membership
-    /// commands.  UI must render the public fields below instead.
+    /// 仅用于后续已认证成员命令的不透明标识；界面必须改为渲染下方的公开字段。
     let id: String
     let role: String
     let handle: String
@@ -236,8 +244,9 @@ enum V2UserBlockChangeOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// UI-facing boundary for a user-owned block list. Commands are persisted
-/// before transport; the received social projection remains authoritative.
+/// 面向界面的用户拉黑名单边界。
+///
+/// 命令在传输之前先持久化；收到的社交投影仍是权威来源。
 protocol V2UserBlockChanging: Sendable {
     func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome
 }
@@ -248,8 +257,9 @@ enum V2RelationshipChangeOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// The visible relationship state remains sync-projection driven. This
-/// boundary only preserves and attempts the user's durable intent.
+/// 面向界面的好友关系变更边界。
+///
+/// 可见关系状态仍由同步投影驱动；该边界只负责保存并尝试执行用户的持久化意图。
 protocol V2RelationshipChanging: Sendable {
     func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome
 }
@@ -260,8 +270,10 @@ enum V2GroupModerationOutcome: Equatable, Sendable {
     case rejected(code: String)
 }
 
-/// Both moderation actions have an independent durable operation and audit
-/// record. They must never be routed through ordinary membership mutation.
+/// 面向界面的群成员禁言边界。
+///
+/// 两类审核动作都有各自独立的持久化操作与审计记录，
+/// 绝不能借用普通成员变更路径来执行。
 protocol V2GroupMemberMuting: Sendable {
     func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
 }
@@ -270,9 +282,10 @@ protocol V2ModeratedGroupMemberRemoving: Sendable {
     func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
 }
 
-/// UI-facing sender. It persists a command before attempting transport, so a
-/// foreground connection failure becomes a durable retry rather than lost UI
-/// intent.
+/// 面向界面的消息发送实现。
+///
+/// 它在尝试传输之前先持久化命令，因此前台连接失败会转化为持久化重试，
+/// 而不是丢失界面意图。
 actor V2OutboxConversationSender: V2ConversationSending {
     private let outbox: V2CommandOutboxEngine
 
@@ -309,9 +322,9 @@ actor V2OutboxConversationSender: V2ConversationSending {
     }
 }
 
-/// Persists a withdrawal before its first network attempt. The synced message
-/// projection, rather than this acknowledgement, remains authoritative for the
-/// final tombstone shown by the UI.
+/// 在首次网络尝试之前持久化撤回。
+///
+/// 界面最终展示的墓碑状态以已同步的消息投影为权威，而不是以本次确认为准。
 actor V2OutboxMessageWithdrawer: V2MessageWithdrawing {
     private let outbox: V2MessageWithdrawalOutboxEngine
 
@@ -374,9 +387,10 @@ actor V2OutboxMessageEditor: V2MessageEditing {
     }
 }
 
-/// The underlying store atomically suppresses equal or older watermarks. This
-/// actor can therefore be called whenever a local conversation becomes
-/// visible, including after an offline restart, without producing duplicates.
+/// 面向界面的已读回执上报实现。
+///
+/// 底层存储会原子地抑制相等或更旧的水位，因此每当本地会话变为可见时都可以调用该 actor，
+/// 包括离线重启之后，也不会产生重复记录。
 actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
     private let outbox: V2ReadReceiptOutboxEngine
 
@@ -558,10 +572,10 @@ actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
     }
 }
 
-/// UI boundary for durable group bootstrap. It obtains a foreground realtime
-/// session first so a successful create can return its room ID immediately;
-/// if that connection cannot be established, it still records the request and
-/// returns the normal durable-retry outcome.
+/// 持久化建群的界面边界。
+///
+/// 它先获取前台实时会话，使创建成功时能立刻返回房间标识；
+/// 若连接无法建立，仍会记录请求并返回常规的持久化重试结果。
 actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
     private let outbox: V2GroupRoomCommandOutboxEngine
     private let runtime: V2ClientRuntime
@@ -731,9 +745,10 @@ actor V2RealtimeConversationLiveActivity: V2ConversationLiveActivityManaging {
     func nextEvent() async throws -> V2LiveActivityEvent { try await events.nextLiveActivityEvent() }
 }
 
-/// Records a membership operation before attempting the realtime request. The
-/// server remains the authorization authority; the UI merely avoids showing
-/// controls it already knows cannot apply to the signed-in member role.
+/// 面向界面的群成员变更实现。
+///
+/// 它在尝试实时请求之前记录成员操作；授权权威仍在服务端，
+/// 界面只是不再展示已知对当前成员角色无效的控件。
 actor V2OutboxGroupMembershipChanger: V2GroupMembershipChanging {
     private let outbox: V2MembershipCommandOutboxEngine
 
@@ -796,9 +811,10 @@ actor V2OutboxModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
     }
 }
 
-/// Keeps the user's receive preference in the durable social-command outbox.
-/// The remote sync projection remains authoritative after another device
-/// changes the setting, while this actor preserves local intent across loss.
+/// 面向界面的陌生人消息偏好更新实现。
+///
+/// 它把用户接收偏好保存在持久化社交命令发件箱中。其他设备修改该设置后，
+/// 远端同步投影仍是权威；该 actor 负责在连接中断时保留本地意图。
 actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdating {
     private let outbox: V2SocialCommandOutboxEngine
 
@@ -839,8 +855,9 @@ actor V2OutboxUserAddPreferenceUpdater: V2UserAddPreferenceUpdating {
     }
 }
 
-/// Receipt preference changes are idempotent protocol commands. The server
-/// remains the authority and its sync projection reconciles other devices.
+/// 面向界面的已读回执偏好更新实现。
+///
+/// 回执偏好变更是幂等协议命令；服务端仍是权威，并由其同步投影协调其他设备。
 actor V2RealtimeReadReceiptPreferenceUpdater: V2ReadReceiptPreferenceUpdating {
     private let outbox: V2SocialCommandOutboxEngine
     init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
@@ -907,11 +924,11 @@ actor V2OutboxRelationshipChanger: V2RelationshipChanging {
     }
 }
 
-/// Bridges the active conversation UI to the reusable room-log engines without
-/// letting a SwiftUI store inspect SQLite or speak the realtime protocol.
-/// Hybrid groups persist a room-log cursor; standard groups use only the
-/// separate in-memory foreground preview cursor and retain normal fan-out as
-/// their durable delivery authority.
+/// 把活跃会话界面桥接到可复用房间日志引擎的适配器。
+///
+/// 它使 SwiftUI 存储无需直接访问 SQLite 或实现实时协议。
+/// 混合大群持久化房间日志游标；标准群只使用独立的内存前台预览游标，
+/// 其持久化投递权威仍是常规扇出。
 actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing {
     private let groupEventSync: V2GroupEventSyncEngine
     private let foregroundGroupPreview: V2ForegroundGroupEventPreviewEngine

@@ -1,12 +1,17 @@
 import Foundation
 import SQLKit
 
-/// Forward, reference and media callers bind `message` and `room` aliases. Historical
-/// membership and current membership are separate intervals: a rejoined user
-/// may read a message from an earlier interval, but never one from the gap.
-/// Missing accepted evidence fails closed; current membership is no fallback.
-/// The immutable completion primary key owns acceptance; payload storage and
-/// the physical compatibility copy of its revision are not authority.
+/// 转发、引用与媒体调用方共用的来源可见性谓词，要求外部绑定 `message` 与 `room` 别名。
+///
+/// 历史成员关系与当前成员关系是两个独立区间：重新入群的用户可以读取更早区间的消息，
+/// 但绝不能读取中间空档期的消息。缺少已接受凭据时一律拒绝，不会退回用当前成员关系兜底。
+/// 已接受的权威来自不可变完成主键，载荷存放位置与其修订的物理兼容副本都不构成权威。
+///
+/// 除成员区间外，还会校验正文修订：修订为 1 直接通过，否则必须存在与该修订匹配的编辑事件，
+/// 以确认请求者在该次编辑提交时同样具备成员资格。
+///
+/// - Parameter actorID: 发起访问的用户标识。
+/// - Returns: 可直接嵌入查询的可见性条件 SQL 片段。
 func v2ForwardSourceVisibility(actorID: UUID) -> SQLQueryString {
     """
     EXISTS (
@@ -62,12 +67,19 @@ WHERE completion.room_id = message.room_id
   AND completion.accepted_membership_revision >= 0
 """
 
-/// Acquire the entire room set before destination admission or message locks.
-/// Membership changes, edits, and withdrawals also start with their room lock.
-/// Opposite forwards therefore serialize in UUID order, without holding a
-/// destination room while waiting for the source room in reverse order.
-/// A missing source is preserved as nil so an immutable completed send can
-/// still replay; a fresh command will fail the final source check.
+/// 在目标准入或消息加锁之前，先按固定顺序取得本次转发涉及的全部房间锁。
+///
+/// 成员变更、编辑与撤回同样从房间锁开始，因此相向而行的两次转发会按房间标识的 UUID 顺序串行，
+/// 不会出现一方持有目标房间却等待另一方源房间的反向等待。
+/// 源消息缺失时返回 `nil` 而不报错，使已持久化完成的发送仍可重放；
+/// 真正的新命令会在最终来源校验中失败。
+///
+/// - Parameters:
+///   - sourceMessageID: 源消息标识。
+///   - targetRoomID: 目标房间标识。
+///   - sql: 当前事务使用的数据库连接。
+/// - Returns: 源消息所在房间标识；源消息不存在时为 `nil`。
+/// - Throws: 查询失败时抛出。
 func v2LockForwardRooms(
     sourceMessageID: UUID,
     targetRoomID: UUID,

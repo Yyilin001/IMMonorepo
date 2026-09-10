@@ -3,13 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 单轮已读回执偏好传播统计。
 public struct V2ReadReceiptPreferencePropagationReport: Equatable, Sendable {
+    /// 本轮认领的操作数量。
     public let claimedOperationCount: Int
+    /// 本轮投影到房间的数量。
     public let projectedRoomCount: Int
+    /// 完成的操作数量。
     public let completedOperationCount: Int
+    /// 安排重试的操作数量。
     public let releasedOperationCount: Int
+    /// 暂停等待运维处理的操作数量。
     public let pausedOperationCount: Int
 
+    /// 保存传播统计。
+    ///
+    /// - Parameters:
+    ///   - claimedOperationCount: 认领数量。
+    ///   - projectedRoomCount: 投影房间数量。
+    ///   - completedOperationCount: 完成数量。
+    ///   - releasedOperationCount: 安排重试数量，默认零。
+    ///   - pausedOperationCount: 暂停数量，默认零。
     public init(
         claimedOperationCount: Int,
         projectedRoomCount: Int,
@@ -25,9 +39,9 @@ public struct V2ReadReceiptPreferencePropagationReport: Equatable, Sendable {
     }
 }
 
-/// Propagates the reciprocal cache tombstones created when an account turns
-/// off direct read receipts. `limit` is a room budget, so neither the command
-/// transaction nor one worker pass grows with the account's contact graph.
+/// 传播账号关闭私聊已读回执时产生的对向缓存墓碑。
+///
+/// `limit` 是按房间计的预算，因此命令事务与单轮工作器处理的规模都不会随该账号的联系人图增长。
 public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     private let database: any Database
     private let shadowForwarder: any V2UserShardProjectionShadowing
@@ -37,6 +51,16 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
+    /// 组合数据库、影子转发器与重试策略。
+    ///
+    /// - Parameters:
+    ///   - database: 存放偏好传播操作的数据库。
+    ///   - shadowForwarder: 把投影变更转发到影子分片的实现。
+    ///   - liveNotifier: 同步变更通知器，可选。
+    ///   - leaseDuration: 认领租约秒数，需大于零，默认 30 秒。
+    ///   - retryPolicy: 失败退避策略。
+    ///   - makeUUID: 标识生成方式。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
         shadowForwarder: any V2UserShardProjectionShadowing,
@@ -56,6 +80,16 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
         self.now = now
     }
 
+    /// 执行一轮有界偏好传播。
+    ///
+    /// 逐条认领操作、投影到相关房间并在成功后终结；剩余预算用尽或无可认领操作时结束本轮。
+    ///
+    /// - Parameter limit: 本轮按房间计的预算，需大于零且小于 `Int.max`。
+    /// - Returns: 本轮传播统计。
+    /// - Throws: 预算越界时抛出
+    ///   ``V2ReadReceiptPreferencePropagationError/invalidLimit``；
+    ///   持久化状态异常时抛出
+    ///   ``V2ReadReceiptPreferencePropagationError/corruptPersistenceState``。
     public func runOnce(limit: Int) async throws -> V2ReadReceiptPreferencePropagationReport {
         guard limit > 0, limit < Int.max else {
             throw V2ReadReceiptPreferencePropagationError.invalidLimit
@@ -334,9 +368,13 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     }
 }
 
+/// 已读回执偏好传播错误。
 public enum V2ReadReceiptPreferencePropagationError: Error, Equatable, Sendable {
+    /// 单轮预算为非正或超出可处理范围。
     case invalidLimit
+    /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
+    /// 控制面缺少必要的投影记录。
     case missingControlProjection
 }
 

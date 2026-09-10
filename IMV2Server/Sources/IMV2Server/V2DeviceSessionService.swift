@@ -6,15 +6,29 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-/// A safe-to-display description of an active account session. The opaque
-/// device ID is returned only to its owning account and is never logged.
+/// 可安全展示的活跃账号会话描述。
+///
+/// 不透明的设备标识只返回给其所属账号，且绝不写入日志。
 public struct V2DeviceSession: Equatable, Sendable {
+    /// 设备标识。
     public let deviceID: DeviceID
+    /// 设备展示名称。
     public let displayName: String
+    /// 设备平台。
     public let platform: String
+    /// 会话创建时刻。
     public let createdAt: Date
+    /// 最近活跃时刻。
     public let lastActiveAt: Date
 
+    /// 保存会话描述。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 设备标识。
+    ///   - displayName: 展示名称。
+    ///   - platform: 设备平台。
+    ///   - createdAt: 会话创建时刻。
+    ///   - lastActiveAt: 最近活跃时刻。
     public init(deviceID: DeviceID, displayName: String, platform: String, createdAt: Date, lastActiveAt: Date) {
         self.deviceID = deviceID
         self.displayName = displayName
@@ -24,57 +38,126 @@ public struct V2DeviceSession: Equatable, Sendable {
     }
 }
 
+/// 会话列表分页。
 public struct V2DeviceSessionPage: Equatable, Sendable {
+    /// 本页会话。
     public let sessions: [V2DeviceSession]
+    /// 下一页游标；为空表示已到末尾。
     public let nextCursor: String?
 
+    /// 保存会话分页。
+    ///
+    /// - Parameters:
+    ///   - sessions: 本页会话。
+    ///   - nextCursor: 下一页游标。
     public init(sessions: [V2DeviceSession], nextCursor: String?) {
         self.sessions = sessions
         self.nextCursor = nextCursor
     }
 }
 
+/// 会话变更结果。
 public enum V2DeviceSessionMutationOutcome: Equatable, Sendable {
+    /// 本次调用实际执行了变更。
     case applied
+    /// 同一操作此前已执行。
     case idempotent
+    /// 目标设备不存在或不属于该账号。
     case targetUnavailable
 }
 
+/// 设备会话服务错误。
 public enum V2DeviceSessionServiceError: Error, Equatable, Sendable {
+    /// 请求参数不满足约束。
     case invalidRequest
+    /// 持久化记录缺失或字段无法解码。
     case malformedPersistence
+    /// 存储或时刻当前不可用。
     case unavailable
 }
 
+/// 设备吊销凭据兑换结果。
 public enum V2DeviceRevocationCapabilityOutcome: Equatable, Sendable {
+    /// 本次调用实际完成了兑换。
     case applied
+    /// 同一操作此前已兑换。
     case idempotent
+    /// 凭据不合法。
     case invalidCredential
+    /// 凭据已过期。
     case expired
+    /// 同一操作标识已被不同载荷占用。
     case operationConflict
 }
 
+/// 设备吊销凭据兑换能力。
 public protocol V2DeviceRevocationCapabilityRedeeming: Sendable {
+    /// 兑换一份设备吊销凭据。
+    ///
+    /// - Parameters:
+    ///   - credential: 待兑换的吊销凭据。
+    ///   - operationID: 本次兑换的幂等操作标识。
+    /// - Returns: 兑换结果。
+    /// - Throws: 凭据非法或持久化失败时抛出。
     func redeem(_ credential: V2DeviceRevocationCredential, operationID: UUID) async throws -> V2DeviceRevocationCapabilityOutcome
 }
 
+/// 已签发但尚未持久化的设备吊销凭据。
 struct V2IssuedDeviceRevocationCapability: Sendable {
+    /// 吊销凭据。
     let credential: V2DeviceRevocationCredential
+    /// 凭据到期时刻。
     let expiresAt: Date
 }
 
-/// Account-edge session management. Mutations hold the same account advisory
-/// lock as credential issue/refresh, revoke all device credentials in one
-/// transaction, and append a durable revocation event for every gateway.
+/// 账号边缘的会话管理能力。
+///
+/// 变更会持有与凭据签发/刷新相同的账号咨询锁，在单个事务内吊销该设备的全部凭据，
+/// 并为每个网关追加一条持久化吊销事件。
 public protocol V2DeviceSessionManaging: Sendable {
+    /// 分页读取账号的活跃会话。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - cursor: 上一页游标。
+    ///   - pageSize: 本页条数。
+    /// - Returns: 会话分页。
+    /// - Throws: 无权限或持久化失败时抛出。
     func sessions(for userID: UserID, cursor: String?, pageSize: Int) async throws -> V2DeviceSessionPage
+
+    /// 吊销指定设备。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 发起操作的当前设备。
+    ///   - targetDeviceID: 待吊销设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 目标不可用或持久化失败时抛出。
     func revokeDevice(
         actorUserID: UserID,
         currentDeviceID: DeviceID,
         targetDeviceID: DeviceID,
         operationID: UUID
     ) async throws -> V2DeviceSessionMutationOutcome
+    /// 吊销当前设备。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 当前设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     func revokeCurrentDevice(actorUserID: UserID, currentDeviceID: DeviceID, operationID: UUID) async throws -> V2DeviceSessionMutationOutcome
+
+    /// 吊销除当前设备外的全部设备。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 保留的当前设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     func revokeOtherDevices(
         actorUserID: UserID,
         currentDeviceID: DeviceID,
@@ -82,19 +165,34 @@ public protocol V2DeviceSessionManaging: Sendable {
     ) async throws -> V2DeviceSessionMutationOutcome
 }
 
+/// 基于 PostgreSQL 的账号会话服务。
 public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceRevocationCapabilityRedeeming, Sendable {
     private let database: any Database
     private let now: @Sendable () -> Date
 
+    /// 组合数据库与授时来源。
+    ///
+    /// - Parameters:
+    ///   - database: 存放设备、会话与吊销记录的数据库。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(database: any Database, now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database
         self.now = now
     }
 
-    /// Called within the credential issuer's transaction. Reacquiring the same
-    /// transaction-scoped account lock preserves the shared writer lock order.
-    /// Only the digest is retained here. The caller must persist the plaintext
-    /// with the bounded encrypted registration replay before committing.
+    /// 在凭据签发者的事务内签发一份吊销凭据。
+    ///
+    /// 重新获取同一事务级账号锁可保持共享写入者的加锁顺序。此处只保存摘要；
+    /// 调用方必须在提交之前把明文与有界的加密注册重放一并持久化。
+    ///
+    /// - Parameters:
+    ///   - sql: 调用方事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
+    ///   - now: 签发时刻。
+    /// - Returns: 已签发但尚未持久化的吊销凭据。
+    /// - Throws: 标识非法或时刻不可编码时抛出
+    ///   ``V2DeviceSessionServiceError/unavailable``。
     static func issueRevocationCapability(
         on sql: any SQLDatabase, userID: UserID, deviceID: DeviceID, at now: Date
     ) async throws -> V2IssuedDeviceRevocationCapability {
@@ -123,6 +221,15 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         return .init(credential: credential, expiresAt: issued.expiresAt)
     }
 
+    /// 按用户与设备查找该设备当前有效的吊销凭据。
+    ///
+    /// - Parameters:
+    ///   - sql: 调用方事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
+    /// - Returns: 匹配的设备绑定凭据；不存在时返回 `nil`。
+    /// - Throws: 时刻不可编码或标识非法时抛出
+    ///   ``V2DeviceSessionServiceError/malformedPersistence``。
     static func matchingRevocationCapability(on sql: any SQLDatabase, userID: UserID, deviceID: DeviceID,
         credential: V2DeviceRevocationCredential) async throws -> V2IssuedDeviceRevocationCapability? {
         guard let row = try await sql.raw("""
@@ -139,6 +246,17 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         return .init(credential: credential, expiresAt: row.expiresAt)
     }
 
+    /// 兑换一份设备吊销凭据。
+    ///
+    /// 事务先以摘要定位目标（不加行锁），再按「先账号锁、后设备行锁」的统一顺序加锁，
+    /// 从而避免与签发、刷新路径形成反向等待。
+    ///
+    /// - Parameters:
+    ///   - credential: 待兑换的吊销凭据。
+    ///   - operationID: 本次兑换的幂等操作标识。
+    /// - Returns: 兑换结果。
+    /// - Throws: 连接不支持 SQL、时刻不可编码或持久化异常时抛出
+    ///   ``V2DeviceSessionServiceError/unavailable``。
     public func redeem(_ credential: V2DeviceRevocationCredential, operationID: UUID) async throws -> V2DeviceRevocationCapabilityOutcome {
         let digest = Self.revocationDigest(credential)
         return try await database.transaction { transaction in
@@ -177,10 +295,23 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         }
     }
 
+    /// 计算吊销凭据的持久化摘要。
+    ///
+    /// - Parameter credential: 待摘要的凭据。
+    /// - Returns: 十六进制摘要字符串。
     private static func revocationDigest(_ credential: V2DeviceRevocationCredential) -> String {
         SHA256.hash(data: Data(credential.rawValue.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// 分页读取账号的活跃设备会话。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - cursor: 上一页游标。
+    ///   - pageSize: 本页条数，需落在允许范围内。
+    /// - Returns: 会话分页；游标非法时按请求错误处理。
+    /// - Throws: 参数越界时抛出 ``V2DeviceSessionServiceError/invalidRequest``；
+    ///   持久化异常时抛出 ``V2DeviceSessionServiceError/malformedPersistence``。
     public func sessions(for userID: UserID, cursor: String?, pageSize: Int) async throws -> V2DeviceSessionPage {
         guard (1 ... 100).contains(pageSize) else { throw V2DeviceSessionServiceError.invalidRequest }
         guard let sql = database as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
@@ -213,6 +344,15 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         return .init(sessions: sessions, nextCursor: nextCursor)
     }
 
+    /// 吊销指定设备。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 发起操作的当前设备。
+    ///   - targetDeviceID: 待吊销设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 目标不可用或持久化失败时抛出。
     public func revokeDevice(
         actorUserID: UserID,
         currentDeviceID: DeviceID,
@@ -229,11 +369,22 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         )
     }
 
-    /// Current-device logout shares the credential-issue/refresh account lock.
-    /// Device IDs are never revived: a later login needs a new device ID.
-    /// The HTTP boundary requires a live credential; this journal supports
-    /// requests authenticated concurrently before the first commit, not an
-    /// unauthenticated or offline revocation capability.
+    /// 吊销当前设备。
+    ///
+    /// 当前设备登出与凭据签发/刷新共用同一账号锁。设备 ID 绝不会被复活：
+    /// 之后的登录必须使用新的设备 ID。HTTP 边界要求有效凭据；
+    /// 该日志服务于在首次提交前并发完成认证的请求，
+    /// 而不是一种无需认证或可离线发起的吊销能力。
+    ///
+    /// 当前设备登出会与凭据签发/刷新共用账号锁；设备标识不会被重新启用，
+    /// 之后的登录必须使用新的设备标识。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 当前设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     public func revokeCurrentDevice(actorUserID: UserID, currentDeviceID: DeviceID, operationID: UUID) async throws -> V2DeviceSessionMutationOutcome {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
@@ -252,6 +403,14 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         }
     }
 
+    /// 吊销除当前设备外的全部设备。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - currentDeviceID: 保留的当前设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Returns: 变更结果。
+    /// - Throws: 持久化失败时抛出。
     public func revokeOtherDevices(
         actorUserID: UserID,
         currentDeviceID: DeviceID,
@@ -321,6 +480,14 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         try await sql.raw("INSERT INTO im_v2.device_session_operations (actor_user_id, operation_id, operation_kind, target_device_id, created_at) VALUES (\(bind: actorUserID), \(bind: operationID), \(bind: kind.rawValue), \(bind: targetDeviceID), \(bind: at))").run()
     }
 
+    /// 在给定事务内吊销一个设备会话。
+    ///
+    /// - Parameters:
+    ///   - sql: 调用方事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
+    ///   - at: 吊销时刻。
+    /// - Throws: 时刻不可编码或持久化失败时抛出。
     static func revokeSession(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID, at: Date) async throws {
         guard v2PostgresTimestampCanEncode(at) else { throw V2DeviceSessionServiceError.unavailable }
         try await sql.raw("""
@@ -413,6 +580,12 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         """).run()
     }
 
+    /// 取得账号级咨询锁。
+    ///
+    /// - Parameters:
+    ///   - sql: 调用方事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    /// - Throws: 加锁失败时抛出。
     private static func lockAccountState(_ sql: any SQLDatabase, userID: UUID) async throws {
         let key = "account-state:" + userID.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
@@ -461,8 +634,9 @@ private func deviceSessionCursorString(lastActiveAt: Date, deviceID: UUID, times
     try JSONEncoder().encode(DeviceSessionCursor(lastActiveAt: lastActiveAt, deviceID: deviceID, lastActiveAtMicroseconds: timestamp.microseconds)).base64EncodedString()
 }
 
-/// Pagination must preserve the database's exact comparison key. Passing a
-/// timestamp through Date loses microseconds at some epochs and can skip ties.
+/// 分页必须保留数据库的精确比较键。
+///
+/// 把时间戳经由 `Date` 传递会在某些纪元丢失微秒，从而可能跳过并列项。
 private struct DeviceSessionCursorTimestamp: Codable, PostgresNonThrowingEncodable, PostgresDecodable {
     let microseconds: Int64
     static var psqlType: PostgresDataType { .timestamptz }

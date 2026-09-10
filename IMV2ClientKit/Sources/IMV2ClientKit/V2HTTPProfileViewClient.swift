@@ -4,28 +4,51 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
+/// 资料视图读取能力。
 public protocol V2ProfileViewReading: Sendable {
+    /// 按查询键批量读取资料视图。
+    ///
+    /// - Parameter keys: 查询键列表。
+    /// - Returns: 与查询键一一对应的结果。
+    /// - Throws: 请求非法、认证失败或网络失败时抛出。
     func readProfileViews(_ keys: [V2ProfileViewLookupKey]) async throws -> [V2ProfileViewLookupResult]
 }
 
+/// 资料视图客户端错误。
 public enum V2ProfileViewClientError: Error, Equatable, Sendable {
+    /// 端点不是合法的 HTTPS 地址。
     case invalidEndpoint
+    /// 请求参数不满足约束。
     case invalidRequest
+    /// 取不到可用凭据。
     case authorizationUnavailable
+    /// 服务端拒绝授权。
     case authorizationDenied
+    /// 响应结构不合法。
     case invalidResponse
+    /// 网络请求失败。
     case networkFailure
+    /// 服务端返回非预期状态码。
     case serverStatus(Int)
 }
 
-/// HTTPS account-edge adapter for bounded, viewer-authorized profile reads.
-/// It deliberately uses a no-store request policy: durable profile state is
-/// owned by the local SQLite projection, not by URLSession's shared cache.
+/// 面向有界、按查看者授权的资料读取的 HTTPS 账号边缘适配器。
+///
+/// 它刻意使用禁用缓存的请求策略：持久化资料状态由本地 SQLite 投影负责，
+/// 而不是由 URLSession 的共享缓存负责。
 public struct V2HTTPProfileViewClient: V2ProfileViewReading, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientPushEndpointCredentialProvider
     private let transport: any V2ClientPushEndpointHTTPTransport
 
+    /// 校验并保存端点、凭据提供方与传输实现。
+    ///
+    /// - Parameters:
+    ///   - endpoint: 资料端点，必须是带主机名的 HTTPS 地址。
+    ///   - credentials: 提供访问令牌与设备标识的凭据来源。
+    ///   - transport: HTTP 传输实现，默认使用系统 URL 会话。
+    /// - Throws: 端点不是合法 HTTPS 地址时抛出
+    ///   ``V2ProfileViewClientError/invalidEndpoint``。
     public init(
         endpoint: URL,
         credentials: any V2ClientPushEndpointCredentialProvider,
@@ -39,6 +62,19 @@ public struct V2HTTPProfileViewClient: V2ProfileViewReading, Sendable {
         self.transport = transport
     }
 
+    /// 批量读取资料视图。
+    ///
+    /// 校验要求查询键非空、不超过上限且无重复；响应必须为 JSON，
+    /// 且返回的结果集合必须与请求键集合完全一致，部分或多出的结果都会被拒绝。
+    ///
+    /// - Parameter keys: 查询键列表。
+    /// - Returns: 与查询键一一对应的结果。
+    /// - Throws: 键不满足约束时抛出 ``V2ProfileViewClientError/invalidRequest``；
+    ///   取不到凭据时抛出 ``V2ProfileViewClientError/authorizationUnavailable``；
+    ///   401 或 403 抛出 ``V2ProfileViewClientError/authorizationDenied``；
+    ///   响应不合法时抛出 ``V2ProfileViewClientError/invalidResponse``；
+    ///   网络失败或非预期状态码时抛出 ``V2ProfileViewClientError/networkFailure`` 或
+    ///   ``V2ProfileViewClientError/serverStatus(_:)``。
     public func readProfileViews(_ keys: [V2ProfileViewLookupKey]) async throws -> [V2ProfileViewLookupResult] {
         guard !keys.isEmpty, keys.count <= V2ProfileViewLookupLimits.maximumKeys, Set(keys).count == keys.count else {
             throw V2ProfileViewClientError.invalidRequest
@@ -82,6 +118,10 @@ public struct V2HTTPProfileViewClient: V2ProfileViewReading, Sendable {
         return results
     }
 
+    /// 从结果中取出其对应的查询键。
+    ///
+    /// - Parameter result: 单条查询结果。
+    /// - Returns: 该结果对应的查询键。
     private static func key(for result: V2ProfileViewLookupResult) -> V2ProfileViewLookupKey {
         switch result {
         case .profile(let key, _), .unavailable(let key): key
@@ -151,6 +191,13 @@ private struct ResponseItem: Decodable {
         case visibilityRevision = "visibility_revision"
     }
 
+    /// 把线路结果解析为领域结果。
+    ///
+    /// 不可用结果不得携带任何资料字段；可用结果必须同时给出状态与两个修订，
+    /// 身份三要素要么全部缺失要么全部存在。
+    ///
+    /// - Returns: 领域层查询结果。
+    /// - Throws: 字段组合非法时抛出 ``V2ProfileViewClientError/invalidResponse``。
     func result() throws -> V2ProfileViewLookupResult {
         let userID = try UserID(userID)
         let context: V2ProfileViewContext

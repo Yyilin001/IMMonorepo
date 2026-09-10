@@ -3,9 +3,9 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Immutable source payload prepared by the control store for a single
-/// fan-out effect. It deliberately contains logical IDs only, never a bucket
-/// address or a connection string.
+/// 由控制存储为单次扇出效果准备的不可变源载荷。
+///
+/// 它刻意只包含逻辑 ID，绝不包含桶地址或连接串。
 public struct V2FanoutProjectionInput: Sendable {
     public let sourceEventID: EventID
     public let targetUserID: UserID
@@ -28,9 +28,10 @@ public struct V2FanoutProjectionInput: Sendable {
     }
 }
 
-/// Immutable cross-store transport for one canonical message state. It has no
-/// bucket or connection information and uses the globally stable state ID, so
-/// a target-shard retry can verify or reuse it without remapping identifiers.
+/// 单个规范消息状态的不可变跨存储传输体。
+///
+/// 它不携带桶或连接信息，并使用全局稳定的状态 ID，
+/// 因此目标分片重试时可以校验或复用，无需重映射标识符。
 public struct V2FanoutMessageProjectionState: Equatable, Sendable {
     public let stateID: UUID
     public let messageID: UUID
@@ -108,10 +109,10 @@ public struct V2FanoutMessageProjectionState: Equatable, Sendable {
     }
 }
 
-/// Privacy-safe timing for one bounded remote target projection and its
-/// control-store acknowledgement. It intentionally contains only aggregate
-/// counts and elapsed durations: room, event, user, bucket and payload values
-/// never reach an observer.
+/// 单个有界远端目标投影及其控制存储确认的隐私安全耗时。
+///
+/// 它刻意只包含聚合计数与耗时：房间、事件、用户、桶与载荷值
+/// 绝不会到达观察者。
 public struct V2CrossStoreFanoutBatchTiming: Equatable, Sendable {
     public let targetCount: Int
     public let migrationReadMilliseconds: Int
@@ -134,16 +135,17 @@ public struct V2CrossStoreFanoutBatchTiming: Equatable, Sendable {
     }
 }
 
-/// Optional diagnostic seam for remote fan-out. Production composition can
-/// leave it unset; a recorder must not participate in delivery correctness.
+/// 远端扇出的可选诊断接缝。
+///
+/// 生产组合可以保持未设置；记录器不得参与投递正确性。
 public protocol V2CrossStoreFanoutDeliveryTimingRecording: Sendable {
     func record(_ timing: V2CrossStoreFanoutBatchTiming) async
 }
 
-/// An already-committed user-sync record mirrored during a user-shard move.
-/// Unlike fan-out input, this preserves the source-assigned sequence and
-/// payload: direct/social authority commits in the control store first and
-/// must never manufacture a second user-visible event on the target shard.
+/// 用户分片迁移期间镜像的、已提交的用户同步记录。
+///
+/// 与扇出输入不同，它保留源分配的序号与载荷：直接/社交权威
+/// 先在控制存储提交，且绝不允许在目标分片上再制造第二个用户可见事件。
 public struct V2UserSyncProjectionMirror: Sendable {
     public let userID: UserID
     public let sequence: UInt64
@@ -162,10 +164,10 @@ public struct V2UserSyncProjectionMirror: Sendable {
     }
 }
 
-/// Target-store half of a cross-store fan-out delivery. The inbox insert and
-/// sequence/log write share one target transaction. If a process dies before
-/// the control store is completed, a retry returns the already committed
-/// sequence instead of producing a second user-visible record.
+/// 跨存储扇出投递的目标存储一侧。
+///
+/// 收件箱写入与序号/日志写入共享同一个目标事务。若进程在控制存储完成前退出，
+/// 重试会返回已提交的序号，而不是产生第二条用户可见记录。
 public struct PostgresV2UserShardFanoutProjector: Sendable {
     private let database: any Database
     private let schema: String
@@ -296,15 +298,19 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         }
     }
 
-    /// Projects one bounded, same-physical-shard batch in one target-store
-    /// transaction.  Control-store completion intentionally remains outside
-    /// this transaction: PostgreSQL cannot atomically commit across the two
-    /// databases. If the process stops after this target commit, a retry
-    /// reads the inbox-backed sync sequence below and completes only the
-    /// still-fenced control delivery. Repeated immutable event payloads are
-    /// sent as a separate, deduplicated table: a normal room-event batch has
-    /// one payload for many target rows, so repeating it per target would
-    /// needlessly consume wire, JSON parsing and PostgreSQL memory.
+    /// 在单个目标存储事务中投影一个有界的同物理分片批次。
+    ///
+    /// 控制存储的完成刻意留在该事务之外：PostgreSQL 无法跨两个数据库原子提交。
+    /// 若进程在本目标事务提交后中止，重试会读取下方由收件箱支撑的同步序号，
+    /// 只补完仍被围栏保护的控制投递。重复的不可变事件载荷通过单独的、
+    /// 去重后的表发送：普通房间事件批次中多个目标行共享一份载荷，
+    /// 若按目标重复发送，会无谓消耗网络、JSON 解析与 PostgreSQL 内存。
+    ///
+    /// - Parameters:
+    ///   - inputs: 本批次待投影的扇出输入，顺序决定返回序号的顺序。
+    ///   - now: 本次批次统一使用的提交时间戳。
+    /// - Returns: 与 `inputs` 一一对应、按同一顺序排列的用户同步序号。
+    /// - Throws: 时间戳无法编码、标识符非法或持久化状态损坏时抛出。
     public func projectBatch(_ inputs: [V2FanoutProjectionInput], now: Date) async throws -> [UInt64] {
         guard !inputs.isEmpty else { return [] }
         guard v2PostgresTimestampCanEncode(now) else {
@@ -615,10 +621,14 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         }
     }
 
-    /// Mirrors a source-owned sync record without changing its sequence. It
-    /// first uses the semantic `(user, source event, kind)` identity; a
-    /// sequence collision with a different record is persistence corruption,
-    /// not a conflict to overwrite during migration.
+    /// 镜像一条源端拥有的同步记录且不改变其序号。
+    ///
+    /// 它首先使用语义身份 `(user, source event, kind)`；若某序号与另一条不同记录
+    /// 冲突，则视为持久化损坏，而非迁移期间可覆盖的冲突。
+    ///
+    /// - Parameter record: 待镜像的、已提交的用户同步记录。
+    /// - Returns: 与源记录一致的持久化用户同步序号。
+    /// - Throws: 标识符非法、序号超出可编码范围或持久化状态损坏时抛出。
     public func mirror(_ record: V2UserSyncProjectionMirror) async throws -> UInt64 {
         try await mirror(record, persistedCreatedAt: nil)
     }
@@ -681,11 +691,19 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
         }
     }
 
-    /// Appends a control-plane-owned projection to whichever user shard is
-    /// currently authoritative. Its source event/kind identity makes retries
-    /// idempotent, while the sequence is allocated by that shard. This is
-    /// required after cutover: the control database's historical counter is
-    /// no longer the target user's live sequence counter.
+    /// 把控制面拥有的投影追加到当前权威的用户分片。
+    ///
+    /// 其源事件/类型身份使重试具备幂等性，而序号由该分片分配。
+    /// 切换后这是必需的：控制数据库的历史计数器不再是目标用户的实时序号计数器。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - sourceEventID: 源事件标识。
+    ///   - projectionKind: 投影类型。
+    ///   - payloadJSON: 投影载荷 JSON。
+    ///   - createdAt: 投影创建时间。
+    /// - Returns: 由目标用户分片新分配的用户同步序号。
+    /// - Throws: 标识符非法、时间戳无法编码或持久化状态损坏时抛出。
     public func projectAllocated(
         userID: UserID,
         sourceEventID: EventID,
@@ -742,10 +760,10 @@ public struct PostgresV2UserShardFanoutProjector: Sendable {
     private func table(_ name: String) -> String { "\(schema).\(name)" }
 }
 
-/// Keeps fan-out control records in their authoritative database while
-/// materializing the per-user projection in the physical store chosen by the
-/// durable logical route. All lease/retry/handoff operations remain control
-/// store operations; only the user projection crosses stores.
+/// 将扇出控制记录保留在其权威数据库中，同时按持久逻辑路由选定的物理存储
+/// 物化每用户投影。
+///
+/// 所有租约/重试/交接操作仍是控制存储操作；只有用户投影跨存储。
 public struct V2CrossStoreFanoutDeliveryStore:
     V2PartitionedFanoutDeliveryStore,
     V2FreshDirectFanoutDeliveryStore,
@@ -754,26 +772,25 @@ public struct V2CrossStoreFanoutDeliveryStore:
     private let control: PostgresV2FanoutDeliveryStore
     private let registry: any V2UserShardStorageResolving
     private let migrations: PostgresV2UserShardMigrationStore
-    /// Set only by the composition root after it has established that this
-    /// bucket uses the control database's `im_v2` schema. It is intentionally
-    /// topology data rather than a best-effort comparison of database objects.
+    /// 仅由组合根在确认该桶使用控制数据库的 `im_v2` schema 后设置。
+    ///
+    /// 它刻意是拓扑数据，而不是对数据库对象做尽力而为的比较。
     private let coLocatedControlBucket: String?
-    /// Payloads above this size are returned once per source event in a
-    /// lease-claim result. The remaining claimed leases are completed from a
-    /// process-local copy before any target transaction starts. This keeps a
-    /// large immutable room event from becoming a member-count-scaled control
-    /// response, without adding a second control-store read.
+    /// 超过该大小的载荷会在租约认领结果中按源事件返回一次。
+    ///
+    /// 其余已认领租约在任何目标事务开始前，从进程本地副本完成。
+    /// 这样可避免一个大体积不可变房间事件演变成随成员数放大的控制响应，
+    /// 同时无需增加第二次控制存储读取。
     private let maximumInlineClaimPayloadBytes: Int
     private let payloadWriteMode: V2FanoutPayloadWriteMode
     private let timingRecorder: (any V2CrossStoreFanoutDeliveryTimingRecording)?
 
-    /// A remote user shard's target transaction and control completion are
-    /// two ordered database boundaries. Multiple claim workers for the same
-    /// remote bucket fragment `SKIP LOCKED` claims and contend on completion
-    /// units; the isolated 5k profile regressed under four such workers.
-    /// Co-located buckets retain parallel projection, but cap one physical
-    /// PostgreSQL shard at the measured eight claim passes: sixteen adds lock
-    /// and claim work without reducing end-to-end latency in the 80k profile.
+    /// 远端用户分片的目标事务与控制完成是两个有序的数据库边界。
+    ///
+    /// 同一远端桶的多个认领工作协程会以 `SKIP LOCKED` 分割认领，并在完成单元上竞争；
+    /// 隔离的 5k 档位在四个此类工作协程下出现回退。
+    /// 同置桶保留并行投影，但将单个物理 PostgreSQL 分片限制在实测的八次认领轮次：
+    /// 十六次会徒增锁与认领开销，而在 80k 档位并不降低端到端延迟。
     public var maximumConcurrentClaimsPerBucket: Int {
         coLocatedControlBucket == nil ? 1 : 8
     }
@@ -933,14 +950,18 @@ public struct V2CrossStoreFanoutDeliveryStore:
         return try await control.completeExternal(lease, userSyncSequence: sequence, now: now)
     }
 
-    /// Uses the control store's native atomic batch only when deployment
-    /// topology proves every projection is in that same `im_v2` schema and no
-    /// forwarding/verified move needs a shadow write. For an external bucket,
-    /// the target inbox/sequence/log effects are instead batched in that one
-    /// physical user database; each successful target sequence is then
-    /// completed through its independent control-store lease fence. A
-    /// forwarding user deliberately keeps the established per-target protocol
-    /// because it also needs a second, migration-target projection.
+    /// 仅当部署拓扑证明所有投影都位于同一 `im_v2` schema 且无需转发/已校验移动的影子写入时，
+    /// 才使用控制存储原生的原子批次。
+    ///
+    /// 对于外部桶，目标收件箱/序号/日志效果改为在该单一物理用户数据库中批量执行；
+    /// 随后每个成功的目标序号通过其独立的控制存储租约围栏完成。
+    /// 转发中的用户刻意保留既有的逐目标协议，因为它还需要第二个迁移目标投影。
+    ///
+    /// - Parameters:
+    ///   - leases: 本批次待提交的扇出投递租约，顺序决定返回结果的顺序。
+    ///   - now: 本次提交统一使用的时间戳。
+    /// - Returns: 与 `leases` 一一对应、按同一顺序排列的提交结果。
+    /// - Throws: 路由缺失、标识符非法或持久化状态损坏时抛出。
     public func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
         guard !leases.isEmpty else { return [] }
         if try await canCommitAtomicallyInControlStore(leases) {
@@ -1147,8 +1168,13 @@ private func crossStoreBatchJSON<T: Encodable>(_ value: T) throws -> String {
     return json
 }
 
-/// Timing must not depend on wall-clock corrections or trap while reporting
-/// an already committed batch. Preserve nearest-millisecond rounding.
+/// 将跨存储投递耗时四舍五入为整数毫秒，用于批次完成后的统计。
+///
+/// - Parameter duration: 应由单调时钟测得的持续时间，避免系统时钟校准影响耗时。
+/// - Returns: 正耗时按最近毫秒舍入的 `Int`；半毫秒向上取整，非正值或整数溢出返回零。
+///
+/// 保持此处的最近毫秒舍入规则，与一般遥测的向下截断规则不同。
+/// 无效观测退回零值，使已经提交的业务批次不会因计时转换失败而报错。
 func v2CrossStoreElapsedMilliseconds(_ duration: Duration) -> Int {
     guard duration > .zero else { return 0 }
     let components = duration.components

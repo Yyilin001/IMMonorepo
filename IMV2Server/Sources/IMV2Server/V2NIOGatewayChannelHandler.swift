@@ -4,11 +4,11 @@ import Logging
 @preconcurrency import NIOCore
 import Synchronization
 
-/// A single TLS-decoded NIO channel. Work is serialized before it enters the
-/// actor-backed byte stream, so async authentication/database work cannot
-/// reorder replies on a connection. The queue is explicitly byte-bounded:
-/// resumable sync must absorb overload rather than memory growing without
-/// limit.
+/// 单条已完成 TLS 解码的 NIO 通道。
+///
+/// 工作在进入由 actor 支撑的字节流之前先被串行化，因此异步认证或数据库操作
+/// 不会把同一连接上的应答顺序打乱。队列显式按字节限量：过载应由可续传的同步吸收，
+/// 而不是让内存无上限增长。
 public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public typealias InboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
@@ -20,23 +20,24 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let logger = Logger(label: "imv2.gateway.transport")
     private var pending: V2GatewayInboundQueue
     private var processing = false
-    /// Exactly one request task belongs to the channel. EOF, timeout,
-    /// revocation, and every explicit close path cancel it before dropping
-    /// queued input, so database/pool acquisition does not continue for a
-    /// client that no longer exists.
+    /// 通道唯一的请求任务。
+    ///
+    /// EOF、超时、吊销以及所有显式关闭路径都会在丢弃排队输入之前先取消它，
+    /// 因此对已经消失的客户端不会继续执行数据库或连接池获取。
     private var processingTask: Task<Void, Never>?
-    /// Best-effort foreground pushes have no request promise and may be
-    /// coalesced. Keep their EventLoop handoff separate from ordered command
-    /// responses so a live-event burst never creates one Swift task and actor
-    /// continuation per recipient.
+    /// 尽力而为的前台推送没有请求承诺，因而可以合并。
+    ///
+    /// 它们的事件循环切换与有序命令应答分开处理，使一次实时事件突发不会为每个接收者
+    /// 各创建一个 Swift 任务与 actor 等待续期。
     private var foregroundWriter: V2NIOGatewayForegroundWriter?
     private struct PendingResponseWrite {
         let frame: V2Frame
         let promise: EventLoopPromise<Void>
     }
     private var pendingResponseWrite: PendingResponseWrite?
-    /// A bounded decoder batch left later wire frames in the byte stream.
-    /// Drain those before later TCP chunks so response order remains FIFO.
+    /// 上一次有界解码批次可能仍在字节流中留下后续线路帧。
+    ///
+    /// 必须先排空它们再处理后续 TCP 分片，才能保持应答先进先出。
     private var needsFrameDrain = false
     private var closed = false
     // `V2GatewayByteStream` is an actor, so installing its channel callbacks
@@ -384,12 +385,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 }
 
-/// Process-wide foreground write combiner. One lane belongs to each child
-/// EventLoop: the first ready connection schedules a drain and later ready
-/// connections join the same bounded turn instead of each allocating an
-/// `EventLoop.execute` closure. Turns are capped so heartbeats, command
-/// responses and TLS work retain fair access to the loop under a live-event
-/// burst.
+/// 进程级前台写合并器。
+///
+/// 每个子事件循环各自拥有一条通道：第一个就绪的连接负责调度一次排空，
+/// 之后就绪的连接加入同一轮有界处理，而不是各自分配一个 `EventLoop.execute` 闭包。
+/// 每轮处理数量设有上限，使实时事件突发时心跳、命令应答与 TLS 处理仍能公平获得事件循环。
 final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
     final class Lane: @unchecked Sendable {
         private struct State {
@@ -416,11 +416,13 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
             if shouldSchedule { scheduleDrain() }
         }
 
-        /// One group publication usually makes many writers on the same
-        /// EventLoop ready together. Appending that whole set under one lane
-        /// lock avoids repeating the cross-thread scheduler lock for every
-        /// recipient while retaining the exact same writer FIFO and fair,
-        /// bounded EventLoop drain turns.
+        /// 批量入队写者。
+        ///
+        /// 一次群组发布通常会让同一 EventLoop 上的多个写者同时就绪。
+        /// 在单次通道锁内追加整批写者，可避免为每个接收者重复获取跨线程调度器锁，
+        /// 同时保持完全相同的写者 FIFO 以及公平、有界的事件循环排空轮次。
+        ///
+        /// - Parameter writers: 本次要追加的写者列表；为空时直接返回。
         func enqueue(_ writers: [V2NIOGatewayForegroundWriter]) {
             guard !writers.isEmpty else { return }
             let shouldSchedule = state.withLock { state in
@@ -482,19 +484,19 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
     }
 }
 
-/// A lifecycle-fenced, already-encoded foreground frame awaiting admission to
-/// one connection writer. Creating this value does not enqueue work; the group
-/// publisher can collect many submissions and enter each EventLoop lane once.
+/// 一个已受生命周期围栏保护、且已完成编码的前台帧，等待被某个连接写者接纳。
+///
+/// 创建该值本身不会入队任何工作；群组发布方可以收集大量提交，只进入每个 EventLoop 通道一次。
 struct V2NIOGatewayForegroundWriteSubmission: Sendable {
     let writer: V2NIOGatewayForegroundWriter
     let bytes: ByteBuffer
 }
 
-/// FIFO used by one foreground connection writer. Normal operation preserves
-/// every ordered live batch. If the bounded prefix fills, one latest recovery
-/// frame is retained separately: after the prefix drains its higher waterline
-/// deliberately exposes a cursor gap and drives the durable pull path. This
-/// bounds memory without silently pretending a suffix is contiguous.
+/// 单个前台连接写者使用的 FIFO。
+///
+/// 正常运行时它保留每一个有序实时批次。若有界前缀被写满，
+/// 则单独保留一个最新的恢复帧：前缀排空后，其更高的水位线会刻意暴露一个游标缺口，
+/// 从而驱动持久拉取路径。这样可在不悄悄假设后缀连续的前提下限制内存占用。
 struct V2GatewayForegroundWriteQueue: Sendable {
     enum AppendOutcome: Equatable, Sendable {
         case queued
@@ -576,11 +578,11 @@ struct V2GatewayForegroundWriteQueue: Sendable {
     }
 }
 
-/// Bounded, non-suspending bridge from an authenticated foreground route to
-/// one NIO channel. Shared immutable frames remain COW while queued. A drain
-/// copies several complete protocol frames into one NIO buffer and performs a
-/// single flush, allowing the decoder to consume the coalesced frames while
-/// amortizing EventLoop, syscall, and TLS-record work.
+/// 从已认证前台路由到单个 NIO channel 的有界、不挂起桥接。
+///
+/// 共享的不可变帧在排队期间保持写时复制。一次排空会把若干完整协议帧复制进单个 NIO 缓冲区，
+/// 并只执行一次 flush，使解码器可以消费这些合并帧，
+/// 同时摊薄事件循环、系统调用与 TLS 记录的开销。
 final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     private struct LaneBatch {
         let lane: V2NIOForegroundWriteScheduler.Lane
@@ -602,9 +604,10 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     }
 
     private let state: Mutex<State>
-    /// A production NIO channel and its EventLoop are thread-safe entry
-    /// points. All mutable channel-handler state remains confined to that
-    /// EventLoop; this reference is never used to run application work inline.
+    /// 生产 NIO channel 及其 EventLoop 是线程安全的入口点。
+    ///
+    /// 所有可变的 channel handler 状态都局限在该 EventLoop 内；
+    /// 该引用绝不会被用来就地运行业务工作。
     private let channel: any Channel
     private let schedulerLane: V2NIOForegroundWriteScheduler.Lane
     private let metrics: (any V2GatewayTransportMetricsRecorder)?
@@ -635,9 +638,12 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         ))
     }
 
-    /// Compatibility entry used by focused queue tests and non-prepared local
-    /// callers. Production group publication submits an already-prepared
-    /// `ByteBuffer` and avoids this one-time conversion per connection.
+    /// 兼容入口，供聚焦的队列测试与未预处理数据的本地调用方使用。
+    ///
+    /// 生产环境的群组发布会提交已准备好的 `ByteBuffer`，
+    /// 从而避免每个连接都做一次这样的转换。
+    ///
+    /// - Parameter bytes: 待提交的已编码字节。
     func submit(_ bytes: Data) {
         submit(ByteBuffer(bytes: bytes))
     }
@@ -646,10 +652,13 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         if append(bytes) { schedulerLane.enqueue(self) }
     }
 
-    /// Admits one prepared frame without immediately entering the shared lane.
-    /// `submitBatch` uses this to pay one lane lock per EventLoop rather than
-    /// one per recipient. The per-connection mutex remains the lifecycle,
-    /// bounded-queue, and FIFO authority.
+    /// 接纳一个已准备好的帧，但不立即进入共享通道。
+    ///
+    /// `submitBatch` 借此把通道锁开销从「每个接收者一次」降为「每个 EventLoop 一次」。
+    /// 每连接互斥锁仍然是生命周期、有界队列与 FIFO 的权威。
+    ///
+    /// - Parameter bytes: 待接纳的已准备帧。
+    /// - Returns: 是否需要将本写者加入调度通道。
     private func append(_ bytes: ByteBuffer) -> Bool {
         let submission = state.withLock { state -> (
             shouldEnqueue: Bool,
@@ -674,11 +683,14 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         return submission.shouldEnqueue
     }
 
-    /// Bulk counterpart used by the real group-broadcast path. All queue
-    /// admissions happen before scheduling, so a concurrently scheduled writer
-    /// can safely drain an admitted frame even when this call does not add it to
-    /// a lane again. Object identity groups writers by their pre-registered
-    /// EventLoop lane without hashing or locking the process-wide scheduler.
+    /// 真实群组广播路径使用的批量对应实现。
+    ///
+    /// 所有队列接纳都发生在调度之前，因此即使本次调用不再把某写者加入通道，
+    /// 一个已被并发调度的写者也能安全地排空已接纳的帧。
+    /// 通过对象标识按预先注册的 EventLoop 通道对写者分组，
+    /// 无需对进程级调度器做哈希或加锁。
+    ///
+    /// - Parameter submissions: 本批待提交的写者与帧。
     static func submitBatch(_ submissions: [V2NIOGatewayForegroundWriteSubmission]) {
         guard !submissions.isEmpty else { return }
         var batches: [ObjectIdentifier: LaneBatch] = [:]
@@ -768,10 +780,15 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     }
 }
 
-/// Encodes the stable 18-byte gateway header and protobuf payload directly
-/// into NIO-owned storage. The byte order intentionally mirrors
-/// `V2FrameCodec.encode`; validation remains in `V2GatewayByteStream` before
-/// the frame crosses onto the event loop.
+/// 把稳定的 18 字节网关头与 protobuf 载荷直接编码进 NIO 持有的存储。
+///
+/// 字节序刻意与 `V2FrameCodec.encode` 保持一致；
+/// 在帧跨越到事件循环之前，校验仍由 `V2GatewayByteStream` 负责。
+///
+/// - Parameters:
+///   - frame: 待编码的帧。
+///   - allocator: NIO 缓冲区分配器。
+/// - Returns: 可直接写入 channel 的缓冲区。
 func v2GatewayWireBuffer(
     _ frame: V2Frame,
     allocator: ByteBufferAllocator
@@ -787,9 +804,11 @@ func v2GatewayWireBuffer(
     return buffer
 }
 
-/// Event-loop-confined, two-dimensional admission queue. `CircularBuffer`
-/// keeps append/pop amortized O(1), so draining a full fragmented connection
-/// never shifts thousands of retained `Data` values on the shared event loop.
+/// 局限于事件循环的二维接纳队列。
+///
+/// `CircularBuffer` 让追加/弹出保持摊还 O(1)，
+/// 因此排空一个写满的碎片化连接时，
+/// 绝不会在共享事件循环上搬移成千上万个保留的 `Data` 值。
 struct V2GatewayInboundQueue {
     private let maximumBytes: Int
     private let maximumChunks: Int

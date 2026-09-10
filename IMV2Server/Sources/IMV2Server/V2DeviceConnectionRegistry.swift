@@ -3,17 +3,19 @@ import IMV2Compression
 import IMV2Core
 import Synchronization
 
-/// Process-local index of authenticated live connections. A durable revocation
-/// consumer invokes this registry on every gateway replica.
+/// 已认证实时连接的进程本地索引。
+///
+/// 持久吊销消费者会在每个网关副本上调用该注册表。
 public actor V2DeviceConnectionRegistry {
-    /// Foreground notifications are the high-frequency path. Keep their
-    /// immutable routing snapshots outside the registry actor so unrelated
-    /// rooms do not queue behind connection lifecycle and presence work.
+    /// 前台通知属于高频路径。
+    ///
+    /// 把它们的不可变路由快照放在注册表 actor 之外，
+    /// 使无关房间不会排在连接生命周期与在线状态工作之后。
     private nonisolated let foregroundRoutes = V2ForegroundConnectionRoutes()
-    /// Every stream created by one Gateway uses this process-wide frame
-    /// contract. When supplied, foreground broadcasts encode once and share
-    /// immutable bytes; tests and alternate embeddings may omit it and retain
-    /// the per-stream compatibility path.
+    /// 同一 Gateway 创建的每条流都使用这套进程级帧契约。
+    ///
+    /// 提供之后，前台广播只编码一次并共享不可变字节；
+    /// 测试与替代嵌入可以省略它，从而保留逐流的兼容路径。
     private let foregroundFrameLimits: V2FrameLimits?
     private let foregroundFrameCompression: V2NegotiatedFrameCompression?
     private let foregroundMaximumUncompressedPayloadBytes: Int
@@ -24,14 +26,15 @@ public actor V2DeviceConnectionRegistry {
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
-    /// Every registration gets a fresh token. Actor methods revalidate it
-    /// after external awaits so an older continuation cannot resurrect state
-    /// after unregister or a later registration of the same connection ID.
+    /// 每次注册都会获得一个新令牌。
+    ///
+    /// actor 方法会在外部 await 之后重新校验它，
+    /// 使较早的续体无法在注销之后、或同一连接 ID 再次注册之后复活状态。
     private typealias Generation = UInt64
     private var lifecycleByConnection: [UUID: Generation] = [:]
-    /// Foreground group viewers are intentionally process-local soft state.
-    /// The durable room event log and normal per-user sync remain recovery
-    /// sources after a process or connection failure.
+    /// 前台群组观看关系刻意是进程本地的软状态。
+    ///
+    /// 在进程或连接失败之后，持久房间事件日志与常规的每用户同步仍是恢复来源。
     private var streamsByForegroundGroup: [RoomID: [UUID: V2GatewayByteStream]] = [:]
     private var foregroundGroupByConnection: [UUID: RoomID] = [:]
     private var foregroundMutationByConnection: [UUID: Generation] = [:]
@@ -45,9 +48,9 @@ public actor V2DeviceConnectionRegistry {
     private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var typingRoomByConnection: [UUID: RoomID] = [:]
     private var typingMutationByConnection: [UUID: Generation] = [:]
-    /// These values are actor-local reentrancy fences, not public identities
-    /// or security capabilities. A monotonic generation is sufficient and
-    /// avoids opening the platform random source during connection churn.
+    /// 这些值是 actor 本地的可重入围栏，而不是公开身份或安全能力。
+    ///
+    /// 单调递增的代次已经够用，并可避免在连接频繁变动时打开平台随机源。
     private var nextGeneration: Generation = 0
     private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
@@ -212,9 +215,12 @@ public actor V2DeviceConnectionRegistry {
         for stream in streams { await stream.sendSyncAvailable(eventID: eventID, highWatermark: highWatermark) }
     }
 
-    /// The domain handler has already verified group membership before this
-    /// is called. One foreground connection may watch one detail room;
-    /// moving it tears down its previous local interest atomically.
+    /// 配置前台群组兴趣管理器。
+    ///
+    /// 调用前领域处理器已校验过群组成员关系。一个前台连接只能观看一个详情房间；
+    /// 切换房间会原子地拆除此前的本地兴趣。
+    ///
+    /// - Parameter manager: 群事件唤醒兴趣管理器。
     public func configureForegroundGroupInterestManager(_ manager: any V2GroupEventWakeInterestManaging) async {
         foregroundGroupInterestManager = manager
         for roomID in Array(streamsByForegroundGroup.keys) {
@@ -290,8 +296,14 @@ public actor V2DeviceConnectionRegistry {
         await removeForegroundGroupSubscription(connectionID: connectionID)
     }
 
-    /// Core routing is allowed to duplicate or lose this hint. Each stream
-    /// receives only a room waterline and must cursor-pull durable events.
+    /// 通知前台群组可用性。
+    ///
+    /// 核心路由允许重复或丢失该提示。
+    /// 每条流只会收到一个房间水位线，必须自行游标拉取持久事件。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - highWatermark: 该房间当前的高水位。
     public nonisolated func notifyForegroundGroupAvailable(
         roomID: RoomID,
         highWatermark: UInt64
@@ -318,9 +330,12 @@ public actor V2DeviceConnectionRegistry {
         )
     }
 
-    /// Routes a direct-event acceleration payload only to foreground streams
-    /// whose authenticated identity was one of the members captured by the
-    /// committing transaction.  A subscription alone is never authority.
+    /// 只把私聊事件加速载荷路由到这样的前台流：
+    /// 其已认证身份属于提交事务所捕获的成员集合。
+    ///
+    /// 单单一条订阅永远不构成权威。
+    ///
+    /// - Parameter event: 待路由的私聊实时事件。
     public nonisolated func notifyForegroundDirectEvent(
         _ event: V2DirectRoomLiveEvent
     ) async {
@@ -347,18 +362,18 @@ public actor V2DeviceConnectionRegistry {
         )
     }
 
-    /// Completes the production local-only direct-event route without
-    /// creating a Swift child task or crossing this registry actor.  The
-    /// immutable frame is encoded once, every audience member is still
-    /// selected from the authenticated routing snapshot, and each stream's
-    /// transport fence validates authentication/lifecycle again.
+    /// 在不新建 Swift 子任务、也不穿越该注册表 actor 的前提下，
+    /// 完成生产环境的纯本地私聊事件路由。
     ///
-    /// `false` is returned before publication when this registry was created
-    /// without a process-wide frame contract.  Once publication begins, a
-    /// partial transport-lifecycle miss also returns `false`; the dispatcher
-    /// then runs the compatibility path.  A duplicate on an already-enqueued
-    /// stream is explicitly safe because foreground events are idempotent
-    /// accelerators and the room-log cursor remains authoritative.
+    /// 不可变帧只编码一次，每个受众成员仍由已认证路由快照选出，
+    /// 且每条流的传输栅栏会再次校验认证与生命周期。
+    ///
+    /// 若该注册表创建时没有进程级帧契约，则在发布之前返回 `false`。
+    /// 一旦发布开始，部分传输生命周期未命中也会返回 `false`；投递器随后改走兼容路径。
+    /// 在已入队流上出现重复显式安全，因为前台事件是幂等加速器，而房间日志游标仍是权威。
+    ///
+    /// - Parameter event: 待提交的私聊实时事件。
+    /// - Returns: 是否已通过快速路径完成本地路由。
     nonisolated func submitForegroundDirectEvent(
         _ event: V2DirectRoomLiveEvent
     ) -> Bool {
@@ -379,10 +394,13 @@ public actor V2DeviceConnectionRegistry {
         return Self.submitPreparedForeground(prepared, to: streams)
     }
 
-    /// Ordered Hybrid-group microbatch counterpart of the direct-event fast
-    /// path. The first event's membership epoch selects the audience, every
-    /// entry is revalidated by the prepared-frame constructor, and all sockets
-    /// receive one shared immutable frame rather than one frame per event.
+    /// 私聊事件快速路径在有序混合群组微批上的对应实现。
+    ///
+    /// 以首个事件的成员任期选出受众，每个条目都由已准备帧构造器重新校验，
+    /// 所有套接字收到同一份共享不可变帧，而不是每个事件一帧。
+    ///
+    /// - Parameter events: 本批有序群组实时事件。
+    /// - Returns: 是否已通过快速路径提交。
     nonisolated func submitForegroundGroupEvents(
         _ events: [V2DirectRoomLiveEvent]
     ) -> Bool {
@@ -403,10 +421,14 @@ public actor V2DeviceConnectionRegistry {
         return Self.submitPreparedForeground(prepared, to: streams)
     }
 
-    /// Keeps the per-stream authentication/lifecycle fence while reducing the
-    /// process-wide scheduler handoff from one lock per recipient to one batch
-    /// per EventLoop. Callback-based test and alternate transports retain their
-    /// established immediate submission path.
+    /// 在保留逐流认证/生命周期栅栏的同时，
+    /// 把进程级调度器交接从「每个接收者一次锁」降为「每个 EventLoop 一批」。
+    /// 基于回调的测试与替代传输仍沿用既有的即时提交路径。
+    ///
+    /// - Parameters:
+    ///   - prepared: 已准备的群事件帧。
+    ///   - streams: 本次投递的已授权目标流。
+    /// - Returns: 是否已通过快速路径完成提交。
     private nonisolated static func submitPreparedForeground(
         _ prepared: V2PreparedGatewayGroupEventAvailable,
         to streams: [V2GatewayByteStream]
@@ -425,8 +447,10 @@ public actor V2DeviceConnectionRegistry {
         return completed
     }
 
-    /// Actor-backed compatibility path used by tests, alternate transports,
-    /// and any stream that could not use the NIO synchronous writer.
+    /// 由 actor 支撑的兼容路径，供测试、替代传输，
+    /// 以及任何无法使用 NIO 同步写者的流使用。
+    ///
+    /// - Parameter events: 本批有序群组实时事件。
     public nonisolated func notifyForegroundGroupEvents(
         _ events: [V2DirectRoomLiveEvent]
     ) async {
@@ -726,9 +750,13 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
-    /// Authorization is identical for all devices owned by one observer. Run
-    /// each unique database check once with a small concurrency ceiling rather
-    /// than serializing every watcher behind this registry actor.
+    /// 同一个观察者拥有的所有设备，其授权判断都相同。
+    ///
+    /// 因此对每个唯一的数据库检查只执行一次，并以较小的并发上限控制，
+    /// 而不是把每个观察者都串行推到这个注册表 actor 之后。
+    ///
+    /// - Parameter keys: 待授权的观察键集合。
+    /// - Returns: 通过授权的观察键集合。
     private func authorizedObservationKeys(_ keys: Set<V2LiveObservationKey>) async -> Set<V2LiveObservationKey> {
         guard let liveActivityObservationAuthorizer else { return keys }
         let values = Array(keys)
@@ -816,12 +844,19 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
-    /// Socket actors are independent once the authorized stream snapshot has
-    /// been captured. Direct rooms normally have only one or two local streams;
-    /// creating a task group for every message costs more than those sequential
-    /// actor hops and creates scheduler pressure at high message rates. Larger
-    /// groups still publish in bounded waves so one slow stream cannot serialize
-    /// the whole room and the gateway cannot create an unbounded task burst.
+    /// 一旦捕获到已授权的流快照，各套接字 actor 便彼此独立。
+    ///
+    /// 单聊房间通常只有一两条本地流；为每条消息都建任务组，
+    /// 其开销高于那几个顺序 actor 跳转，还会在高消息速率下造成调度压力。
+    /// 更大的群组仍以有界波次发布，
+    /// 使一条慢流无法串行化整个房间，网关也不会制造无界的任务突发。
+    ///
+    /// - Parameters:
+    ///   - streams: 目标流列表。
+    ///   - roomID: 目标房间标识。
+    ///   - highWatermark: 当前高水位。
+    ///   - directEvent: 可选的私聊实时事件。
+    ///   - prepared: 可选的已准备群事件帧。
     private nonisolated static func publishForeground(
         _ streams: [V2GatewayByteStream],
         roomID: RoomID,
@@ -895,9 +930,11 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
-    /// Internal invariant probe used by churn tests. Mutation generations are
-    /// transient reentrancy fences and must never become a connection-history
-    /// ledger.
+    /// 供高频变动测试使用的内部不变量探针。
+    ///
+    /// 变更代次只是短暂的可重入围栏，绝不能演变成一份连接历史台账。
+    ///
+    /// - Returns: 当前暂存的可重入围栏数量。
     func transientMutationTokenCount() -> Int {
         foregroundMutationByConnection.count
             + presenceMutationByConnection.count
@@ -912,10 +949,11 @@ public actor V2DeviceConnectionRegistry {
 
 }
 
-/// Sharded, lock-backed foreground routing snapshot. Subscription authority is
-/// still established by `V2DeviceConnectionRegistry`; entries here contain
-/// only the already-authenticated user identity needed to fence a direct live
-/// payload and the process-local stream reference used for best-effort hints.
+/// 分片的、基于锁的前台路由快照。
+///
+/// 订阅权威仍由 `V2DeviceConnectionRegistry` 确立；
+/// 这里的条目只包含为私聊实时载荷建立围栏所需的已认证用户身份，
+/// 以及用于尽力而为提示的进程本地流引用。
 private final class V2ForegroundConnectionRoutes: Sendable {
     private struct Entry: Sendable {
         let userID: UserID
@@ -925,16 +963,17 @@ private final class V2ForegroundConnectionRoutes: Sendable {
 
     private struct State: Sendable {
         var entriesByRoom: [RoomID: [UUID: Entry]] = [:]
-        /// Group publication is much more frequent than subscription
-        /// mutation. Build revision-fenced immutable arrays on mutation so a
-        /// hot room does not allocate and retain every stream again for each
-        /// foreground batch. Copying one Array value on lookup retains only
-        /// its COW storage; a concurrent mutation publishes a new snapshot.
+        /// 群组发布的频率远高于订阅变更。
+        ///
+        /// 在变更时构建受修订围栏保护的不可变数组，
+        /// 使热房间无需为每个前台批次重新分配并保留全部流。
+        /// 查找时复制一个数组值只保留其写时复制存储；并发变更会发布一份新快照。
         var groupStreamsByRoomRevision:
             [RoomID: [UInt64: [V2GatewayByteStream]]] = [:]
-        /// A large reconnect wave may add many viewers before the first live
-        /// event. Rebuild lazily once after that wave instead of turning N
-        /// subscriptions into O(N²) snapshot copies.
+        /// 一次大规模重连潮可能在首个实时事件之前加入大量观看者。
+        ///
+        /// 在这波之后惰性重建一次，
+        /// 而不是把 N 次订阅变成 O(N²) 次快照复制。
         var dirtyGroupStreamRooms: Set<RoomID> = []
     }
 
@@ -1001,9 +1040,13 @@ private final class V2ForegroundConnectionRoutes: Sendable {
         }
     }
 
-    /// Selects an audience from immutable, authenticated subscription state.
-    /// A group event never trusts room interest alone: the subscription and
-    /// committing transaction must name the same durable membership epoch.
+    /// 从不可变的、已认证的订阅状态中选出受众。
+    ///
+    /// 群组事件绝不只凭房间兴趣就下判断：
+    /// 订阅与提交事务必须指向同一个持久成员任期。
+    ///
+    /// - Parameter event: 待路由的实时事件。
+    /// - Returns: 匹配该事件的已授权流。
     func streams(for event: V2DirectRoomLiveEvent) -> [V2GatewayByteStream] {
         shard(for: event.roomID).state.withLock { state in
             if let membershipRevision = event.groupMembershipRevision {

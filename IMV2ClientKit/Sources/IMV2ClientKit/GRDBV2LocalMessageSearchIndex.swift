@@ -2,9 +2,10 @@ import Foundation
 import GRDB
 import IMV2Core
 
-/// The search index is a replaceable local projection in `V2Search.sqlite`.
-/// The primary V2 database owns these durable jobs, making a search write
-/// replay-safe after a process crash and keeping FTS work off the sync writer.
+/// 搜索索引是 `V2Search.sqlite` 中的可替换本地投影。
+///
+/// 持久化任务由主 V2 数据库持有，使搜索写入在进程崩溃后可安全重放，
+/// 同时把全文检索工作从同步写入路径上移开。
 extension GRDBV2LocalSyncStore {
     public nonisolated func messageSearchIndexUpdates() -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
         let pool = databasePool
@@ -40,9 +41,12 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    /// Rebuilds only the derived database. Primary message projection reads are
-    /// short, paged read transactions; all expensive FTS deletes/inserts occur
-    /// in the independent search database.
+    /// 仅重建派生数据库。
+    ///
+    /// 主库上的消息投影读取都是短时分页读事务；所有昂贵的全文检索删除与插入
+    /// 都发生在独立的搜索数据库中。
+    ///
+    /// - Throws: 任务取消时抛出 `CancellationError`；主库写入被栅栏限制或索引操作失败时抛出。
     public func rebuildMessageSearchIndex() async throws {
         while !Task.isCancelled {
             let generation = try await databasePool.write { db in
@@ -106,9 +110,12 @@ extension GRDBV2LocalSyncStore {
         throw CancellationError()
     }
 
-    /// Brings an existing index online and then applies one bounded batch. The
-    /// caller may repeatedly invoke `processPendingMessageSearchIndexJobs` as
-    /// low-priority maintenance without ever delaying sync application.
+    /// 让既有索引上线，然后应用一个有界批次。
+    ///
+    /// 调用方可以反复以低优先级维护方式调用
+    /// ``processPendingMessageSearchIndexJobs(limit:)``，而不会拖慢同步应用。
+    ///
+    /// - Throws: 索引重建或批次处理失败时抛出。
     public func prepareMessageSearchIndex() async throws {
         if try messageSearchIndexState() != .ready {
             try await rebuildMessageSearchIndex()
@@ -116,9 +123,11 @@ extension GRDBV2LocalSyncStore {
         _ = try await processPendingMessageSearchIndexJobs(limit: 64)
     }
 
-    /// Foreground-only low-priority maintenance owned by the authenticated
-    /// runtime. It deliberately yields between tiny batches and never touches
-    /// the primary database for more than a job read/ack transaction.
+    /// 仅由前台运行的认证运行时持有的低优先级维护循环。
+    ///
+    /// 它刻意在细小批次之间让出执行权，对主库的访问不会超过一次任务读取与确认事务。
+    ///
+    /// - Throws: 任务取消时抛出 `CancellationError`；索引操作失败时抛出。
     public func runMessageSearchIndexer() async throws {
         while !Task.isCancelled {
             if try messageSearchIndexState() != .ready {
@@ -134,9 +143,14 @@ extension GRDBV2LocalSyncStore {
         throw CancellationError()
     }
 
-    /// Applies at most `limit` coalesced work items. A failure after the search
-    /// DB commit but before primary acknowledgement simply replays the same
-    /// document, which is idempotent by message id/revision/generation.
+    /// 应用至多 `limit` 个已合并的工作项。
+    ///
+    /// 若在搜索库提交之后、主库确认之前失败，只会重放同一份文档；
+    /// 该重放按消息标识、修订与代次是幂等的。
+    ///
+    /// - Parameter limit: 本次最多处理的工作项数，需落在 `1...256`。
+    /// - Returns: 实际处理的工作项数。
+    /// - Throws: 条数越界时抛出 ``V2MessageSearchError/invalidPageSize``；其余失败来自存储。
     @discardableResult
     public func processPendingMessageSearchIndexJobs(limit: Int = 64) async throws -> Int {
         guard (1 ... 256).contains(limit) else { throw V2MessageSearchError.invalidPageSize }
@@ -180,22 +194,34 @@ extension GRDBV2LocalSyncStore {
         return jobs.count
     }
 
-    /// Commit before retiring a derived FTS file, so a process restart cannot
-    /// mistake a newly empty search database for a previously ready index.
+    /// 在废弃派生全文索引文件之前先提交状态。
+    ///
+    /// 这样进程重启不会把刚刚清空的搜索数据库误认为此前已就绪的索引。
+    ///
+    /// - Throws: 数据库写入失败时抛出。
     public func requireMessageSearchIndexRebuild() throws {
         try databasePool.write { db in
             try db.execute(sql: "UPDATE v2_message_search_state SET state = 'building' WHERE singleton = 1")
         }
     }
 
+    /// 读取当前搜索索引状态。
+    ///
+    /// - Returns: 索引状态。
+    /// - Throws: 数据库读取失败时抛出。
     public func messageSearchIndexState() throws -> V2MessageSearchIndexState {
         try databasePool.read { db in try Self.readMessageSearchIndexState(db: db) }
     }
 
-    /// FTS yields candidates only. Every candidate is checked against the
-    /// authoritative database's current revision before it becomes a hit, so a
-    /// lagging or crashed index can omit recent text but can never reveal an
-    /// edited, withdrawn, or reset message.
+    /// 执行一次消息搜索。
+    ///
+    /// 全文索引只给出候选；每个候选在成为命中之前都会与权威数据库的当前修订比对，
+    /// 因此滞后或崩溃过的索引最多漏掉近期文本，绝不会暴露已被编辑、撤回或重置的消息。
+    ///
+    /// - Parameter request: 搜索请求。
+    /// - Returns: 搜索结果分页。
+    /// - Throws: 查询为空、条数越界、索引不可用或游标与范围不匹配时抛出
+    ///   ``V2MessageSearchError``；其余失败来自存储。
     public func searchMessages(_ request: V2MessageSearchRequest) throws -> V2MessageSearchPage {
         guard (1 ... 100).contains(request.limit) else { throw V2MessageSearchError.invalidPageSize }
         let tokenizer = V2CharacterGramTokenizer()
@@ -413,8 +439,16 @@ extension GRDBV2LocalSyncStore {
         return .init(hits: hits, nextCursor: scanCursor)
     }
 
-    /// One primary read validates the entire FTS candidate batch. This keeps
-    /// the replaceable index privacy-safe without an N+1 query per hit.
+    /// 以一次主库读取校验整批全文检索候选。
+    ///
+    /// 这样既保持了可替换索引的隐私安全，又避免了每个命中一次查询的 N+1 问题。
+    ///
+    /// - Parameters:
+    ///   - candidates: 全文索引给出的候选。
+    ///   - generation: 索引代次。
+    ///   - db: 主库只读连接。
+    /// - Returns: 在当前代次下仍然有效的候选标识。
+    /// - Throws: 查询失败时抛出。
     private static func currentSearchCandidateIDs(
         _ candidates: [IndexedCandidate],
         generation: Int64,

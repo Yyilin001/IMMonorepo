@@ -3,20 +3,34 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// A bounded, auditable reason supplied by the separately authenticated
-/// operator control plane. Free-form operator notes belong in the external
-/// case-management system, never in the account database.
+/// 由单独认证的运维控制面提供的有界、可审计原因。
+///
+/// 自由文本的运维记录应留在外部工单系统，永远不进入账号数据库。
 public enum V2AccountDisableReason: String, Codable, CaseIterable, Sendable {
+    /// 用户本人请求停用。
     case userRequested = "user_requested"
+    /// 凭据疑似泄漏。
     case credentialCompromise = "credential_compromise"
+    /// 依据策略执行。
     case policyEnforcement = "policy_enforcement"
 }
 
+/// 一次账号停用命令。
 public struct V2AccountDisableCommand: Sendable {
+    /// 目标用户。
     public let userID: UserID
+    /// 本次停用的幂等操作标识。
     public let operationID: UUID
+    /// 停用原因。
     public let reason: V2AccountDisableReason
 
+    /// 校验并保存停用命令。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户，需可解析为 UUID。
+    ///   - operationID: 幂等操作标识。
+    ///   - reason: 停用原因。
+    /// - Throws: 用户标识非法时抛出 ``V2AccountDisableError/invalidUserID``。
     public init(userID: UserID, operationID: UUID, reason: V2AccountDisableReason) throws {
         guard UUID(uuidString: userID.rawValue) != nil else { throw V2AccountDisableError.invalidUserID }
         self.userID = userID
@@ -25,32 +39,55 @@ public struct V2AccountDisableCommand: Sendable {
     }
 }
 
+/// 账号停用结果。
 public enum V2AccountDisableOutcome: Equatable, Sendable {
+    /// 本次调用实际停用了账号。
     case disabled(disabledAt: Date)
+    /// 同一操作此前已执行，返回其原有停用时刻。
     case idempotent(disabledAt: Date)
+    /// 账号此前已因其他原因停用，返回既有停用时刻。
     case alreadyDisabled(disabledAt: Date)
 }
 
+/// 账号停用错误。
 public enum V2AccountDisableError: Error, Equatable, Sendable {
+    /// 用户标识不是合法 UUID。
     case invalidUserID
+    /// 运维主体标识不满足格式要求。
     case invalidOperatorPrincipal
+    /// 同一操作标识已用于其他账号。
     case operationConflict
+    /// 数据库或时刻编码当前不可用。
     case unavailable
 }
 
-/// The operator boundary intentionally contains one destructive action only:
-/// permanently disable one account. It cannot re-enable an account, delete
-/// retained data, or accept raw SQL/batches. Recovery is a separately
-/// specified product and audit workflow.
+/// 运维边界刻意只包含一个破坏性动作：永久停用单个账号。
+///
+/// 它不能重新启用账号、删除保留数据，也不接受原始 SQL 或批量操作；
+/// 恢复流程由单独定义的产品与审计工作流负责。
 public protocol V2AccountDisabling: Sendable {
+    /// 停用指定账号。
+    ///
+    /// - Parameter command: 已校验的停用命令。
+    /// - Returns: 停用结果。
+    /// - Throws: 操作冲突或存储不可用时抛出。
     func disable(_ command: V2AccountDisableCommand) async throws -> V2AccountDisableOutcome
 }
 
+/// 基于 PostgreSQL 的账号停用实现。
 public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
     private let database: any Database
     private let operatorPrincipal: String
     private let now: @Sendable () -> Date
 
+    /// 组合数据库与固定的运维主体。
+    ///
+    /// - Parameters:
+    ///   - database: 存放账号状态、设备会话与公开资料的数据库。
+    ///   - operatorPrincipal: 运维主体标识，需符合通用运维主体格式。
+    ///   - now: 可注入的当前时刻读取函数。
+    /// - Throws: 运维主体格式非法时抛出
+    ///   ``V2AccountDisableError/invalidOperatorPrincipal``。
     public init(
         database: any Database,
         operatorPrincipal: String,
@@ -64,6 +101,20 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
         self.now = now
     }
 
+    /// 在单个事务内停用账号并吊销其全部凭据。
+    ///
+    /// 凭据签发与刷新会先获取同一账号状态锁后才返回凭据，因此顺序保证：
+    /// 要么新签发的凭据被本事务吊销，要么签发流程观察到停用状态而拒绝签发。
+    /// 事务内依次处理操作幂等、账号既有停用、停用记录写入、直发策略修订递增、
+    /// 设备与令牌吊销、公开资料暂停及传播发件箱写入，最后登记设备吊销事件，
+    /// 让各网关副本关闭已建立的连接。
+    ///
+    /// - Parameter command: 已校验的停用命令。
+    /// - Returns: 停用结果。
+    /// - Throws: 用户标识非法时抛出 ``V2AccountDisableError/invalidUserID``；
+    ///   同一操作标识已用于其他账号时抛出 ``V2AccountDisableError/operationConflict``；
+    ///   连接不可用、时刻不可编码、计数已饱和或资料暂停未生效时抛出
+    ///   ``V2AccountDisableError/unavailable``。
     public func disable(_ command: V2AccountDisableCommand) async throws -> V2AccountDisableOutcome {
         guard let userUUID = UUID(uuidString: command.userID.rawValue) else {
             throw V2AccountDisableError.invalidUserID
@@ -151,11 +202,23 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
         }
     }
 
+    /// 取得账号状态咨询锁。
+    ///
+    /// - Parameters:
+    ///   - sql: 当前事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    /// - Throws: 加锁失败时抛出。
     private func lockAccountState(_ sql: any SQLDatabase, userID: UUID) async throws {
         let key = "account-state:" + userID.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
     }
 
+    /// 取得停用操作咨询锁。
+    ///
+    /// - Parameters:
+    ///   - sql: 当前事务使用的数据库连接。
+    ///   - operationID: 操作标识。
+    /// - Throws: 加锁失败时抛出。
     private func lockOperation(_ sql: any SQLDatabase, operationID: UUID) async throws {
         let key = "account-disable-operation:" + operationID.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()

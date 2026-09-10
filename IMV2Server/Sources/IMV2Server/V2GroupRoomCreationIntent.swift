@@ -3,26 +3,54 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 群房间创建意图的状态。
 public enum V2GroupRoomCreationIntentState: String, Equatable, Sendable {
+    /// 已准备，尚未提交归属事务。
     case prepared
+    /// 归属事务已提交，路由已确定。
     case committed
 }
 
-/// Immutable control-plane identity for one group-creation operation. The
-/// generated IDs and owner are fixed before cross-database work starts; only
-/// `state` may advance from prepared to committed.
+/// 一次建群操作不可变的控制面身份。
+///
+/// 生成的标识与归属会在跨库工作开始之前固定；此后只有状态可以从已准备推进到已提交。
 public struct V2GroupRoomCreationIntent: Equatable, Sendable {
+    /// 发起建群的用户。
     public let actorUserID: UserID
+    /// 建群操作标识。
     public let operationID: GroupRoomOperationID
+    /// 预分配的房间标识。
     public let roomID: RoomID
+    /// 建群事件标识。
     public let eventID: EventID
+    /// 关联的扇出计划标识。
     public let planID: FanoutPlanID
+    /// 逻辑房间分片标识，已去除首尾空白。
     public let roomShardID: String
+    /// 路由代次。
     public let routeEpoch: Int64
+    /// 请求指纹，需为 32 字节。
     public let requestFingerprint: Data
+    /// 受众成员数量，含群主。
     public let audienceMemberCount: Int
+    /// 当前状态。
     public let state: V2GroupRoomCreationIntentState
 
+    /// 校验并保存建群意图。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起建群的用户。
+    ///   - operationID: 建群操作标识。
+    ///   - roomID: 预分配的房间标识。
+    ///   - eventID: 建群事件标识。
+    ///   - planID: 关联的扇出计划标识。
+    ///   - roomShardID: 逻辑分片标识，去除首尾空白后需非空。
+    ///   - routeEpoch: 非负的路由代次。
+    ///   - requestFingerprint: 请求指纹，需为 32 字节。
+    ///   - audienceMemberCount: 受众成员数量，需落在 `1...100000`。
+    ///   - state: 初始状态，默认已准备。
+    /// - Throws: 任一约束不满足时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``。
     public init(
         actorUserID: UserID,
         operationID: GroupRoomOperationID,
@@ -53,6 +81,12 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
         self.state = state
     }
 
+    /// 以同一身份派生指定状态的新意图。
+    ///
+    /// - Parameter state: 目标状态。
+    /// - Returns: 除状态外字段完全一致的意图。
+    /// - Throws: 字段校验失败时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``。
     fileprivate func withState(
         _ state: V2GroupRoomCreationIntentState
     ) throws -> Self {
@@ -71,61 +105,121 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
     }
 }
 
+/// 准备建群意图的结果。
 public enum V2PrepareGroupRoomCreationIntentOutcome: Equatable, Sendable {
+    /// 本次调用新准备了意图。
     case prepared(V2GroupRoomCreationIntent)
     case idempotent(V2GroupRoomCreationIntent)
     case idempotencyConflict
     case invalidMembers
 }
 
+/// 群房间创建意图的持久化能力。
 public protocol V2GroupRoomCreationIntentStore: Sendable {
+    /// 以显式成员列表准备建群意图。
+    ///
+    /// - Parameters:
+    ///   - candidate: 候选意图。
+    ///   - memberUserIDs: 初始成员列表。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 准备结果。
+    /// - Throws: 意图冲突或持久化失败时抛出。
     func prepare(
         _ candidate: V2GroupRoomCreationIntent,
         memberUserIDs: [UserID],
         now: Date
     ) async throws -> V2PrepareGroupRoomCreationIntentOutcome
 
+    /// 以分阶段建群命令准备建群意图。
+    ///
+    /// - Parameters:
+    ///   - candidate: 候选意图。
+    ///   - command: 分阶段建群命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 准备结果。
+    /// - Throws: 意图冲突或持久化失败时抛出。
     func prepareStaged(
         _ candidate: V2GroupRoomCreationIntent,
         command: V2StagedGroupRoomCommand,
         now: Date
     ) async throws -> V2PrepareGroupRoomCreationIntentOutcome
 
-    /// Reads the exact audience frozen by `prepare`. A retry or recovery
-    /// worker must use this relation rather than reconstructing membership
-    /// from a later client request.
+    /// 读取由 `prepare` 冻结的精确受众。
+    ///
+    /// 重试或恢复工作器必须使用这份关系，而不是依据之后到达的客户端请求重建成员集合。
+    ///
+    /// - Parameter intent: 建群意图。
+    /// - Returns: 冻结的成员列表。
+    /// - Throws: 意图不存在或持久化失败时抛出。
     func memberUserIDs(
         for intent: V2GroupRoomCreationIntent
     ) async throws -> [UserID]
 
+    /// 分页读取冻结的受众成员。
+    ///
+    /// - Parameters:
+    ///   - intent: 建群意图。
+    ///   - afterUserID: 上一页最后一位成员；为空表示从头开始。
+    ///   - limit: 本页最多返回的成员数。
+    /// - Returns: 成员清单分片。
+    /// - Throws: 意图不存在或持久化失败时抛出。
     func memberUserIDSlice(
         for intent: V2GroupRoomCreationIntent,
         afterUserID: UserID?,
         limit: Int
     ) async throws -> V2GroupRoomCreationManifestSlice
 
-    /// Records the canonical room route only after the owner transaction has
-    /// committed. Repeating this operation with the same immutable intent is
-    /// safe; a conflicting route is a durable topology error.
+    /// 仅在归属事务提交之后记录规范房间路由。
+    ///
+    /// 以同一不可变意图重复调用是安全的；若路由冲突则视为持久化的拓扑错误。
+    ///
+    /// - Parameters:
+    ///   - intent: 建群意图。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 已提交的意图。
+    /// - Throws: 路由冲突时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/routeConflict``；其余失败抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/corruptPersistenceState``。
     func finalizeCommitted(
         _ intent: V2GroupRoomCreationIntent,
         now: Date
     ) async throws -> V2GroupRoomCreationIntent
 }
 
+/// 建群意图存储错误。
 public enum V2GroupRoomCreationIntentStoreError: Error, Equatable, Sendable {
+    /// 意图字段不满足约束。
     case invalidIntent
+    /// 房间路由与既有记录冲突。
     case routeConflict
+    /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
 }
 
+/// 基于 PostgreSQL 的建群意图存储。
 public struct PostgresV2GroupRoomCreationIntentStore:
     V2GroupRoomCreationIntentStore
 {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放建群意图与冻结受众的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 以显式成员列表准备建群意图。
+    ///
+    /// 同一操作标识与相同请求指纹会返回已有的意图，指纹不同则判定冲突。
+    ///
+    /// - Parameters:
+    ///   - candidate: 候选意图。
+    ///   - memberUserIDs: 初始成员列表。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 准备结果。
+    /// - Throws: 意图不合法时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``；指纹冲突时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/routeConflict``；持久化异常时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/corruptPersistenceState``。
     public func prepare(
         _ candidate: V2GroupRoomCreationIntent,
         memberUserIDs: [UserID],
@@ -235,6 +329,14 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         }
     }
 
+    /// 以分阶段建群命令准备建群意图，并冻结受众草稿关系。
+    ///
+    /// - Parameters:
+    ///   - candidate: 候选意图。
+    ///   - command: 分阶段建群命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 准备结果。
+    /// - Throws: 与 ``prepare(_:memberUserIDs:now:)`` 相同的错误。
     public func prepareStaged(
         _ candidate: V2GroupRoomCreationIntent,
         command: V2StagedGroupRoomCommand,
@@ -357,6 +459,17 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         }
     }
 
+    /// 记录规范房间路由并推进意图状态。
+    ///
+    /// 只有归属事务提交之后才应调用；重复调用返回已提交意图，路由冲突则判定为拓扑错误。
+    ///
+    /// - Parameters:
+    ///   - intent: 建群意图。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 已提交的意图。
+    /// - Throws: 路由冲突时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/routeConflict``；其余失败抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/corruptPersistenceState``。
     public func finalizeCommitted(
         _ intent: V2GroupRoomCreationIntent,
         now: Date
@@ -421,6 +534,12 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         }
     }
 
+    /// 读取冻结的受众成员列表。
+    ///
+    /// - Parameter intent: 建群意图。
+    /// - Returns: 冻结的成员列表。
+    /// - Throws: 意图不存在或持久化失败时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/corruptPersistenceState``。
     public func memberUserIDs(
         for intent: V2GroupRoomCreationIntent
     ) async throws -> [UserID] {
@@ -441,6 +560,15 @@ public struct PostgresV2GroupRoomCreationIntentStore:
         return try rows.map { try UserID($0.userID.uuidString) }
     }
 
+    /// 分页读取冻结的受众成员。
+    ///
+    /// - Parameters:
+    ///   - intent: 建群意图。
+    ///   - afterUserID: 上一页最后一位成员；为空表示从头开始。
+    ///   - limit: 本页最多返回的成员数。
+    /// - Returns: 成员清单分片。
+    /// - Throws: 意图不存在、分页参数非法或持久化失败时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/corruptPersistenceState``。
     public func memberUserIDSlice(
         for intent: V2GroupRoomCreationIntent,
         afterUserID: UserID?,

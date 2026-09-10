@@ -3,10 +3,22 @@ import IMV2Core
 import Observation
 import SwiftUI
 
+/// 「登录设备」页面的状态容器。
+///
+/// 它持有设备会话分页状态、加载进度与用户反馈文案，
+/// 所有网络调用都在 MainActor 上发起，并通过代次校验丢弃过期响应。
 @MainActor
 @Observable
 final class V2DeviceSessionsStore {
-    enum State: Equatable { case loading, loaded, failed }
+    /// 页面级加载状态。
+    enum State: Equatable {
+        /// 正在读取第一页。
+        case loading
+        /// 已成功加载至少一页。
+        case loaded
+        /// 读取失败，且当前没有可展示的数据。
+        case failed
+    }
 
     private let manager: any V2ClientDeviceSessionManaging
     private let makeUUID: @Sendable () -> UUID
@@ -25,6 +37,10 @@ final class V2DeviceSessionsStore {
         self.makeUUID = makeUUID
     }
 
+    /// 重新读取第一页设备会话。
+    ///
+    /// 会立即使更早的「加载更多」请求失效：即便其传输层已经在途且无法被取消，
+    /// 代次校验也会阻止它写回结果。
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
@@ -49,6 +65,10 @@ final class V2DeviceSessionsStore {
         }
     }
 
+    /// 按游标继续读取下一页设备会话。
+    ///
+    /// 仅当状态为已加载、当前无在途加载且存在下一页游标时才会执行；
+    /// 结果按设备标识去重后追加。
     func loadMore() async {
         guard let cursor = nextCursor, !isLoadingMore, state == .loaded else { return }
         let refreshGeneration = self.refreshGeneration
@@ -78,6 +98,12 @@ final class V2DeviceSessionsStore {
         }
     }
 
+    /// 吊销指定设备上的会话。
+    ///
+    /// 当前设备与正在进行的变更会被直接忽略；
+    /// 服务端报告会话已不存在时，同样会从列表中移除该设备。
+    ///
+    /// - Parameter session: 待吊销的设备会话。
     func revoke(_ session: V2ClientDeviceSession) async {
         guard !session.isCurrentDevice, !isMutating else { return }
         isMutating = true
@@ -96,6 +122,7 @@ final class V2DeviceSessionsStore {
         }
     }
 
+    /// 吊销除当前设备以外的全部会话。
     func revokeOtherDevices() async {
         guard !isMutating else { return }
         isMutating = true
@@ -112,6 +139,9 @@ final class V2DeviceSessionsStore {
     }
 }
 
+/// 「登录设备」页面视图。
+///
+/// 展示当前设备与其他登录设备，并提供单设备退出与全部退出入口。
 struct V2DeviceSessionsView: View {
     @Bindable var store: V2DeviceSessionsStore
     @State private var sessionPendingRevocation: V2ClientDeviceSession?

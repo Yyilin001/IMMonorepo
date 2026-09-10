@@ -3,15 +3,23 @@ import Fluent
 import Foundation
 import PostgresNIO
 
+/// 数据库失败的处置分类。
 enum V2PostgresFailureDisposition: Equatable, Sendable {
+    /// 事务被回滚，可整体重试。
     case retryTransaction
+    /// 依赖不可用，应作为临时不可用上报。
     case unavailable
+    /// 其他错误，按原样抛出。
     case other
 }
 
-/// Keeps database-driver details at the PostgreSQL boundary. Only failures
-/// known to be transient are converted into retryable protocol responses;
-/// programming errors and constraint violations still surface normally.
+/// 把数据库驱动细节限制在 PostgreSQL 边界内。
+///
+/// 只有已知的瞬时失败会被归类为可重试或不可用；编程错误与约束冲突仍按原样向调用方抛出，
+/// 不会被误判成可以重试的临时故障。
+///
+/// - Parameter error: 待分类的错误。
+/// - Returns: 该错误对应的处置分类。
 func v2PostgresFailureDisposition(_ error: any Error) -> V2PostgresFailureDisposition {
     if error is ConnectionPoolTimeoutError || error is ConnectionPoolError {
         return .unavailable
@@ -46,6 +54,11 @@ func v2PostgresFailureDisposition(_ error: any Error) -> V2PostgresFailureDispos
     return .other
 }
 
+/// 按 SQLSTATE 分类服务端错误。
+///
+/// - Parameter sqlState: PostgreSQL 五位状态码。
+/// - Returns: 死锁与序列化失败归类为可重试；锁超时、语句取消、服务关闭，
+///   以及 `08`、`53` 前缀的连接与资源类错误归类为不可用；其余为其他错误。
 private func v2PostgresFailureDisposition(sqlState: String) -> V2PostgresFailureDisposition {
     switch sqlState {
     case "40P01", "40001":
@@ -60,10 +73,17 @@ private func v2PostgresFailureDisposition(sqlState: String) -> V2PostgresFailure
     }
 }
 
-/// Retries the complete transaction after PostgreSQL has rolled it back for a
-/// deadlock or serialization failure. Retrying a statement inside an aborted
-/// transaction is invalid, so callers must put the whole idempotent command in
-/// this boundary.
+/// 在 PostgreSQL 因死锁或序列化失败回滚后重试整个事务。
+///
+/// 在已中止的事务内重试单条语句是无效的，因此调用方必须把完整的幂等命令放进本边界；
+/// 重试之间会做短随机退避，避免相向请求立刻重建同一条等待图。
+///
+/// - Parameters:
+///   - database: 执行事务的数据库。
+///   - maximumRetryCount: 最大额外重试次数，默认 2，需非负。
+///   - operation: 事务内执行的幂等操作。
+/// - Returns: 操作结果。
+/// - Throws: 任务取消时抛出 `CancellationError`；其他错误在重试耗尽后按原样抛出。
 func v2WithPostgresTransactionRetry<Result: Sendable>(
     database: any Database,
     maximumRetryCount: Int = 2,

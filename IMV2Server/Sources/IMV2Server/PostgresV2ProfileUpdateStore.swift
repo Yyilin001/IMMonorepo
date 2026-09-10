@@ -3,14 +3,21 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Own-profile writer. It verifies that an avatar is both owned by the actor
-/// and scanner-approved in the same transaction as the profile revision and
-/// durable direct-peer invalidation source record.
+/// 本人资料写入实现。
+///
+/// 头像必须在同一事务内同时满足「属于发起者」与「扫描已通过」，
+/// 且与该次资料修订、持久化的私聊对端失效源记录一起提交。
 public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileReading {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
+    /// 组合数据库与标识、授时来源。
+    ///
+    /// - Parameters:
+    ///   - database: 存放公开资料、资料操作与失效源记录的数据库。
+    ///   - makeUUID: 传播源记录标识生成方式。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
@@ -21,6 +28,19 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
         self.now = now
     }
 
+    /// 应用一次本人资料变更。
+    ///
+    /// 事务先读取并锁定当前资料行，使并发重试能看到其等待期间提交的操作，再检查修订与时钟。
+    /// 已有同一操作记录时校验载荷一致并返回当前权威视图；否则更新资料修订、写入传播源记录
+    /// 并登记操作结果。
+    ///
+    /// - Parameter command: 资料变更命令。
+    /// - Returns: 变更结果。
+    /// - Throws: 标识无法解析或持久化状态异常时抛出
+    ///   ``V2ProfileUpdateError/corruptPersistenceState``；同一操作标识载荷不一致时抛出
+    ///   ``V2ProfileUpdateError/operationPayloadMismatch``；修订冲突时抛出
+    ///   ``V2ProfileUpdateError/revisionConflict(current:)``；头像不可用时抛出
+    ///   ``V2ProfileUpdateError/avatarUnavailable``。
     public func update(_ command: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome {
         guard let actorID = UUID(uuidString: command.actorUserID.rawValue),
               let operationID = UUID(uuidString: command.operationID.rawValue)
@@ -112,6 +132,12 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
         }
     }
 
+    /// 读取发起者当前的本人资料。
+    ///
+    /// - Parameter actorUserID: 目标用户。
+    /// - Returns: 当前资料视图。
+    /// - Throws: 标识无法解析、资料不存在或持久化失败时抛出
+    ///   ``V2ProfileUpdateError/corruptPersistenceState``。
     public func currentProfile(for actorUserID: UserID) async throws -> V2ProfileView {
         guard let actorID = UUID(uuidString: actorUserID.rawValue) else {
             throw V2ProfileUpdateError.corruptPersistenceState

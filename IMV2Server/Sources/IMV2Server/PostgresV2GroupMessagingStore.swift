@@ -3,10 +3,11 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL group bootstrap transaction. It creates the room, initial
-/// membership, admission state, fan-out plan and operation ledger atomically.
-/// Staged audiences stay relational throughout this transaction, so a 100k
-/// group never becomes a Swift array or a giant PostgreSQL operation array.
+/// PostgreSQL 群引导事务。
+///
+/// 它在同一事务内创建房间、初始成员关系、准入状态、扇出计划与操作台账。
+/// 分阶段受众在整个事务中始终保持关系形态，因此十万成员群不会变成 Swift 数组
+/// 或一个巨大的 PostgreSQL 参数数组。
 public struct PostgresV2GroupMessagingStore:
     V2GroupMessagingStore,
     V2ControlValidatedGroupMessagingStore,

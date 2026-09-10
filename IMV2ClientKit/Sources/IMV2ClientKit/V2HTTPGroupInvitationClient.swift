@@ -4,44 +4,144 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
+/// 客户端群邀请与入群申请的封闭错误分类。
+///
+/// 每一类都对应一个可被上层稳定处理的结果，而不是把底层错误文本直接外泄。
 public enum V2ClientGroupInvitationError: Error, Equatable, Sendable {
-    case invalidEndpoint, invalidRequest, authorizationUnavailable, authorizationDenied
-    case unavailable, conflict, memberLimitReached, rateLimited(retryAfterSeconds: Int?)
-    case invalidResponse, networkFailure, serverStatus(Int)
+    /// 配置的服务端点非法（非 HTTPS 或缺少主机）。
+    case invalidEndpoint
+    /// 本地请求参数非法。
+    case invalidRequest
+    /// 当前无法取得有效凭据。
+    case authorizationUnavailable
+    /// 服务端拒绝了本次凭据授权。
+    case authorizationDenied
+    /// 依赖的服务暂时不可用。
+    case unavailable
+    /// 与服务端状态冲突（例如邀请已失效或已被处理）。
+    case conflict
+    /// 群成员数量已达上限。
+    case memberLimitReached
+    /// 触发限流；关联值为服务端建议的重试等待秒数。
+    case rateLimited(retryAfterSeconds: Int?)
+    /// 响应无法解析为预期结构。
+    case invalidResponse
+    /// 网络层失败（连接、超时等）。
+    case networkFailure
+    /// 服务端返回了未映射的状态码。
+    case serverStatus(Int)
 }
 
+/// 提交入群申请的结果。
 public enum V2ClientGroupJoinSubmissionOutcome: Equatable, Sendable {
+    /// 申请已新提交。
     case submitted(V2GroupJoinRequest)
+    /// 该申请此前已提交且仍在待处理。
     case alreadyPending(V2GroupJoinRequest)
+    /// 申请人已是群成员，无需再申请。
     case alreadyMember(V2GroupInvitePreview)
+    /// 申请被拒绝。
     case rejected(V2GroupJoinRequest)
 }
 
+/// 处理入群申请的结果。
 public enum V2ClientGroupJoinDecisionOutcome: Equatable, Sendable {
-    case approved(V2GroupJoinRequest), rejected(V2GroupJoinRequest), alreadyDecided(V2GroupJoinRequest)
+    /// 申请已批准。
+    case approved(V2GroupJoinRequest)
+    /// 申请已拒绝。
+    case rejected(V2GroupJoinRequest)
+    /// 该申请此前已作出决定，本次为重放。
+    case alreadyDecided(V2GroupJoinRequest)
 }
 
+/// 群邀请与入群申请的客户端能力边界。
 public protocol V2ClientGroupInvitationManaging: Sendable {
+    /// 创建一条群邀请链接。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间。
+    ///   - operationID: 该次创建操作的稳定标识，用于幂等重试。
+    ///   - lifetimeSeconds: 邀请有效期秒数。
+    ///   - maximumApprovedUses: 最多可被批准使用的次数。
+    /// - Returns: 新建的邀请链接。
+    /// - Throws: 无权限、参数非法或网络失败时抛出。
     func create(roomID: RoomID, operationID: GroupInviteOperationID, lifetimeSeconds: Int, maximumApprovedUses: Int) async throws -> V2GroupInviteLink
+    /// 列出某群组当前仍然有效的邀请。
+    ///
+    /// - Parameter roomID: 目标群组房间。
+    /// - Returns: 有效邀请列表。
+    /// - Throws: 无权限或网络失败时抛出。
     func activeInvites(roomID: RoomID) async throws -> [V2GroupInviteLink]
+    /// 撤销一条群邀请。
+    ///
+    /// - Parameters:
+    ///   - inviteID: 待撤销的邀请。
+    ///   - roomID: 邀请所属群组房间。
+    ///   - operationID: 该次操作的稳定标识，用于幂等重试。
+    /// - Throws: 无权限、邀请不存在或网络失败时抛出。
     func revoke(inviteID: GroupInviteID, roomID: RoomID, operationID: GroupInviteOperationID) async throws
+    /// 预览一条邀请链接所指的群组信息。
+    ///
+    /// - Parameter secret: 邀请链接中的秘密凭据。
+    /// - Returns: 邀请预览。
+    /// - Throws: 邀请失效、已用尽或网络失败时抛出。
     func preview(secret: V2GroupInviteSecret) async throws -> V2GroupInvitePreview
+    /// 使用邀请链接提交入群申请。
+    ///
+    /// - Parameters:
+    ///   - secret: 邀请链接中的秘密凭据。
+    ///   - operationID: 该次申请操作的稳定标识，用于幂等重试。
+    ///   - note: 可选的申请附言。
+    /// - Returns: 提交结果。
+    /// - Throws: 邀请失效、冲突或网络失败时抛出。
     func submit(secret: V2GroupInviteSecret, operationID: GroupJoinRequestOperationID, note: String?) async throws -> V2ClientGroupJoinSubmissionOutcome
+    /// 按游标分页读取某群组的待处理入群申请。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间。
+    ///   - cursor: 分页游标，首页传 `nil`。
+    ///   - pageSize: 本页最多返回的条数。
+    /// - Returns: 待处理申请分页。
+    /// - Throws: 无权限、游标非法或网络失败时抛出。
     func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage
+    /// 批准或拒绝一条入群申请。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间。
+    ///   - requestID: 待处理的入群申请。
+    ///   - operationID: 该次决策操作的稳定标识，用于幂等重试。
+    ///   - decision: 批准或拒绝。
+    /// - Returns: 决策结果。
+    /// - Throws: 无权限、申请不存在或网络失败时抛出。
     func decide(roomID: RoomID, requestID: GroupJoinRequestID, operationID: GroupJoinDecisionOperationID, decision: V2GroupJoinDecision) async throws -> V2ClientGroupJoinDecisionOutcome
 }
 
+/// 注入式 HTTP 传输边界，便于测试替换底层会话。
 public protocol V2ClientGroupInvitationHTTPTransport: Sendable {
+    /// 执行一次请求并返回数据与响应。
+    ///
+    /// - Parameter request: 待发送的请求。
+    /// - Returns: 响应数据与 HTTP 响应。
+    /// - Throws: 传输层失败或响应类型不符时抛出。
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
+/// 基于 URLSession 的群邀请 HTTP 传输实现。
 public actor V2URLSessionGroupInvitationHTTPTransport: V2ClientGroupInvitationHTTPTransport {
     private let session: URLSession
 
+    /// 创建传输实现。
+    ///
+    /// - Parameter session: 底层会话，默认使用账号专用安全会话。
     public init(session: URLSession = V2SecureURLSession.account) {
         self.session = session
     }
 
+    /// 执行一次请求并返回数据与响应。
+    ///
+    /// - Parameter request: 待发送的请求。
+    /// - Returns: 响应数据与 HTTP 响应。
+    /// - Throws: 任务已取消、传输失败或响应类型不符时抛出。
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         let (data, response) = try await session.data(for: request)
@@ -52,11 +152,19 @@ public actor V2URLSessionGroupInvitationHTTPTransport: V2ClientGroupInvitationHT
     }
 }
 
+/// 群邀请与入群申请的 HTTP 客户端实现。
 public struct V2HTTPGroupInvitationClient: V2ClientGroupInvitationManaging, Sendable {
     private let baseURL: URL
     private let credentials: any V2ClientPushEndpointCredentialProvider
     private let transport: any V2ClientGroupInvitationHTTPTransport
 
+    /// 创建客户端。
+    ///
+    /// - Parameters:
+    ///   - baseURL: 服务基地址，必须为 HTTPS 且包含主机。
+    ///   - credentials: 凭据提供方。
+    ///   - transport: HTTP 传输实现，默认使用 URLSession。
+    /// - Throws: 服务端点非法时抛出 `invalidEndpoint`。
     public init(
         baseURL: URL,
         credentials: any V2ClientPushEndpointCredentialProvider,

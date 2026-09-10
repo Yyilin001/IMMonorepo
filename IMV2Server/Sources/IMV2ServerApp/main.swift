@@ -2174,9 +2174,10 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
     func value(for key: String) -> String? { ProcessInfo.processInfo.environment[key] }
 }
 
-/// Production log adapter for the library telemetry boundary. These are
-/// structured operational events, not high-cardinality metric labels: they do
-/// not include room/user/message IDs, payloads, URLs, tokens or credentials.
+/// 库遥测边界的生产日志适配器。
+///
+/// 这些是结构化运维事件，而不是高基数指标标签：
+/// 其中不会包含房间、用户或消息标识，也不包含载荷、地址、令牌或凭据。
 private struct V2ApplicationTelemetrySink: V2TelemetrySink {
     let logger: Logger
     let successSamplePermille: Int

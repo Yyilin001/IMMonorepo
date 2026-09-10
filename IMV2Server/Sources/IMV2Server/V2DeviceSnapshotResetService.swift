@@ -3,13 +3,24 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// One operator-authorized reset request. The operation UUID is the immutable
-/// artifact ID, making request retries converge on the same durable build.
+/// 一次运维授权的重置请求。
+///
+/// 操作 UUID 同时是不可变产物标识，因此请求重试会收敛到同一次持久化构建，
+/// 不会产生多份互不相同的快照产物。
 public struct V2DeviceSnapshotResetCommand: Sendable {
+    /// 本次重置的幂等操作标识。
     public let operationID: UUID
+    /// 目标用户。
     public let userID: UserID
+    /// 目标设备。
     public let deviceID: DeviceID
 
+    /// 保存重置请求。
+    ///
+    /// - Parameters:
+    ///   - operationID: 幂等操作标识。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
     public init(operationID: UUID, userID: UserID, deviceID: DeviceID) {
         self.operationID = operationID
         self.userID = userID
@@ -17,38 +28,72 @@ public struct V2DeviceSnapshotResetCommand: Sendable {
     }
 }
 
+/// 设备快照重置的构建状态。
 public enum V2DeviceSnapshotResetBuildState: String, Codable, Equatable, Sendable {
+    /// 产物仍在构建中。
     case preparing
+    /// 产物已可被设备拉取。
     case ready
 }
 
+/// 设备快照重置结果。
 public struct V2DeviceSnapshotResetResult: Equatable, Sendable {
+    /// 重置后的同步代次。
     public let generation: UInt64
+    /// 产物当前构建状态。
     public let state: V2DeviceSnapshotResetBuildState
+    /// 本次调用是否命中既有结果。
     public let wasIdempotent: Bool
+
+    /// 保存重置结果。
+    ///
+    /// - Parameters:
+    ///   - generation: 同步代次。
+    ///   - state: 构建状态。
+    ///   - wasIdempotent: 是否命中既有结果。
     public init(generation: UInt64, state: V2DeviceSnapshotResetBuildState, wasIdempotent: Bool) {
         self.generation = generation; self.state = state; self.wasIdempotent = wasIdempotent
     }
 }
 
+/// 设备快照重置错误。
 public enum V2DeviceSnapshotResetError: Error, Equatable, Sendable {
+    /// 目标设备当前不可用。
     case deviceUnavailable
+    /// 该设备已有待处理的重置。
     case resetAlreadyPending
+    /// 持久化状态与预期结构不符。
     case malformedPersistence
+    /// 依赖当前不可用。
     case unavailable
 }
 
+/// 设备快照重置的暂存能力。
 public protocol V2DeviceSnapshotResetting: Sendable {
+    /// 暂存一次设备快照重置。
+    ///
+    /// - Parameter command: 重置请求。
+    /// - Returns: 重置结果。
+    /// - Throws: 设备不可用、已有待处理重置或持久化失败时抛出。
     func stage(_ command: V2DeviceSnapshotResetCommand) async throws -> V2DeviceSnapshotResetResult
 }
 
-/// Device credentials are control-plane authority and must never be inferred
-/// from a user-projection shard. Independent shard databases intentionally do
-/// not mirror `auth_devices`.
+/// 设备可用性检查能力。
+///
+/// 设备凭据属于控制面权威，绝不能从用户投影分片推断；独立的用户分片库刻意不复制
+/// `auth_devices`，因此该检查必须走控制面。
 public protocol V2DeviceAvailabilityChecking: Sendable {
+    /// 判断指定设备当前是否可用。
+    ///
+    /// - Parameters:
+    ///   - userID: 设备归属用户。
+    ///   - deviceID: 目标设备。
+    /// - Returns: 设备未吊销且会话有效时为 `true`。
+    /// - Throws: 存储不可用时抛出。
     func isAvailable(userID: UserID, deviceID: DeviceID) async throws -> Bool
 }
 
+/// 基于 PostgreSQL 的设备可用性检查实现。
 public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking {
     private let database: any Database
 
@@ -56,6 +101,14 @@ public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking 
         self.database = database
     }
 
+    /// 查询设备是否仍然有效。
+    ///
+    /// - Parameters:
+    ///   - userID: 设备归属用户。
+    ///   - deviceID: 目标设备。
+    /// - Returns: 设备未吊销、会话未过期且账号未停用时为 `true`。
+    /// - Throws: 标识非法或连接不支持 SQL 时抛出
+    ///   ``V2DeviceSnapshotResetError/malformedPersistence``。
     public func isAvailable(userID: UserID, deviceID: DeviceID) async throws -> Bool {
         guard let sql = database as? any SQLDatabase else {
             throw V2DeviceSnapshotResetError.unavailable
@@ -70,9 +123,10 @@ public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking 
     }
 }
 
-/// Creates only durable build/assignment state. Page materialization belongs
-/// to `PostgresV2SnapshotArtifactBuilder`, so this operator request never holds
-/// a user's full current projection in its task or HTTP response lifecycle.
+/// 只创建持久化构建与分配状态的设备快照重置服务。
+///
+/// 分页物化由 `PostgresV2SnapshotArtifactBuilder` 负责，因此该运维请求的调用栈与 HTTP 响应
+/// 生命周期内都不会持有用户的完整当前投影。
 public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, Sendable {
     private let registry: any V2UserShardStorageResolving
     private let deviceAvailability: any V2DeviceAvailabilityChecking
@@ -101,6 +155,16 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
         self.capabilityLifetime = capabilityLifetime; self.makeUUID = makeUUID; self.now = now
     }
 
+    /// 暂存一次设备快照重置。
+    ///
+    /// 先确认设备可用且不存在待处理重置，再写入构建与分配状态；
+    /// 同一操作标识重试会命中既有产物并返回其当前状态。
+    ///
+    /// - Parameter command: 重置请求。
+    /// - Returns: 重置结果。
+    /// - Throws: 设备不可用时抛出 ``V2DeviceSnapshotResetError/deviceUnavailable``；
+    ///   已有待处理重置时抛出 ``V2DeviceSnapshotResetError/resetAlreadyPending``；
+    ///   持久化异常时抛出 ``V2DeviceSnapshotResetError/malformedPersistence``。
     public func stage(_ command: V2DeviceSnapshotResetCommand) async throws -> V2DeviceSnapshotResetResult {
         guard try await deviceAvailability.isAvailable(
             userID: command.userID,

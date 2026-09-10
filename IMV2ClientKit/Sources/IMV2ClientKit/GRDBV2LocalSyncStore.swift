@@ -34,10 +34,10 @@ public struct V2ClientConversationListCursor: Equatable, Sendable {
     }
 }
 
-/// One bounded conversation-list row assembled from a single SQLite read
-/// snapshot. Mutable profile presentation remains separate from the durable
-/// room identity, while every value needed by the visible page is captured
-/// without a follow-up query per room.
+/// 由单次 SQLite 读取快照组装出的有界会话列表行。
+///
+/// 可变的资料展示与持久房间身份保持分离，同时可见页面所需的全部取值都在本次读取中取齐，
+/// 无需为每个房间追加一次查询。
 public struct V2ClientConversationListEntry: Equatable, Sendable {
     public let roomID: RoomID
     public let lastMessage: V2ClientMessageProjection?
@@ -85,17 +85,18 @@ public struct V2ClientConversationListPage: Equatable, Sendable {
     }
 }
 
-/// The local database is the authoritative device projection. It applies sync
-/// records incrementally in one SQLite transaction.
+/// 本地同步存储。
+///
+/// 本地数据库是权威的设备端投影，它在单个 SQLite 事务内增量应用同步记录。
 public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2LocalForegroundGroupEventPreviewStore, V2ClientProfileProjectionStore {
-    /// All local command repositories share this actor-owned pool. Extensions
-    /// preserve the actor boundary while keeping each durable queue in its
-    /// own source file.
+    /// 全部本地命令仓储共用的 actor 级连接池。
+    ///
+    /// 扩展方法保持 actor 边界，同时让各个持久化队列各自位于独立源文件中。
     let databasePool: DatabasePool
     let projectionChangeHub = V2ProjectionChangeHub()
-    /// Search is intentionally a separately-writable derived database. This
-    /// prevents FTS maintenance from competing with the authoritative sync
-    /// projection writer in `databasePool`.
+    /// 搜索使用刻意独立可写的派生数据库。
+    ///
+    /// 这样可以避免全文检索维护与 `databasePool` 中的权威同步投影写入相互争用。
     let messageSearchDatabasePool: DatabasePool
     let databaseURL: URL
     let messageSearchDatabaseURL: URL
@@ -141,9 +142,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Actor-isolated and off MainActor. GRDB close drains current accesses and
-    /// rejects future accesses, including late work retaining this store.
-    /// An error must prevent any caller from unlinking the database files.
+    /// 析构时结束变更订阅。
+    ///
+    /// 该过程发生在 actor 隔离且不在主线程上。GRDB 关闭会排空当前访问并拒绝后续访问，
+    /// 包括仍持有该存储的滞后工作；任何错误都必须阻止调用方删除数据库文件。
     deinit { projectionChangeHub.finish() }
 
     public func close() throws {
@@ -152,9 +154,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try messageSearchDatabasePool.close()
     }
 
-    /// Reasserts and verifies the device-only backup policy after database
-    /// reopen. The managed directory, SQLite file, WAL, and SHM are all scoped
-    /// out of device backup and therefore cannot restore unsent V2 commands.
+    /// 在数据库重新打开后重申并校验「仅本机、不参与设备备份」策略。
+    ///
+    /// 受管目录、SQLite 文件、WAL 与 SHM 都被排除在设备备份之外，
+    /// 因此备份无法恢复出尚未发送的 V2 命令。
+    ///
+    /// - Throws: 备份排除属性设置或校验失败时抛出。
     public func refreshBackupExclusion() throws {
         try Self.applyBackupExclusion(databaseURL: databaseURL)
         try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
@@ -196,7 +201,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in try Self.readCursor(db) }
     }
 
-    /// Persists recovery intent without erasing the live bank or any outbox.
+    /// 持久化一次恢复意图，但不擦除当前投影库与任何发件箱。
+    ///
+    /// - Throws: 数据库写入失败时抛出。
     public func requestSnapshotRebuild() throws {
         try databasePool.write { db in
             try db.execute(sql: "INSERT OR IGNORE INTO v2_sync_rebuild_requests (singleton) VALUES (1)")
@@ -1043,9 +1050,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_group_permission_revisions",
     ]
 
-    /// These tables form one atomically swappable local projection bank. The
-    /// device-owned identity cache is copied with authoritative invalidations
-    /// applied, while sync events and search jobs intentionally start empty.
+    /// 组成可原子替换的本地投影库的表集合。
+    ///
+    /// 设备自有的身份缓存会在应用权威失效后复制过去，而同步事件与搜索任务刻意从空开始。
     private static let snapshotOrdinaryBankTables = snapshotProjectionTables + [
         "v2_group_events",
         "v2_group_event_cursors",
@@ -1059,12 +1066,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     private static let snapshotVirtualBankTables = ["v2_contact_profile_search"]
 
-    /// A Snapshot V3 artifact is the canonical baseline for the per-user sync
-    /// stream. Room-log history has its own durable cursor, so replacing its
-    /// rows would leave the cursor ahead of visible projections. Preserve only
-    /// room-log rooms that remain represented in the incoming baseline; a
-    /// removed group membership or a revoked direct identity therefore drops
-    /// its local event history instead of granting it new read authority.
+    /// 在快照影子表中保留房间日志投影。
+    ///
+    /// 快照 V3 产物是用户同步流的规范基线，而房间日志历史拥有自己的持久化游标：
+    /// 直接替换其行会让游标领先于可见投影。因此这里只保留仍出现在传入基线中的房间日志；
+    /// 已被移出群或被吊销私聊身份的房间会丢弃本地事件历史，而不是借此获得新的读取权限。
+    ///
+    /// - Parameter db: 执行快照导入的数据库。
+    /// - Throws: 查询或写入失败时抛出。
     private static func preserveRoomLogProjection(inSnapshotShadows db: Database) throws {
         let shadowRooms = snapshotShadowTable(for: "v2_room_profile_projections")
         let shadowDirectProfiles = snapshotShadowTable(for: "v2_direct_room_profile_projections")
@@ -1427,9 +1436,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard !prepared else { throw V2ClientSyncError.resetPending }
     }
 
-    /// Explicit table routing keeps every snapshot page on ordinary DML. It
-    /// avoids schema rewrites and schema-lock invalidations while the live
-    /// projection remains readable throughout a resumable import.
+    /// 快照分页写入的目标表路由。
+    ///
+    /// 显式路由让每个快照分页都走普通 DML，从而避免 schema 重写与 schema 锁失效，
+    /// 使实时投影在可续传导入期间始终可读。
     private enum ProjectionTableTarget {
         case live
         case snapshotShadow
@@ -1560,8 +1570,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// PostgreSQL and Foundation may spell the same UUID differently. Only
-    /// identity segments are normalized; kind and role names remain exact.
+    /// 规范化群能力快照键。
+    ///
+    /// PostgreSQL 与 Foundation 可能以不同写法表示同一个 UUID，因此只对身份片段做规范化；
+    /// 类型名与角色名保持精确匹配。
+    ///
+    /// - Parameter value: 原始键值。
+    /// - Returns: 规范化后的键；格式非法时返回 `nil`。
     private static func canonicalGroupCapabilitySnapshotKey(_ value: String) -> String? {
         var parts = value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         let identityIndices: [Int]
@@ -1671,15 +1686,26 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// UI/repository code reads this durable projection rather than scanning
-    /// opaque sync-event bytes on the main actor.
+    /// 读取指定房间的全部消息投影。
+    ///
+    /// 界面与仓储读取的是这份持久化投影，而不是在主线程上扫描不透明的同步事件字节。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 该房间的消息投影列表。
+    /// - Throws: 数据库读取失败时抛出。
     public func messages(in roomID: RoomID) throws -> [V2ClientMessageProjection] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM v2_message_projections WHERE room_id = ? ORDER BY timeline_sequence, message_id", arguments: [roomID.rawValue]).map(Self.decodeMessageProjection)
         }
     }
 
-    /// Reads one bounded page, including decorations, from a single snapshot.
+    /// 由单次快照读取一页有界时间线（含装饰数据）。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Parameter cursor: 更早页面的游标；为空表示从最新开始。
+    /// - Parameter limit: 本页最多返回的条目数。
+    /// - Returns: 时间线分页。
+    /// - Throws: 参数越界或数据库读取失败时抛出。
     public func conversationTimelinePage(
         in roomID: RoomID,
         before cursor: V2ClientTimelineCursor? = nil,
@@ -1692,9 +1718,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Message ID lookup plus two index seeks: cost and retained payload do
-    /// not grow with the target's depth in room history. No OFFSET or scan of
-    /// all prior pages. Account, target and decorations share one read snapshot.
+    /// 读取包含目标消息的时间线窗口。
+    ///
+    /// 实现为一次消息标识查找加两次索引检索：开销与保留载荷都不随目标在房间历史中的深度增长，
+    /// 不使用 OFFSET，也不扫描此前所有分页；账号、目标与装饰数据共享同一次读取快照。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - messageID: 目标消息。
+    ///   - limit: 窗口内最多返回的条目数。
+    /// - Returns: 目标消息所在的时间线窗口。
+    /// - Throws: 参数越界或数据库读取失败时抛出。
     public func conversationTimelineWindow(
         in roomID: RoomID,
         for userID: UserID,
@@ -1838,8 +1872,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Test/diagnostic batch read. Production list rendering uses the bounded
-    /// materialized conversation page below.
+    /// 批量读取全部会话状态，供测试与诊断使用。
+    ///
+    /// 生产环境的列表渲染使用下方有界的物化会话分页。
+    ///
+    /// - Returns: 按房间标识索引的会话状态。
+    /// - Throws: 数据库读取失败时抛出。
     func conversationStates() throws -> [RoomID: V2ClientConversationState] {
         try databasePool.read { db in
             let states = try Row.fetchAll(
@@ -1854,8 +1892,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in (try Bool.fetchOne(db, sql: "SELECT is_favorited FROM v2_message_favorites WHERE message_id = ?", arguments: [messageID.rawValue])) ?? false }
     }
 
-    /// Reads the room's favorite membership in one query for timeline
-    /// decoration instead of querying once for every visible message.
+    /// 以一次查询读取房间内被收藏的消息标识，用于时间线装饰。
+    ///
+    /// 这样无需为每条可见消息各查一次。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 被收藏的消息标识集合。
+    /// - Throws: 数据库读取失败时抛出。
     public func favoritedMessageIDs(in roomID: RoomID) throws -> Set<MessageID> {
         try databasePool.read { db in
             let rows = try Row.fetchAll(
@@ -1867,9 +1910,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// A personal collection view over already-authorized local messages.
-    /// Favorites are projections, not a second message cache, so withdrawal
-    /// and reset behavior stays identical to the ordinary timeline.
+    /// 面向已授权本地消息的个人收藏视图。
+    ///
+    /// 收藏是投影而不是第二份消息缓存，因此撤回与重置行为与普通时间线完全一致。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - limit: 本页最多返回的条数。
+    ///   - cursor: 上一页游标。
+    /// - Returns: 收藏消息分页。
+    /// - Throws: 参数越界或数据库读取失败时抛出。
     public func favoritedMessages(
         before cursor: V2ClientFavoriteMessageCursor? = nil,
         limit: Int = 50
@@ -1912,9 +1962,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Resolves titles only for one bounded UI page. Group projection wins for
-    /// a group room; the synchronized direct profile wins over its older
-    /// discovery cache for a direct room.
+    /// 仅为有界的单个界面分页解析标题。
+    ///
+    /// 群房间优先使用群投影；私聊房间优先使用已同步的私聊资料，而不是更早的发现缓存。
+    ///
+    /// - Parameter roomIDs: 本页涉及的房间列表。
+    /// - Returns: 房间到标题的映射。
+    /// - Throws: 数据库读取失败时抛出。
     public func conversationTitles(for roomIDs: [RoomID]) throws -> [RoomID: String] {
         guard roomIDs.count <= 100 else { throw V2ClientProjectionError.invalidMessagePayload }
         let unique = Array(Set(roomIDs)).sorted()
@@ -1948,8 +2002,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// The latest room-scoped announcement is a materialized sync projection,
-    /// not a cached response from the command that happened to create it.
+    /// 读取房间最新的群公告。
+    ///
+    /// 它是物化的同步投影，而不是「碰巧创建了该公告的命令」留下的缓存响应。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 公告投影；不存在时返回 `nil`。
+    /// - Throws: 数据库读取失败时抛出。
     public func groupAnnouncement(roomID: RoomID) throws -> V2ClientGroupAnnouncement? {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(
@@ -1977,7 +2036,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Records a retryable intent without modifying messages, cursors or outbox.
+    /// 记录一次可重试的基线读取意图，但不修改消息、游标或发件箱。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 本次恢复请求。
+    /// - Throws: 数据库写入失败时抛出。
     public func requestRolePolicyBaseline(roomID: RoomID) throws -> V2RolePolicyRecoveryRequest {
         try databasePool.write { db in
             try Self.requireRolePolicyRecoveryReady(db: db)
@@ -1985,8 +2048,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Bounded discovery for the recovery runner. Already queued, current
-    /// requests are excluded so subsequent pages can reach the other rooms.
+    /// 供恢复运行器使用的有界发现。
+    ///
+    /// 已排队且仍然有效的请求会被排除，使后续分页能够覆盖其他房间。
+    ///
+    /// - Parameter limit: 本次最多补建的房间数。
+    /// - Returns: 本次补建的请求数量。
+    /// - Throws: 数据库读写失败时抛出。
     public func enqueueMissingRolePolicyBaselines(limit: Int = 32) throws -> Int {
         guard (1 ... 100).contains(limit) else { throw V2RolePolicyRecoveryError.invalidLimit }
         return try databasePool.write { db in
@@ -2060,8 +2128,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// False means the request was superseded or its local fences changed.
-    /// No state is then changed; a runner can discover a fresh request.
+    /// 保存基线读取结果。
+    ///
+    /// 返回 `false` 表示该请求已被取代或其本地栅栏已变化；此时不会改变任何状态，
+    /// 恢复运行器可以重新发现一个新的请求。
+    ///
+    /// - Parameter baseline: 服务端返回的策略基线。
+    /// - Parameter expected: 期望的当前请求。
+    /// - Returns: 保存生效时为 `true`。
+    /// - Throws: 数据库写入失败时抛出。
     @discardableResult
     public func completeRolePolicyBaseline(_ baseline: V2GroupRolePolicyBaseline, for request: V2RolePolicyRecoveryRequest) throws -> Bool {
         try Task.checkCancellation()
@@ -2174,8 +2249,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try JSONEncoder().encode(permissions.map(\.rawValue).sorted())
     }
 
-    /// Missing roles remain unknown until an event or a complete owner
-    /// observation establishes their value. Baselines do not invent events.
+    /// 读取房间的角色策略。
+    ///
+    /// 缺失角色在事件或一次完整的归属观测确立其取值之前保持未知状态；
+    /// 基线不会凭空造出事件。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 已知的角色策略列表。
+    /// - Throws: 数据库读取失败时抛出。
     public func groupRolePolicies(roomID: RoomID) throws -> [V2ClientGroupRolePolicy] {
         try databasePool.read { try Self.readGroupRolePolicies(roomID: roomID, db: $0) }
     }
@@ -2237,14 +2318,21 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return result
     }
 
-    /// Rebuilds the derived character index in bounded transactions. The
-    /// durable message projection remains readable while this runs; callers
-    /// should expose `.building` instead of treating a partial index as an
-    /// empty search result.
+    /// 在有界事务中重建派生字符索引。
+    ///
+    /// 重建期间持久化消息投影保持可读；调用方应对外暴露 `.building` 状态，
+    /// 而不是把部分索引当作空搜索结果。
 
-    /// Reads one inbox or archive page through the materialized ordering
-    /// index. The keyset predicate matches the index order exactly, and all
-    /// page details are hydrated inside the same read transaction.
+    /// 通过物化排序索引读取一页收件箱或归档列表。
+    ///
+    /// 键集谓词与索引顺序完全一致，且本页全部细节都在同一读事务内补齐。
+    ///
+    /// - Parameters:
+    ///   - isArchived: 是否读取归档列表。
+    ///   - cursor: 上一页游标。
+    ///   - limit: 本页最多返回的条数。
+    /// - Returns: 会话列表分页。
+    /// - Throws: 参数越界或数据库读取失败时抛出。
     public func conversationListPage(
         isArchived: Bool,
         before cursor: V2ClientConversationListCursor? = nil,
@@ -2311,9 +2399,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Reads every reaction needed by one visible conversation in one query.
-    /// Callers can group these value projections without an N+1 database read
-    /// for each rendered message.
+    /// 以一次查询读取某个可见会话所需的全部表情记录。
+    ///
+    /// 调用方可以据此自行分组这些值投影，而不必为每条渲染消息各执行一次查询（避免 N+1 读取）。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 该房间的表情记录。
+    /// - Throws: 数据库读取失败时抛出。
     public func reactions(in roomID: RoomID) throws -> [V2ClientMessageReaction] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE room_id = ? ORDER BY message_id, reaction, actor_user_id", arguments: [roomID.rawValue]).map { row in
@@ -2322,8 +2414,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Test/diagnostic batch read. Production contacts use the bounded page
-    /// API so a large relationship graph is never materialized on refresh.
+    /// 批量读取全部关系，供测试与诊断使用。
+    ///
+    /// 生产环境联系人使用有界分页接口，避免刷新时把庞大关系图整体物化。
+    ///
+    /// - Returns: 关系投影列表。
+    /// - Throws: 数据库读取失败时抛出。
     func relationships() throws -> [V2ClientRelationshipProjection] {
         try databasePool.read { db in
             try Row.fetchAll(db, sql: "SELECT target_user_id, state, requested_by_user_id, updated_at FROM v2_relationship_projections ORDER BY target_user_id").map(Self.decodeRelationshipProjection)
@@ -2454,11 +2550,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Persists an identity that the current user explicitly resolved before
-    /// opening a direct room. It deliberately survives a sync reset: the
-    /// server has not made this cache a sync projection yet, and deleting it
-    /// would regress an already-authorized, still-active direct room to a
-    /// UUID title after recovery.
+    /// 缓存当前用户打开私聊前显式解析出的身份。
+    ///
+    /// 它刻意在同步重置后仍然保留：服务端尚未把该缓存变成同步投影，
+    /// 而删除它会让一个已授权且仍然有效的私聊房间在恢复后退化成 UUID 标题。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - publicIdentity: 已解析的公开身份。
+    ///   - updatedAt: 缓存时刻，默认当前时间。
+    /// - Throws: 数据库写入失败时抛出。
     public func cacheDirectRoomIdentity(roomID: RoomID, publicIdentity: V2PublicIdentity, updatedAt: Date = Date()) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
@@ -2510,9 +2611,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Reads the last authorized profile representation. Callers must resolve
-    /// it through `V2ProfileResolver`; they must not copy its dynamic display
-    /// data into message or conversation structures.
+    /// 读取最后一次已授权的资料表示。
+    ///
+    /// 调用方必须通过 `V2ProfileResolver` 解析它，不得把其中的动态展示数据复制进
+    /// 消息或会话结构。
+    ///
+    /// - Parameter userID: 目标用户。
+    /// - Returns: 资料视图；本地不存在时返回 `nil`。
+    /// - Throws: 数据库读取失败时抛出。
     public func profileView(userID: UserID) throws -> V2ProfileView? {
         try databasePool.read { db in
             guard let row = try Row.fetchOne(
@@ -2541,9 +2647,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Called only with a fully authorized server response. The write and
-    /// invalidation cleanup share one transaction, so UI never observes a
-    /// fresh profile alongside a pending older refresh requirement.
+    /// 保存资料视图。
+    ///
+    /// 只有在拿到完整授权服务端响应时才允许调用。写入与失效清理共享同一事务，
+    /// 因此界面不会同时看到新资料与仍需完成的旧刷新要求。
+    ///
+    /// - Parameter profile: 待保存资料。
+    /// - Throws: 数据库写入失败时抛出。
     public func saveProfileView(_ profile: V2ProfileView) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
@@ -2551,9 +2661,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Deletes an inaccessible view instead of retaining old profile data in
-    /// the local account projection. The image cache observes the same signal
-    /// at a higher media boundary and must evict any protected avatar bytes.
+    /// 标记资料不可用。
+    ///
+    /// 直接删除不可访问的视图，而不是在本地账号投影中保留旧资料；
+    /// 图像缓存在更高的媒体边界观察到同一信号，必须同时清除受保护的头像字节。
+    ///
+    /// - Parameter userID: 目标用户。
+    /// - Throws: 数据库写入失败时抛出。
     public func markProfileUnavailable(userID: UserID) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
@@ -2562,9 +2676,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Applies one server-authorized batch in one SQLite transaction. A crash
-    /// can therefore expose either the previous profile generation or the
-    /// complete new response, never a partially hydrated contact page.
+    /// 在单个 SQLite 事务内应用一批已授权的服务端结果。
+    ///
+    /// 因此崩溃后要么暴露上一代资料，要么暴露完整的新响应，
+    /// 绝不会出现只补齐了一部分联系人的页面。
+    ///
+    /// - Parameter results: 服务端返回的查询结果。
+    /// - Throws: 数据库写入失败时抛出。
     public func applyProfileViewResults(_ results: [V2ProfileViewLookupResult]) throws {
         try databasePool.write { db in
             try Self.requireProjectionWritesUnfenced(db: db)
@@ -2602,9 +2720,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// PostgreSQL's `BIGINT` and SQLite's `INTEGER` are signed. Keep the
-    /// protocol's wider `uint64` domain at the transport boundary and fail
-    /// closed before any value enters durable local state.
+    /// 把无符号整数转换为本地可持久化的有符号整数。
+    ///
+    /// PostgreSQL 的 `BIGINT` 与 SQLite 的 `INTEGER` 都是有符号类型；
+    /// 更宽的协议 `uint64` 域止步于传输边界，任何取值在进入本地持久化状态之前都必须通过失败关闭。
+    ///
+    /// - Parameter value: 待转换的无符号整数。
+    /// - Returns: 对应的有符号整数。
+    /// - Throws: 超出 `Int64` 表示范围时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     static func storageInteger(_ value: UInt64) throws -> Int64 {
         guard let result = Int64(exactly: value) else {
             throw V2ClientSyncError.storageRangeExceeded
@@ -2836,9 +2960,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// The account-bound database is the effect's account scope. This claim,
-    /// projection mutation, FTS job and consuming feed cursor share one write
-    /// transaction. Failed application cannot leave a committed claim behind.
+    /// 为一条消息效果登记认领。
+    ///
+    /// 账号绑定的数据库就是该效果的账号作用域。认领标记、投影变更、全文检索任务与消费游标
+    /// 共享同一次写入事务，因此应用失败不会留下已提交的认领记录。
+    ///
+    /// - Parameters:
+    ///   - effect: 待应用的消息效果。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - db: 当前写入事务。
+    /// - Returns: 首次认领时为 `true`；重复应用时返回 `false`。
+    /// - Throws: 数据库读写失败时抛出。
     private static func claimMessageEffect(_ effect: V2LocalMessageEffect, sourceEventID: EventID, db: Database) throws -> Bool {
         let digest = try effect.digest()
         let revision = try storageInteger(effect.revision)
@@ -3766,10 +3898,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
-    /// Tombstones are durable permission revocations, not merely a rendering
-    /// flag. Remove content-bearing local columns before the search-index job
-    /// runs so a crash cannot leave text, media references, entities or
-    /// mention targets available through another local feature.
+    /// 清除本地消息投影中的正文内容。
+    ///
+    /// 墓碑是持久化的权限吊销，而不只是一个渲染标记。这里会在全文检索任务运行之前
+    /// 先删除承载内容的本地列，使崩溃也不会让正文、媒体引用、富文本实体或提及目标
+    /// 通过其他本地功能继续可见。
+    ///
+    /// - Parameters:
+    ///   - messageID: 目标消息。
+    ///   - roomID: 目标房间。
+    ///   - messageRevision: 目标修订。
+    ///   - db: 当前写入事务。
+    /// - Throws: 数据库读写失败时抛出。
     private static func redactLocalMessageProjection(
         messageID: MessageID,
         revision: Int64,

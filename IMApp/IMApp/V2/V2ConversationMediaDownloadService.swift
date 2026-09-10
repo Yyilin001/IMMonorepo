@@ -3,9 +3,10 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 
-/// A local, shareable media file. It intentionally contains no provider URL,
-/// credential, or server-side filename; those remain inside ClientKit's
-/// one-shot authorization and transfer boundary.
+/// 一个本地的、可分享的媒体文件。
+///
+/// 它刻意不包含提供方 URL、凭据或服务端文件名；
+/// 这些信息始终留在 ClientKit 的一次性授权与传输边界之内。
 struct V2DownloadedConversationMedia: Hashable, Identifiable, Sendable {
     let mediaID: MediaID
     let fileURL: URL
@@ -14,13 +15,21 @@ struct V2DownloadedConversationMedia: Hashable, Identifiable, Sendable {
 }
 
 protocol V2ConversationMediaDownloading: Sendable {
-    /// Re-authorizes and replaces the local cache entry before returning a
-    /// shareable local file. It must not return a provider target.
+    /// 在返回可分享的本地文件之前，先重新授权并替换本地缓存条目。
+    ///
+    /// 实现绝不能返回提供方目标地址。
+    ///
+    /// - Parameters:
+    ///   - media: 待下载的媒体引用。
+    ///   - message: 媒体所在消息的位置，可为空。
+    /// - Returns: 可分享的本地媒体文件。
+    /// - Throws: 授权失败或传输失败时抛出。
     func download(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia
 }
 
-/// Optional local-cache capability. Kept separate from download so existing
-/// test/remote implementations do not acquire file-system authority.
+/// 可选的本地缓存能力。
+///
+/// 它与下载能力分离，使既有的测试/远端实现不会因此获得文件系统权限。
 protocol V2ConversationMediaCacheDiscarding: Sendable {
     func discard(_ media: V2MediaReference) async
 }
@@ -48,10 +57,10 @@ struct V2ConversationMediaCachePolicy: Equatable, Sendable {
     }
 }
 
-/// Applies V2's device-local storage policy to the directory that contains
-/// local sync state or downloaded media. The application currently offers no
-/// persistent background media transfer, so `Complete` protection is correct
-/// for this foreground-only media cache.
+/// 把 V2 的设备本地存储策略应用到存放本地同步状态或已下载媒体的目录。
+///
+/// 应用目前不提供常驻后台媒体传输，
+/// 因此该仅前台使用的媒体缓存采用 `Complete` 保护级别是正确的。
 enum V2DeviceLocalStoragePolicy {
     static func prepareManagedDirectory(
         _ directory: URL,
@@ -220,9 +229,10 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         try? fileManager.removeItem(at: candidate)
     }
 
-    /// Interrupted URLSession downloads leave only random `.partial` files;
-    /// this never touches complete cache entries, and never traverses outside
-    /// the cache directory.
+    /// 清理被中断的临时下载文件。
+    ///
+    /// 被中断的 URLSession 下载只会留下随机的 `.partial` 文件；
+    /// 该操作绝不触碰完整的缓存条目，也绝不会遍历到缓存目录之外。
     func discardOrphanedTemporaryFiles() {
         guard let entries = try? fileManager.contentsOfDirectory(
             at: directory,
@@ -240,10 +250,11 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         }
     }
 
-    /// Activation-time maintenance removes interrupted transfers, expired
-    /// entries, then least-recently-downloaded files until both capacity caps
-    /// are satisfied. It only examines direct regular children with the cache
-    /// extension and never follows a path outside the managed directory.
+    /// 激活期维护。
+    ///
+    /// 依次清除被中断的传输、已过期条目，然后按最近最少下载顺序删除文件，
+    /// 直到满足两个容量上限。它只检查缓存目录直属的、带缓存扩展名的常规子文件，
+    /// 绝不跟随指向受管目录之外的路径。
     func performMaintenance() {
         discardOrphanedTemporaryFiles()
         try? enforceCachePolicy(excluding: nil)

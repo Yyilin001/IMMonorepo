@@ -3,17 +3,28 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Authorizes each profile through a concrete direct-room or room-membership
-/// context. It deliberately performs no group roster enumeration; each lookup
-/// is bounded and backed by the active-membership indexes already used by the
-/// room directory.
+/// 逐个资料通过具体的私聊房间或房间成员上下文进行授权。
+///
+/// 它刻意不做群名册枚举：每次查找都是有界的，并复用房间目录已经在用的当前成员索引。
 public struct PostgresV2ProfileViewStore: V2ProfileViewStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放公开资料、房间与媒体对象的数据库。
     public init(database: any Database) {
         self.database = database
     }
 
+    /// 按请求键读取资料视图。
+    ///
+    /// 请求键以 JSON 数组一次性传入，数据库按序返回每一项结果；无权限、被拉黑、
+    /// 已删除或不存在的对象会被收敛为同一类结果，头像媒体仅在归属正确且可用时才返回。
+    ///
+    /// - Parameter request: 已校验的查询请求。
+    /// - Returns: 与请求键一一对应的结果列表。
+    /// - Throws: 用户标识无法解析、连接不支持 SQL 或返回行与请求数量不符时抛出
+    ///   ``V2ProfileViewReadError/corruptPersistenceState``。
     public func read(_ request: V2ProfileViewReadRequest) async throws -> [V2ProfileViewLookupResult] {
         guard let actorID = UUID(uuidString: request.actorUserID.rawValue) else {
             throw V2ProfileViewReadError.corruptPersistenceState

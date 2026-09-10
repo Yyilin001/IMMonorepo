@@ -3,16 +3,22 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 单轮快照产物构建报告。
 public struct V2SnapshotArtifactBuildReport: Equatable, Sendable {
+    /// 本轮是否成功认领到一个构建任务。
     public let claimed: Bool
+    /// 本轮是否发布了完整产物。
     public let published: Bool
+    /// 产物包含的页数。
     public let pageCount: UInt32
+    /// 产物包含的条目数。
     public let itemCount: UInt64
 }
 
-/// Resumable Snapshot V3 builder. Every iteration keeps at most one bounded
-/// query result and one encoded page in memory, then commits its keyset cursor
-/// in the same transaction as the page bytes.
+/// 可续传的快照 V3 构建器。
+///
+/// 每次迭代最多在内存中保留一份有界查询结果与一个已编码页面，
+/// 并在写入页面字节的同一事务内提交其键集游标，因此进程中断后可以从游标处继续。
 public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     private let database: any Database
     private let schema: String
@@ -22,6 +28,18 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     private let messageReadMode: V2MessageProjectionReadMode
     private let makeUUID: @Sendable () -> UUID
 
+    /// 校验并保存数据库、schema 与分页参数。
+    ///
+    /// - Parameters:
+    ///   - database: 存放投影状态与快照产物的数据库。
+    ///   - schema: 目标 schema，需符合 `^[A-Za-z_][A-Za-z0-9_]*$`。
+    ///   - pageItemLimit: 单页条目上限，需落在编解码器允许范围内。
+    ///   - maximumCandidateItems: 单次候选读取上限，需不小于单页上限。
+    ///   - leaseDuration: 认领租约秒数，需大于零。
+    ///   - messageReadMode: 消息投影读取模式，默认优先共享状态。
+    ///   - makeUUID: 页面或产物标识生成方式。
+    ///
+    /// 参数越界时直接失败，避免出现越界分页或非法 schema 拼接。
     public init(
         database: any Database,
         schema: String = "im_v2",
@@ -43,6 +61,15 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
         self.makeUUID = makeUUID
     }
 
+    /// 执行一轮有界快照构建。
+    ///
+    /// 无可认领任务时返回未认领的报告；成功认领后逐页读取、编码并提交，
+    /// 全部页面完成后发布产物。
+    ///
+    /// - Parameter now: 本次构建时刻。
+    /// - Returns: 本轮构建报告。
+    /// - Throws: 任务取消时抛出 `CancellationError`；持久化异常、条目过大、
+    ///   产物过大或租约丢失时抛出 ``V2SnapshotArtifactBuilderError``。
     public func runOnce(now: Date = Date()) async throws -> V2SnapshotArtifactBuildReport {
         try Task.checkCancellation()
         guard let claim = try await claim(now: now) else {
@@ -403,10 +430,15 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     private func table(_ name: String) -> String { "\(schema).\(name)" }
 }
 
+/// 快照产物构建错误。
 public enum V2SnapshotArtifactBuilderError: Error, Equatable, Sendable {
+    /// 持久化记录缺失或字段无法解码。
     case corruptPersistence
+    /// 单个条目超出允许的页内大小。
     case itemTooLarge
+    /// 产物总量超出允许上限。
     case artifactTooLarge
+    /// 构建期间租约已被他人接管。
     case lostLease
 }
 

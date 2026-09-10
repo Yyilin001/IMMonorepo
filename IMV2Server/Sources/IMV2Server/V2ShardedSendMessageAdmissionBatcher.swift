@@ -1,20 +1,32 @@
 import Foundation
 import IMV2Core
 
-/// Stable, process-local partitioning for message admission.
+/// 消息准入的稳定进程内分片。
 ///
-/// Every room is routed to exactly one lane for the lifetime of this value,
-/// so commands for that room retain the existing FIFO and no-overtake
-/// guarantees. Independent rooms can progress on separate actor executors.
-/// Database concurrency is split across lanes. Pending requests instead use
-/// one process-wide limiter, so skewed room hashes can borrow idle capacity
-/// without silently increasing PostgreSQL pressure or retained request memory.
+/// 每个房间在本值存活期间只会落入固定的一条通道，因此该房间的命令仍保持既有的
+/// 先进先出与不可超越语义；相互独立的房间则可以在不同 actor 执行器上并行推进。
+/// 数据库并发被拆分到各通道，而待处理请求改用进程级统一限流器，
+/// 使哈希偏斜的房间可以借用空闲容量，又不会悄悄抬高 PostgreSQL 压力或驻留内存。
 public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission, Sendable {
     private let lanes: [V2SendMessageAdmissionBatcher]
 
+    /// 是否接管前台写入准入。
     nonisolated public let managesForegroundWriteAdmission: Bool
+    /// 是否发布已提交的群事件。
     nonisolated public let publishesCommittedGroupEvents: Bool
 
+    /// 构造分片准入器。
+    ///
+    /// 各通道的在途批量额度按商与余数精确分配；自适应策略中的最小窗口请求数按通道数向上取整，
+    /// 但至少为 2，保证单通道仍能观察到足够样本。进程级待处理上限由共享容量统一持有，
+    /// 通道内保留同值仅用于配置校验与诊断。
+    ///
+    /// - Parameters:
+    ///   - store: 执行原子批量写入的存储。
+    ///   - configuration: 基础批量接入配置。
+    ///   - laneCount: 通道数量，需大于 1 且不超过在途批量与待处理请求上限。
+    ///   - databaseWorkAdmission: 可选的数据库工作准入控制器。
+    ///   - committedMessageObserver: 可选的已提交消息观察者。
     public init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: V2SendMessageAdmissionBatcher.Configuration,
@@ -66,6 +78,13 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         }
     }
 
+    /// 接受一条房间写入请求。
+    ///
+    /// 请求按房间标识的稳定哈希进入固定通道，从而保持该房间的命令顺序。
+    ///
+    /// - Parameter request: 待接受的写入请求，函数会消费该值。
+    /// - Returns: 写入结果。
+    /// - Throws: 准入拒绝、取消或存储失败时抛出。
     public func accept(
         _ request: consuming V2RoomWriteRequest
     ) async throws -> V2SendMessageOutcome {
@@ -76,6 +95,12 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         )].accept(ownedRequest)
     }
 
+    /// 汇总各通道的运行快照。
+    ///
+    /// 计数类指标在求和时饱和到 `UInt64.max`，最大值类指标取各通道最大值，
+    /// 布尔类指标取任一通道为真，避免长跑进程因溢出产生错误读数。
+    ///
+    /// - Returns: 聚合后的准入快照。
     public func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot {
         let laneSnapshots = await withTaskGroup(
             of: V2SendMessageAdmissionBatcher.Snapshot.self,
@@ -94,9 +119,15 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         return Self.aggregate(laneSnapshots)
     }
 
-    /// FNV-1a is deterministic across launches, unlike Swift's randomized
-    /// `Hashable` seed. Stable routing is required for reproducible load tests
-    /// and ensures one room cannot move between lanes during a process run.
+    /// 计算房间所属通道下标。
+    ///
+    /// 这里使用 FNV-1a 而非 Swift 随机化的 `Hashable` 种子，以获得跨启动的确定性：
+    /// 稳定路由是压测可复现的前提，也保证同一房间在进程运行期间不会在通道间迁移。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - laneCount: 通道数量，需大于零。
+    /// - Returns: 通道下标。
     static func laneIndex(for roomID: RoomID, laneCount: Int) -> Int {
         precondition(laneCount > 0)
         var hash: UInt64 = 14_695_981_039_346_656_037
@@ -107,14 +138,31 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         return Int(hash % UInt64(laneCount))
     }
 
+    /// 按商与余数把一个总量精确分配到第 `index` 份。
+    ///
+    /// - Parameters:
+    ///   - total: 待分配总量。
+    ///   - index: 当前份下标。
+    ///   - count: 总份数。
+    /// - Returns: 该份应得的数量；各份之和等于 `total`。
     private static func portion(total: Int, index: Int, count: Int) -> Int {
         (total / count) + (index < total % count ? 1 : 0)
     }
 
+    /// 计算向上取整的整数除法。
+    ///
+    /// - Parameters:
+    ///   - value: 被除数。
+    ///   - divisor: 除数。
+    /// - Returns: 向上取整的结果。
     private static func ceilingDivide(_ value: Int, by divisor: Int) -> Int {
         (value + divisor - 1) / divisor
     }
 
+    /// 聚合各通道快照。
+    ///
+    /// - Parameter snapshots: 各通道快照。
+    /// - Returns: 聚合后的快照。
     private static func aggregate(
         _ snapshots: [V2SendMessageAdmissionBatcher.Snapshot]
     ) -> V2SendMessageAdmissionBatcher.Snapshot {
@@ -175,6 +223,10 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         )
     }
 
+    /// 以饱和方式求和，溢出时返回 `UInt64.max`。
+    ///
+    /// - Parameter values: 待求和的计数。
+    /// - Returns: 求和结果。
     private static func saturatingSum(_ values: [UInt64]) -> UInt64 {
         values.reduce(0) { partial, value in
             let sum = partial.addingReportingOverflow(value)

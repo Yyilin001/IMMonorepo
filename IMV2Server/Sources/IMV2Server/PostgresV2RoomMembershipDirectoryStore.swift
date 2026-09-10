@@ -3,17 +3,35 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Reads visible current members at one room revision. Every returned row has
-/// an active public profile and active account; hidden or disabled identities
-/// are omitted rather than exposed as an internal user ID. The opaque cursor
-/// keeps every page bounded without mixing two membership revisions.
+/// 在某个房间修订上读取可见的当前成员。
+///
+/// 每一条返回记录都必须具备有效的公开资料与未停用的账号；不可见或已停用的身份会被省略，
+/// 而不会以只有内部标识的形式暴露。不透明游标保证每页有界，且不会把两个成员修订的页面混在一起。
 public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放房间、成员关系与公开资料的数据库。
     public init(database: any Database) {
         self.database = database
     }
 
+    /// 读取一页成员名录。
+    ///
+    /// 事务以共享锁读取房间当前成员修订；携带游标时要求游标修订与当前修订一致，
+    /// 否则返回修订冲突而不混合两版数据。发起者必须是该修订下的当前成员。
+    /// 查询按用户标识排序并多取一行以判断是否还有后续页，资料未生效或账号已停用的成员被过滤。
+    ///
+    /// - Parameter request: 已校验的查询请求。
+    /// - Returns: 成员名录分页。
+    /// - Throws: 游标房间不符或格式非法时抛出
+    ///   ``V2RoomMembershipDirectoryError/invalidCursor``；房间不存在或非群聊时抛出
+    ///   ``V2RoomMembershipDirectoryError/roomNotFound``；发起者不是当前成员时抛出
+    ///   ``V2RoomMembershipDirectoryError/actorNotMember``；游标修订过期时抛出
+    ///   ``V2RoomMembershipDirectoryError/revisionConflict(currentRevision:)``；
+    ///   角色或账号类型无法解码时抛出
+    ///   ``V2RoomMembershipDirectoryError/corruptPersistenceState``。
     public func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
         let roomID = try directoryUUID(request.roomID)
         let actorID = try directoryUUID(request.actorUserID)
@@ -142,6 +160,12 @@ private struct DirectoryCursor: Codable {
     let afterUserID: UUID
 }
 
+/// 解码成员名录游标。
+///
+/// - Parameter value: Base64 编码的游标字符串。
+/// - Returns: 解码后的游标。
+/// - Throws: 解码失败、版本不符或成员修订为负时抛出
+///   ``V2RoomMembershipDirectoryError/invalidCursor``。
 private func directoryCursor(_ value: String) throws -> DirectoryCursor {
     guard let data = Data(base64Encoded: value),
           let cursor = try? JSONDecoder().decode(DirectoryCursor.self, from: data),
@@ -151,11 +175,25 @@ private func directoryCursor(_ value: String) throws -> DirectoryCursor {
     return cursor
 }
 
+/// 编码成员名录游标。
+///
+/// - Parameters:
+///   - roomID: 目标房间。
+///   - membershipRevision: 本页对应的成员修订。
+///   - afterUserID: 下一页起始位置的前一条用户标识。
+/// - Returns: Base64 编码的游标字符串。
+/// - Throws: 编码失败时抛出。
 private func directoryCursorString(roomID: UUID, membershipRevision: Int64, afterUserID: UUID) throws -> String {
     let cursor = DirectoryCursor(version: 1, roomID: roomID, membershipRevision: membershipRevision, afterUserID: afterUserID)
     return try JSONEncoder().encode(cursor).base64EncodedString()
 }
 
+/// 把标识原始值解析为 UUID。
+///
+/// - Parameter identifier: 已校验的标识类型。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2RoomMembershipDirectoryError/corruptPersistenceState``。
 private func directoryUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = UUID(uuidString: identifier.rawValue) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
     return value

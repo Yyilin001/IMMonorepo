@@ -1,12 +1,11 @@
 import Foundation
 import Vapor
 
-/// Installs the baseline HTTP middleware shared by every V2 process. Call this
-/// immediately after creating `Application`, before appending authentication or
-/// rate-limit middleware. Replacing Vapor's defaults is intentional: its
-/// default error logger records the complete URL, including signed capability
-/// query values.
 /// HTTP 中间件安装入口。
+///
+/// 每个 V2 进程共享的基线 HTTP 中间件都在此安装。应在创建 `Application` 后立即调用，
+/// 且要先于认证或限流中间件。这里刻意替换 Vapor 的默认中间件：
+/// Vapor 默认的错误日志会记录完整 URL，其中包含已签名能力查询参数。
 ///
 /// 按顺序安装 `V2RedactedRouteLoggingMiddleware` 与
 /// `V2RedactedErrorMiddleware`，减少敏感字段日志与错误信息泄露。
@@ -19,9 +18,10 @@ public enum V2RedactedHTTPMiddlewareConfiguration {
     }
 }
 
-/// Logs the matched route template, never the caller-controlled path or query.
-/// Templates keep log cardinality bounded and avoid persisting identifiers.
 /// 路由级日志中间件，记录路由模板而非原始路径。
+///
+/// 只记录匹配到的路由模板，绝不记录调用方控制的路径或查询串。
+/// 模板可让日志基数保持有界，并避免持久化标识符。
 private struct V2RedactedRouteLoggingMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
         // Successful request-per-line logging is diagnostic, not an
@@ -32,11 +32,10 @@ private struct V2RedactedRouteLoggingMiddleware: Middleware {
     }
 }
 
-/// Produces the stable Vapor-compatible JSON error envelope while deliberately
-/// omitting the original error description from logs. Low-level errors can
-/// contain SQL, provider URLs, tokens, or filesystem paths.
 /// 错误响应中间件。
 ///
+/// 产出稳定的、与 Vapor 兼容的 JSON 错误封装，同时刻意不在日志中保留原始错误描述。
+/// 底层错误可能包含 SQL、提供方 URL、令牌或文件系统路径。
 /// 使用稳定的错误 reason 并统一返回 JSON envelope，避免泄露底层异常细节。
 private struct V2RedactedErrorMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {

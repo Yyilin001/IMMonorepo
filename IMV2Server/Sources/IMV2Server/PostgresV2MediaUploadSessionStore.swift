@@ -3,18 +3,40 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL fencing for upload target exchange. A session is both
-/// user/device-bound and one-time: one conditional update validates ownership,
-/// device state, media state, expiry, and lease eligibility before claiming it.
+/// 上传目标兑换的 PostgreSQL 栅栏实现。
+///
+/// 上传会话既绑定用户与设备，也是一次性的：单条条件更新会同时校验归属、设备状态、
+/// 媒体状态、有效期与租约资格，全部满足后才完成认领。
 public struct PostgresV2MediaUploadSessionStore: V2MediaUploadSessionStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库与令牌生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放上传授权与媒体对象的数据库。
+    ///   - makeUUID: 认领令牌生成方式，测试可注入确定性实现。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 认领一个上传会话以兑换提供方目标。
+    ///
+    /// 认领成功时会把授权置为已认领、写入租约并递增重试计数；重试计数达到
+    /// 有符号 64 位上限后不再递增，避免溢出。
+    ///
+    /// - Parameters:
+    ///   - ownerUserID: 会话归属用户。
+    ///   - deviceID: 发起兑换的设备。
+    ///   - uploadSessionID: 上传会话标识。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数，需大于零。
+    /// - Returns: 已认领的上传会话。
+    /// - Throws: 租约时长非正时抛出
+    ///   ``V2MediaUploadSessionStoreError/invalidRequest``；租约到期时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``；会话不满足归属、设备、状态或时效条件时抛出
+    ///   ``V2MediaUploadSessionStoreError/sessionUnavailable``。
     public func claimUpload(
         ownerUserID: UserID,
         deviceID: DeviceID,
@@ -72,6 +94,16 @@ public struct PostgresV2MediaUploadSessionStore: V2MediaUploadSessionStore {
         )
     }
 
+    /// 将已认领的上传会话标记为已消费。
+    ///
+    /// 会话必须仍归属于同一认领令牌、未过期，且设备与媒体状态仍然有效。
+    ///
+    /// - Parameters:
+    ///   - claim: 已认领的上传会话。
+    ///   - now: 完成时刻。
+    /// - Throws: 时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``；会话不满足条件时抛出
+    ///   ``V2MediaUploadSessionStoreError/sessionUnavailable``。
     public func completeUploadTarget(_ claim: V2ClaimedMediaUpload, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now),
               let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -97,6 +129,11 @@ public struct PostgresV2MediaUploadSessionStore: V2MediaUploadSessionStore {
             """).first() != nil else { throw V2MediaUploadSessionStoreError.sessionUnavailable }
     }
 
+    /// 释放已认领但未消费的上传会话，使其回到待认领状态。
+    ///
+    /// - Parameter claim: 已认领的上传会话。
+    /// - Throws: 连接不支持 SQL 或会话标识非法时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func releaseUploadTarget(_ claim: V2ClaimedMediaUpload) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
@@ -109,8 +146,11 @@ public struct PostgresV2MediaUploadSessionStore: V2MediaUploadSessionStore {
     }
 }
 
+/// 上传会话存储错误。
 public enum V2MediaUploadSessionStoreError: Error, Equatable, Sendable {
+    /// 请求参数不满足约束。
     case invalidRequest
+    /// 上传会话当前不可认领、消费或释放。
     case sessionUnavailable
 }
 
@@ -127,6 +167,12 @@ private struct MediaUploadGrantRow: Decodable {
     }
 }
 
+/// 把标识原始值解析为 UUID。
+///
+/// - Parameter value: 已校验的标识类型。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2MediaUploadSessionStoreError/sessionUnavailable``。
 private func uploadUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let uuid = UUID(uuidString: value.rawValue) else { throw V2MediaUploadSessionStoreError.sessionUnavailable }
     return uuid

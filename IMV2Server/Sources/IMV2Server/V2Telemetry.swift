@@ -2,16 +2,17 @@ import Foundation
 import Dispatch
 import Synchronization
 
-/// A deliberately small observability boundary. Its fields are enumerated or
-/// aggregate values only: callers must not attach room IDs, user IDs, message
-/// content, opaque tokens, URLs, or arbitrary error strings as metric labels.
+/// 一个刻意保持精简的可观测性边界。
+///
+/// 其字段只允许是枚举值或聚合值：调用方不得把房间 ID、用户 ID、消息内容、
+/// 不透明令牌、URL 或任意错误字符串作为指标标签挂载上来。
 public protocol V2TelemetrySink: Sendable {
     func record(_ event: V2TelemetryEvent) async
 }
 
-/// A privacy-safe, point-in-time view of gateway connection state. It is
-/// intentionally limited to process-local aggregate counts: neither device
-/// identifiers nor user identifiers may cross this boundary.
+/// 网关连接状态的隐私安全瞬时视图。
+///
+/// 它刻意只包含进程内的聚合计数：设备标识与用户标识都不得跨越该边界。
 public protocol V2ConnectionMetricsSource: Sendable {
     func connectionMetricsSnapshot() async -> V2ConnectionMetricsSnapshot
 }
@@ -26,10 +27,10 @@ public struct V2ConnectionMetricsSnapshot: Equatable, Sendable {
     }
 }
 
-/// Renders the connection-specific part of the private Prometheus surface.
-/// Keeping it separate from event telemetry means a scrape observes the
-/// current registry state instead of a counter reconstructed from lifecycle
-/// events that could be lost across a process restart.
+/// 渲染私有 Prometheus 指标面中与连接相关的部分。
+///
+/// 把它与事件遥测分开，意味着一次抓取观察到的是注册表当前状态，
+/// 而不是从生命周期事件重建出来的计数——后者可能在进程重启中丢失。
 public func v2RenderPrometheusConnectionMetrics(_ snapshot: V2ConnectionMetricsSnapshot) -> String {
     [
         "# HELP im_v2_gateway_active_devices Process-local authenticated devices with an active gateway connection.",
@@ -41,9 +42,10 @@ public func v2RenderPrometheusConnectionMetrics(_ snapshot: V2ConnectionMetricsS
     ].joined(separator: "\n") + "\n"
 }
 
-/// Closed reasons for a gateway socket leaving service. These are intentionally
-/// transport facts rather than error strings, so they remain safe metric
-/// labels and cannot expose command payload or identity data.
+/// 网关套接字退出服务的封闭原因集合。
+///
+/// 它们刻意是传输层事实而非错误字符串，因此可以作为安全的指标标签，
+/// 且不会暴露命令载荷或身份数据。
 public enum V2GatewayConnectionClosure: String, CaseIterable, Equatable, Sendable {
     case peerDisconnected = "peer_disconnected"
     case connectionLimit = "connection_limit"
@@ -145,14 +147,15 @@ public protocol V2GatewayTransportMetricsSource: Sendable {
     func gatewayTransportMetricsSnapshot() async -> V2GatewayTransportMetricsSnapshot
 }
 
-/// Write-side transport instrumentation boundary. The reader-only source is
-/// what the metrics listener accepts; gateway handlers additionally need this
-/// closed mutation vocabulary.
+/// 写侧的传输指标边界。
+///
+/// 指标监听器只接受只读来源；网关处理器额外需要这套封闭的变更词汇表。
 public protocol V2GatewayTransportMetricsRecorder: V2GatewayTransportMetricsSource {
     func connectionOpened()
     func connectionClosed(reason: V2GatewayConnectionClosure)
-    /// Records a socket rejected before the channel handler owns an active
-    /// connection gauge slot.
+    /// 记录一个在 channel handler 持有活跃连接计量槽之前就被拒绝的套接字。
+    ///
+    /// - Parameter reason: 该套接字被拒绝的封闭原因。
     func connectionRejected(reason: V2GatewayConnectionClosure)
     func observeQueuedInboundBytes(_ bytes: Int)
     func foregroundFrameSubmitted(
@@ -198,12 +201,12 @@ extension V2GatewayTransportMetricsRecorder {
     public func foregroundGroupDeferredWakeDelivered() {}
 }
 
-/// Process-local transport metrics. Gateway channels update it without using
-/// connection, user, device, room or request identifiers. The peak queue value
-/// is deliberately a process lifetime high-water mark, not a per-channel
-/// label, so a scrape cannot create unbounded time series. `Mutex` is the
-/// explicit synchronization boundary for every mutable field, allowing this
-/// process-wide recorder to be Sendable without an unchecked conformance.
+/// 进程本地传输指标。
+///
+/// 网关通道更新它时不使用连接、用户、设备、房间或请求标识。
+/// 峰值队列值刻意是进程生命周期的高水位线而非每通道标签，
+/// 使一次抓取不会制造无界的时间序列。`Mutex` 是每个可变字段的显式同步边界，
+/// 使这个进程级记录器无需 `@unchecked` 即可满足 Sendable。
 public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder, Sendable {
     private struct Storage: Sendable {
         var activeConnections = 0
@@ -524,8 +527,9 @@ public enum V2GatewayTelemetryOutcome: String, CaseIterable, Hashable, Sendable 
     case failed
 }
 
-/// Error codes are intentionally a closed, protocol-level vocabulary. The
-/// server must not use exception descriptions as telemetry dimensions.
+/// 错误码刻意是一套封闭的、协议级词汇表。
+///
+/// 服务端不得把异常描述用作遥测维度。
 public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendable {
     case invalidArgument = "INVALID_ARGUMENT"
     case forbidden = "FORBIDDEN"
@@ -547,8 +551,7 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendabl
 }
 
 public enum V2TelemetryEvent: Equatable, Sendable {
-    /// The trace ID correlates a single gateway command without identifying a
-    /// user, device, room, message, token or protocol payload.
+    /// 跟踪 ID 用于关联单条网关命令，且不标识任何用户、设备、房间、消息、令牌或协议载荷。
     case gatewayCommand(
         traceID: UUID,
         command: V2GatewayTelemetryCommand,
@@ -556,8 +559,7 @@ public enum V2TelemetryEvent: Equatable, Sendable {
         rejection: V2GatewayTelemetryRejection?,
         elapsedMilliseconds: UInt64
     )
-    /// Aggregate durable-work progression. Counts are deliberately not keyed
-    /// by room, source event, target user or shard to avoid high cardinality.
+    /// 聚合的持久工作进展。计数刻意不按房间、来源事件、目标用户或分片建键，以避免高基数。
     case fanoutProgress(
         traceID: UUID,
         claimedOutboxRows: Int,
@@ -583,15 +585,13 @@ public enum V2FanoutTelemetryStage: String, CaseIterable, Equatable, Sendable {
     case pipeline
 }
 
-/// Bounds repeated command diagnostics without weakening exact metrics.
+/// 在不削弱精确指标的前提下，限制重复的命令诊断日志。
 ///
-/// Expected overload responses and slow accepts can arrive thousands of times
-/// per second. Writing every occurrence to a synchronous stdout handler burns
-/// the CPU needed to drain the queue and creates a positive feedback loop.
-/// This limiter admits the first bounded burst independently for every closed
-/// command/result key in each one-second window. Prometheus still records all
-/// events, so the log remains a source of representative trace IDs rather than
-/// an unreliable counter.
+/// 预期内的过载响应与慢接受每秒可能出现数千次。
+/// 若把每次出现都写入同步 stdout 处理器，会烧掉本应用于排空队列的 CPU，
+/// 并形成正反馈循环。
+/// 该限流器在每个一秒窗口内、对每个封闭的命令/结果键各自放行最初一具有界的突发量。
+/// Prometheus 仍记录全部事件，因此日志只是代表性跟踪 ID 的来源，而不是不可靠的计数器。
 public final class V2CommandDiagnosticLogLimiter: Sendable {
     private struct Key: Hashable, Sendable {
         let command: V2GatewayTelemetryCommand
@@ -650,9 +650,10 @@ public final class V2CommandDiagnosticLogLimiter: Sendable {
     }
 }
 
-/// Sends the same privacy-reviewed event to several sinks. This keeps the
-/// production structured log and the metrics aggregate in lockstep without
-/// giving either sink access to request payloads or identifiers.
+/// 把同一个经过隐私审查的事件发送到多个接收端。
+///
+/// 这使生产结构化日志与指标聚合保持同步，
+/// 同时不让任一接收端接触到请求载荷或标识符。
 public struct V2CompositeTelemetrySink: V2TelemetrySink {
     private let sinks: [any V2TelemetrySink]
 
@@ -667,18 +668,15 @@ public struct V2CompositeTelemetrySink: V2TelemetrySink {
     }
 }
 
-/// A finite-cardinality Prometheus text exporter. It deliberately consumes
-/// only the established telemetry event vocabulary: correlation IDs are
-/// discarded, and no user, room, device, token, payload, URL, or exception
-/// text can become a metric label.
-/// A finite-cardinality metrics accumulator shared by every gateway command.
+/// 有限基数的 Prometheus 文本导出器，也是所有网关命令共享的有限基数指标累加器。
 ///
-/// Command telemetry is a very hot path. An actor made every command suspend
-/// and enqueue on one executor even though the mutation below is only a few
-/// integer additions. A short `Mutex` critical section preserves exact
-/// counters while avoiding that scheduler hop. Rendering first takes a value
-/// snapshot and formats outside the lock, so a scrape cannot stall command
-/// acceptance while it builds the Prometheus text document.
+/// 它刻意只消费既定的遥测事件词汇：关联 ID 会被丢弃，
+/// 且没有任何用户、房间、设备、令牌、载荷、URL 或异常文本能成为指标标签。
+///
+/// 命令遥测是极热路径。此前使用 actor 会让每条命令都挂起并在单一执行器上排队，
+/// 即便下方的变更只是几次整数加法。改用简短的 `Mutex` 临界区既保留精确计数，
+/// 又避免了那次调度跳转。渲染时先取一份值快照，再在锁外格式化，
+/// 因此构建 Prometheus 文本文档时不会阻塞命令接受。
 public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
     private struct GatewayKey: Hashable, Sendable {
         let command: V2GatewayTelemetryCommand
@@ -751,9 +749,11 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
         }
     }
 
-    /// Produces a stable Prometheus 0.0.4 text document suitable for a
-    /// private metrics listener. Callers must not expose it on the public
-    /// media edge or realtime gateway listener.
+    /// 产出一份稳定的 Prometheus 0.0.4 文本文档，供私有指标监听器使用。
+    ///
+    /// 调用方不得把它暴露在公开媒体边缘或实时网关监听器上。
+    ///
+    /// - Returns: 渲染后的 Prometheus 文本。
     public func renderPrometheus() async -> String {
         let storage = storage.withLock { $0 }
         var lines: [String] = [
@@ -849,12 +849,22 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     }
 }
 
+/// 以两个单调时钟时刻计算指标使用的完整毫秒数。
+///
+/// - Parameters:
+///   - startedAt: 操作开始时刻。
+///   - now: 本次观测时刻；早于开始时刻时按无效观测处理。
+/// - Returns: 向下截断的非负毫秒数；时刻逆序或转换溢出时返回零。
 func v2ElapsedMilliseconds(since startedAt: ContinuousClock.Instant, now: ContinuousClock.Instant) -> UInt64 {
     v2ElapsedMilliseconds(startedAt.duration(to: now))
 }
 
-/// Timing metrics floor positive elapsed durations to whole milliseconds.
-/// Keep unavailable/overflowing observations from failing business reporting.
+/// 将耗时转换为遥测使用的完整毫秒数，避免指标转换失败影响业务结果。
+///
+/// - Parameter elapsed: 来自单调时钟的耗时。
+/// - Returns: 正耗时向下截断后的 `UInt64` 毫秒值；非正耗时或乘加运算溢出时返回零。
+///
+/// 小于一毫秒的有效耗时与无效观测都会得到零，调用方不能仅凭零值区分两者。
 func v2ElapsedMilliseconds(_ elapsed: Duration) -> UInt64 {
     guard elapsed > .zero else { return 0 }
     let components = elapsed.components

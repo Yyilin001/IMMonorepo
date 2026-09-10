@@ -3,13 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 单轮控制面维护统计。
 public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
+    /// 删除的终态簿记行数。
     public let deletedRows: Int
+    /// 清理的幂等记录行数。
     public let purgedIdempotencyRows: Int
+    /// 清理的过期凭据重放记录行数。
     public let purgedExpiredCredentialReplayRows: Int
+    /// 清理的过期刷新历史行数。
     public let purgedExpiredRefreshHistoryRows: Int
+    /// 清理的过期连接租约行数。
     public let purgedExpiredConnectionLeaseRows: Int
 
+    /// 保存维护统计；各项计数为负时按零处理。
+    ///
+    /// - Parameters:
+    ///   - deletedRows: 删除行数。
+    ///   - purgedIdempotencyRows: 幂等记录行数。
+    ///   - purgedExpiredCredentialReplayRows: 凭据重放记录行数。
+    ///   - purgedExpiredRefreshHistoryRows: 刷新历史行数。
+    ///   - purgedExpiredConnectionLeaseRows: 过期连接租约行数。
     public init(
         deletedRows: Int,
         purgedIdempotencyRows: Int = 0,
@@ -23,10 +37,21 @@ public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
         self.purgedExpiredRefreshHistoryRows = max(0, purgedExpiredRefreshHistoryRows)
         self.purgedExpiredConnectionLeaseRows = max(0, purgedExpiredConnectionLeaseRows)
     }
+    /// 本轮是否删除了任何终态簿记。
     public var didWork: Bool { deletedRows > 0 }
 }
 
+/// 控制面维护的持久化能力。
 public protocol V2ControlPlaneHousekeepingStore: Sendable {
+    /// 清理止于终态的簿记数据。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - retention: 终态簿记的保留时长。
+    ///   - idempotencyRetention: 幂等记录的最短保留时长。
+    ///   - limit: 本轮最多处理的数量。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 持久化失败时抛出。
     func purgeTerminal(
         now: Date,
         retention: TimeInterval,
@@ -35,12 +60,22 @@ public protocol V2ControlPlaneHousekeepingStore: Sendable {
     ) async throws -> V2ControlPlaneHousekeepingReport
 }
 
+/// 控制面维护工作器。
 public struct V2ControlPlaneHousekeepingWorker: Sendable {
     private let store: any V2ControlPlaneHousekeepingStore
     private let retention: TimeInterval
     private let idempotencyRetention: TimeInterval
     private let now: @Sendable () -> Date
 
+    /// 组合维护存储与保留策略。
+    ///
+    /// - Parameters:
+    ///   - store: 执行清理的持久化存储。
+    ///   - retention: 终态簿记保留秒数，需为正的有限值，默认 7 天。
+    ///   - idempotencyRetention: 幂等记录保留秒数，需不短于幂等策略下限。
+    ///   - now: 可注入的当前时刻读取函数。
+    ///
+    /// 保留时长越界或幂等保留期过短时直接失败，避免误删仍可能被重放依赖的记录。
     public init(
         store: any V2ControlPlaneHousekeepingStore,
         retention: TimeInterval = 7 * 86_400,
@@ -58,6 +93,12 @@ public struct V2ControlPlaneHousekeepingWorker: Sendable {
         self.now = now
     }
 
+    /// 执行一轮有界控制面维护。
+    ///
+    /// - Parameter limit: 本轮最多处理的数量，需大于零。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 上限非正时抛出
+    ///   ``V2ControlPlaneHousekeepingError/invalidLimit``；其余错误来自存储实现。
     public func runOnce(limit: Int) async throws -> V2ControlPlaneHousekeepingReport {
         guard limit > 0 else { throw V2ControlPlaneHousekeepingError.invalidLimit }
         return try await store.purgeTerminal(
@@ -69,19 +110,35 @@ public struct V2ControlPlaneHousekeepingWorker: Sendable {
     }
 }
 
+/// 控制面维护错误。
 public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
+    /// 单轮上限为非正值。
     case invalidLimit
+    /// 持久化状态损坏。
     case corruptPersistenceState
 }
 
-/// Retains authoritative room events/messages while removing bounded batches
-/// of terminal worker bookkeeping. Fan-out rows are dismantled from leaves to
-/// roots so no foreign-key fence or in-progress delivery can be bypassed.
+/// 控制面维护的 PostgreSQL 实现。
+///
+/// 它保留权威房间事件与消息，只删除有界的终态工作器簿记。
+/// 扇出相关行按从叶子到根的次序拆除，因此不会绕过任何外键栅栏或仍在进行的投递。
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放终态簿记与控制面状态的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 清理止于终态的簿记数据。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - retention: 终态簿记保留时长。
+    ///   - idempotencyRetention: 幂等记录最短保留时长。
+    ///   - limit: 本轮最多处理的数量。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 持久化失败时抛出。
     public func purgeTerminal(
         now: Date,
         retention: TimeInterval,
@@ -295,10 +352,10 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         }
     }
 
-    /// Ordinary user-command ledgers are replay results, not authoritative
-    /// domain history. Select a rotating subset when the configured batch is
-    /// smaller than the table count, and divide the batch across that subset;
-    /// one maintenance pass therefore cannot amplify `limit` by table count.
+    /// 普通用户命令台账属于重放结果，而不是权威领域历史。
+    ///
+    /// 当配置的批量小于表数量时，选取一个轮转子集并把批量分摊到该子集上，
+    /// 因此单次维护推进不会把 `limit` 按表数量成倍放大。
     private func purgeIdempotencyResults(
         sql: any SQLDatabase,
         cutoff: Date,

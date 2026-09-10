@@ -3,45 +3,73 @@ import IMV2ClientKit
 import Observation
 import UIKit
 
-/// User preference survives account cache retirement. Remote intent and
-/// acknowledgement remain authoritative in SQLite. MainActor writes happen
-/// only after this active store accepts a durable snapshot.
+/// 推送开关偏好的存储能力。
+///
+/// 用户偏好会在账号缓存退役后继续保留；远端意图与确认仍以 SQLite 为权威。
+/// 只有当前活动存储接受了持久化快照之后，才会在主线程上写入界面状态。
 @MainActor
 protocol V2PushWakePreferenceStoring: AnyObject {
+    /// 查询推送开关偏好。
+    ///
+    /// - Returns: 当前是否开启推送。
     func isEnabled() -> Bool
+
+    /// 设置推送开关偏好。
+    ///
+    /// - Parameter enabled: 目标开关状态。
     func setEnabled(_ enabled: Bool)
 }
 
+/// 基于 `UserDefaults` 的推送开关偏好存储。
 @MainActor
 final class V2UserDefaultsPushWakePreferenceStore: V2PushWakePreferenceStoring {
     private let defaults: UserDefaults
     private let key: String
+    /// 以偏好存储与键名构造。
+    ///
+    /// - Parameters:
+    ///   - defaults: 偏好存储，默认标准存储。
+    ///   - key: 偏好键。
     init(defaults: UserDefaults = .standard, key: String) { self.defaults = defaults; self.key = key }
     func isEnabled() -> Bool { defaults.bool(forKey: key) }
     func setEnabled(_ enabled: Bool) { defaults.set(enabled, forKey: key) }
 }
 
-/// UIKit's registration request is a main-thread side effect. Its callback is
-/// owned by `V2AppPushDelegate`, which forwards the opaque token only to the
-/// active settings store.
+/// 远程通知注册能力。
+///
+/// UIKit 的注册请求是主线程副作用；其回调由 `V2AppPushDelegate` 持有，
+/// 后者只把不透明令牌转交给当前活动的设置存储。
 @MainActor
 protocol V2RemoteNotificationRegistering: AnyObject {
+    /// 向系统发起远程通知注册。
     func registerForRemoteNotifications()
 }
 
+/// 推送设备令牌接收能力。
 @MainActor
 protocol V2PushDeviceTokenReceiving: AnyObject {
+    /// 接收系统下发的 APNs 令牌。
+    ///
+    /// - Parameter token: 不透明设备令牌。
     func receiveAPNSToken(_ token: String) async
+
+    /// 处理远程通知注册失败。
     func remoteNotificationRegistrationFailed() async
 }
 
-/// A background Push is only a lossy request to run the authenticated sync
-/// path. It never contains or acknowledges a chat message by itself.
+/// 后台推送处理能力。
+///
+/// 后台推送只是「请运行已认证同步路径」的有损请求，
+/// 它本身既不会包含聊天消息，也不会确认聊天消息。
 @MainActor
 protocol V2PushWakeHandling: AnyObject {
+    /// 处理一次后台推送唤醒。
+    ///
+    /// - Returns: 后台抓取结果。
     func handlePushWake() async -> UIBackgroundFetchResult
 }
 
+/// 推送唤醒设置错误。
 enum V2PushWakeSettingsError: Error { case endpointRemovalPending }
 
 @MainActor
@@ -251,8 +279,9 @@ final class V2PushWakeSettingsStore {
     private func fail(_ message: String) { state = .retryableFailure; feedback = message }
 }
 
-/// This adapter contains the UIApplication callback boundary. It never logs
-/// the APNs token or registration error; both are sensitive endpoint material.
+/// 承载 `UIApplication` 回调边界的应用推送委托。
+///
+/// 它绝不记录 APNs 令牌或注册错误：两者都属于敏感端点材料。
 @MainActor
 final class V2AppPushDelegate: NSObject, UIApplicationDelegate, V2RemoteNotificationRegistering {
     private(set) var store: V2AppStore!

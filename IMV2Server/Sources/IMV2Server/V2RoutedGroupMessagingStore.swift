@@ -2,15 +2,22 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// Stable candidate selection for a group creation that has not yet acquired
-/// a durable intent. The intent store persists the result before owner work,
-/// so later configuration changes affect only new operations.
+/// 尚未获得持久化创建意图时使用的稳定候选分片选择器。
+///
+/// 意图存储会在归属工作开始之前先持久化选择结果，
+/// 因此之后的配置变化只会影响新操作，不会改变已有创建过程。
 public struct V2GroupRoomShardSelector: Equatable, Sendable {
+    /// 参与选择的候选分片标识，已规范化并排序。
     public let shardIDs: [String]
 
-    /// Deployment form used by `IM_V2_GROUP_ROOM_SHARD_ID`. Existing room
-    /// routes are durable and never re-hashed; this ordered set is consulted
-    /// only before a new creation intent has fixed its owner.
+    /// 以 `IM_V2_GROUP_ROOM_SHARD_ID` 使用的逗号分隔形式构造。
+    ///
+    /// 既有房间路由是持久化的，绝不会被重新哈希；该有序集合只会在新的创建意图
+    /// 尚未固定归属之前参与选择。
+    ///
+    /// - Parameter rawValue: 逗号分隔的分片标识，元素会去除首尾空白。
+    /// - Throws: 分片数量、空白元素或重复项不满足约束时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``。
     public init(rawValue: String) throws {
         try self.init(shardIDs: rawValue
             .split(separator: ",", omittingEmptySubsequences: false)
@@ -18,6 +25,13 @@ public struct V2GroupRoomShardSelector: Equatable, Sendable {
         )
     }
 
+    /// 以分片标识列表构造选择器。
+    ///
+    /// 标识会去除首尾空白并排序，使同一集合的不同输入顺序得到相同结果。
+    ///
+    /// - Parameter shardIDs: 非空、无空白元素且无重复的标识列表，数量需落在 `1...64`。
+    /// - Throws: 任一约束不满足时抛出
+    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``。
     public init(shardIDs: [String]) throws {
         let normalized = shardIDs.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -29,6 +43,14 @@ public struct V2GroupRoomShardSelector: Equatable, Sendable {
         self.shardIDs = normalized.sorted()
     }
 
+    /// 为一次建群操作选择候选分片。
+    ///
+    /// 选择结果稳定：同一发起者与操作标识始终得到同一候选分片。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起建群的用户。
+    ///   - operationID: 建群操作标识。
+    /// - Returns: 选中的分片标识。
     public func shardID(
         actorUserID: UserID,
         operationID: GroupRoomOperationID
@@ -47,15 +69,14 @@ public struct V2GroupRoomShardSelector: Equatable, Sendable {
     }
 }
 
-/// Cross-database group creation coordinator for inline audiences. It fixes a
-/// control-plane intent, executes exactly one selected owner store, then
-/// finalizes the canonical room route. No database address or fresh hash is
-/// accepted from the client.
+/// 面向内联受众的跨库建群协调器。
 ///
-/// Staged 100k-member creation is deliberately not claimed here yet: its
-/// member manifest needs a paged control-to-owner transfer with independent
-/// digests before this type can safely conform to
-/// `V2StagedGroupMessagingStore`.
+/// 它先固定控制面意图，再执行唯一选中的归属存储，最后确定规范房间路由。
+/// 客户端提交的数据库地址或临时哈希都不会被接受。
+///
+/// 十万成员的分阶段建群在这里刻意尚未启用：在成员清单具备带独立摘要的分页
+/// 控制面到归属传输之前，该类型不应贸然实现
+/// ``V2StagedGroupMessagingStore``。
 public struct V2RoutedGroupMessagingStore:
     V2GroupMessagingStore,
     V2StagedGroupMessagingStore
@@ -65,6 +86,13 @@ public struct V2RoutedGroupMessagingStore:
     private let ownerStores:
         [String: any V2ControlValidatedStagedGroupMessagingStore]
 
+    /// 组合创建意图存储与各归属存储。
+    ///
+    /// - Parameters:
+    ///   - intentStore: 持久化创建意图的控制面存储。
+    ///   - ownerStores: 逻辑分片标识到归属建群存储的映射，需非空。
+    /// - Throws: 归属映射为空时抛出
+    ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
     public init(
         intentStore: any V2GroupRoomCreationIntentStore,
         ownerStores: [String: any V2ControlValidatedStagedGroupMessagingStore]
@@ -80,6 +108,20 @@ public struct V2RoutedGroupMessagingStore:
         self.ownerStores = ownerStores
     }
 
+    /// 创建群房间。
+    ///
+    /// 先固定控制面意图，再只向选中的归属存储发起一次建群，最后确定规范房间路由。
+    ///
+    /// - Parameters:
+    ///   - command: 建群命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - roomShardID: 创建时选定的房间归属分片。
+    ///   - roomID: 预分配的房间标识。
+    ///   - eventID: 建群事件标识。
+    ///   - planID: 关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 建群结果。
+    /// - Throws: 归属未配置、意图冲突或归属存储失败时抛出。
     public func create(
         command: V2CreateGroupRoomCommand,
         capacityProfile: V2CapacityProfile,
@@ -151,6 +193,18 @@ public struct V2RoutedGroupMessagingStore:
         return outcome
     }
 
+    /// 以已冻结的分阶段受众创建群房间。
+    ///
+    /// - Parameters:
+    ///   - command: 分阶段建群命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - roomShardID: 创建时选定的房间归属分片。
+    ///   - roomID: 预分配的房间标识。
+    ///   - eventID: 建群事件标识。
+    ///   - planID: 关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 建群结果。
+    /// - Throws: 归属未配置、创建意图准备失败或归属存储返回错误时抛出。
     public func createStaged(
         command: V2StagedGroupRoomCommand,
         capacityProfile: V2CapacityProfile,

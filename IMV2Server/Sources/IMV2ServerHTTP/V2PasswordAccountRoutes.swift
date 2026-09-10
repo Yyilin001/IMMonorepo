@@ -27,9 +27,9 @@ public struct V2PasswordAccountRoutes: Sendable {
         self.loginAttemptLimiter = loginAttemptLimiter
     }
 
-    /// 挂载：
-    /// - `POST /v2/account-auth/password/register`
-    /// - `POST /v2/account-auth/password/assertion`
+    /// 挂载密码账号相关路由：
+    /// - `POST /v2/account-auth/password/register`：注册密码账号。
+    /// - `POST /v2/account-auth/password/assertion`：提交密码断言以换取会话凭据。
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "account-auth", "password", "register") { request async throws -> Response in
             let input = try request.content.decode(V2PasswordAccountHTTPRequest.self)

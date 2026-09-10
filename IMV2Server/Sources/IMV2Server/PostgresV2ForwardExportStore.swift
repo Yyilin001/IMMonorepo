@@ -3,13 +3,23 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// The export commit is the source authorization linearization point. This
-/// primitive performs no RPC and never reports a message accepted by a target.
+/// 转发导出的持久化实现。
+///
+/// 导出的提交即源端授权的线性化点。该原语不执行任何远程调用，
+/// 也绝不把消息报告为目标侧已接受。
 public struct PostgresV2ForwardExportStore: Sendable {
     private let database: any Database
     private let maximumExportsPerRoom: Int
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库、单房间导出上限与标识生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放房间、消息、媒体与导出记录的数据库。
+    ///   - maximumExportsPerRoom: 单房间允许的未完成导出上限，需大于零，默认 1024。
+    ///   - makeUUID: 导出标识生成方式。
+    ///
+    /// 上限非正时直接失败，避免出现无界导出队列。
     public init(database: any Database, maximumExportsPerRoom: Int = 1_024, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         precondition(maximumExportsPerRoom > 0)
         self.database = database
@@ -17,6 +27,30 @@ public struct PostgresV2ForwardExportStore: Sendable {
         self.makeUUID = makeUUID
     }
 
+    /// 准备一次转发导出，或在重试时返回既有导出。
+    ///
+    /// 加锁顺序为一个用户对互斥锁加一个源房间锁，绝不锁定远端目标房间。
+    /// 已存在同一用户、操作、源消息与目标房间的导出时逐字段复核其不可变绑定，
+    /// 包括源房间与源修订；不匹配即判定幂等冲突，而不会改写信封或重新授予。
+    /// 新导出会校验源房间归属、消息可见性与未撤回状态、修订一致、富文本合法、
+    /// 媒体引用全部未撤销且可用未过期，并以 UUID 顺序锁定消息引用的全部媒体。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起转发的用户。
+    ///   - operationID: 转发操作标识。
+    ///   - source: 源消息引用。
+    ///   - sourceRoute: 源房间的已选定归属。
+    ///   - targetRoomID: 目标房间。
+    ///   - targetRoute: 目标房间的已选定归属。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 可投递的转发导出。
+    /// - Throws: 标识非法时抛出 ``V2ForwardExportError/invalidRequest``；
+    ///   源房间或消息不可用、修订已变化时抛出
+    ///   ``V2ForwardExportError/sourceUnavailable`` 或 ``V2ForwardExportError/sourceChanged``；
+    ///   归属不符时抛出 ``V2ForwardExportError/ownerChanged``；媒体不可用或存在撤销引用时抛出
+    ///   ``V2ForwardExportError/mediaUnavailable``；已有导出绑定不一致时抛出
+    ///   ``V2ForwardExportError/idempotencyConflict``；队列已满或持久化状态异常时抛出
+    ///   ``V2ForwardExportError/capacityExceeded`` 或 ``V2ForwardExportError/corruptPersistenceState``。
     public func prepare(
         actorUserID: UserID,
         operationID: MessageForwardOperationID,

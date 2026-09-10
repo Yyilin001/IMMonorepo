@@ -2,13 +2,24 @@ import IMV2ClientKit
 import Foundation
 import IMV2Core
 
-/// Read-side dependencies shared by the list, search, and detail features.
+/// 列表、搜索与详情功能共用的读取侧依赖。
 struct V2ConversationProjectionDependencies {
+    /// 会话数据源。
     let dataSource: any V2ConversationDataSource
+    /// 消息搜索实现。
     let messageSearcher: (any V2ConversationMessageSearching)?
+    /// 群公告读取实现。
     let groupAnnouncementReader: (any V2GroupAnnouncementReading)?
+    /// 群角色策略读取实现。
     let groupRolePolicyReader: (any V2GroupRolePolicyAccessing)?
 
+    /// 组合读取侧依赖。
+    ///
+    /// - Parameters:
+    ///   - dataSource: 会话数据源。
+    ///   - messageSearcher: 消息搜索实现。
+    ///   - groupAnnouncementReader: 群公告读取实现。
+    ///   - groupRolePolicyReader: 群角色策略读取实现。
     init(
         dataSource: any V2ConversationDataSource,
         messageSearcher: (any V2ConversationMessageSearching)? = nil,
@@ -22,8 +33,9 @@ struct V2ConversationProjectionDependencies {
     }
 }
 
-/// Message and per-conversation command dependencies. Keeping these commands
-/// together prevents list composition from knowing every detail-store field.
+/// 消息与单会话命令依赖。
+///
+/// 把这些命令集中在一起，使列表组合层无需了解详情存储的每一个字段。
 struct V2ConversationMessageDependencies {
     let sender: (any V2ConversationSending)?
     let withdrawer: (any V2MessageWithdrawing)?
@@ -58,7 +70,7 @@ struct V2ConversationMessageDependencies {
     }
 }
 
-/// Group lifecycle, policy, membership, and moderation dependencies.
+/// 群生命周期、策略、成员与审核相关依赖。
 struct V2ConversationGroupDependencies {
     let announcementManager: (any V2GroupAnnouncementManaging)?
     let memberRoleChanger: (any V2GroupMemberRoleChanging)?
@@ -141,9 +153,10 @@ struct V2ConversationRuntimeDependencies {
     }
 }
 
-/// The authenticated conversation feature boundary. App composition creates
-/// this once; list and detail stores receive cohesive capability groups rather
-/// than forwarding dozens of unrelated constructor arguments.
+/// 已认证的会话功能边界。
+///
+/// 应用组合层只创建一次该环境，列表与详情存储收到的是内聚的能力分组，
+/// 而不是几十个彼此无关的构造参数。
 struct V2ConversationFeatureEnvironment {
     let userID: String
     let projections: V2ConversationProjectionDependencies

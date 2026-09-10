@@ -2,18 +2,36 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// A revision belongs to one role's source event. It must not be inferred
-/// from the room-wide command revision or a recipient's personal cursor.
+/// 本地角色策略变更效果。
+///
+/// 修订属于某个角色的来源事件，绝不能由房间级命令修订或接收者的个人游标推断得出。
 struct V2LocalRolePolicyEffect {
+    /// 来源事件标识。
     let sourceEventID: EventID
+    /// 目标房间。
     let roomID: RoomID
+    /// 目标角色。
     let role: V2RoomMembershipRole
+    /// 策略修订。
     let revision: Int64
+    /// 解析后的权限集合。
     let permissions: Set<V2GroupPermission>
+    /// 权限集合的规范 JSON 编码。
     let encodedPermissions: Data
+    /// 来源房间序号；历史载荷可能缺失。
     let roomSequence: Int64?
+    /// 由房间、角色、修订、权限、发起者与时间戳计算的规范摘要。
     let digest: Data
 
+    /// 从同步记录解码角色策略效果。
+    ///
+    /// - Parameters:
+    ///   - record: 角色权限变更类型的同步记录。
+    ///   - expectedRoomSequence: 期望的房间序号；给出且载荷含序号时必须一致。
+    ///   - expectedRoomID: 期望的房间；给出时必须与载荷一致。
+    /// - Throws: 载荷无法解码、事件类型不符、角色为群主或未知、
+    ///   权限存在重复或未知取值，或与期望值不一致时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord, expectedRoomSequence: UInt64? = nil, expectedRoomID: RoomID? = nil) throws {
         struct Wire: Decodable {
             let event_type: String; let room_id: String; let revision: Int64

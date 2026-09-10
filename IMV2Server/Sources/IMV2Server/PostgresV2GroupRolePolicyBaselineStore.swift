@@ -3,11 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 群组角色策略基线的 PostgreSQL 只读实现。
+///
+/// 它只读取权威策略基线，不读取重放回执或经过过滤的房间历史。
 public struct PostgresV2GroupRolePolicyBaselineStore: V2GroupRolePolicyBaselineReading {
     private let database: any Database
 
+    /// 创建基线读取器。
+    ///
+    /// - Parameter database: 控制面数据库连接。
     public init(database: any Database) { self.database = database }
 
+    /// 读取某成员视角下的群组角色策略基线。
+    ///
+    /// 单条 SQL 语句为成员关系、各项修订、显式策略标记与权限值提供同一个 MVCC 读取点。
+    /// 没有任何行加上显式策略标记时，刻意视为「显式空集」而非默认权限。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间。
+    ///   - actorUserID: 发起读取的成员。
+    /// - Returns: 该房间的角色策略基线。
+    /// - Throws: 房间不存在、发起者非成员或持久化状态损坏时抛出。
     public func readRolePolicyBaseline(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupRolePolicyBaseline {
         guard let sql = database as? any SQLDatabase,
               let room = UUID(uuidString: roomID.rawValue), let actor = UUID(uuidString: actorUserID.rawValue)

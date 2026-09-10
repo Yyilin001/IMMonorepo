@@ -212,9 +212,10 @@ struct V2RootView: View {
     #endif
 }
 
-/// Covers sensitive conversation pixels before UIKit records the application
-/// switcher snapshot. It is intentionally opaque and unanimated so no frame of
-/// the underlying hierarchy is exposed during the active-to-inactive change.
+/// 在 UIKit 记录应用切换器快照之前遮盖敏感会话像素。
+///
+/// 它刻意保持不透明且不做动画，使从活跃到非活跃的切换过程中不会暴露
+/// 底层视图层级中的任何一帧内容。
 private struct V2PrivacyShieldView: View {
     var body: some View {
         Color(.systemBackground)

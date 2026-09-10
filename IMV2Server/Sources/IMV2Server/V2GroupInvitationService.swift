@@ -2,16 +2,38 @@ import Crypto
 import Foundation
 import IMV2Core
 
+/// 群邀请的部署策略参数。
+///
+/// 各项上限用于约束邀请有效期、可用次数与单房间并发邀请量，
+/// 以及单个申请人与单条邀请上允许的待处理申请数量。
 public struct V2GroupInvitationPolicy: Equatable, Sendable {
+    /// 标准策略：最短 5 分钟、最长 30 天。
     public static let standard = try! V2GroupInvitationPolicy()
 
+    /// 邀请最短有效期秒数。
     public let minimumLifetime: TimeInterval
+    /// 邀请最长有效期秒数。
     public let maximumLifetime: TimeInterval
+    /// 单条邀请允许的最大审批通过次数。
     public let maximumApprovedUses: Int
+    /// 单房间允许的活跃邀请上限。
     public let maximumActiveInvitesPerRoom: Int
+    /// 单个申请人允许的待处理申请上限。
     public let maximumPendingRequestsPerApplicant: Int
+    /// 单条邀请允许的待处理申请上限。
     public let maximumPendingRequestsPerInvite: Int
 
+    /// 校验并保存邀请策略。
+    ///
+    /// - Parameters:
+    ///   - minimumLifetime: 最短有效期，需大于零，默认 5 分钟。
+    ///   - maximumLifetime: 最长有效期，需不小于最短有效期且可写入 `Int`，默认 30 天。
+    ///   - maximumApprovedUses: 最大通过次数，需大于零，默认 1000。
+    ///   - maximumActiveInvitesPerRoom: 活跃邀请上限，需大于零，默认 20。
+    ///   - maximumPendingRequestsPerApplicant: 申请人待处理上限，需大于零，默认 20。
+    ///   - maximumPendingRequestsPerInvite: 单邀请待处理上限，需大于零，默认 1000。
+    /// - Throws: 任一取值不满足约束时抛出
+    ///   ``V2GroupInvitationServiceError/invalidRequest``。
     public init(
         minimumLifetime: TimeInterval = 5 * 60,
         maximumLifetime: TimeInterval = 30 * 86_400,
@@ -37,12 +59,17 @@ public struct V2GroupInvitationPolicy: Equatable, Sendable {
     }
 }
 
-/// Derives a retry-stable 256-bit invite secret from a durable operation ID.
-/// The key never leaves the account service. Domain separation prevents this
-/// construction from being interchangeable with any other HMAC use.
+/// 由持久化操作标识派生可重试的 256 位邀请密钥的签发器。
+///
+/// 密钥永不离开账号服务；域分隔前缀确保该构造不能与其他 HMAC 用途互相替换。
 public struct V2GroupInviteSecretIssuer: Sendable {
     private let key: SymmetricKey
 
+    /// 以 Base64 密钥构造签发器。
+    ///
+    /// - Parameter value: Base64 编码的密钥，至少 32 字节。
+    /// - Throws: 无法解码或长度不足时抛出
+    ///   ``V2GroupInvitationServiceError/invalidConfiguration``。
     public init(base64EncodedKey value: String) throws {
         guard let bytes = Data(base64Encoded: value), bytes.count >= 32 else {
             throw V2GroupInvitationServiceError.invalidConfiguration
@@ -50,11 +77,27 @@ public struct V2GroupInviteSecretIssuer: Sendable {
         key = SymmetricKey(data: bytes)
     }
 
+    /// 以原始密钥构造签发器。
+    ///
+    /// - Parameter rawKey: 密钥字节，至少 32 字节。
+    /// - Throws: 长度不足时抛出
+    ///   ``V2GroupInvitationServiceError/invalidConfiguration``。
     public init(rawKey: Data) throws {
         guard rawKey.count >= 32 else { throw V2GroupInvitationServiceError.invalidConfiguration }
         key = SymmetricKey(data: rawKey)
     }
 
+    /// 为一次邀请操作派生密钥。
+    ///
+    /// 派生输入绑定发起者与操作标识，因此同一操作重试会得到相同密钥，
+    /// 而不同操作之间互不相同。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起邀请的用户。
+    ///   - operationID: 邀请操作标识。
+    /// - Returns: URL 安全 Base64 编码的邀请密钥。
+    /// - Throws: 密钥构造失败时抛出
+    ///   ``V2GroupInvitationServiceError/invalidRequest``。
     public func secret(actorUserID: UserID, operationID: GroupInviteOperationID) throws -> V2GroupInviteSecret {
         let material = Data("im-v2-group-invite-v1\u{0}\(actorUserID.rawValue)\u{0}\(operationID.rawValue)".utf8)
         let bytes = Data(HMAC<SHA256>.authenticationCode(for: material, using: key))
@@ -65,6 +108,10 @@ public struct V2GroupInviteSecretIssuer: Sendable {
         return try .init(encoded)
     }
 
+    /// 计算邀请密钥的摘要。
+    ///
+    /// - Parameter secret: 邀请密钥。
+    /// - Returns: 密钥明文的 SHA-256 摘要。
     public func digest(_ secret: V2GroupInviteSecret) -> Data {
         Data(SHA256.hash(data: Data(secret.rawValue.utf8)))
     }
@@ -171,7 +218,9 @@ public struct V2GroupInviteCreatePersistenceRequest: Sendable {
     public let maximumApprovedUses: Int
     public let maximumActiveInvitesPerRoom: Int
     public let createdAt: Date
-    /// Current attempt's business clock; never changes the original lifetime.
+    /// 本次尝试的业务时刻。
+    ///
+    /// 它只影响本次评估，绝不会改变已经固定的原始有效期。
     public let evaluatedAt: Date
     private(set) var persistedTimestamps: V2GroupInviteCreationTimestamps?
 
@@ -247,14 +296,21 @@ public enum V2GroupJoinDecisionPreparationOutcome: Equatable, Sendable {
     case inviteExhausted
 }
 
-/// Approval is one owner transaction, including the membership operation and
-/// its durable result. A failed approval leaves the request pending.
+/// 群入群审批的持久化结果。
+///
+/// 审批与成员操作及其持久化结果同属一个归属事务；审批失败时申请保持待处理状态。
 public enum V2GroupJoinApprovalPersistenceOutcome: Equatable, Sendable {
+    /// 本次调用实际批准了申请。
     case approved(V2GroupJoinRequestRecord)
+    /// 该申请此前已作出决定。
     case alreadyDecided(V2GroupJoinRequestRecord)
+    /// 决策与当前状态冲突。
     case conflict
+    /// 成员数量已达房间上限。
     case memberLimitReached
+    /// 被限流，并给出建议重试秒数。
     case rateLimited(retryAfterSeconds: Int)
+    /// 准入或存储当前不可用。
     case unavailable
 }
 

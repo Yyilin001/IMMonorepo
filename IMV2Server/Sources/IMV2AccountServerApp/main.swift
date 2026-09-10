@@ -326,9 +326,9 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
 }
 
 
-/// Owns unstructured process tasks that must start before `Application.startup`
-/// can complete. Every normal and exceptional exit cancels and joins the set
-/// before database/event-loop shutdown begins.
+/// 持有必须在 `Application.startup` 完成之前启动的非结构化进程任务。
+///
+/// 无论正常退出还是异常退出，都会在开始关闭数据库与事件循环之前取消并等待这批任务收敛。
 private actor RuntimeTaskSupervisor {
     private var tasks: [Task<Void, Never>] = []
     private var isShuttingDown = false

@@ -3,13 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 单轮同步维护统计。
 public struct V2SyncHousekeepingReport: Equatable, Sendable {
+    /// 清理的过期同步令牌数量。
     public let expiredTokenCount: Int
+    /// 清理的过期回执数量。
     public let expiredReceiptCount: Int
+    /// 从过期暂存重置中恢复的设备数量。
     public let recoveredResetCount: Int
+    /// 清理的快照产物数量。
     public let purgedSnapshotCount: Int
+    /// 清理的投影效果记录数量。
     public let purgedProjectionEffectCount: Int
 
+    /// 保存维护统计。
+    ///
+    /// - Parameters:
+    ///   - expiredTokenCount: 过期令牌数量。
+    ///   - expiredReceiptCount: 过期回执数量。
+    ///   - recoveredResetCount: 恢复重置的设备数量。
+    ///   - purgedSnapshotCount: 清理快照数量。
+    ///   - purgedProjectionEffectCount: 清理投影效果数量，默认零。
     public init(
         expiredTokenCount: Int,
         expiredReceiptCount: Int,
@@ -24,6 +38,7 @@ public struct V2SyncHousekeepingReport: Equatable, Sendable {
         self.purgedProjectionEffectCount = purgedProjectionEffectCount
     }
 
+    /// 本轮是否产生了实际清理或恢复。
     public var didWork: Bool {
         expiredTokenCount > 0 || expiredReceiptCount > 0 ||
             recoveredResetCount > 0 || purgedSnapshotCount > 0 ||
@@ -31,7 +46,16 @@ public struct V2SyncHousekeepingReport: Equatable, Sendable {
     }
 }
 
+/// 同步维护的持久化能力。
 public protocol V2SyncHousekeepingStore: Sendable {
+    /// 清理过期状态并恢复可用的暂存重置。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - projectionEffectRetention: 投影效果记录的最短保留时长。
+    ///   - limit: 本轮最多处理的数量。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 持久化失败时抛出。
     func purgeExpired(
         now: Date,
         projectionEffectRetention: TimeInterval,
@@ -39,11 +63,20 @@ public protocol V2SyncHousekeepingStore: Sendable {
     ) async throws -> V2SyncHousekeepingReport
 }
 
+/// 同步维护工作器。
 public struct V2SyncHousekeepingWorker: Sendable {
     private let store: any V2SyncHousekeepingStore
     private let projectionEffectRetention: TimeInterval
     private let now: @Sendable () -> Date
 
+    /// 组合维护存储与保留策略。
+    ///
+    /// - Parameters:
+    ///   - store: 执行清理的持久化存储。
+    ///   - projectionEffectRetention: 投影效果保留秒数，默认取幂等策略的最短保留期。
+    ///   - now: 可注入的当前时刻读取函数。
+    ///
+    /// 保留期非有限或短于幂等策略下限时直接失败，避免过早清理造成重复投递。
     public init(
         store: any V2SyncHousekeepingStore,
         projectionEffectRetention: TimeInterval = V2IdempotencyPolicy.minimumServerRetention,
@@ -58,6 +91,12 @@ public struct V2SyncHousekeepingWorker: Sendable {
         self.now = now
     }
 
+    /// 执行一轮有界同步维护。
+    ///
+    /// - Parameter limit: 本轮最多处理的数量，需大于零。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 上限非正时抛出 ``V2SyncHousekeepingError/invalidLimit``；
+    ///   其余错误来自存储实现。
     public func runOnce(limit: Int) async throws -> V2SyncHousekeepingReport {
         guard limit > 0 else { throw V2SyncHousekeepingError.invalidLimit }
         return try await store.purgeExpired(
@@ -68,24 +107,41 @@ public struct V2SyncHousekeepingWorker: Sendable {
     }
 }
 
+/// 同步维护错误。
 public enum V2SyncHousekeepingError: Error, Equatable, Sendable {
+    /// 单轮上限为非正值。
     case invalidLimit
+    /// 持久化状态损坏。
     case corruptPersistenceState
 }
 
-/// Bounded expiry cleanup for one physical user-projection schema. Expired
-/// staged resets are first returned to `ready` at their unchanged ACK
-/// watermark, so cleanup can never make a device skip an undelivered record.
+/// 单个物理用户投影 schema 的有界过期清理实现。
+///
+/// 过期的暂存重置会先以未改变的确认水位恢复为就绪状态，
+/// 因此清理过程绝不会让设备跳过尚未投递的记录。
 public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
     private let database: any Database
     private let schema: String
 
+    /// 组合数据库与 schema。
+    ///
+    /// - Parameters:
+    ///   - database: 存放同步令牌、回执与快照产物的数据库。
+    ///   - schema: 目标 schema，默认 `im_v2`。
     public init(database: any Database, schema: String = "im_v2") {
         precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
         self.database = database
         self.schema = schema
     }
 
+    /// 清理过期同步状态并恢复暂存重置。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - projectionEffectRetention: 投影效果记录的最短保留时长。
+    ///   - limit: 本轮最多处理的数量。
+    /// - Returns: 本轮维护统计。
+    /// - Throws: 持久化失败时抛出。
     public func purgeExpired(
         now: Date,
         projectionEffectRetention: TimeInterval,

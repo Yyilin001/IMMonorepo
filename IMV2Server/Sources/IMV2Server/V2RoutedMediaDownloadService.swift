@@ -3,16 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 单个房间归属所需的媒体数据库与提供方组合。
 public struct V2MessageMediaOwner: Sendable {
+    /// 归属侧数据库。
     let database: any Database
+    /// 归属侧媒体提供方。
     let provider: any V2MediaObjectProvider
+
+    /// 组合数据库与提供方。
+    ///
+    /// - Parameters:
+    ///   - database: 归属侧数据库。
+    ///   - provider: 归属侧媒体提供方。
     public init(database: any Database, provider: any V2MediaObjectProvider) {
         self.database = database; self.provider = provider
     }
 }
 
-/// A message locator chooses the persisted room owner. Personal delivery is
-/// checked on the routed user store; device authority stays on control.
+/// 按消息定位房间归属的媒体下载服务。
+///
+/// 消息定位符用于选择已持久化的房间归属；个人投递路径在路由后的用户存储上校验，
+/// 设备权威仍留在控制面。
 public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
     private let legacy: V2MediaEdgeDownloadService
     private let rooms: any V2RoomShardRouting
@@ -20,6 +31,16 @@ public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
     private let authorization: MessageMediaAuthorization
     private let now: @Sendable () -> Date
 
+    /// 组合兼容路径、路由来源与各归属端点。
+    ///
+    /// - Parameters:
+    ///   - legacy: 无消息定位符时使用的兼容下载服务。
+    ///   - rooms: 房间归属路由来源。
+    ///   - owners: 逻辑分片标识到归属端点的映射。
+    ///   - userRoutes: 用户归属栅栏。
+    ///   - userStores: 用户归属存储解析器。
+    ///   - coLocatedControlBuckets: 与控制库同库部署、需复用栅栏连接的归属桶。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(legacy: V2MediaEdgeDownloadService, rooms: any V2RoomShardRouting,
                 owners: [String: V2MessageMediaOwner], userRoutes: any V2UserShardRouteFencing,
                 userStores: any V2UserShardStorageResolving, coLocatedControlBuckets: Set<String> = [],
@@ -28,6 +49,23 @@ public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
         authorization = .init(userRoutes: userRoutes, userStores: userStores, coLocatedControlBuckets: coLocatedControlBuckets)
     }
 
+    /// 解析媒体下载目标。
+    ///
+    /// 未给出消息定位符时直接走兼容路径；给出时先解析房间归属，若房间不存在则按未授权处理，
+    /// 归属未配置则返回消息归属不可用。授权通过后签发下载会话并兑换提供方目标，
+    /// 返回前再次确认目标未过期。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起下载的用户。
+    ///   - deviceID: 发起下载的设备。
+    ///   - mediaID: 目标媒体标识。
+    ///   - message: 媒体所属消息位置。
+    /// - Returns: 提供方对象目标。
+    /// - Throws: 房间不存在或授权不通过时抛出
+    ///   ``V2MediaStoreError/downloadNotAuthorized``；归属未配置时抛出
+    ///   ``V2MediaEdgeHTTPHandlerError/messageOwnerUnavailable``；
+    ///   时刻不可编码时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``；
+    ///   目标已过期时抛出 ``V2MediaProviderSessionError/expiredSession``。
     public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2MediaProviderObjectTarget {
         guard let message else { return try await legacy.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID) }
         try Task.checkCancellation()
@@ -51,8 +89,19 @@ public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
     }
 }
 
+/// 单次消息媒体访问的标识上下文。
 private struct MessageMediaContext: Sendable {
     let actor: UUID; let device: UUID; let media: UUID; let room: UUID; let message: UUID; let route: V2RoomShardRoute
+    /// 解析并保存标识上下文。
+    ///
+    /// - Parameters:
+    ///   - actor: 发起访问的用户。
+    ///   - device: 发起访问的设备。
+    ///   - media: 目标媒体标识。
+    ///   - message: 媒体所属消息位置。
+    ///   - route: 已解析的房间归属。
+    /// - Throws: 任一标识无法解析为 UUID 时抛出
+    ///   ``V2MediaStoreError/downloadNotAuthorized``。
     init(actor: UserID, device: DeviceID, media: MediaID, message: V2MediaMessageLocation, route: V2RoomShardRoute) throws {
         guard let actor = actor.uuidValue, let device = device.uuidValue, let media = media.uuidValue,
               let room = message.roomID.uuidValue, let message = message.messageID.uuidValue
@@ -61,6 +110,7 @@ private struct MessageMediaContext: Sendable {
     }
 }
 
+/// 消息媒体访问的授权快照。
 private struct MessageMediaSnapshot: Decodable, Equatable, Sendable {
     let membershipRevision: Int64
     let contentRevision: Int64
@@ -73,15 +123,26 @@ private struct MessageMediaSnapshot: Decodable, Equatable, Sendable {
     }
 }
 
+/// 消息媒体访问的跨存储授权逻辑。
 private struct MessageMediaAuthorization: Sendable {
     let userRoutes: any V2UserShardRouteFencing
     let userStores: any V2UserShardStorageResolving
     let coLocatedControlBuckets: Set<String>
 
-    /// The only cross-store transaction fence is the existing bounded user
-    /// cutover fence. No provider I/O runs here. Room facts are read before the
-    /// user proof and compared under local locks afterwards, preventing a
-    /// leave/rejoin or edit race from combining incompatible authorizations.
+    /// 在用户切栅栏内执行归属事务操作。
+    ///
+    /// 唯一的跨存储事务栅栏是既有的有界用户切栅栏，且此处不进行任何提供方 I/O。
+    /// 房间事实先于用户证明读取，随后在本地锁下比对，避免退群重入或编辑竞态把
+    /// 互不兼容的授权拼接在一起。
+    ///
+    /// - Parameters:
+    ///   - owner: 房间归属数据库。
+    ///   - context: 访问标识上下文。
+    ///   - operation: 在归属事务内执行的操作。
+    /// - Returns: 操作结果。
+    /// - Throws: 设备无效、授权不通过或快照在加锁后发生变化时抛出
+    ///   ``V2MediaStoreError/downloadNotAuthorized``；
+    ///   连接不支持 SQL 时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     func withOwner<Result: Sendable>(owner: any Database, context: MessageMediaContext,
         operation: @escaping @Sendable (any SQLDatabase) async throws -> Result) async throws -> Result {
         try Task.checkCancellation()
@@ -120,6 +181,13 @@ private struct MessageMediaAuthorization: Sendable {
         }
     }
 
+    /// 校验设备仍为有效会话且账号未停用。
+    ///
+    /// - Parameters:
+    ///   - context: 访问标识上下文。
+    ///   - sql: 控制面数据库连接。
+    /// - Throws: 设备无效、资料未生效或账号已停用时抛出
+    ///   ``V2MediaStoreError/downloadNotAuthorized``。
     private func checkDevice(_ context: MessageMediaContext, sql: any SQLDatabase) async throws {
         guard try await sql.raw("""
             SELECT 1 FROM im_v2.auth_devices AS device
@@ -129,6 +197,18 @@ private struct MessageMediaAuthorization: Sendable {
             """).first() != nil else { throw V2MediaStoreError.downloadNotAuthorized }
     }
 
+    /// 读取消息媒体授权快照。
+    ///
+    /// 锁定读取时会对房间行加共享锁，并在消息与媒体行上追加共享锁，
+    /// 使加锁前后的快照可以在同一事务内精确比对。
+    ///
+    /// - Parameters:
+    ///   - context: 访问标识上下文。
+    ///   - sql: 归属数据库连接。
+    ///   - locking: 是否加共享锁。
+    /// - Returns: 授权快照。
+    /// - Throws: 消息不可见、归属不符、媒体不可用或引用已撤销时抛出
+    ///   ``V2MediaStoreError/downloadNotAuthorized``。
     private func snapshot(_ context: MessageMediaContext, sql: any SQLDatabase, locking: Bool) async throws -> MessageMediaSnapshot {
         if locking {
             _ = try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: context.room) FOR SHARE").first()
@@ -155,14 +235,23 @@ private struct MessageMediaAuthorization: Sendable {
     }
 }
 
-/// Scoped grants live with the media owner. They contain identity and scope,
-/// never provider URLs. The control-plane device check is repeated for grant,
-/// claim and final consumption, including after provider signing has awaited.
+/// 与媒体归属一同存放的范围化授权。
+///
+/// 授权只包含身份与作用域，绝不包含提供方地址。签发、认领与最终消费三个阶段都会重复
+/// 控制面设备校验，包括在等待提供方签名返回之后。
 private struct MessageMediaSessions: V2MediaDownloadSessionStore {
     let owner: any Database
     let context: MessageMediaContext
     let authorization: MessageMediaAuthorization
 
+    /// 签发下载会话。
+    ///
+    /// - Parameters:
+    ///   - now: 签发时刻。
+    ///   - expiresAt: 会话到期时刻，需晚于签发时刻。
+    /// - Returns: 下载授权。
+    /// - Throws: 到期时刻不晚于当前时刻时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``；其余错误来自授权流程。
     func issue(now: Date, expiresAt: Date) async throws -> V2MediaDownloadGrant {
         guard v2PostgresTimestampPrecedes(now, expiresAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let id = UUID()
@@ -178,6 +267,21 @@ private struct MessageMediaSessions: V2MediaDownloadSessionStore {
         }
     }
 
+    /// 认领下载会话。
+    ///
+    /// 条件更新要求会话标识、媒体、用户、设备、消息位置与房间归属全部匹配，
+    /// 且会话未过期；重试计数达到有符号 64 位上限后不再递增。
+    ///
+    /// - Parameters:
+    ///   - requesterUserID: 请求下载的用户。
+    ///   - deviceID: 发起下载的设备。
+    ///   - downloadSessionID: 下载会话标识。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    /// - Returns: 已认领的下载会话。
+    /// - Throws: 参数与上下文不符、租约时长非法或会话不可认领时抛出
+    ///   ``V2MediaDownloadSessionStoreError/sessionUnavailable``；
+    ///   租约到期时刻不可编码时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     func claimDownload(requesterUserID: UserID, deviceID: DeviceID, downloadSessionID: MediaDownloadSessionID, now: Date, leaseDuration: TimeInterval) async throws -> V2ClaimedMediaDownload {
         guard requesterUserID.uuidValue == context.actor, deviceID.uuidValue == context.device, let session = downloadSessionID.uuidValue,
               leaseDuration.isFinite, leaseDuration > 0 else { throw V2MediaDownloadSessionStoreError.sessionUnavailable }
@@ -201,6 +305,14 @@ private struct MessageMediaSessions: V2MediaDownloadSessionStore {
         }
     }
 
+    /// 消费已认领的下载会话。
+    ///
+    /// - Parameters:
+    ///   - claim: 已认领的下载会话。
+    ///   - now: 完成时刻。
+    /// - Throws: 时刻不可编码时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``；租约已失效时抛出
+    ///   ``V2MediaDownloadSessionStoreError/sessionUnavailable``。
     func completeDownload(_ claim: V2ClaimedMediaDownload, now: Date) async throws {
         guard claim.mediaID.uuidValue == context.media, let session = claim.downloadSessionID.uuidValue else { throw V2MediaDownloadSessionStoreError.sessionUnavailable }
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -214,6 +326,11 @@ private struct MessageMediaSessions: V2MediaDownloadSessionStore {
         }
     }
 
+    /// 释放已认领但未消费的下载会话。
+    ///
+    /// - Parameter claim: 已认领的下载会话。
+    /// - Throws: 参数与上下文不符或连接不支持 SQL 时抛出
+    ///   ``V2MediaDownloadSessionStoreError/sessionUnavailable``。
     func releaseDownload(_ claim: V2ClaimedMediaDownload) async throws {
         guard claim.mediaID.uuidValue == context.media, let session = claim.downloadSessionID.uuidValue,
               let sql = owner as? any SQLDatabase else { throw V2MediaDownloadSessionStoreError.sessionUnavailable }

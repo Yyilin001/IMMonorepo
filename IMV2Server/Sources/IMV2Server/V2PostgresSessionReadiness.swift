@@ -1,8 +1,11 @@
 import Fluent
 import SQLKit
 
+/// PostgreSQL 会话参数就绪检查错误。
 public enum V2PostgresSessionReadinessError: Error, Equatable, Sendable {
+    /// 当前数据库适配器不支持 SQL 查询。
     case unsupportedDatabase
+    /// 服务端实际生效的超时参数与期望策略不一致，参数为期望值。
     case policyMismatch(
         statementTimeoutMilliseconds: Int,
         lockTimeoutMilliseconds: Int,
@@ -10,11 +13,23 @@ public enum V2PostgresSessionReadinessError: Error, Equatable, Sendable {
     )
 }
 
-/// Fails startup if the PostgreSQL server did not accept the session timeout
-/// policy. The policy is installed in every connection's startup packet; this
-/// probe makes a proxy/server that discards those settings observable before
-/// a public listener opens.
+/// PostgreSQL 会话策略就绪探针。
+///
+/// 若服务端未接受会话超时策略则让启动失败。策略随每个连接的启动包下发，
+/// 该探针可在监听端口开放前发现丢弃这些设置的代理或服务端。
 public enum V2PostgresSessionReadiness {
+    /// 校验服务端实际生效的会话超时参数与策略一致。
+    ///
+    /// 比较的是服务端 `pg_settings` 中的真实取值，而不是客户端下发的参数，
+    /// 因此可发现被代理丢弃或覆盖的配置。
+    ///
+    /// - Parameters:
+    ///   - database: 待检查的数据库连接。
+    ///   - policy: 期望生效的运行时策略。
+    /// - Throws: 连接不支持 SQL 时抛出
+    ///   ``V2PostgresSessionReadinessError/unsupportedDatabase``；
+    ///   三项超时参数任一与策略不同、或查询结果无法解码时抛出
+    ///   ``V2PostgresSessionReadinessError/policyMismatch(statementTimeoutMilliseconds:lockTimeoutMilliseconds:idleTransactionTimeoutMilliseconds:)``。
     public static func verify(
         database: any Database,
         policy: V2PostgresRuntimePolicy

@@ -26,12 +26,11 @@ private func v2GatewayCount(_ value: Int) throws -> UInt32 {
     return count
 }
 
-/// Exact protobuf payload size for the gateway's `GroupEventPage` envelope.
+/// 网关 `GroupEventPage` 信封的精确 protobuf 载荷字节数。
 ///
-/// The handler used to append one event, serialize the whole candidate page,
-/// then repeat. That makes a full page quadratic in both protobuf work and
-/// temporary allocations. Keeping the estimator beside the wire mapping makes
-/// the size fence linear while the final gateway encode remains authoritative.
+/// 早期实现每追加一条事件就整体序列化一次候选页面，使满页场景在 protobuf 计算与临时分配上
+/// 都退化为二次复杂度。把估算函数放在线路映射旁边，使大小栅栏保持线性，
+/// 同时最终网关编码仍是权威结果。
 private func v2GroupEventPageEnvelopeBytes(
     roomID: String,
     eventFieldBytes: Int,
@@ -207,7 +206,7 @@ extension V2ModerationService: V2GatewayModerationHandling {}
 extension V2ConversationCapabilitiesService: V2GatewayConversationCapabilitiesHandling {}
 extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
 
-/// Routes validated authenticated protobuf commands to the V2 domain services.
+/// 把已校验的已认证 protobuf 命令路由到 V2 领域服务。
 public struct V2GatewayDomainCommandHandler:
     V2GatewayCommandHandler,
     V2PreparedGroupEventCommandHandling {
@@ -233,10 +232,10 @@ public struct V2GatewayDomainCommandHandler:
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private let controlWriteAdmissionEnabled: Bool
-    /// A room-log page shares the ordinary gateway-frame payload budget with
-    /// its envelope headers. The final wire encoder remains authoritative;
-    /// this budget prevents a valid durable backlog from becoming a transport
-    /// disconnect before it reaches that boundary.
+    /// 房间日志分页与其信封头共享普通网关帧的载荷预算。
+    ///
+    /// 最终线路编码器仍是权威；该预算用于避免一份合法但较长的持久化积压
+    /// 在抵达该边界之前就被当作传输错误断开连接。
     private let maximumGroupEventPagePayloadBytes: Int
     private let now: @Sendable () -> Date
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
@@ -1362,10 +1361,10 @@ public struct V2GatewayDomainCommandHandler:
         return groupEventPageEnvelope(page)
     }
 
-    /// Maps the durable fallback through the exact same payload-budget rules
-    /// as the ordinary group-event command. The prepared-page fast path calls
-    /// this only when local immutable coverage is unavailable or the fresh
-    /// membership fence cannot authorize the cached page.
+    /// 用与普通群事件命令完全相同的载荷预算规则构造持久化回落响应。
+    ///
+    /// 预编码快速路径只会在本地不可变覆盖不足，或最新成员栅栏无法为缓存分页授权时
+    /// 才回落到本方法。
     private func groupEventPageEnvelope(_ page: V2GroupEventLogPage) -> IMV2Envelope {
         var response = IMV2Envelope()
         // Use the largest possible request ID to make this sizing an upper

@@ -3,18 +3,36 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 账号边缘限流判定结果。
 public enum V2AccountEdgeClientRateLimitResult: Equatable, Sendable {
+    /// 本次请求被允许并已计入窗口。
     case allowed
+    /// 本次请求被拒绝，并给出建议重试秒数。
     case rateLimited(retryAfterSeconds: Int)
 }
 
-/// Cross-replica account-edge request budget. The input is an authenticated
-/// edge address and persistence stores only its keyed digest.
+/// 跨副本共享的账号边缘请求预算能力。
+///
+/// 输入是已通过认证的边缘地址或连接身份，持久化只保存其带密钥摘要。
 public protocol V2AccountEdgeClientRateLimiting: Sendable {
+    /// 消耗一次按客户端地址计费的额度。
+    ///
+    /// - Parameter address: 已通过边缘校验的客户端地址。
+    /// - Returns: 允许或限流结果。
+    /// - Throws: 密钥派生、时刻编码或存储不可用时抛出。
     func consume(address: V2AccountEdgeClientAddress) async throws -> V2AccountEdgeClientRateLimitResult
 }
 
+/// 跨副本共享的已认证账号请求预算能力。
 public protocol V2AuthenticatedAccountRateLimiting: Sendable {
+    /// 消耗指定作用域与代价的已认证额度。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证连接的用户与设备身份。
+    ///   - scope: 计费作用域，例如某类账号接口。
+    ///   - cost: 本次消耗的额度，需大于零且不超过窗口上限。
+    /// - Returns: 允许或限流结果。
+    /// - Throws: 作用域或代价非法、时刻编码失败或存储不可用时抛出。
     func consume(
         identity: V2AuthenticatedConnection,
         scope: String,
@@ -22,12 +40,22 @@ public protocol V2AuthenticatedAccountRateLimiting: Sendable {
     ) async throws -> V2AccountEdgeClientRateLimitResult
 }
 
+/// 基于 PostgreSQL 的账号边缘限流实现。
+///
+/// 高基数假名键的回收与请求延迟相互独立，可由多个副本并发执行。
 public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLimiting, V2AuthenticatedAccountRateLimiting, Sendable {
     private let database: any Database
     private let policy: V2AccountEdgeClientRateLimitPolicy
     private let key: V2AccountEdgeClientRateLimitKey
     private let now: @Sendable () -> Date
 
+    /// 组合数据库、限流预算与假名化密钥。
+    ///
+    /// - Parameters:
+    ///   - database: 存放限流窗口的数据库。
+    ///   - policy: 固定窗口预算策略。
+    ///   - key: 地址与身份的假名化密钥。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
         policy: V2AccountEdgeClientRateLimitPolicy,
@@ -40,12 +68,27 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         self.now = now
     }
 
+    /// 按客户端地址消耗一次额度。
+    ///
+    /// - Parameter address: 已通过边缘校验的客户端地址。
+    /// - Returns: 允许或限流结果。
+    /// - Throws: 存储不可用或时刻编码失败时抛出
+    ///   ``V2AccountEdgeClientRateLimitError/unavailable``。
     public func consume(
         address: V2AccountEdgeClientAddress
     ) async throws -> V2AccountEdgeClientRateLimitResult {
         try await consume(clientKey: key.digest(address), cost: 1)
     }
 
+    /// 按已认证身份与作用域消耗指定代价的额度。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证连接身份。
+    ///   - scope: 计费作用域。
+    ///   - cost: 本次消耗的额度，需大于零且不超过窗口上限。
+    /// - Returns: 允许或限流结果。
+    /// - Throws: 代价越界时抛出
+    ///   ``V2AccountEdgeClientRateLimitError/invalidPolicy``；其余错误同地址计费路径。
     public func consume(
         identity: V2AuthenticatedConnection,
         scope: String,
@@ -60,6 +103,18 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         )
     }
 
+    /// 以假名键执行一次窗口内计费。
+    ///
+    /// 唯一键冲突时的行锁即是串行化边界：饱和哨兵值只记录拒绝，
+    /// 不再额外消耗咨询锁、`SELECT FOR UPDATE` 与单独的更新往返。
+    /// 窗口已过期时以本次时刻开启新窗口并把计数重置为本次代价。
+    ///
+    /// - Parameters:
+    ///   - clientKey: 已派生的假名键。
+    ///   - cost: 本次消耗的额度。
+    /// - Returns: 允许或限流结果。
+    /// - Throws: 连接不支持 SQL、窗口起点不可编码或查询无结果时抛出
+    ///   ``V2AccountEdgeClientRateLimitError/unavailable``。
     private func consume(
         clientKey: String,
         cost: Int
@@ -108,8 +163,14 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         return .allowed
     }
 
-    /// High-cardinality pseudonymous keys are reclaimed independently from
-    /// request latency. Multiple replicas may run this bounded sweep.
+    /// 回收已过期的假名键。
+    ///
+    /// 回收与请求延迟相互独立，多个副本可安全并行执行这一有界扫描。
+    ///
+    /// - Parameter limit: 本轮最多删除的键数量，需大于零。
+    /// - Returns: 实际删除的键数量。
+    /// - Throws: 上限非正、连接不支持 SQL 或窗口起点不可编码时抛出
+    ///   ``V2AccountEdgeClientRateLimitError/unavailable``。
     @discardableResult
     public func purgeExpired(limit: Int) async throws -> Int {
         guard limit > 0, let sql = database as? any SQLDatabase else {

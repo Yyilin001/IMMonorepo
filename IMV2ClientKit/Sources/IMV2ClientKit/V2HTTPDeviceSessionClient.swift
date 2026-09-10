@@ -4,17 +4,35 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
-/// Account-owned session metadata returned by the account edge. Device IDs
-/// are opaque and used solely for an explicit remote-log-out command.
+/// 账号边缘返回的账号自有会话元数据。
+///
+/// 设备标识是不透明值，只用于显式的远程登出命令。
 public struct V2ClientDeviceSession: Equatable, Sendable, Identifiable {
+    /// 设备标识。
     public let deviceID: DeviceID
+    /// 设备名称。
     public let deviceName: String
+    /// 设备平台。
     public let platform: String
+    /// 会话创建时刻。
     public let createdAt: Date
+    /// 最近活跃时刻。
     public let lastActiveAt: Date
+    /// 是否为当前设备。
     public let isCurrentDevice: Bool
 
+    /// 用于列表标识。
     public var id: DeviceID { deviceID }
+
+    /// 保存会话元数据。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 设备标识。
+    ///   - deviceName: 设备名称。
+    ///   - platform: 设备平台。
+    ///   - createdAt: 会话创建时刻。
+    ///   - lastActiveAt: 最近活跃时刻。
+    ///   - isCurrentDevice: 是否为当前设备。
     public init(deviceID: DeviceID, deviceName: String, platform: String, createdAt: Date, lastActiveAt: Date, isCurrentDevice: Bool) {
         self.deviceID = deviceID
         self.deviceName = deviceName
@@ -25,33 +43,72 @@ public struct V2ClientDeviceSession: Equatable, Sendable, Identifiable {
     }
 }
 
+/// 会话列表分页。
 public struct V2ClientDeviceSessionPage: Equatable, Sendable {
+    /// 本页会话。
     public let sessions: [V2ClientDeviceSession]
+    /// 下一页游标；为空表示已到末尾。
     public let nextCursor: String?
 
+    /// 保存会话分页。
+    ///
+    /// - Parameters:
+    ///   - sessions: 本页会话。
+    ///   - nextCursor: 下一页游标。
     public init(sessions: [V2ClientDeviceSession], nextCursor: String?) {
         self.sessions = sessions
         self.nextCursor = nextCursor
     }
 }
 
+/// 会话接口使用的边缘凭据。
 public struct V2ClientDeviceSessionCredentials: Sendable {
+    /// 访问令牌。
     public let accessToken: String
+    /// 当前设备标识。
     public let deviceID: DeviceID
+
+    /// 保存凭据。
+    ///
+    /// - Parameters:
+    ///   - accessToken: 访问令牌。
+    ///   - deviceID: 当前设备标识。
     public init(accessToken: String, deviceID: DeviceID) { self.accessToken = accessToken; self.deviceID = deviceID }
 }
 
+/// 会话接口的凭据提供能力。
 public protocol V2ClientDeviceSessionCredentialProvider: Sendable {
+    /// 获取一次边缘凭据。
+    ///
+    /// - Returns: 访问令牌与当前设备标识。
+    /// - Throws: 凭据不可用时抛出。
     func deviceSessionCredentials() async throws -> V2ClientDeviceSessionCredentials
 }
 
+/// 会话接口的 HTTP 传输能力。
 public protocol V2ClientDeviceSessionHTTPTransport: Sendable {
+    /// 执行一次 HTTP 请求。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 网络失败或响应不可解析时抛出。
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
+/// 基于 URLSession 的会话传输实现。
 public actor V2URLSessionDeviceSessionHTTPTransport: V2ClientDeviceSessionHTTPTransport {
     private let session: URLSession
+    /// 以会话构造传输实现。
+    ///
+    /// - Parameter session: 使用的 URL 会话，默认使用账号安全会话配置。
     public init(session: URLSession = V2SecureURLSession.account) { self.session = session }
+
+    /// 执行请求并要求返回 HTTP 响应。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 网络失败时抛出；响应不是 HTTP 响应时抛出
+    ///   ``V2ClientDeviceSessionError/invalidResponse``。
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else { throw V2ClientDeviceSessionError.invalidResponse }
@@ -59,19 +116,48 @@ public actor V2URLSessionDeviceSessionHTTPTransport: V2ClientDeviceSessionHTTPTr
     }
 }
 
+/// 账号会话的管理能力。
 public protocol V2ClientDeviceSessionManaging: Sendable {
+    /// 分页读取账号的活跃会话。
+    ///
+    /// - Parameters:
+    ///   - cursor: 上一页游标。
+    ///   - pageSize: 本页条数。
+    /// - Returns: 会话分页。
+    /// - Throws: 认证、网络或响应解析失败时抛出。
     func list(cursor: String?, pageSize: Int) async throws -> V2ClientDeviceSessionPage
+
+    /// 远程登出指定设备。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     func revoke(deviceID: DeviceID, operationID: UUID) async throws
+
+    /// 远程登出除当前设备外的全部设备。
+    ///
+    /// - Parameter operationID: 幂等操作标识。
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     func revokeOtherDevices(operationID: UUID) async throws
 }
 
-/// HTTPS account-edge adapter. The caller provides one stable operation ID
-/// per user intent, making a retry after an interrupted response safe.
+/// 账号边缘的 HTTPS 适配器。
+///
+/// 调用方为每次用户意图提供一个稳定操作标识，因此响应中断后的重试是安全的。
 public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientDeviceSessionCredentialProvider
     private let transport: any V2ClientDeviceSessionHTTPTransport
 
+    /// 校验并保存端点、凭据提供方与传输实现。
+    ///
+    /// - Parameters:
+    ///   - endpoint: 会话端点，必须是带主机名的 HTTPS 地址。
+    ///   - credentials: 提供访问令牌与设备标识的凭据来源。
+    ///   - transport: HTTP 传输实现，默认使用系统 URL 会话。
+    /// - Throws: 端点不是合法 HTTPS 地址时抛出
+    ///   ``V2ClientDeviceSessionError/invalidEndpoint``。
     public init(endpoint: URL, credentials: any V2ClientDeviceSessionCredentialProvider, transport: any V2ClientDeviceSessionHTTPTransport = V2URLSessionDeviceSessionHTTPTransport()) throws {
         guard endpoint.scheme?.lowercased() == "https", endpoint.host != nil else { throw V2ClientDeviceSessionError.invalidEndpoint }
         self.endpoint = endpoint
@@ -79,6 +165,15 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         self.transport = transport
     }
 
+    /// 分页读取账号的活跃会话。
+    ///
+    /// - Parameters:
+    ///   - cursor: 上一页游标。
+    ///   - pageSize: 本页条数，需落在 `1...100`。
+    /// - Returns: 会话分页。
+    /// - Throws: 条数越界时抛出 ``V2ClientDeviceSessionError/invalidRequest``；
+    ///   响应不是 JSON 或字段非法时抛出
+    ///   ``V2ClientDeviceSessionError/invalidResponse``；其余失败按状态码映射。
     public func list(cursor: String?, pageSize: Int) async throws -> V2ClientDeviceSessionPage {
         guard (1 ... 100).contains(pageSize) else { throw V2ClientDeviceSessionError.invalidRequest }
         var queryItems = [URLQueryItem(name: "page_size", value: String(pageSize))]
@@ -107,14 +202,33 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         } catch { throw V2ClientDeviceSessionError.invalidResponse }
     }
 
+    /// 远程登出指定设备。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - operationID: 幂等操作标识。
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     public func revoke(deviceID: DeviceID, operationID: UUID) async throws {
         try await mutate(path: ["revoke"], body: .init(deviceID: deviceID.rawValue, operationID: operationID))
     }
 
+    /// 远程登出除当前设备外的全部设备。
+    ///
+    /// - Parameter operationID: 幂等操作标识。
+    /// - Throws: 认证、网络或服务端拒绝时抛出。
     public func revokeOtherDevices(operationID: UUID) async throws {
         try await mutate(path: ["revoke-others"], body: .init(deviceID: nil, operationID: operationID))
     }
 
+    /// 发送一次变更请求并要求 204 空响应。
+    ///
+    /// 非 204 状态按统一映射转换为领域错误。
+    ///
+    /// - Parameters:
+    ///   - path: 追加在端点之后的路径段。
+    ///   - body: 请求体。
+    /// - Throws: 请求体编码失败时抛出
+    ///   ``V2ClientDeviceSessionError/invalidRequest``；其余失败按状态码或网络错误映射。
     private func mutate(path: [String], body: MutationBody) async throws {
         var request = try await authenticatedRequest(path: path, method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -124,6 +238,18 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         guard response.statusCode == 204 else { throw try failure(for: response) }
     }
 
+    /// 构造带 Bearer 令牌与设备标识的请求。
+    ///
+    /// 访问令牌需非空且不含控制字符；请求显式禁用缓存并设置 15 秒超时。
+    ///
+    /// - Parameters:
+    ///   - path: 追加在端点之后的路径段。
+    ///   - method: HTTP 方法。
+    ///   - queryItems: 查询参数。
+    /// - Returns: 可发送请求。
+    /// - Throws: 任务取消时抛出 `CancellationError`；取不到凭据或令牌非法时抛出
+    ///   ``V2ClientDeviceSessionError/authorizationUnavailable``；
+    ///   端点或路径无法构造出合法地址时抛出对应错误。
     private func authenticatedRequest(path: [String], method: String, queryItems: [URLQueryItem] = []) async throws -> URLRequest {
         let current: V2ClientDeviceSessionCredentials
         do { current = try await credentials.deviceSessionCredentials() }
@@ -148,6 +274,12 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         return request
     }
 
+    /// 发送请求并把传输层错误映射为领域错误。
+    ///
+    /// - Parameter request: 待发送请求。
+    /// - Returns: 响应体与 HTTP 响应。
+    /// - Throws: 任务取消时抛出 `CancellationError`；已属于本领域错误时原样抛出；
+    ///   其余失败抛出 ``V2ClientDeviceSessionError/networkFailure``。
     private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         do { return try await transport.data(for: request) }
         catch is CancellationError { throw CancellationError() }
@@ -155,6 +287,10 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
         catch { throw V2ClientDeviceSessionError.networkFailure }
     }
 
+    /// 按状态码映射领域错误。
+    ///
+    /// - Parameter response: HTTP 响应。
+    /// - Returns: 对应的领域错误。
     private func failure(for response: HTTPURLResponse) throws -> V2ClientDeviceSessionError {
         switch response.statusCode {
         case 400: return .invalidRequest
@@ -165,13 +301,21 @@ public struct V2HTTPDeviceSessionClient: V2ClientDeviceSessionManaging, Sendable
     }
 }
 
+/// 设备会话客户端错误。
 public enum V2ClientDeviceSessionError: Error, Equatable, Sendable {
+    /// 端点不是合法的 HTTPS 地址。
     case invalidEndpoint
+    /// 请求参数不满足约束。
     case invalidRequest
+    /// 取不到可用凭据或令牌非法。
     case authorizationUnavailable
+    /// 服务端拒绝授权。
     case authorizationDenied
+    /// 目标会话不存在或已不可用。
     case sessionUnavailable
+    /// 响应结构不合法。
     case invalidResponse
+    /// 服务端返回非预期状态码。
     case serverStatus(Int)
     case networkFailure
 }

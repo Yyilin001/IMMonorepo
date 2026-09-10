@@ -3,28 +3,28 @@ import NIOCore
 import SQLKit
 import Synchronization
 
+/// 事件循环均衡数据库错误。
 public enum V2EventLoopBalancedDatabaseError: Error, Equatable, Sendable {
+    /// 未提供任何数据库句柄。
     case emptyDatabaseSet
+    /// 提供的句柄不支持 SQL。
     case databaseDoesNotSupportSQL
+    /// 各句柄的配置类型不一致。
     case inconsistentConfiguration
+    /// 各句柄的 SQL 方言类型不一致。
     case inconsistentDialect
 }
 
-/// Dispatches independent database operations across one Fluent database
-/// handle per application EventLoop.
+/// 把相互独立的数据库操作分发到每个应用事件循环各一个 Fluent 数据库句柄上。
 ///
-/// Fluent binds a database returned by `Application.db(...)` to the EventLoop
-/// selected when that handle is created. Keeping one such handle in a
-/// long-lived Store therefore uses only one member of an
-/// `EventLoopGroupConnectionPool`, regardless of the configured number of
-/// EventLoops. This adapter restores the intended pool topology while keeping
-/// transaction and single-session work pinned to exactly one underlying
-/// handle.
+/// Fluent 会把 `Application.db(...)` 返回的数据库绑定到创建该句柄时选定的事件循环，
+/// 因此长期存活的 Store 若只持有其中一个句柄，无论配置了多少事件循环，
+/// 都只会用到 `EventLoopGroupConnectionPool` 中的一个成员。该适配器恢复预期的连接池拓扑，
+/// 同时让事务与单会话工作严格固定在同一个底层句柄上。
 ///
-/// The wrapper's reported EventLoop is deliberately stable, as required by
-/// `Database` and `SQLDatabase`. Legacy EventLoopFuture results are hopped back
-/// to that loop; async callers are free to resume on the Swift concurrency
-/// executor after the selected database operation completes.
+/// 包装器对外报告的事件循环刻意保持稳定，以满足 `Database` 与 `SQLDatabase` 的要求。
+/// 基于 `EventLoopFuture` 的旧接口结果会被回跳到该循环；异步调用方则可在所选操作完成后
+/// 自由地在 Swift 并发执行器上恢复。
 public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable {
     private struct Entry: Sendable {
         let database: any Database
@@ -42,8 +42,19 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable 
 
     public var version: (any SQLDatabaseReportedVersion)? { nil }
     public var inTransaction: Bool { false }
+    /// 已配置的句柄数量。
     public var configuredEventLoopCount: Int { entries.count }
 
+    /// 校验并保存各事件循环的数据库句柄。
+    ///
+    /// 要求所有句柄都支持 SQL、配置类型一致且方言类型一致，
+    /// 以免在同一个包装器下混用语义不同的连接。
+    ///
+    /// - Parameter databases: 各事件循环对应的数据库句柄。
+    /// - Throws: 列表为空时抛出 ``V2EventLoopBalancedDatabaseError/emptyDatabaseSet``；
+    ///   句柄不支持 SQL 时抛出 ``V2EventLoopBalancedDatabaseError/databaseDoesNotSupportSQL``；
+    ///   配置类型不一致时抛出 ``V2EventLoopBalancedDatabaseError/inconsistentConfiguration``；
+    ///   方言不一致时抛出 ``V2EventLoopBalancedDatabaseError/inconsistentDialect``。
     public init(databases: [any Database]) throws {
         guard let firstDatabase = databases.first else {
             throw V2EventLoopBalancedDatabaseError.emptyDatabaseSet
@@ -127,6 +138,9 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable 
         try await nextEntry().sql.withSession(closure)
     }
 
+    /// 依次选取下一个句柄，实现轮转分发。
+    ///
+    /// - Returns: 本次使用的句柄。
     private func nextEntry() -> Entry {
         cursor.withLock { index in
             let entry = entries[index]

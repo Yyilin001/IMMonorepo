@@ -3,18 +3,44 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// The mutable group controls share the same ordered event stream as messages.
-/// In particular, a policy or role change is never committed without its room
-/// event and delivery plan. Consumers must use the source room sequence,
-/// rather than a recipient's personal sync cursor, to order these effects.
+/// 可变的群控制项与消息共享同一条有序事件流。
+///
+/// 尤其是策略或角色变更，绝不会在没有房间事件与投递计划的情况下提交。
+/// 消费方必须使用来源房间序号而不是接收者的个人同步游标来排列这些效果。
 public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2OwnerValidatedGroupCapabilitiesStore {
     private let database: any Database
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放房间、成员、置顶与策略状态的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 设置置顶消息（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 置顶消息命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 置顶结果。
+    /// - Throws: 无权限、状态冲突或持久化失败时抛出。
     public func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属设置置顶消息。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 置顶消息命令。
+    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 置顶结果。
+    /// - Throws: 归属已变更、无权限、状态冲突或持久化失败时抛出。
     public func setPinnedMessageOwnerValidated(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
@@ -53,10 +79,33 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
+    /// 设置群公告（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 群公告命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 公告结果。
+    /// - Throws: 无权限、状态冲突或持久化失败时抛出。
     public func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属设置群公告。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 群公告命令。
+    ///   - ownerRoute: 已选定的房间归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 公告结果。
+    /// - Throws: 归属已变更、无权限、状态冲突或持久化失败时抛出。
     public func setAnnouncementOwnerValidated(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
@@ -86,10 +135,33 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
+    /// 设置角色权限（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 角色权限命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 权限变更结果。
+    /// - Throws: 无权限、修订冲突或持久化失败时抛出。
     public func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
         try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属设置角色权限。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 角色权限命令。
+    ///   - ownerRoute: 已选定的房间归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 权限变更结果。
+    /// - Throws: 归属已变更、无权限、修订冲突或持久化失败时抛出。
     public func setRolePermissionsOwnerValidated(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
         try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
@@ -126,10 +198,33 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
+    /// 调整成员角色（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 成员角色命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 角色变更结果。
+    /// - Throws: 目标非成员、无权限或持久化失败时抛出。
     public func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
         try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属调整成员角色。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起操作的用户。
+    ///   - command: 成员角色命令。
+    ///   - ownerRoute: 已选定的房间归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 角色变更结果。
+    /// - Throws: 归属已变更、目标非成员、无权限或持久化失败时抛出。
     public func changeMemberRoleOwnerValidated(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
         try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }

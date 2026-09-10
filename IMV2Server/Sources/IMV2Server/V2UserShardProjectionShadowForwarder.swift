@@ -3,17 +3,25 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// The small non-fan-out part of user sync (relationship, block and receive
-/// preference) is authoritative in the control store. This boundary mirrors
-/// its already-committed records to the current write owner, plus the target
-/// while a migration still writes at source. The source operation ID is the
-/// durable retry key, so a lost response can safely repeat the mirror without
-/// allocating another target sequence.
+/// 用户同步中不参与扇出的一小部分（关系、拉黑与接收偏好）以控制面存储为权威。
+///
+/// 该边界把已提交记录镜像到当前写入归属；当迁移仍在源端写入时，也会镜像到迁移目标。
+/// 来源操作标识就是持久化重试键，因此响应丢失后可以安全地重复镜像，
+/// 而不会额外占用目标端序号。
 public struct V2UserShardProjectionShadowRequest: Sendable {
+    /// 目标用户。
     public let userID: UserID
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 需要镜像的投影类型集合。
     public let projectionKinds: Set<String>
 
+    /// 保存镜像请求。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - projectionKinds: 投影类型集合。
     public init(
         userID: UserID,
         sourceEventID: EventID,
@@ -25,24 +33,40 @@ public struct V2UserShardProjectionShadowRequest: Sendable {
     }
 }
 
+/// 用户分片投影影子转发能力。
 public protocol V2UserShardProjectionShadowing: Sendable {
-    /// Writes the existing control-plane record to the user's live write
-    /// owner, and mirrors it to an in-flight migration target when needed.
-    /// The returned sequence belongs to the live write owner and is suitable
-    /// for a best-effort live sync hint. `nil` means no requested source
-    /// projection existed in the control store.
+    /// 把既有控制面记录写入用户当前写入归属，并在需要时镜像到迁移目标。
+    ///
+    /// 返回的序号属于当前写入归属，可用于尽力而为的实时同步提示；
+    /// 返回 `nil` 表示控制面存储中不存在所请求的来源投影。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - projectionKinds: 投影类型集合。
+    /// - Returns: 当前写入归属的序号；无来源投影时为 `nil`。
+    /// - Throws: 路由或存储失败时抛出。
     func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64?
 
-    /// Mirrors a bounded committed micro-batch. The result preserves request
-    /// order and has the same semantics as calling the scalar method for each
-    /// request. Concrete stores may collapse routing fences and source reads
-    /// into set-based operations; the default keeps existing adapters correct.
+    /// 镜像一个有界的已提交微批。
+    ///
+    /// 结果保持请求顺序，语义等同于逐条调用标量方法。具体存储可以把路由栅栏与来源读取
+    /// 合并为集合式操作；默认实现保证既有适配器行为正确。
+    ///
+    /// - Parameter requests: 待镜像请求列表。
+    /// - Returns: 与输入顺序对应的序号结果。
+    /// - Throws: 路由或存储失败时抛出。
     func shadowIfForwarding(
         _ requests: [V2UserShardProjectionShadowRequest]
     ) async throws -> [UInt64?]
 }
 
 public extension V2UserShardProjectionShadowing {
+    /// 逐条镜像的兼容实现。
+    ///
+    /// - Parameter requests: 待镜像请求列表。
+    /// - Returns: 与输入顺序对应的序号结果。
+    /// - Throws: 任一条目失败时抛出。
     func shadowIfForwarding(
         _ requests: [V2UserShardProjectionShadowRequest]
     ) async throws -> [UInt64?] {
@@ -59,12 +83,20 @@ public extension V2UserShardProjectionShadowing {
     }
 }
 
+/// 基于 PostgreSQL 的用户分片投影影子转发实现。
 public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
     private let registry: any V2UserShardStorageResolving
     private let routeFence: any V2UserShardRouteFencing
     private let batchRouteFence: (any V2UserShardRouteBatchFencing)?
     private let coLocatedControlBuckets: Set<String>
 
+    /// 组合归属解析器与路由栅栏。
+    ///
+    /// - Parameters:
+    ///   - registry: 用户归属存储解析器。
+    ///   - routeFence: 用户归属栅栏。
+    ///   - batchRouteFence: 可选的批量路由栅栏。
+    ///   - coLocatedControlBuckets: 与控制库同库部署、需复用栅栏连接的归属桶。
     public init(
         registry: any V2UserShardStorageResolving,
         routeFence: any V2UserShardRouteFencing,
@@ -77,6 +109,14 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
+    /// 镜像单条已提交投影。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - projectionKinds: 投影类型集合。
+    /// - Returns: 当前写入归属的序号；无来源投影时为 `nil`。
+    /// - Throws: 路由或存储失败时抛出。
     public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
         try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
             guard let sql = fencedDatabase as? any SQLDatabase,
@@ -95,6 +135,14 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         }
     }
 
+    /// 批量镜像已提交投影。
+    ///
+    /// 请求为空时直接返回空结果；数量超过 1024 或未配置批量栅栏时，
+    /// 退化为逐条镜像以保持语义一致。
+    ///
+    /// - Parameter requests: 待镜像请求列表。
+    /// - Returns: 与输入顺序对应的序号结果。
+    /// - Throws: 路由或存储失败时抛出。
     public func shadowIfForwarding(
         _ requests: [V2UserShardProjectionShadowRequest]
     ) async throws -> [UInt64?] {
@@ -181,11 +229,18 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         return liveSequence
     }
 
-    /// Common co-located topology: acquire every cutover fence once, load all
-    /// migration/source rows with two set queries, and reuse the source Sync
-    /// sequence as the already-materialized live result. Remote routes and
-    /// active forwarding migrations retain the same target transactions and
-    /// idempotency checks as the scalar path.
+    /// 有界批量镜像实现，语义与逐条标量路径一致。
+    ///
+    /// 常见的同置拓扑下：一次性获取所有切换栅栏，用两条集合查询加载全部迁移/来源行，
+    /// 并复用来源 Sync 序号作为已物化的实时结果。
+    /// 远端路由以及处于活跃转发的迁移，则保留与标量路径相同的目标事务与幂等校验。
+    ///
+    /// - Parameters:
+    ///   - requests: 待镜像的请求列表，返回结果顺序与之一致。
+    ///   - routes: 各目标用户对应的用户分片路由。
+    ///   - controlDatabase: 控制面数据库连接。
+    /// - Returns: 与输入顺序对应的序号结果。
+    /// - Throws: 路由或存储失败时抛出。
     private func shadowBatch(
         requests: [V2UserShardProjectionShadowRequest],
         routes: [V2UserShardRoute],

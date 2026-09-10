@@ -4,10 +4,10 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Streams one user's complete data-plane slice between physical shards.
-/// A renewable per-user fence pauses projection/build/GC workers on both
-/// endpoints while copy and equality verification run; ordinary incremental
-/// sync rows remain available to the migration shadow-forwarder.
+/// 在物理分片之间流式迁移单个用户的完整数据面切片。
+///
+/// 迁移期间会以可续期的用户级栅栏暂停两端分片上的投影、构建与回收工作器，
+/// 同时常规增量同步行仍可供迁移影子转发器使用。
 public struct PostgresV2UserShardProjectionTransfer: V2UserShardMigrationCopying, V2UserShardMigrationVerifying, V2UserShardMigrationRetentionCleaning {
     private let source: any Database
     private let target: any Database

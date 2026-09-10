@@ -11,9 +11,10 @@ public enum V2GatewayRuntimeConfigurationError: Error, Equatable, Sendable {
     case invalid(String)
 }
 
-/// Controls whether accepted or edited message content enters the durable
-/// review pipeline. Disabling the lane leaves existing jobs untouched and
-/// deliberately does not backfill messages created while it is disabled.
+/// 控制已接受或已编辑的消息内容是否进入持久审核流水线。
+///
+/// 关闭该通道不会改动既有任务，
+/// 且刻意不会回填在关闭期间产生的消息。
 public enum V2ContentReviewMode: String, Equatable, Sendable {
     case enabled
     case disabled
@@ -33,48 +34,47 @@ public enum V2MessageProjectionReadMode: String, Equatable, Sendable {
     case shared
 }
 
-/// Selects how the fixed two-user audience of a direct message becomes
-/// durable delivery work. `preplanned` still uses the ordinary Delivery,
-/// Inbox and completion fences; it only removes the redundant outbox and
-/// membership-enumeration phases. This is deployment policy, never client
-/// input, so a rollout can be reversed without changing the wire protocol.
+/// 选择单聊消息固定的双人受众如何变成持久投递工作。
+///
+/// `preplanned` 仍使用常规的投递、收件箱与完成围栏；
+/// 它只是省去冗余的发件箱与成员枚举阶段。
+/// 这是部署策略而非客户端输入，因此灰度回滚无需改动线上协议。
 public enum V2DirectFanoutMode: String, Equatable, Sendable {
     case planner
     case preplanned
-    /// The direct room event log is the durable source of truth. Clients
-    /// recover by room cursor and foreground subscriptions receive only a
-    /// best-effort waterline hint, so no per-message user projection or
-    /// delivery lease is needed for the fixed two-user audience.
+    /// 以单聊房间事件日志作为持久事实来源。
+    ///
+    /// 客户端通过房间游标恢复，前台订阅只会收到尽力而为的水位提示，
+    /// 因此固定的双人受众无需每消息的用户投影或投递租约。
     case roomLog = "room_log"
 }
 
-/// Controls which durable command-rate fence applies to ordinary direct
-/// messages when their canonical delivery record is the room event log.
-/// This is deployment policy, never client input.
+/// 控制当普通单聊消息的规范投递记录就是房间事件日志时，适用哪一道持久命令速率围栏。
 ///
-/// `room` preserves the original per-room command window. `shardOnly` keeps
-/// the durable shard command window, gateway user/device rate limits, direct
-/// policy checks and stranger quota, but does not rewrite the otherwise idle
-/// per-room command counter for every direct message. It is intentionally
-/// valid only together with `V2DirectFanoutMode.roomLog`.
+/// 这是部署策略而非客户端输入。
+///
+/// `room` 保留原先的每房间命令窗口。
+/// `shardOnly` 仍保留持久分片命令窗口、网关用户/设备速率限制、单聊策略检查与陌生人配额，
+/// 但不会再为每条单聊消息改写本应闲置的每房间命令计数器。
+/// 它刻意只在配合 `V2DirectFanoutMode.roomLog` 时才有效。
 public enum V2DirectRoomLogAdmissionMode: String, Equatable, Sendable {
     case room
     case shardOnly = "shard_only"
 }
 
-/// Controls whether an accepted-message incremental sync body is retained in
-/// the fan-out payload table or represented by its immutable message-state
-/// reference. Readers always support both forms so this can be rolled out
-/// after every binary has the reference join and rolled back without data
-/// loss before compaction.
+/// 控制已接受消息的增量同步正文是保留在扇出载荷表中，还是由其不可变消息状态引用表示。
+///
+/// 读取方始终同时支持两种形式，
+/// 因此可以在所有二进制都具备引用 join 之后再灰度开启，并在压缩之前无损回滚。
 public enum V2FanoutPayloadWriteMode: String, Equatable, Sendable {
     case body
     case reference
 }
 
-/// Metrics are intentionally bound to a loopback-only listener. A collector
-/// must run in the same host or pod namespace; exposing these operational
-/// details through the public realtime or media listeners is forbidden.
+/// 指标刻意只绑定到 loopback 监听器。
+///
+/// 采集器必须运行在同一主机或 Pod 命名空间内；
+/// 禁止通过公开的实时或媒体监听器暴露这些运行细节。
 public struct V2MetricsListenerConfiguration: Equatable, Sendable {
     public let host: String
     public let port: Int
@@ -88,9 +88,10 @@ public struct V2MetricsListenerConfiguration: Equatable, Sendable {
     }
 }
 
-/// Deployment-only mapping from a logical bucket to a physical database. It
-/// is parsed at startup, never written into fan-out records, logs or API
-/// responses. Omitting the JSON keeps the single-bucket deployment explicit.
+/// 仅用于部署的「逻辑桶到物理数据库」映射。
+///
+/// 它在启动时解析，绝不写入扇出记录、日志或 API 响应。
+/// 省略该 JSON 会让单桶部署保持显式。
 public struct V2UserShardStorageConfiguration: Codable, Equatable, Sendable {
     public let bucket: String
     public let databaseURL: String
@@ -109,9 +110,13 @@ public struct V2UserShardStorageConfiguration: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey { case bucket; case databaseURL = "database_url"; case schema }
 
-    /// Decodes the deployment-only registry shared by gateway and operator
-    /// processes. The caller remains responsible for requiring the local
-    /// bucket appropriate to its role.
+    /// 解码网关与运维进程共享的、仅用于部署的注册表。
+    ///
+    /// 调用方仍需自行负责要求与其角色相符的本地桶。
+    ///
+    /// - Parameter rawValue: 注册表 JSON 文本。
+    /// - Returns: 解码出的存储配置列表。
+    /// - Throws: JSON 非法、为空或存在重复桶/地址时抛出。
     public static func parseRegistryJSON(_ rawValue: String) throws -> [Self] {
         guard let data = rawValue.data(using: .utf8) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_USER_SHARD_STORES_JSON")
@@ -127,11 +132,12 @@ public struct V2UserShardStorageConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-/// Deployment-only physical owner registry for room writes. A row's durable
-/// `room_shard_id` selects one entry; the registry must cover every shard that
-/// this gateway can create or serve. Several logical shards may intentionally
-/// share one database during a staged rollout, so duplicate addresses are
-/// valid while duplicate shard IDs are not.
+/// 仅用于部署的房间写入物理归属注册表。
+///
+/// 一行的持久 `room_shard_id` 会选中其中一项；
+/// 该注册表必须覆盖本网关能够创建或服务的每个分片。
+/// 在分阶段灰度期间，多个逻辑分片可以刻意共享同一个数据库，
+/// 因此重复的地址是合法的，而重复的分片 ID 不是。
 public struct V2RoomShardStorageConfiguration: Codable, Equatable, Sendable {
     public let shardID: String
     public let databaseURL: String
@@ -182,9 +188,10 @@ public struct V2RoomShardStorageConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-/// Push remains disabled until every APNs secret and topic is explicitly
-/// provisioned. The endpoint-encryption secret is required only in the process
-/// that actually resolves endpoint plaintext for a provider request.
+/// 推送运行时配置。
+///
+/// 在每组 APNs 密钥与主题都显式配置之前，推送保持关闭。
+/// 端点加密密钥只在真正为提供方请求解析端点明文的那一个进程中是必需的。
 public enum V2PushRuntimeConfiguration: Sendable {
     case disabled
     case apns(V2APNSRuntimeConfiguration)
@@ -195,8 +202,10 @@ public enum V2FanoutHintRuntimeConfiguration: Sendable {
     case nats(V2NATSFanoutHintConfiguration)
 }
 
-/// Hybrid foreground wake routing is optional for a single gateway but must
-/// use a shared broker when active viewers can be connected to other replicas.
+/// 混合前台唤醒路由配置。
+///
+/// 对单个网关它是可选的；
+/// 但当活跃观看者可能连接在其他副本上时，必须使用共享 broker。
 public enum V2GroupEventWakeRuntimeConfiguration: Sendable {
     case localOnly
     case nats(V2NATSGroupEventWakeConfiguration)
@@ -224,18 +233,20 @@ public struct V2APNSRuntimeConfiguration: Sendable {
     }
 }
 
-/// All production-affecting V2 values are explicit. There are intentionally no
-/// development defaults for credentials, frame/queue limits, or capacity
-/// policy: an incomplete deployment must fail before opening a public port.
+/// 所有会影响生产行为的 V2 取值都是显式的。
+///
+/// 对凭据、帧/队列上限或容量策略刻意不提供开发默认值：
+/// 一个不完整的部署必须在打开公开端口之前失败。
 public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databaseURL: String
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
-    /// Fluent defaults to a single PostgreSQL connection per event loop. The
-    /// gateway runs foreground commands and durable fan-out in the same
-    /// process, so deployment must size this explicitly rather than allowing a
-    /// fan-out transaction to starve sync or command work on one event loop.
+    /// 每个事件循环允许的数据库连接数。
+    ///
+    /// Fluent 默认每个事件循环只用一个 PostgreSQL 连接。
+    /// 网关在同一进程中同时运行前台命令与持久扇出，
+    /// 因此部署必须显式设定该值，而不能放任一次扇出事务在某个事件循环上饿死同步或命令工作。
     public var databaseMaxConnectionsPerEventLoop: Int {
         databasePolicy.maximumConnectionsPerEventLoop
     }
@@ -253,10 +264,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let foregroundGroupBatchDelayMilliseconds: Int
     public let foregroundGroupBatchExtensionDelayMilliseconds: Int
     public let foregroundGroupBatchExtensionMinimumEvents: Int
-    /// Group read cursors remain individually idempotent and durable, but
-    /// independent operations may share one bounded PostgreSQL transaction.
-    /// These deployment controls keep the latency/throughput trade-off
-    /// explicit instead of baking a benchmark-specific value into `main`.
+    /// 群组已读游标仍各自幂等且持久，但相互独立的操作可以共享同一个有界的 PostgreSQL 事务。
+    ///
+    /// 这些部署控制项把延迟与吞吐之间的取舍显式化，
+    /// 而不是把某个基准测试专用值硬编码进 `main`。
     public let readReceiptBatchSize: Int
     public let readReceiptBatchMaximumDelayMilliseconds: Int
     public let readReceiptBatchMaximumInFlightBatches: Int
@@ -265,52 +276,54 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let preparedGroupEventPageCacheMaximumBytes: Int
     public let preparedGroupEventPageCacheShardCount: Int
     public let connectionLimits: V2ConnectionLimits
-    /// Hard process-local admission ceiling, including unauthenticated TLS
-    /// sockets. This bounds per-connection queues, actors and TLS state.
+    /// 进程本地准入的硬上限，包含尚未认证的 TLS 套接字。
+    ///
+    /// 它为每连接队列、actor 与 TLS 状态设界。
     public let maximumConnections: Int
-    /// Kernel listen queue requested by the TLS listener. Keeping this
-    /// explicit avoids SwiftNIO's deliberately conservative default of 128,
-    /// which is too small for coordinated reconnects on a high-online IM
-    /// gateway. The effective value is still capped by the host's somaxconn.
+    /// TLS 监听器请求的内核监听队列长度。
+    ///
+    /// 显式设置可避免 SwiftNIO 那个刻意保守的默认值 128——
+    /// 对于高在线 IM 网关上的集中重连，128 太小。
+    /// 实际生效值仍受宿主机的 somaxconn 限制。
     public let listenBacklog: Int
-    /// Maximum sockets accepted from one listener-read readiness event.
-    /// SwiftNIO defaults to four, which is intentionally conservative but
-    /// leaves a large listen queue draining too slowly during reconnects.
+    /// 单次监听器可读就绪事件中最多接受的套接字数。
+    ///
+    /// SwiftNIO 默认是 4，刻意保守，
+    /// 但会在重连期间让一个较长的监听队列排空得过慢。
     public let acceptBatchSize: Int
     public let authenticatedConnectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     public let livePresenceRenewalBatchSize: Int
     public let livePresenceRenewalMaximumDelayMilliseconds: Int
     public let commandRateLimitPolicy: V2GatewayCommandRateLimitPolicy
     public let maximumQueuedInboundBytes: Int
-    /// Complements the byte bound so a stream of one-byte TCP fragments cannot
-    /// create an unbounded number of queued `Data` allocations.
+    /// 与字节上限互补，使一串单字节 TCP 分片不会制造出无界数量的排队 `Data` 分配。
     public let maximumQueuedInboundChunks: Int
-    /// Absolute time from accepted channel to authenticated session. Unlike
-    /// idle timeout it cannot be extended by trickling bytes.
+    /// 从接受通道到会话完成认证的绝对时限。
+    ///
+    /// 与空闲超时不同，它无法通过挤牙膏式地发送字节来延长。
     public let authenticationTimeoutMilliseconds: Int
     public let idleTimeoutMilliseconds: Int
-    /// Maximum cooperative drain time after the public listener has closed.
-    /// A hard deadline prevents a database operation that has not observed
-    /// cancellation from exceeding the container termination grace period.
+    /// 公开监听器关闭之后允许的最大协作排空时间。
+    ///
+    /// 硬性截止时间可防止某个未观察到取消的数据库操作超出容器终止宽限期。
     public let shutdownGraceMilliseconds: Int
     public let capabilityProfile: String
     public let workerBatchSize: Int
     public let workerPollIntervalMilliseconds: Int
-    /// Independent projection claim loops per unique user schema. Multiple
-    /// schemas may share one physical database pool; the startup connection
-    /// budget accounts for every schema's workers plus its snapshot builder.
-    /// The checkpoint `SKIP LOCKED` fence preserves one ordered stream per user.
+    /// 每个唯一用户 schema 各自的独立投影认领循环数量。
+    ///
+    /// 多个 schema 可以共享同一个物理数据库连接池；
+    /// 启动时的连接预算会为每个 schema 的工作者及其快照构建器计入开销。
+    /// 检查点的 `SKIP LOCKED` 围栏为每个用户保持一条有序流。
     public let userProjectionConcurrency: Int
-    /// Busy projector transactions run back-to-back, but these two independent
-    /// budgets force a cooperative executor yield under a sustained backlog.
+    /// 繁忙的投影事务会背靠背执行，
+    /// 但这两个独立预算会在持续积压时强制协作式地让出执行器。
     public let userProjectionMaximumConsecutiveBusyPasses: Int
     public let userProjectionBusyDrainBudgetMilliseconds: Int
-    /// Process-local database admission bounds reject overload before a
-    /// request spends the much longer Fluent pool timeout waiting for a slot.
-    /// Durable message writes, control-plane writes, and interactive reads
-    /// reserve capacity independently. Their sum is validated against the
-    /// same physical foreground pool; this is admission isolation, not
-    /// additional database connections.
+    /// 进程本地数据库准入上限会在请求花费漫长得多的 Fluent 连接池超时等待槽位之前就拒绝过载。
+    ///
+    /// 持久消息写入、控制面写入与交互式读取各自独立预留容量。
+    /// 它们之和会针对同一个物理前台连接池进行校验；这是准入隔离，而不是额外的数据库连接。
     public let foregroundWriteDatabaseWorkLimit: Int
     public let foregroundControlWriteDatabaseWorkLimit: Int
     public let interactiveReadDatabaseWorkLimit: Int
@@ -321,163 +334,173 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let syncDatabaseWorkMaximumQueued: Int
     public let databaseWorkAdmissionTimeoutMilliseconds: Int
     public let databaseWorkAdmissionEnabled: Bool
-    /// Best-effort sync hints are coalesced by user; cursor pull remains the
-    /// authoritative recovery mechanism.
+    /// 尽力而为的同步提示按用户合并；游标拉取仍是权威恢复机制。
     public let syncWakeCoalescingMilliseconds: Int
     public let syncWakeMaximumPendingUsers: Int
     public let syncWakeDeliveryConcurrency: Int
     public let syncWakeCoalescingEnabled: Bool
     public let acceptedMessageProjectionBatchEnabled: Bool
-    /// Successful command logs are sampled independently from complete
-    /// Prometheus accounting. Slow, rejected and failed command logs retain a
-    /// small per-result burst but are bounded so overload cannot turn stdout
-    /// formatting into a positive feedback loop.
+    /// 成功命令日志独立于完整的 Prometheus 记账进行采样。
+    ///
+    /// 慢命令、被拒绝命令与失败命令的日志会为每种结果保留一小的突发量，
+    /// 但整体有界，使过载不会把 stdout 格式化变成正反馈循环。
     public let commandSuccessLogSamplePermille: Int
     public let commandSlowLogThresholdMilliseconds: Int
     public let commandDiagnosticLogMaximumPerSecond: Int
-    /// Maximum number of co-located target projections committed in one
-    /// database transaction. Keeping this small bounds rollback work, lock
-    /// hold time and WAL burst size.
+    /// 单个数据库事务中最多提交的同置目标投影数量。
+    ///
+    /// 保持较小的值可以约束回滚工作量、锁持有时间与 WAL 突发大小。
     public let fanoutDeliveryCommitBatchSize: Int
-    /// Maximum number of remote-user-shard effects a cross-store worker
-    /// projects before its separate control-store acknowledgement. This is
-    /// intentionally distinct from the co-located transaction boundary:
-    /// remote delivery pays one target and one control database round-trip per
-    /// batch, so the validated optimum is larger without widening the
-    /// co-located lock/WAL critical section.
+    /// 跨存储工作者在单独进行控制存储确认之前，最多投影的远端用户分片效果数量。
+    ///
+    /// 它刻意与同置事务边界不同：
+    /// 远端投递每个批次要付一次目标库与一次控制库的往返，
+    /// 因此经验证的最优值更大，同时又不加宽同置路径的锁/WAL 临界区。
     public let crossStoreFanoutDeliveryCommitBatchSize: Int
-    /// Maximum same-claim remote commit batches in flight for one physical
-    /// user-shard bucket. This overlaps independent target/control database
-    /// transactions but is intentionally capped below general worker
-    /// concurrency to avoid fragmenting claim ownership or amplifying locks.
+    /// 针对单个物理用户分片桶，同一认领下最多同时在途的远端提交批次数。
+    ///
+    /// 它会让彼此独立的目标库/控制库事务重叠，
+    /// 但刻意限制在通用工作者并发之下，以避免碎片化认领归属或放大锁竞争。
     public let crossStoreFanoutDeliveryCommitConcurrency: Int
-    /// Maximum number of durable delivery leases one delivery worker claims in
-    /// one pass. This is intentionally separate from the generic worker
-    /// batch, which controls outbox and planning work as well.
+    /// 单个投递工作者在单轮中最多认领的持久投递租约数量。
+    ///
+    /// 它刻意与同时管控发件箱与规划工作的通用工作者批次区分开。
     public let fanoutDeliveryClaimBatchSize: Int
-    /// Number of full fresh-lane claim passes before a recovery-first pass.
-    /// This is explicit deployment policy because it bounds recovery latency
-    /// under an indefinitely busy new-message stream.
+    /// 在插入一轮以恢复为先的认领之前，先执行多少轮完整的新鲜通道认领。
+    ///
+    /// 这是显式的部署策略，因为它界定了在新消息流无限繁忙时的恢复延迟上限。
     public let fanoutFreshBurstPasses: Int
     public let durableRetryPolicy: V2DurableRetryPolicy
     public let fanoutHint: V2FanoutHintRuntimeConfiguration
     public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
-    /// Cadence of the durable Hybrid-room metadata wake. Full foreground
-    /// payloads use their independent low-latency path; this coalesced outbox
-    /// is a recovery hint and deliberately trails that path so it cannot make
-    /// every active client repair a transient cross-Gateway publication gap.
+    /// 持久混合群组元数据唤醒的节律。
+    ///
+    /// 完整前台载荷走各自独立的低延迟路径；
+    /// 这个合并发件箱是恢复提示，刻意落后于该路径，
+    /// 以免让每个活跃客户端都去修复一次短暂的跨 Gateway 发布缺口。
     public let groupEventWakePollIntervalMilliseconds: Int
     public let maintenancePollIntervalMilliseconds: Int
-    /// High-volume retention tables use a separate backlog-drain loop. Busy
-    /// passes run back-to-back within these cooperative budgets; an empty pass
-    /// falls back to the independently configured idle poll interval.
+    /// 高吞吐的保留表使用单独的积压排空循环。
+    ///
+    /// 繁忙轮次会在这些协作预算内背靠背运行；
+    /// 空轮次则回退到独立配置的闲时轮询间隔。
     public let backlogMaintenanceIdlePollIntervalMilliseconds: Int
     public let backlogMaintenanceMaximumConsecutiveBusyPasses: Int
     public let backlogMaintenanceBusyDrainBudgetMilliseconds: Int
     public let mediaWithdrawnRetentionSeconds: Int
-    /// Server replay results outlive the first-party client retry window.
-    /// Deployment may retain them longer, but never shorten this protocol
-    /// fence or a delayed client could execute an already-completed command.
+    /// 服务端重放结果的保留时长会超过第一方客户端的重试窗口。
+    ///
+    /// 部署可以延长保留时间，但绝不能缩短这道协议围栏，
+    /// 否则一个延迟的客户端可能会执行一条已完成的命令。
     public let idempotencyRetentionSeconds: Int
     public let messageProjectionWriteMode: V2MessageProjectionWriteMode
     public let messageProjectionReadMode: V2MessageProjectionReadMode
     public let directFanoutMode: V2DirectFanoutMode
-    /// A direct room-log-only deployment fence. The default retains exact
-    /// legacy room admission semantics.
+    /// 仅用于 direct-room-log 部署的一道围栏。
+    ///
+    /// 默认值保留与旧版完全一致的房间准入语义。
     public let directRoomLogAdmissionMode: V2DirectRoomLogAdmissionMode
-    /// Zero preserves exact per-message shard admission. A positive value is
-    /// an explicit, direct-room-log-only batch size for pre-charged command
-    /// credits; it is never enabled by a client request.
+    /// 取零表示保留精确的每消息分片准入。
+    ///
+    /// 正值是一个显式的、仅用于 direct-room-log 的预扣命令额度批大小；
+    /// 它绝不会由客户端请求开启。
     public let directRoomLogShardAdmissionCreditBatchSize: Int
-    /// Zero retains an exact room-admission update for every accepted direct
-    /// command. A positive value pre-charges the existing per-room command
-    /// window in bounded batches, preserving the room limit while avoiding a
-    /// `room_admission` lock/update on every eligible micro-batch item.
+    /// 取零表示为每条已接受单聊命令保留一次精确的房间准入更新。
+    ///
+    /// 正值会以有界批次预扣既有的每房间命令窗口，
+    /// 在保留房间上限的同时，避免对每个符合条件的微批条目都做一次 `room_admission` 锁/更新。
     public let directRoomLogRoomAdmissionCreditBatchSize: Int
-    /// Zero keeps direct room-log appends one command per transaction.  A
-    /// positive value enables only the deliberately narrow, ordered plain
-    /// direct-message micro-batch; non-eligible commands transparently use
-    /// the established single-command write path.
+    /// 取零表示单聊房间日志追加保持每条命令一个事务。
+    ///
+    /// 正值只开启那条刻意收窄的、有序的普通单聊消息微批；
+    /// 不符合条件的命令会透明地走既有的单命令写入路径。
     public let directRoomLogAppendBatchSize: Int
-    /// Bounded number of append micro-batches that may execute concurrently.
-    /// The default preserves the original eight-batch deployment behavior;
-    /// a positive override is an explicitly measured throughput experiment,
-    /// never a client-controlled concurrency setting.
+    /// 可并发执行的追加微批数量上限。
+    ///
+    /// 默认值保留原先的八批部署行为；
+    /// 正值覆盖是一次经过明确测量的吞吐实验，绝不是客户端可控的并发设置。
     public let directRoomLogAppendBatchMaximumInFlightBatches: Int
-    /// Maximum direct append requests retained before they are assigned to a
-    /// durable micro-batch. This is deliberately independent of the database
-    /// work queue: one queued database operation may represent many append
-    /// requests, so reusing that operation count as a request count rejects
-    /// otherwise bounded traffic bursts prematurely.
+    /// 在分配给持久微批之前最多保留的单聊追加请求数。
+    ///
+    /// 它刻意独立于数据库工作队列：一个排队的数据库操作可能代表许多追加请求，
+    /// 因此把操作数当作请求数复用会过早拒绝本应有界的流量突发。
     public let directRoomLogAppendMaximumPendingRequests: Int
-    /// Stable room-keyed scheduling lanes. The total in-flight and pending
-    /// budgets are shared across lanes instead of multiplied by this value.
+    /// 稳定的、按房间建键的调度通道数。
+    ///
+    /// 在途与待处理预算在各通道之间共享，而不是乘以该值。
     public let directRoomLogAppendLaneCount: Int
-    /// Maximum extra server-side queueing time for an append micro-batch.
-    /// This has meaning only when `directRoomLogAppendBatchSize` is positive.
+    /// 追加微批在服务端额外等待的最长时间。
+    ///
+    /// 只有当 `directRoomLogAppendBatchSize` 为正时才有意义。
     public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
-    /// Optional sustained-arrival policy for append micro-batches. The base
-    /// delay remains the interactive default; this longer cap is selected
-    /// only after the bounded detector sees enough arrivals in its configured
-    /// monotonic observation window.
+    /// 追加微批的可选持续到达策略。
+    ///
+    /// 基础延迟仍为交互式默认值；
+    /// 只有当有界检测器在其配置的单调观察窗口内看到足够多的到达之后，才会选用这个更长的上限。
     public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
     public let directRoomLogAppendBatchHighActivityMinimumRequests: Int?
     public let directRoomLogAppendBatchHighActivityWindowMilliseconds: Int?
-    /// Bounded LRU capacity for stable direct-message policy snapshots. The
-    /// cache is only an acceleration hint; durable revision fences remain in
-    /// every PostgreSQL append.
+    /// 稳定单聊策略快照的有界 LRU 容量。
+    ///
+    /// 该缓存只是加速提示；每次 PostgreSQL 追加仍保留持久的修订围栏。
     public let directSendPolicyCacheMaximumEntries: Int
-    /// Bounded LRU capacity for conditional room-log append snapshots. These
-    /// entries carry only revision-fenced hints; PostgreSQL remains the cursor,
-    /// membership and authorization authority for every accepted message.
+    /// 条件式房间日志追加快照的有界 LRU 容量。
+    ///
+    /// 这些条目只携带受修订围栏保护的提示；
+    /// 对每条已接受消息而言，PostgreSQL 仍是游标、成员与授权的权威。
     public let directRoomLogFastAppendCacheMaximumEntries: Int
-    /// Lifetime for a revision-fenced conditional append hint. A stale entry
-    /// can only cause PostgreSQL to reject the fast attempt and fall back; it
-    /// can never authorize a message, so this may safely span sparse active
-    /// room revisit intervals while remaining bounded by the LRU capacity.
+    /// 受修订围栏保护的条件式追加提示的存活时长。
+    ///
+    /// 过期条目只会让 PostgreSQL 拒绝该快速尝试并回退；它永远无法授权消息，
+    /// 因此该时长可以安全地覆盖稀疏活跃房间的再次访问间隔，同时仍受 LRU 容量约束。
     public let directRoomLogFastAppendCacheLifetimeSeconds: Int
-    /// Zero disables the process-local direct event cache. Cached entries are
-    /// never authorization state and are always validated against PostgreSQL
-    /// before being served.
+    /// 取零会关闭进程本地单聊事件缓存。
+    ///
+    /// 缓存条目永远不是授权状态，在被提供出去之前总会先经 PostgreSQL 校验。
     public let directRoomLogEventCacheMaximumEntries: Int
     public let directRoomLogEventCacheMaximumBytes: Int
     public let directRoomLogEventCacheMaximumEntriesPerRoom: Int
     public let directRoomLogEventCacheShardCount: Int
     public let directRoomLogEventCacheMaximumPendingWrites: Int
     public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
-    /// Unreferenced immutable revisions remain recoverable for this grace.
-    /// The default is seven days; deployments may lengthen it independently
-    /// of user projection MVCC retention.
+    /// 未被引用的不可变修订在该宽限期内仍可恢复。
+    ///
+    /// 默认是七天；部署可以独立于用户投影的 MVCC 保留策略单独延长它。
     public let messageProjectionStateRetentionSeconds: Int
     public let metrics: V2MetricsListenerConfiguration
     public let metricsMinimumRefreshIntervalMilliseconds: Int
     public let metricsRefreshTimeoutMilliseconds: Int
     public let gatewayNodeID: String
-    /// The explicit deployment topology fence for process-local wake routing.
-    /// All replicas of one logical deployment must receive the same value.
+    /// 用于进程本地唤醒路由的显式部署拓扑围栏。
+    ///
+    /// 同一逻辑部署的所有副本必须收到相同的值。
     public let gatewayReplicaCount: Int
     public let userShardRoute: V2UserShardRoute
     public let userShardStorage: [V2UserShardStorageConfiguration]
-    /// Physical owner locations for room write shards. These are deployment
-    /// facts; existing rooms keep their persisted logical owner.
+    /// 房间写入分片的物理归属位置。
+    ///
+    /// 这些是部署事实；既有房间保留其已持久化的逻辑归属。
     public let roomShardStorage: [V2RoomShardStorageConfiguration]
     public let directRoomShardID: String
-    /// Parsed at process start so an invalid room-owner route fails readiness
-    /// rather than the first direct-room creation request.
+    /// 单聊房间分片路由器。
+    ///
+    /// 它在进程启动时解析，使非法的房间归属路由在就绪阶段就失败，
+    /// 而不是等到首个建群/建单聊请求才暴露。
     public let directRoomShardRouter: V2DirectRoomShardRouter
-    /// Candidate owners for newly-created groups. Existing rooms always use
-    /// their durable control-plane route and are never re-hashed from this
-    /// deployment list.
+    /// 新建群组的候选归属。
+    ///
+    /// 既有房间始终使用其持久的控制面路由，绝不会根据这份部署列表重新哈希。
     public let groupRoomShardIDs: [String]
-    /// Compatibility value for service APIs whose routed store ignores the
-    /// proposed owner. A single-owner deployment retains its exact behavior.
+    /// 供那些其路由存储会忽略所提议归属的服务 API 使用的兼容值。
+    ///
+    /// 单归属部署保留其完全相同的行为。
     public var groupRoomShardID: String { groupRoomShardIDs[0] }
     public let strangerMessagePolicy: V2StrangerMessagePolicy
     public let push: V2PushRuntimeConfiguration
-    /// The mode controls durable job creation and worker startup. A separately
-    /// authenticated audit principal is additionally required to run the
-    /// worker. Terms are deployment policy, never client input; richer
-    /// AI/OCR providers use the same worker boundary.
+    /// 该模式控制持久任务的创建与工作者的启动。
+    ///
+    /// 运行工作者还需要一个单独认证的审核主体。
+    /// 词表属于部署策略而非客户端输入；更丰富的 AI/OCR 提供方使用同一个工作者边界。
     public let contentReviewMode: V2ContentReviewMode
     public let contentReviewSafetyActorUserID: UserID?
     public let contentReviewViolationTerms: [String]
@@ -1506,9 +1529,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         return Int64(result)
     }
 
-    /// The durable revocation cursor is keyed by this value. Restrict it to a
-    /// bounded deployment identifier so it cannot turn an environment typo
-    /// into unbounded cursor-table growth or unsafe SQL/log metadata.
+    /// 读取并校验网关节点 ID。
+    ///
+    /// 持久吊销游标以该值为键。因此把它限制为一个有界的部署标识符，
+    /// 使一次环境变量拼写错误不会演变成游标表无界增长或不安全的 SQL/日志元数据。
+    ///
+    /// - Parameter environment: 运行时环境变量来源。
+    /// - Returns: 合法且已规范化的节点 ID。
+    /// - Throws: 变量缺失或格式非法时抛出。
     private static func gatewayNodeID(environment: any V2RuntimeEnvironment) throws -> String {
         let value = try required("IM_V2_GATEWAY_NODE_ID", environment: environment)
         guard value.range(of: "^[A-Za-z0-9._:-]{1,128}$", options: .regularExpression) != nil else {

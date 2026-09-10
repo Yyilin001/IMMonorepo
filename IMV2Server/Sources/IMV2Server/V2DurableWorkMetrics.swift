@@ -3,92 +3,148 @@ import Foundation
 import SQLKit
 import Synchronization
 
-/// A private, aggregate-only view of durable work waiting behind the gateway.
-/// It deliberately contains no identifiers, shard labels, provider names, or
-/// payload-derived fields, so it is safe to render from the loopback-only
-/// Prometheus listener.
+/// 网关背后待处理持久化工作的私有聚合视图。
+///
+/// 它刻意不包含任何标识、分片标签、提供方名称或由载荷派生的字段，
+/// 因此可以安全地从仅回环可达的 Prometheus 监听端点输出。
 public protocol V2DurableWorkMetricsSource: Sendable {
+    /// 读取当前持久化工作指标快照。
+    ///
+    /// - Returns: 聚合后的指标快照。
     func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot
 }
 
+/// 持久化工作指标快照。
 public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
+    /// 本次快照是否由数据源成功产出。
     public private(set) var isAvailable: Bool
-    /// A failed/timed-out refresh may safely expose the last complete global
-    /// snapshot, but it must never present that data as current.
+    /// 本次快照是否来自上一次成功的完整结果。
+    ///
+    /// 刷新失败或超时时可以安全地暴露上一次完整的全局快照，
+    /// 但绝不能把这些数据当作当前值呈现。
     public private(set) var servedFromLastKnownGood: Bool
+    /// 距上次成功刷新经过的秒数。
     public private(set) var lastSuccessfulRefreshAgeSeconds: Int
+    /// 处于待处理状态的房间发件箱行数。
     public let readyRoomOutboxRows: Int
+    /// 已被认领的房间发件箱行数。
     public let leasedRoomOutboxRows: Int
+    /// 已安排重试的房间发件箱行数。
     public let scheduledRoomOutboxRows: Int
+    /// 已暂停的房间发件箱行数。
     public let pausedRoomOutboxRows: Int
+    /// 待处理的私聊资料更新数量。
     public let readyDirectProfileUpdates: Int
+    /// 已被认领的私聊资料更新数量。
     public let leasedDirectProfileUpdates: Int
+    /// 待处理的已读回执偏好传播数量。
     public let readyReadReceiptPreferencePropagations: Int
+    /// 已被认领的已读回执偏好传播数量。
     public let leasedReadReceiptPreferencePropagations: Int
+    /// 已安排重试的已读回执偏好传播数量。
     public let scheduledReadReceiptPreferencePropagations: Int
+    /// 已暂停的已读回执偏好传播数量。
     public let pausedReadReceiptPreferencePropagations: Int
+    /// 仍未关闭的扇出计划数量。
     public let openFanoutPlans: Int
+    /// 待处理的扇出投递数量。
     public let readyFanoutDeliveries: Int
+    /// 已被认领的扇出投递数量。
     public let leasedFanoutDeliveries: Int
+    /// 已安排重试的扇出投递数量。
     public let scheduledFanoutDeliveries: Int
+    /// 已暂停的扇出投递数量。
     public let pausedFanoutDeliveries: Int
-    /// Projection phase A is complete; admission capacity still awaits the
-    /// independent phase-B release worker.
+    /// 投影阶段已完成、仍在等待独立释放工作器回收容量的扇出完成单元数量。
     public let terminalFanoutCompletionUnits: Int
+    /// 上述完成单元中最长的滞留秒数。
     public let oldestTerminalFanoutCompletionAgeSeconds: Int
+    /// 待处理的内容审核任务数量。
     public let readyContentReviews: Int
+    /// 已被认领的内容审核任务数量。
     public let leasedContentReviews: Int
+    /// 已安排重试的内容审核任务数量。
     public let scheduledContentReviews: Int
+    /// 已暂停的内容审核任务数量。
     public let pausedContentReviews: Int
+    /// 待处理的媒体扫描任务数量。
     public let readyMediaScans: Int
+    /// 已被认领的媒体扫描任务数量。
     public let leasedMediaScans: Int
+    /// 已安排重试的媒体扫描任务数量。
     public let scheduledMediaScans: Int
+    /// 已暂停的媒体扫描任务数量。
     public let pausedMediaScans: Int
+    /// 待处理的媒体清理任务数量。
     public let readyMediaPurges: Int
+    /// 已被认领的媒体清理任务数量。
     public let leasedMediaPurges: Int
+    /// 已安排重试的媒体清理任务数量。
     public let scheduledMediaPurges: Int
+    /// 已暂停的媒体清理任务数量。
     public let pausedMediaPurges: Int
-    /// PostgreSQL's cheap planner-statistics estimate. This intentionally
-    /// avoids an exact COUNT(*) scan of the append-heavy retained sync log on
-    /// every Prometheus scrape.
+    /// 用户同步日志行数的 PostgreSQL 规划器估算值。
+    ///
+    /// 使用估算可避免在每次 Prometheus 抓取时对高写入的保留同步日志执行精确 `COUNT(*)` 扫描。
     public let userSyncLogEstimatedRows: Int
-    /// Heap plus indexes and TOAST bytes retained by user_sync_log. Unlike the
-    /// row estimate this is an exact relation-size lookup, not a table scan.
+    /// 用户同步日志保留的堆、索引与 TOAST 总字节数。
+    ///
+    /// 与行数估算不同，这是一次精确的关系大小查询，而不是全表扫描。
     public let userSyncLogRelationBytes: Int
-    /// Stable control-projection idempotency results. These are intentionally
-    /// separate from the compactable ordered log and must be capacity-planned
-    /// with the operation ledgers that retain the same semantic retries.
+    /// 稳定的控制面投影幂等结果行数估算。
+    ///
+    /// 这些记录与可压缩的有序日志刻意分开保存，容量规划时必须与承载同一语义重试的
+    /// 操作台账一并考虑。
     public let userProjectionEffectsEstimatedRows: Int
+    /// 控制面投影幂等结果占用的关系字节数。
     public let userProjectionEffectsRelationBytes: Int
+    /// 待处理的用户投影数量。
     public let readyUserProjections: Int
+    /// 已安排重试的用户投影数量。
     public let scheduledUserProjections: Int
+    /// 已暂停的用户投影数量。
     public let pausedUserProjections: Int
+    /// 当前最大的用户投影滞后量。
     public let maximumUserProjectionLag: Int
+    /// 正在构建的快照产物数量。
     public let buildingSnapshotArtifacts: Int
+    /// 构建失败的快照产物数量。
     public let failedSnapshotArtifacts: Int
+    /// 构建中快照产物的最长存在秒数。
     public let oldestBuildingSnapshotAgeSeconds: Int
+    /// 投影版本回收的待处理行数估算。
     public let projectionVersionGCBacklogEstimatedRows: Int
-    /// Planner estimates are used so a scrape never scans the largest table.
+    /// 消息投影状态行数估算；使用规划器估算可避免抓取时扫描最大的表。
     public let messageProjectionStatesEstimatedRows: Int
+    /// 消息投影状态占用的关系字节数。
     public let messageProjectionStatesRelationBytes: Int
+    /// 已建立状态引用的消息投影行数估算。
     public let messageProjectionReferenceEstimatedRows: Int
+    /// 仍待回填状态引用的消息投影行数估算。
     public let messageProjectionBackfillEstimatedRows: Int
+    /// 仍以内联方式保存载荷的消息投影行数估算。
     public let messageProjectionInlinePayloadEstimatedRows: Int
-    /// Accepted revision-1 state bodies that can still be replaced by an
-    /// exact co-located immutable room-event reference.
+    /// 仍可被同库不可变房间事件精确引用替换的修订 1 已接受状态正文行数估算。
     public let messageProjectionStateInlineBodyEstimatedRows: Int
+    /// 尚未压缩的投影记录数量。
     public let uncompactedProjectedRecords: Int
+    /// 全部设备上仍未确认的同步记录数量。
     public let pendingSyncRecordsAcrossDevices: Int
+    /// 处于重置待处理状态的设备数量。
     public let resetPendingDevices: Int
+    /// 待发送的推送唤醒数量。
     public let readyPushWakes: Int
+    /// 已被认领的推送唤醒数量。
     public let leasedPushWakes: Int
+    /// 已被终态抑制的推送唤醒数量。
     public let suppressedPushWakes: Int
-    /// Outstanding durable account/device revocations for the gateway node
-    /// serving this private scrape. It intentionally has no node/device/user
-    /// label, so the scrape cannot disclose topology or identity.
+    /// 服务本次私有抓取的网关节点上尚未处理的账号与设备吊销事件数量。
+    ///
+    /// 该指标刻意不带节点、设备或用户标签，因此抓取结果不会泄漏拓扑或身份信息。
     public let pendingDeviceRevocationEvents: Int
-    /// Cluster-global storage cleanup backlog. This is separate from socket
-    /// closure because a remote shard outage can delay only reclamation.
+    /// 集群级的存储清理积压。
+    ///
+    /// 它与套接字关闭分开统计：远端分片不可用只会延迟存储回收，不会延迟连接关闭。
     public let pendingRevokedDeviceProjectionCleanupEvents: Int
 
     public init(
@@ -229,10 +285,10 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     }
 }
 
-/// Coalesces concurrent Prometheus scrapes and bounds how often the expensive
-/// exact PostgreSQL aggregate is evaluated. Availability failures are cached
-/// for the same short interval so an outage cannot turn scraper retries into a
-/// database reconnect storm.
+/// 合并并发的 Prometheus 抓取，并限制昂贵精确聚合的评估频率。
+///
+/// 可用性失败也会在同一短窗口内被缓存，使一次故障不会因抓取端重试而演变成
+/// 数据库重连风暴。
 public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let source: any V2DurableWorkMetricsSource
     private let minimumRefreshInterval: TimeInterval
@@ -328,11 +384,11 @@ private enum V2DurableWorkMetricsRefreshResult: Sendable {
     case timedOut
 }
 
-/// This is intentionally an unstructured race. A structured task group waits
-/// for a non-cooperative database child while leaving scope and would recreate
-/// the `/metrics` hang this boundary exists to prevent. The losing task is
-/// cancelled; PostgreSQL's connection-level statement timeout provides the
-/// independent hard stop if a driver does not promptly observe cancellation.
+/// 这里刻意使用非结构化竞速。
+///
+/// 结构化任务组在离开作用域前会等待不配合取消的数据库子任务，
+/// 从而重现本边界试图避免的 `/metrics` 挂起。竞速失败的一方会被取消；
+/// 若驱动未及时感知取消，PostgreSQL 的连接级语句超时仍提供独立硬停。
 private func v2LoadDurableWorkMetrics(
     source: any V2DurableWorkMetricsSource,
     timeout: Duration
@@ -395,12 +451,15 @@ private final class V2DurableWorkMetricsRefreshRace: Sendable {
     }
 }
 
-/// Combines the control-plane snapshot with one snapshot for every distinct
-/// physical user store. Sources are queried concurrently; a partial result is
-/// never presented as a healthy global view.
+/// 把控制面快照与每个不同物理用户存储的一份快照合并起来。
+///
+/// 各数据源会并发查询；部分成功的结果绝不会被当作健康的全局视图呈现。
 public struct V2AggregateDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let sources: [any V2DurableWorkMetricsSource]
 
+    /// 组合多个指标来源。
+    ///
+    /// - Parameter sources: 待聚合的指标来源列表。
     public init(sources: [any V2DurableWorkMetricsSource]) {
         precondition(!sources.isEmpty)
         self.sources = sources
@@ -423,17 +482,25 @@ public struct V2AggregateDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     }
 }
 
-/// The snapshot is evaluated at scrape time rather than reconstructed from
-/// worker counters. This preserves visibility across process restarts and
-/// allows alerts to distinguish an idle worker from a growing durable backlog.
+/// PostgreSQL 侧的持久化工作指标来源。
+///
+/// 快照在抓取时直接查询，而不是由工作器计数器重建：这样进程重启后依然可见，
+/// 告警也能区分「工作器空闲」与「持久化积压持续增长」。
 public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let database: any Database
     private let deliveryBucket: String?
     private let gatewayNodeID: String?
     private let includesUserShardMetrics: Bool
 
-    /// `nil` is the runtime's all-configured-buckets view. The bucket-scoped
-    /// form is retained for focused tests and partitioned deployments.
+    /// 构造指标来源。
+    ///
+    /// - Parameters:
+    ///   - database: 执行指标查询的数据库。
+    ///   - deliveryBucket: 投递桶过滤；为 `nil` 表示运行时视角下的全部已配置桶。
+    ///   - gatewayNodeID: 网关节点标识，用于统计本节点待处理的吊销事件。
+    ///   - includesUserShardMetrics: 是否一并统计用户分片指标。
+    ///
+    /// 桶级形式保留给针对性测试与分区部署使用。
     public init(
         database: any Database,
         deliveryBucket: String? = nil,
@@ -446,9 +513,13 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         self.includesUserShardMetrics = includesUserShardMetrics
     }
 
-    /// Exposes the fallible database boundary for focused integration tests.
-    /// The metrics route must use `durableWorkMetricsSnapshot()` instead so a
-    /// failed scrape remains observable without replacing the whole endpoint.
+    /// 暴露可失败的数据库边界，供针对性集成测试使用。
+    ///
+    /// 指标路由必须改用 `durableWorkMetricsSnapshot()`，
+    /// 使抓取失败仍然可观测，而不会让整个端点随之失效。
+    ///
+    /// - Returns: 本次查询到的指标快照。
+    /// - Throws: 连接不支持 SQL 或查询失败时抛出。
     public func loadDurableWorkMetrics() async throws -> V2DurableWorkMetricsSnapshot {
         guard let sql = database as? any SQLDatabase else {
             throw V2DurableWorkMetricsError.sqlUnavailable
@@ -799,9 +870,9 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     }
 }
 
-/// Lightweight, schema-aware metrics for a single physical user store. It
-/// does not read control-plane work tables, so several stores can be safely
-/// aggregated without double-counting the control database.
+/// 单个物理用户存储的轻量 schema 感知指标。
+///
+/// 它不读取控制面工作表，因此多个存储可以安全聚合，而不会把控制库重复计数。
 public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let database: any Database
     private let schema: String

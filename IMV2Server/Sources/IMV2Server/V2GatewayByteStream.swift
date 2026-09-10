@@ -4,15 +4,16 @@ import IMV2Core
 import NIOCore
 import Synchronization
 
-/// One immutable server-push frame shared by every authorized local recipient
-/// that negotiated the same protocol version. The bytes carry no
-/// connection-specific state: audience selection and transport lifecycle
-/// checks remain outside this value.
+/// 一份不可变的服务端推送帧，由协商到相同协议版本的每个已授权本地接收者共享。
+///
+/// 这些字节不携带任何连接特定状态：
+/// 受众选择与传输生命周期校验都留在这个值之外。
 struct V2PreparedGatewayGroupEventAvailable: Sendable {
     let protocolVersion: UInt8
-    /// `ByteBuffer` is a COW, `Sendable` value. One prepared group frame can
-    /// therefore share its immutable storage across every authorized channel;
-    /// a channel pipeline that needs to mutate its copy detaches normally.
+    /// `ByteBuffer` 是写时复制的、`Sendable` 的值。
+    ///
+    /// 因此一份已准备的群组帧可以把自己的不可变存储共享给每个已授权通道；
+    /// 需要修改自身副本的通道流水线会照常分离。
     private let uncompressedBytes: ByteBuffer
     private let compressedBytes: ByteBuffer?
 
@@ -67,9 +68,18 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
         }
     }
 
-    /// Encodes one room-local ordered group batch once. No connection-specific
-    /// field is present, so the exact same immutable bytes may be enqueued on
-    /// every authorized stream.
+    /// 对单个房间本地的有序群组批次做一次编码。
+    ///
+    /// 其中不存在连接特定字段，因此完全相同的不可变字节可以入队到每个已授权流。
+    ///
+    /// - Parameters:
+    ///   - groupEvents: 本批按房间顺序排列的群组实时事件。
+    ///   - frameLimits: 帧编解码限制。
+    ///   - protocolVersion: 目标协议版本，默认当前版本。
+    ///   - compression: 已协商的帧压缩方式；`nil` 表示不压缩。
+    ///   - maximumUncompressedPayloadBytes: 允许的未压缩载荷上限（字节）。
+    ///   - compressionThresholdBytes: 启用压缩的字节阈值。
+    ///   - maximumExpansionRatio: 允许的最大膨胀比。
     init?(
         groupEvents: [V2DirectRoomLiveEvent],
         frameLimits: V2FrameLimits,
@@ -159,13 +169,12 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
     }
 }
 
-/// Process-local authorization and lifecycle fence for the high-frequency
-/// foreground push path. The registry still selects an audience from an
-/// authenticated subscription; this second fence prevents a stale routing
-/// snapshot from writing after unregister, revocation, or transport close.
-/// The synchronous writer only enqueues bounded best-effort work on the
-/// channel's own EventLoop. Durable room-log cursor pull remains the recovery
-/// path for every drop.
+/// 面向高频前台推送路径的进程本地授权与生命周期栅栏。
+///
+/// 注册表仍会从已认证订阅中选出受众；
+/// 这第二道栅栏则防止过期的路由快照在注销、吊销或传输关闭之后继续写入。
+/// 同步写者只在该通道自身的 EventLoop 上入队有界的尽力而为工作。
+/// 持久房间日志游标拉取仍是每一次丢弃的恢复路径。
 private final class V2GatewayForegroundTransport: Sendable {
     private enum Writer: Sendable {
         case callback(@Sendable (ByteBuffer) -> Void)
@@ -232,9 +241,11 @@ private final class V2GatewayForegroundTransport: Sendable {
         return true
     }
 
-    /// Captures the same authentication and lifecycle fence as `submit`, but
-    /// leaves lane scheduling to the group publisher so many local recipients
-    /// can be admitted as one EventLoop batch.
+    /// 捕获与 `submit` 相同的认证与生命周期栅栏，
+    /// 但把通道调度留给群组发布方，使大量本地接收者可以作为单个 EventLoop 批次被接纳。
+    ///
+    /// - Parameter prepared: 已准备的群组事件帧。
+    /// - Returns: 可供批量提交的 NIO 提交对象；不满足快速路径条件时为 `nil`。
     func prepareNIOSubmission(
         _ prepared: V2PreparedGatewayGroupEventAvailable
     ) -> V2NIOGatewayForegroundWriteSubmission? {
@@ -250,14 +261,18 @@ private final class V2GatewayForegroundTransport: Sendable {
     }
 }
 
-/// The transport-neutral half of a gateway connection. TLS is deliberately
-/// terminated outside this actor; callers feed only decrypted bytes and write
-/// the returned bytes back to the same connection. This keeps framing,
-/// lifecycle fencing, and domain dispatch testable without a socket.
+/// 网关连接中与传输无关的那一半。
+///
+/// TLS 刻意在该 actor 之外终止；调用方只投喂已解密字节，
+/// 并把返回的字节写回同一连接。
+/// 这使分帧、生命周期栅栏与领域分发都能在没有套接字的情况下被测试。
 public actor V2GatewayByteStream {
-    /// Process-unique connection identity backed by the same CSPRNG expansion
-    /// and atomic counter used for accepted-message identifiers. This avoids
-    /// relying on the platform UUID implementation during reconnect bursts.
+    /// 生成进程内唯一的连接标识。
+    ///
+    /// 它由与已接受消息标识相同的 CSPRNG 扩展与原子计数器支撑，
+    /// 从而避免在重连突发期间依赖平台 UUID 实现。
+    ///
+    /// - Returns: 新生成的连接标识。
     public nonisolated static func makeConnectionID() -> UUID {
         V2SecureProcessUUIDGenerator.shared.makeOne()
     }
@@ -276,9 +291,10 @@ public actor V2GatewayByteStream {
     // scheduling a best-effort close.
     private var deviceRevocationHandler: (@Sendable () async -> Void)?
     private var outboundWriter: (@Sendable (Data) async -> Void)?
-    /// Once the owning transport closes, late callback installation must not
-    /// recreate a stream -> callback -> channel-handler -> stream retain
-    /// cycle. This also fences the handlerAdded/channelInactive race.
+    /// 一旦所属传输关闭，迟到的回调安装就不得重新形成
+    /// 流 -> 回调 -> channel handler -> 流的循环强引用。
+    ///
+    /// 它同时为 handlerAdded/channelInactive 之间的竞态建立围栏。
     private var transportClosed = false
 
     public init(
@@ -296,10 +312,15 @@ public actor V2GatewayByteStream {
         self.registry = registry
     }
 
-    /// Accepts any fragment produced by a TLS stream. One input may produce no
-    /// response (partial frame) or several responses (coalesced frames).
-    /// Framing or command failures close the session so a malformed stream
-    /// cannot continue from an unknown protocol state.
+    /// 接收 TLS 流产生的任意分片。
+    ///
+    /// 一次输入可能不产生任何响应（帧不完整）或产生多个响应（多帧合并）。
+    /// 分帧或命令失败会关闭会话，
+    /// 从而让畸形流无法从未知协议状态继续。
+    ///
+    /// - Parameter bytes: 本次收到的字节。
+    /// - Returns: 本次产生的响应字节数组。
+    /// - Throws: 分帧或命令处理失败时抛出。
     public func receive(_ bytes: Data) async throws -> [Data] {
         var responses: [Data] = []
         var needsFrameDrain = try await receive(bytes) { response in
@@ -313,9 +334,14 @@ public actor V2GatewayByteStream {
         return responses
     }
 
-    /// Production transports use this form so replies can cross their
-    /// writability boundary one at a time instead of materializing a second
-    /// response batch beside the decoded frame batch.
+    /// 生产传输使用该形式，使应答可以逐个跨越其可写边界，
+    /// 而无需在已解码帧批次之外再物化出第二个响应批次。
+    ///
+    /// - Parameters:
+    ///   - bytes: 本次收到的字节。
+    ///   - respond: 每条应答的回调，调用方自行控制写入节奏。
+    /// - Returns: 是否需要继续排空帧。
+    /// - Throws: 分帧或命令处理失败时抛出。
     public func receive(
         _ bytes: Data,
         respond: (Data) async throws -> Void
@@ -325,9 +351,15 @@ public actor V2GatewayByteStream {
         }
     }
 
-    /// Production NIO transports use the validated frame form so they can
-    /// write header and protobuf payload directly into their outbound
-    /// `ByteBuffer`. Transport-neutral callers retain the `Data` API above.
+    /// 生产 NIO 传输使用已校验的帧形式，
+    /// 从而可以把头部与 protobuf 载荷直接写入其出站 `ByteBuffer`。
+    /// 与传输无关的调用方仍使用上方的 `Data` API。
+    ///
+    /// - Parameters:
+    ///   - bytes: 本次收到的字节。
+    ///   - respond: 每条已校验帧的回调。
+    /// - Returns: 是否需要继续排空帧。
+    /// - Throws: 分帧或命令处理失败时抛出。
     func receiveFrames(
         _ bytes: Data,
         respond: (V2Frame) async throws -> Void
@@ -371,8 +403,11 @@ public actor V2GatewayByteStream {
         }
     }
 
-    /// Must be called when the underlying TLS channel reaches EOF. A trailing
-    /// partial frame is a protocol failure, not an ignored disconnect.
+    /// 必须在底层 TLS 通道到达 EOF 时调用。
+    ///
+    /// 末尾残留的不完整帧属于协议失败，而不是可忽略的断开。
+    ///
+    /// - Throws: 末尾存在不完整帧时抛出。
     public func finish() async throws {
         detachTransport()
         do {
@@ -400,16 +435,26 @@ public actor V2GatewayByteStream {
         deviceRevocationHandler = handler
     }
 
-    /// Live availability is explicitly best effort. The NIO owner drops it
-    /// when its outbound channel is not writable; recovery is always SYNC_PULL.
+    /// 实时可用性提示显式采用尽力而为语义。
+    ///
+    /// 当出站通道不可写时，NIO 所有者会丢弃该提示；恢复始终依赖 SYNC_PULL。
+    ///
+    /// - Parameter writer: 出站数据写入回调。
     public func setOutboundWriter(_ writer: @escaping @Sendable (Data) async -> Void) {
         guard !transportClosed else { return }
         outboundWriter = writer
     }
 
-    /// Installs both channel callbacks in one actor turn. Installing them in
-    /// separate awaits allowed EOF to clear the first callback before the
-    /// second one was installed, retaining a closed NIO pipeline forever.
+    /// 在单次 actor 轮次内安装两个通道回调。
+    ///
+    /// 若分两次 await 安装，EOF 可能在第二个回调装上之前就清空第一个回调，
+    /// 从而使已关闭的 NIO 流水线被永久持有。
+    ///
+    /// - Parameters:
+    ///   - deviceRevocationHandler: 设备吊销通知回调。
+    ///   - outboundWriter: 出站数据写入回调。
+    ///   - foregroundWriter: 可选的前台帧写入回调。
+    /// - Returns: 是否成功安装。
     public func attachTransport(
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
@@ -430,9 +475,16 @@ public actor V2GatewayByteStream {
         return true
     }
 
-    /// Production SwiftNIO attachment. The actor-backed `Data` callback stays
-    /// unchanged for transport-neutral compatibility, while foreground group
-    /// frames retain their prepared COW `ByteBuffer` all the way to the channel.
+    /// 生产 SwiftNIO 挂载。
+    ///
+    /// 面向传输无关兼容性的、由 actor 支撑的 `Data` 回调保持不变；
+    /// 前台群组帧则一路保留其已准备的写时复制 `ByteBuffer` 直到写入通道。
+    ///
+    /// - Parameters:
+    ///   - deviceRevocationHandler: 设备吊销通知回调。
+    ///   - outboundWriter: 出站数据写入回调。
+    ///   - foregroundWriter: 前台帧写者，未启用时为 `nil`。
+    /// - Returns: 是否成功挂载。
     func attachNIOTransport(
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
@@ -445,8 +497,11 @@ public actor V2GatewayByteStream {
         return true
     }
 
-    /// Transport admission uses this only to cancel its absolute pre-auth
-    /// deadline. Identity data remains inside the session actor.
+    /// 传输准入只借此取消其绝对的认证前截止时间。
+    ///
+    /// 身份数据仍留在会话 actor 内部。
+    ///
+    /// - Returns: 当前会话是否已完成认证。
     public func isAuthenticated() async -> Bool {
         await session.authenticatedIdentity() != nil
     }
@@ -465,9 +520,14 @@ public actor V2GatewayByteStream {
         await outboundWriter(bytes)
     }
 
-    /// A best-effort foreground wake over the same authenticated TLS stream.
-    /// A plain direct event may include an optional post-commit payload, but
-    /// cursor pull remains the durable recovery and gap-repair path.
+    /// 在同一条已认证 TLS 流上发送尽力而为的前台唤醒。
+    ///
+    /// 普通私聊事件可以附带可选的提交后载荷，
+    /// 但游标拉取仍是持久恢复与缺口修复的路径。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - highWatermark: 该房间当前的高水位。
     public func sendGroupEventAvailable(
         roomID: RoomID,
         highWatermark: UInt64,
@@ -494,10 +554,12 @@ public actor V2GatewayByteStream {
         await outboundWriter(bytes)
     }
 
-    /// Sends a frame encoded once for a process-local authorized audience.
-    /// The stream still fences the write by its authenticated negotiation and
-    /// current transport callback; a stale or differently-versioned stream
-    /// cannot consume shared bytes.
+    /// 发送一份为进程本地已授权受众编码一次的帧。
+    ///
+    /// 该流仍会用自身已认证的协商结果与当前传输回调为写入建立围栏；
+    /// 过期或协议版本不同的流无法消费这份共享字节。
+    ///
+    /// - Parameter prepared: 已准备的群组事件帧。
     func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async {
         guard let contract = await session.authenticatedFrameContract(),
               contract.protocolVersion == prepared.protocolVersion,
@@ -507,19 +569,25 @@ public actor V2GatewayByteStream {
         await outboundWriter(Data(buffer.readableBytesView))
     }
 
-    /// Production foreground notifications use this nonisolated fast path.
-    /// A false result means the connection is unauthenticated, detached, uses
-    /// another protocol version, or has no NIO fast writer; callers retain the
-    /// actor-backed compatibility path for those cases.
+    /// 生产前台通知使用该 nonisolated 快速路径。
+    ///
+    /// 返回 `false` 表示连接未认证、已分离、使用其他协议版本，或没有 NIO 快速写者；
+    /// 这些情况下调用方保留由 actor 支撑的兼容路径。
+    ///
+    /// - Parameter prepared: 已准备的群组事件帧。
+    /// - Returns: 是否已通过快速路径提交。
     nonisolated func submitGroupEventAvailable(
         _ prepared: V2PreparedGatewayGroupEventAvailable
     ) -> Bool {
         foregroundTransport.submit(prepared)
     }
 
-    /// Production group publication first collects these lifecycle-fenced NIO
-    /// submissions, then enters each EventLoop lane once. Alternate transports
-    /// return nil and continue through `submitGroupEventAvailable` unchanged.
+    /// 生产群组发布会先收集这些受生命周期围栏保护的 NIO 提交，再逐个进入每个 EventLoop 通道一次。
+    ///
+    /// 其他传输返回 `nil`，并继续走不变的 `submitGroupEventAvailable` 路径。
+    ///
+    /// - Parameter prepared: 已准备的群组事件帧。
+    /// - Returns: NIO 提交对象；不满足快速路径条件时为 `nil`。
     nonisolated func prepareNIOGroupEventAvailable(
         _ prepared: V2PreparedGatewayGroupEventAvailable
     ) -> V2NIOGatewayForegroundWriteSubmission? {

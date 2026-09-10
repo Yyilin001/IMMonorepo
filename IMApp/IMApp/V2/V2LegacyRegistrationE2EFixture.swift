@@ -3,10 +3,20 @@ import CryptoKit
 import Foundation
 import Security
 
-/// Opt-in fixture restricted to a fresh, disposable local-E2E namespace.
-/// Seeds only historical IDs; normal account verification still supplies all
-/// authority. It never overwrites an existing registration ledger.
+/// 需显式开启的测试夹具，只作用于全新的、用完即弃的本地端到端命名空间。
+///
+/// 它只写入历史标识；真正的授权仍由常规账号校验提供，并且绝不会覆盖已有的注册台账。
 enum V2LegacyRegistrationE2EFixture {
+    /// 在请求时写入历史注册台账。
+    ///
+    /// 仅在启动参数包含 `-v2-ui-testing-legacy-registration` 时生效，
+    /// 并要求提供合法的端到端作用域、账号名、设备标识与操作标识。
+    ///
+    /// - Parameters:
+    ///   - baseService: 钥匙串服务名前缀。
+    ///   - scope: 端到端测试作用域。
+    ///   - arguments: 启动参数。
+    /// - Throws: 作用域缺失、参数非法或钥匙串写入失败时抛出。
     static func installIfRequested(baseService: String, scope: V2LiveLocalAccountE2ETestScope?, arguments: [String]) throws {
         guard arguments.contains("-v2-ui-testing-legacy-registration") else { return }
         guard let scope else { throw Failure.invalidScope }
@@ -28,11 +38,23 @@ enum V2LegacyRegistrationE2EFixture {
         guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw Failure.persistence }
     }
 
+    /// 删除该作用域下的历史注册台账。
+    ///
+    /// - Parameters:
+    ///   - baseService: 钥匙串服务名前缀。
+    ///   - scope: 端到端测试作用域。
+    /// - Throws: 钥匙串删除失败（且不是「未找到」）时抛出。
     static func remove(baseService: String, scope: V2LiveLocalAccountE2ETestScope) throws {
         let status = SecItemDelete(query(baseService: baseService, scope: scope) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw Failure.persistence }
     }
 
+    /// 构造钥匙串查询条件。
+    ///
+    /// - Parameters:
+    ///   - baseService: 钥匙串服务名前缀。
+    ///   - scope: 端到端测试作用域。
+    /// - Returns: 通用密码条目的查询字典。
     private static func query(baseService: String, scope: V2LiveLocalAccountE2ETestScope) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: scope.keychainService(basedOn: baseService),

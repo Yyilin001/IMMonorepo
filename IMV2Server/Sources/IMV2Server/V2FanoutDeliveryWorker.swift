@@ -1,24 +1,45 @@
 import Foundation
 import IMV2Core
 
-/// Delivery means a durable, idempotent user-sync projection. Socket or push
-/// wake-ups are downstream hints and cannot decide whether a fan-out target is
-/// considered delivered.
+/// 扇出投递租约。
+///
+/// 「已投递」的含义是完成了一次持久化且幂等的用户同步投影；
+/// 套接字或推送唤醒都只是下游提示，不能决定某个扇出目标是否算已投递。
 public struct V2FanoutDeliveryLease: Equatable, Sendable {
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 目标用户。
     public let targetUserID: UserID
+    /// 投影类型标识。
     public let projectionKind: String
+    /// 所属完成单元。
     public let completionUnitID: CompletionUnitID
+    /// 认领时观察到的用户归属路由。
     public let observedRoute: V2UserShardRoute
+    /// 本次租约的认领令牌。
     public let claimToken: UUID
+    /// 本次是第几次尝试。
     public let attempt: Int
-    /// A process-local copy of the immutable source event payload. It is
-    /// populated only by the cross-store claim path to avoid a second control
-    /// database round-trip before the target projection. The durable lease
-    /// fence remains the claim token; this value is never persisted as lease
-    /// state and callers without it use the fenced control-store read.
+    /// 不可变来源事件载荷的进程内副本。
+    ///
+    /// 只有跨库认领路径会填充它，以避免在目标投影之前再次访问控制库。
+    /// 持久化租约栅栏仍是认领令牌；该值绝不会作为租约状态被持久化，
+    /// 未携带它的调用方会改为在栅栏保护下读取控制面存储。
     public let eventPayloadJSON: String?
 
+    /// 校验并保存投递租约。
+    ///
+    /// - Parameters:
+    ///   - sourceEventID: 来源事件标识。
+    ///   - targetUserID: 目标用户。
+    ///   - projectionKind: 投影类型标识。
+    ///   - completionUnitID: 所属完成单元。
+    ///   - observedRoute: 认领时观察到的用户归属。
+    ///   - claimToken: 认领令牌。
+    ///   - attempt: 尝试次数，需大于零。
+    ///   - eventPayloadJSON: 可选的进程内载荷副本。
+    ///
+    /// 尝试次数非正时直接失败，避免重试退避从非法状态开始。
     public init(sourceEventID: EventID, targetUserID: UserID, projectionKind: String, completionUnitID: CompletionUnitID, observedRoute: V2UserShardRoute, claimToken: UUID, attempt: Int = 1, eventPayloadJSON: String? = nil) {
         precondition(attempt > 0)
         self.sourceEventID = sourceEventID
@@ -32,32 +53,36 @@ public struct V2FanoutDeliveryLease: Equatable, Sendable {
     }
 }
 
+/// 一次投递终结的结果。
 public enum V2FanoutDeliveryCommit: Equatable, Sendable {
+    /// 租约已失效，本次终结未生效。
     case staleLease
-    /// The target projection may already have committed on the old physical
-    /// owner, but the control-store route fence observed a newer write owner
-    /// before terminalization. The same durable delivery row has been moved
-    /// to that owner and released for an idempotent replay.
+    /// 投递行已被迁移到新的归属。
+    ///
+    /// 目标投影可能已在旧的物理归属上提交，但控制面路由栅栏在终结之前观察到了更新的写入归属；
+    /// 同一持久化投递行已被移动到新归属并释放，以便幂等重放。
     case rerouted(V2UserShardRoute)
+    /// 已提交，并给出版本序号与容量释放情况。
     case committed(userSyncSequence: UInt64, releasedCompletionUnit: Bool, closedPlan: Bool)
 }
 
-/// A mutually exclusive class of durable delivery work. Keeping these classes
-/// separate lets the hot path use an index that is specific to brand-new work,
-/// without weakening retry, lease-expiry recovery, or the claim-token fence.
+/// 持久化投递工作的互斥类别。
+///
+/// 保持类别分离可以让热路径使用只针对全新工作的索引，
+/// 同时不削弱重试、租约过期恢复与认领令牌栅栏的语义。
 public enum V2FanoutDeliveryClaimLane: Sendable, Equatable {
-    /// Never leased and never scheduled for a retry.
+    /// 从未被认领，也从未安排过重试。
     case fresh
-    /// Explicitly released after a failure and now due for another attempt.
+    /// 失败后被显式释放，现已到下一次尝试时间。
     case retryDue
-    /// A previous worker stopped making progress and its lease has elapsed.
+    /// 先前的工作器停止推进，其租约已过期。
     case expiredLease
 }
 
-/// One stable share of a concurrent claim pass. Every delivery lane assigns
-/// the same target user to one partition so workers do not contend on that
-/// user's monotonic sync-sequence row. Durable row/advisory fences retain
-/// correctness if process concurrency or replica count changes later.
+/// 单次并发认领中的一份稳定份额。
+///
+/// 所有投递通道都会把同一目标用户分配到同一分区，使工作器不会在该用户的单调同步序号行上争用。
+/// 即使之后进程并发度或副本数量变化，持久化行锁与咨询锁仍能保证正确性。
 public struct V2FanoutDeliveryClaimPartition: Sendable, Equatable {
     public let index: Int
     public let count: Int
@@ -69,28 +94,76 @@ public struct V2FanoutDeliveryClaimPartition: Sendable, Equatable {
     }
 }
 
+/// 扇出投递的持久化能力。
 public protocol V2FanoutDeliveryStore: Sendable {
+    /// 认领一批待投递工作。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的物理桶过滤。
+    ///   - lane: 工作类别。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    ///   - limit: 本次最多认领的数量。
+    /// - Returns: 认领到的投递租约。
+    /// - Throws: 持久化失败时抛出。
     func claimPending(bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2FanoutDeliveryLease]
+
+    /// 终结单条租约。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次投递租约。
+    ///   - now: 终结时刻。
+    /// - Returns: 终结结果。
+    /// - Throws: 持久化失败时抛出。
     func commit(_ lease: V2FanoutDeliveryLease, now: Date) async throws -> V2FanoutDeliveryCommit
-    /// Commits one bounded group of leases. Implementations that own all
-    /// affected records in one database may make this one transaction; a
-    /// cross-store implementation may retain per-lease commits because it
-    /// cannot invent atomicity across physical databases.
+
+    /// 终结一个有界的租约分组。
+    ///
+    /// 若实现拥有全部受影响记录所在的数据库，可以把整批放在一个事务内；
+    /// 跨存储实现可以保留逐条终结，因为它无法在物理数据库之间凭空创造原子性。
+    ///
+    /// - Parameters:
+    ///   - leases: 本批租约。
+    ///   - now: 终结时刻。
+    /// - Returns: 与输入顺序对应的终结结果。
+    /// - Throws: 持久化失败时抛出。
     func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit]
-    /// Moves a claimed, not-yet-projected delivery to the router's current
-    /// logical write bucket. Implementations must fence this update with the
-    /// lease token; it is a handoff of one durable inbox effect, never a
-    /// second delivery or a terminal skip.
+
+    /// 把已认领但尚未投影的投递移交给路由当前的逻辑写入桶。
+    ///
+    /// 实现必须用租约令牌为这次更新加栅栏；它只是同一个持久化收件箱效果的移交，
+    /// 绝不构成第二次投递，也不构成终态跳过。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次投递租约。
+    ///   - route: 目标用户归属。
+    /// - Throws: 栅栏不匹配或持久化失败时抛出。
     func handoff(_ lease: V2FanoutDeliveryLease, to route: V2UserShardRoute) async throws
+
+    /// 释放租约以便重试。
+    ///
+    /// - Parameter lease: 本次投递租约。
+    /// - Throws: 持久化失败时抛出。
     func release(_ lease: V2FanoutDeliveryLease) async throws
     func scheduleRetry(_ lease: V2FanoutDeliveryLease, disposition: V2DurableRetryDisposition, now: Date) async throws
 }
 
-/// Optional claim capability for stores that can keep concurrent delivery
-/// workers disjoint. Every lane partitions by target user so all writers of a
-/// user's monotonic sync sequence share the same lane. Other stores retain the
-/// original fenced `SKIP LOCKED` claim behavior.
+/// 可选的认领能力，使并发投递工作器的处理范围互不相交。
+///
+/// 各通道按目标用户分区，因此同一用户单调同步序号的所有写入者都落在同一通道。
+/// 其他存储仍保留原有的带栅栏 `SKIP LOCKED` 认领语义。
 public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
+    /// 在指定分区内认领一批投递。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的物理桶过滤。
+    ///   - lane: 工作类别。
+    ///   - partition: 本工作器负责的分区。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    ///   - limit: 本次最多认领的数量。
+    /// - Returns: 认领到的投递租约。
+    /// - Throws: 持久化失败时抛出。
     func claimPending(
         bucket: String?, lane: V2FanoutDeliveryClaimLane,
         partition: V2FanoutDeliveryClaimPartition,
@@ -98,20 +171,37 @@ public protocol V2PartitionedFanoutDeliveryStore: V2FanoutDeliveryStore {
     ) async throws -> [V2FanoutDeliveryLease]
 }
 
-/// Optional co-located fast path for brand-new direct-message work. The store
-/// locks, projects and terminalizes each selected delivery in one transaction
-/// without first persisting a lease update. Retry/expired rows deliberately
-/// stay on the ordinary claim-token protocol, so fault recovery keeps the
-/// same durable semantics.
+/// 面向全新私聊消息工作的可选同库快速路径。
+///
+/// 存储会在单个事务内完成加锁、投影与终结，而不先持久化租约更新。
+/// 重试类与租约过期类行仍走普通认领令牌协议，因此故障恢复保持相同的持久化语义。
 public protocol V2FreshDirectFanoutDeliveryStore: V2FanoutDeliveryStore {
+    /// 直接处理一批已预规划的全新私聊投递。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的物理桶过滤。
+    ///   - partition: 可选的分区。
+    ///   - now: 本次处理时刻。
+    ///   - limit: 本次最多处理的数量。
+    /// - Returns: 本批处理结果。
+    /// - Throws: 事务失败时抛出。
     func commitFreshDirectPreplanned(
         bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
         now: Date, limit: Int
     ) async throws -> [V2FreshDirectFanoutDeliveryCommit]
-    /// Converts a failed no-lease fast-path row into an ordinary durable lease.
-    /// This is invoked only after the atomic fast path throws; normal generic
-    /// fresh scans may therefore exclude direct rows and use their user-lane
-    /// partial index without stranding poison work.
+    /// 把快速路径中失败的无租约行转换为普通持久化租约。
+    ///
+    /// 只有原子快速路径抛出异常之后才会调用；因此常规的通用全新工作扫描可以把私聊行排除在外，
+    /// 使用其用户通道部分索引，而不会让问题工作项永久滞留。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的物理桶过滤。
+    ///   - partition: 可选的分区。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    ///   - limit: 本次最多认领的数量。
+    /// - Returns: 转换后的普通租约。
+    /// - Throws: 持久化失败时抛出。
     func claimFreshDirectPreplannedForRecovery(
         bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
         now: Date, leaseDuration: TimeInterval, limit: Int
@@ -119,6 +209,9 @@ public protocol V2FreshDirectFanoutDeliveryStore: V2FanoutDeliveryStore {
 }
 
 public extension V2FreshDirectFanoutDeliveryStore {
+    /// 默认不提供恢复转换能力，返回空结果。
+    ///
+    /// - Returns: 空数组。
     func claimFreshDirectPreplannedForRecovery(
         bucket _: String?, partition _: V2FanoutDeliveryClaimPartition?,
         now _: Date, leaseDuration _: TimeInterval, limit _: Int
@@ -127,11 +220,23 @@ public extension V2FreshDirectFanoutDeliveryStore {
     }
 }
 
+/// 全新私聊投递的直接处理结果。
 public struct V2FreshDirectFanoutDeliveryCommit: Equatable, Sendable {
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 目标用户。
     public let targetUserID: UserID
+    /// 写入的用户同步序号。
     public let userSyncSequence: UInt64
 
+    /// 保存处理结果。
+    ///
+    /// - Parameters:
+    ///   - sourceEventID: 来源事件标识。
+    ///   - targetUserID: 目标用户。
+    ///   - userSyncSequence: 用户同步序号，需大于零。
+    ///
+    /// 序号非正时直接失败，避免产生无效的同步位置。
     public init(
         sourceEventID: EventID, targetUserID: UserID,
         userSyncSequence: UInt64
@@ -143,29 +248,38 @@ public struct V2FreshDirectFanoutDeliveryCommit: Equatable, Sendable {
     }
 }
 
-/// Optional topology-specific cap for concurrent claim passes against one
-/// logical bucket. The pipeline's global delivery concurrency is a capacity
-/// ceiling, not permission to create contention within a single physical
-/// target database. Stores that do not declare a cap use the global ceiling.
+/// 面向单个逻辑桶并发认领的可选拓扑上限。
+///
+/// 流水线的全局投递并发是容量上限，并不代表可以在单个物理目标库内制造争用。
+/// 未声明上限的存储使用全局上限。
 public protocol V2FanoutDeliveryBucketConcurrencyControlling: Sendable {
+    /// 单逻辑桶允许的最大并发认领数。
     var maximumConcurrentClaimsPerBucket: Int { get }
 }
 
-/// Allocates claim turns for one logical target bucket. Seven (by default)
-/// fast-path turns are followed by one recovery-first turn. If the preferred
-/// lane is empty, a worker falls through to the other lanes immediately; if
-/// it is busy, each turn still claims only one lane, retaining a bounded
-/// transaction and its all-or-nothing lease update.
+/// 为单个逻辑目标桶分配认领轮次的调度器。
+///
+/// 默认在七次快速路径轮次之后安排一次恢复优先轮次。若首选通道为空，
+/// 工作器会立即穿透到其他通道；若其繁忙，每轮仍只认领一个通道，
+/// 从而保持有界事务与其全有或全无的租约更新。
 public actor V2FanoutDeliveryClaimScheduler {
     private let freshBurstPasses: Int
     private var freshPassesSinceRecovery = 0
     private var nextRecoveryLane: V2FanoutDeliveryClaimLane = .retryDue
 
+    /// 组合快速路径轮次数量。
+    ///
+    /// - Parameter freshBurstPasses: 快速路径连续轮次，需大于零，默认 7。
+    ///
+    /// 取值非正时直接失败，避免调度器出现无界偏好。
     public init(freshBurstPasses: Int = 7) {
         precondition(freshBurstPasses > 0)
         self.freshBurstPasses = freshBurstPasses
     }
 
+    /// 给出下一轮认领的通道顺序。
+    ///
+    /// - Returns: 依次尝试的通道列表，首选为空时会穿透到后续通道。
     public func lanesForNextClaim() -> [V2FanoutDeliveryClaimLane] {
         if freshPassesSinceRecovery < freshBurstPasses {
             freshPassesSinceRecovery += 1
@@ -188,14 +302,30 @@ public protocol V2LiveSyncNotifier: Sendable {
     func notifySyncAvailable(userID: UserID, eventID: UInt64, highWatermark: UInt64) async
 }
 
+/// 单轮扇出投递统计。
 public struct V2FanoutDeliveryReport: Equatable, Sendable {
+    /// 本轮认领数量。
     public let claimedCount: Int
+    /// 已提交数量。
     public let committedCount: Int
+    /// 因租约失效而放弃的数量。
     public let staleCount: Int
+    /// 因归属迁移而重新路由的数量。
     public let staleRouteCount: Int
+    /// 安排重试的数量。
     public let releasedCount: Int
+    /// 暂停等待运维处理的数量。
     public let pausedCount: Int
 
+    /// 保存投递统计。
+    ///
+    /// - Parameters:
+    ///   - claimedCount: 认领数量。
+    ///   - committedCount: 提交数量。
+    ///   - staleCount: 失效数量。
+    ///   - staleRouteCount: 重新路由数量，默认零。
+    ///   - releasedCount: 安排重试数量。
+    ///   - pausedCount: 暂停数量，默认零。
     public init(claimedCount: Int, committedCount: Int, staleCount: Int, staleRouteCount: Int = 0, releasedCount: Int, pausedCount: Int = 0) {
         self.claimedCount = claimedCount
         self.committedCount = committedCount
@@ -206,10 +336,15 @@ public struct V2FanoutDeliveryReport: Equatable, Sendable {
     }
 }
 
-/// A bounded caller-scheduled worker. It purposely processes sequentially:
-/// database lease contention is the backpressure boundary, while deployment
-/// controls parallelism through bucket ownership and worker replicas.
+/// 用户归属解析能力。
+///
+/// 投递前需要把租约中观察到的归属与路由当前结果比对，用于判断是否需要移交。
 protocol V2FanoutDeliveryRouteResolving: Sendable {
+    /// 解析一批租约对应的当前用户归属。
+    ///
+    /// - Parameter leases: 本批投递租约。
+    /// - Returns: 与输入顺序对应的用户归属。
+    /// - Throws: 路由解析失败时抛出。
     func routes(for leases: [V2FanoutDeliveryLease]) async throws -> [V2UserShardRoute]
 }
 
@@ -221,6 +356,11 @@ private struct V2UserShardFanoutDeliveryRouteResolver: V2FanoutDeliveryRouteReso
     }
 }
 
+/// 有界、由调用方调度的投递工作器。
+///
+/// 它刻意按顺序处理：数据库租约争用就是背压边界，部署方通过桶归属与工作器副本数量
+/// 来控制并行度。批处理失败隔离阈值用于在成员达到指定尝试次数后二分拆解批次，
+/// 从而在保留瞬时故障原有重试单位的同时隔离确定性毒点记录。
 public struct V2FanoutDeliveryWorker: Sendable {
     private let store: any V2FanoutDeliveryStore
     private let bucket: String?
@@ -231,16 +371,17 @@ public struct V2FanoutDeliveryWorker: Sendable {
     private let retryPolicy: V2DurableRetryPolicy
     private let claimScheduler: V2FanoutDeliveryClaimScheduler
     private let commitBatchSize: Int
-    /// Once any member has reached this attempt, an atomic batch failure is
-    /// bisected until healthy sub-batches can commit and a deterministic
-    /// poison record is isolated. Earlier failures retain the original batch
-    /// retry unit so transient database errors do not immediately amplify
-    /// transaction count.
+    /// 触发批次失败隔离的尝试次数。
+    ///
+    /// 一旦任一成员达到该尝试次数，原子批次失败就会被二分，
+    /// 直到健康子批次可以提交、并隔离出一条确定性的毒丸记录。
+    /// 更早的失败仍保留原本的整批重试单元，
+    /// 使瞬时数据库错误不会立刻放大事务数量。
     private let batchFailureIsolationAttempt: Int
-    /// Normally one: a durable batch's complete target/control protocol stays
-    /// sequential unless the remote topology enables the measured two-batch
-    /// overlap. Result processing remains in source-batch order and each
-    /// failed batch retains its existing all-or-nothing retry unit.
+    /// 单个桶允许的并发提交批次数，通常为一。
+    ///
+    /// 持久批次的完整目标/控制协议保持串行，除非远端拓扑启用了实测过的两批重叠。
+    /// 结果处理仍按来源批次顺序进行，每个失败批次保留其原有的全有或全无重试单元。
     private let maximumConcurrentCommitBatches: Int
 
     var maximumConcurrentClaimsPerBucket: Int {
@@ -555,11 +696,15 @@ public struct V2FanoutDeliveryWorker: Sendable {
         leases.count > 1 && leases.contains { $0.attempt >= batchFailureIsolationAttempt }
     }
 
-    /// The caller reaches this only after the original atomic batch has
-    /// failed. Each successful sub-batch is therefore safe to terminalize;
-    /// failed singletons retain the ordinary durable retry/pause policy. A
-    /// cross-store implementation remains safe because projection and inbox
-    /// writes are idempotently fenced by the existing delivery identity.
+    /// 隔离失败的原子批次。
+    ///
+    /// 调用方只有在原始原子批次失败后才会来到这里。因此每个成功的子批次都可以安全终结；
+    /// 失败的单条记录仍沿用普通的持久重试/暂停策略。
+    /// 跨存储实现同样安全，因为投影与收件箱写入都由既有的投递身份幂等地围栏保护。
+    ///
+    /// - Parameter leases: 原始批次中待隔离的投递租约。
+    /// - Returns: 各子批次对应的提交结论。
+    /// - Throws: 取消或持久化失败时抛出。
     private func isolateFailedBatch(
         _ leases: [V2FanoutDeliveryLease]
     ) async throws -> [V2FanoutBatchCommitResolution] {

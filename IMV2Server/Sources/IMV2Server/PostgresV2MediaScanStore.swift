@@ -3,15 +3,34 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 媒体扫描发件箱的 PostgreSQL 持久化实现。
+///
+/// 它以租约方式认领待扫描对象，并把扫描结论写回权威媒体状态。
 public struct PostgresV2MediaScanStore: V2MediaScanStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 创建扫描发件箱存储。
+    ///
+    /// - Parameters:
+    ///   - database: 控制面数据库连接。
+    ///   - makeUUID: 认领令牌生成器，默认使用 `UUID.init`。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 认领一待扫描对象。
+    ///
+    /// 候选包含待处理项，以及租约已过期的已认领项；认领使用 `SKIP LOCKED`，
+    /// 因此多个工作进程可以并行推进而不会互相阻塞。重试计数在饱和时保持原值，避免回绕。
+    ///
+    /// - Parameters:
+    ///   - now: 当前时间。
+    ///   - leaseDuration: 本次租约时长，必须为正。
+    ///   - limit: 本次最多认领的对象数，必须为正。
+    /// - Returns: 已认领的扫描租约列表。
+    /// - Throws: 时间戳无法表示、计数非法或持久化状态损坏时抛出。
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2MediaScanLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
         guard let leaseExpiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
@@ -52,6 +71,15 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
         }
     }
 
+    /// 提交扫描结论。
+    ///
+    /// 通过时把对象置为可用，否则置为失败，并同时收尾发件箱行。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次处理持有的扫描租约。
+    ///   - result: 扫描结论。
+    ///   - now: 当前时间。
+    /// - Throws: 租约失效、状态非法或持久化失败时抛出。
     public func complete(_ lease: V2MediaScanLease, result: V2MediaScanResult, now: Date) async throws {
         let mediaID = try mediaScanUUID(lease.mediaID)
         let nextState = result == .passed ? "available" : "failed"
@@ -82,6 +110,13 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
         }
     }
 
+    /// 按持久重试策略安排下一次扫描尝试。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次处理持有的扫描租约。
+    ///   - disposition: 持久重试处置策略。
+    ///   - now: 当前时间。
+    /// - Throws: 租约失效或持久化失败时抛出。
     public func scheduleRetry(_ lease: V2MediaScanLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let mediaID = try mediaScanUUID(lease.mediaID)

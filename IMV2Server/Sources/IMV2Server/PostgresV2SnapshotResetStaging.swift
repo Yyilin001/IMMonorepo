@@ -2,15 +2,45 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Shared primitive for automatic low-cursor recovery and operator resets.
-/// The caller must hold the device cursor row lock in its transaction.
+/// 自动低游标恢复与运维重置共用的原语。
+///
+/// 调用方必须在其事务内持有该设备游标行的锁；本原语假定该锁已生效，
+/// 因此所有读取与写入都处于同一设备状态快照之下。
 struct PostgresV2SnapshotResetStager {
+    /// 暂存结果。
     struct Result: Sendable {
+        /// 本次重置绑定的快照。
         let snapshotID: UUID
+        /// 重置后的同步代次。
         let generation: Int64
+        /// 快照基准序号。
         let baseSequence: Int64
     }
 
+    /// 为设备暂存一次快照重置。
+    ///
+    /// 前置校验包括：代次为正、保留下限非负、能力生命周期为正的有限值、档位标识非空，
+    /// 且存在一个处于就绪状态且迁移栅栏已失效的投影检查点。
+    /// 随后在用户与档位维度上串行创建产物：优先复用基准序号落在保留下限与检查点之间、
+    /// 未过期且同档同版本的既有产物，并把其到期时间至少延长到本次分配的新截止点；
+    /// 否则新建产物。最后写入设备重置记录、同步令牌并推进游标状态。
+    ///
+    /// - Parameters:
+    ///   - sql: 当前事务使用的数据库连接。
+    ///   - schema: 目标 schema。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
+    ///   - currentGeneration: 当前同步代次，需大于零。
+    ///   - retainedFloor: 可复用的最低基准序号。
+    ///   - capabilityProfile: 能力档位标识。
+    ///   - capabilityLifetime: 本次分配的存活时长秒数。
+    ///   - now: 服务端统一授时时刻。
+    ///   - makeUUID: 生成快照标识、令牌与回执的方式。
+    /// - Returns: 本次暂存结果。
+    /// - Throws: 分配截止点不可编码时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``；检查点不可用、代次溢出、
+    ///   保留下限高于检查点，或复用产物过期时抛出
+    ///   ``V2SyncStoreError/snapshotCheckpointUnavailable``。
     static func stage(
         sql: any SQLDatabase,
         schema: String,
@@ -140,6 +170,12 @@ struct PostgresV2SnapshotResetStager {
         )
     }
 
+    /// 拼接 schema 限定的表名。
+    ///
+    /// - Parameters:
+    ///   - schema: schema 名。
+    ///   - name: 表名，仅允许来自代码内常量。
+    /// - Returns: 形如 `schema.table` 的限定名。
     private static func table(_ schema: String, _ name: String) -> String {
         "\(schema).\(name)"
     }

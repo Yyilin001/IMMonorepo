@@ -3,13 +3,31 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL lease store for the coalesced Hybrid-room wake outbox. It never
-/// stores a user, device, message body, or event payload.
+/// 混合大群合并唤醒发件箱的 PostgreSQL 租约存储。
+///
+/// 该存储不保存用户、设备、消息正文或事件载荷，只保存房间级水位与租约状态。
 public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放唤醒发件箱与房间水位计数器的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 认领一批待发布的房间唤醒。
+    ///
+    /// 认领更新与水位读取刻意拆成两条 `READ COMMITTED` 语句：在租约锁归属本事务之前提交的
+    /// 消息事务此时已可见，而仍在追加的消息事务必须先更新被租约占用的发件箱行才能提交，
+    /// 因此会覆盖当前修订并保留新的唤醒。若沿用认领语句的原始快照读取房间计数器，
+    /// 会在锁等待之后留下一个极窄的水位丢失窗口。
+    ///
+    /// - Parameters:
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    ///   - limit: 本批最多认领的房间数。
+    /// - Returns: 本批唤醒租约，水位取发件箱目标与房间当前序号的较大值。
+    /// - Throws: 上限非正、租约到期时刻不可编码，或水位、修订、尝试次数非正时抛出
+    ///   ``V2GroupEventWakeStoreError/corruptPersistenceState``。
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2GroupEventWakeLease] {
         guard limit > 0,
               let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration)
@@ -73,6 +91,14 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
         }
     }
 
+    /// 标记唤醒已发布并删除对应发件箱条目。
+    ///
+    /// 删除带有修订栅栏：若期间已观察到更新的事件并改写了修订或状态，
+    /// 本次删除不会命中，新的唤醒得以保留。
+    ///
+    /// - Parameter lease: 本次唤醒租约。
+    /// - Throws: 连接不支持 SQL、房间标识非法或修订超出可编码范围时抛出
+    ///   ``V2GroupEventWakeStoreError/corruptPersistenceState``。
     public func markPublished(_ lease: V2GroupEventWakeLease) async throws {
         guard let sql = database as? any SQLDatabase,
               let roomID = UUID(uuidString: lease.wake.roomID.rawValue),
@@ -88,6 +114,15 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
             """).run()
     }
 
+    /// 把租约安排为稍后重试。
+    ///
+    /// 只有认领令牌与修订都匹配时才会回到待处理状态并写入下次尝试时刻。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次唤醒租约。
+    ///   - nextAttemptAt: 下次尝试时刻。
+    /// - Throws: 连接不支持 SQL、标识或修订非法、时刻不可编码时抛出
+    ///   ``V2GroupEventWakeStoreError/corruptPersistenceState``。
     public func scheduleRetry(_ lease: V2GroupEventWakeLease, nextAttemptAt: Date) async throws {
         guard let sql = database as? any SQLDatabase,
               let roomID = UUID(uuidString: lease.wake.roomID.rawValue),
@@ -108,7 +143,9 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     }
 }
 
+/// 群事件唤醒存储错误。
 public enum V2GroupEventWakeStoreError: Error, Equatable, Sendable {
+    /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
 }
 

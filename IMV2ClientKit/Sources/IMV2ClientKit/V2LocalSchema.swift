@@ -1,10 +1,9 @@
 import Foundation
 
-/// Canonical schema for a fresh, device-local V2 projection database.
+/// 全新设备本地 V2 投影数据库的规范 schema。
 ///
-/// The application is not deployed. Only explicitly registered, tested
-/// migrations are supported; these preserve pending commands and committed
-/// projection effects rather than silently accepting arbitrary older layouts.
+/// 该应用尚未发布，因此只支持显式注册且经过测试的迁移：
+/// 这些迁移会保留待处理命令与已提交的投影效果，而不会静默接受任意旧版布局。
 extension GRDBV2LocalSyncStore {
     static let pinnedMessageProjectionSchemaSQL = """
         CREATE TABLE v2_group_pinned_messages (

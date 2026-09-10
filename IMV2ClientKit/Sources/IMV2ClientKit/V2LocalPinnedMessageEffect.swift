@@ -2,17 +2,37 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// Pin order comes from the source room log, including a validated room
-/// envelope for legacy payloads. A personal cursor cannot fill that field.
+/// 本地置顶消息变更效果。
+///
+/// 置顶顺序来自来源房间日志；历史载荷则依赖经过校验的房间信封。
+/// 个人同步游标无法补上该字段。
 struct V2LocalPinnedMessageEffect {
+    /// 来源事件标识。
     let sourceEventID: EventID
+    /// 目标房间。
     let roomID: RoomID
+    /// 被置顶或取消置顶的消息。
     let messageID: MessageID
+    /// 变更后的置顶状态。
     let isPinned: Bool
+    /// 服务端事件时间戳（毫秒）。
     let updatedAtMilliseconds: Int64
+    /// 来源房间序号；历史载荷可能缺失。
     let roomSequence: Int64?
+    /// 由房间、消息、置顶状态、更新时间与发起者计算的规范摘要。
     let digest: Data
 
+    /// 从同步记录解码置顶效果。
+    ///
+    /// 给出期望房间序号时，该序号会覆盖载荷中缺失的序号；
+    /// 载荷自带序号时必须与期望值一致。
+    ///
+    /// - Parameters:
+    ///   - record: 置顶变更类型的同步记录。
+    ///   - expectedRoomSequence: 期望的房间序号。
+    ///   - expectedRoomID: 期望的房间。
+    /// - Throws: 载荷无法解码、事件类型不符、字段越界，或与期望值不一致时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord, expectedRoomSequence: UInt64? = nil, expectedRoomID: RoomID? = nil) throws {
         struct Wire: Decodable {
             let event_type: String; let room_id: String; let message_id: String

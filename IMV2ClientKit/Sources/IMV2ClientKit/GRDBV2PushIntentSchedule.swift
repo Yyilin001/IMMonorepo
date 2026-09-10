@@ -2,6 +2,15 @@ import Foundation
 import GRDB
 
 extension GRDBV2LocalSyncStore {
+    /// 读取推送意图的下一次尝试调度。
+    ///
+    /// 只有与当前安装绑定一致、尚未被确认、且已具备可用令牌引用
+    /// （或明确处于关闭意图）的记录才会被纳入调度。
+    ///
+    /// - Parameters:
+    ///   - scope: 当前本地账号与安装的作用域。
+    ///   - ownerID: 推送意图的归属标识。
+    /// - Returns: 下一次尝试时间与变更通知组成的调度。
     public nonisolated func pushIntentSchedule(scope: V2PushIntentScope, ownerID: UUID) -> V2CommandRetrySchedule {
         let pool = databasePool
         let query = """

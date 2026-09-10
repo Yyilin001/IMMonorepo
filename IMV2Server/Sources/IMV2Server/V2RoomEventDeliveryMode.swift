@@ -3,11 +3,24 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Shared delivery seam for every room mutation.  It keeps the write-side
-/// choice explicit: standard rooms create an asynchronous fan-out plan;
-/// hybrid rooms create a terminal audit plan with zero targets and rely on
-/// the ordered room event log instead.
+/// 所有房间变更共用的投递边界。
+///
+/// 该边界把写入侧的投递选择显式化：标准房间创建异步扇出计划；
+/// 混合房间则创建一个零目标的终态审计计划，实际投递依赖有序的房间事件日志。
 enum V2RoomEventDeliveryMode {
+    /// 按房间投递模式预留准入容量。
+    ///
+    /// 标准扇出按目标规则计费；混合大群只按命令计费，不预留扇出目标容量。
+    ///
+    /// - Parameters:
+    ///   - deliveryMode: 房间的投递模式。
+    ///   - targetRule: 标准扇出使用的目标计费规则。
+    ///   - profile: 房间容量配置。
+    ///   - roomState: 房间当前准入状态。
+    ///   - shardState: 分片当前准入状态。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 准入预留结果。
+    /// - Throws: 容量不足或状态不满足准入条件时抛出。
     static func reserve(
         deliveryMode: V2GroupDeliveryMode,
         targetRule: FanoutTargetRule,
@@ -35,6 +48,23 @@ enum V2RoomEventDeliveryMode {
         }
     }
 
+    /// 按房间投递模式在同一事务内持久化扇出计划。
+    ///
+    /// 标准扇出写入计划行并创建待处理发件箱条目；混合大群写入零目标、
+    /// 预留成本为零且立即终态的计划行，不创建发件箱条目。
+    ///
+    /// - Parameters:
+    ///   - deliveryMode: 房间的投递模式。
+    ///   - planID: 本次扇出计划标识。
+    ///   - eventID: 触发本次计划的来源事件标识。
+    ///   - roomID: 目标房间。
+    ///   - roomSequence: 来源事件在房间日志中的序号。
+    ///   - committedMembershipRevision: 提交时冻结的成员修订。
+    ///   - standardTargetRuleJSON: 标准扇出使用的目标规则 JSON。
+    ///   - standardTargetCount: 标准扇出的目标数量。
+    ///   - now: 服务端统一授时时刻。
+    ///   - sql: 当前变更事务使用的数据库连接。
+    /// - Throws: 持久化失败时抛出。
     static func persistPlan(
         deliveryMode: V2GroupDeliveryMode,
         planID: UUID,

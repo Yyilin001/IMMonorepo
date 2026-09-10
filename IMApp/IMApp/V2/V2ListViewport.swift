@@ -1,11 +1,14 @@
 import Observation
 import SwiftUI
 
-/// Row geometry is transient and bounded by the published window. Only the
-/// top visible identity and an explicit restoration request are observed.
+/// 列表视口状态。
+///
+/// 行几何信息是临时的且受已发布窗口约束；对外观察到的只有顶部可见条目标识
+/// 与显式的恢复请求。
 @MainActor
 @Observable
 final class V2ListViewport {
+    /// 一次滚动位置恢复请求。
     struct Restoration: Equatable {
         let id = UUID()
         let itemID: String
@@ -55,8 +58,16 @@ final class V2ListViewport {
         return row.maxY > 0 && row.minY < height
     }
 
-    /// Resolve immediately before publishing, with no suspension before the
-    /// caller commits. A reader must never restore an obsolete scroll position.
+    /// 在发布前立即解析读取结果，调用方提交之前不得发生挂起。
+    ///
+    /// 读取方绝不允许恢复一个已经过时的滚动位置，因此这里在捕获锚点后同步判断：
+    /// 锚点未变则沿用回退值，锚点仍在返回集合中则直接采用，否则要求重新读取。
+    ///
+    /// - Parameters:
+    ///   - capturedAnchorID: 本次读取开始时捕获的锚点标识。
+    ///   - returnedIDs: 本次读取返回的条目标识列表。
+    ///   - fallback: 锚点未变化时使用的回退标识。
+    /// - Returns: 读取结果（就绪或需要重新读取）。
     func resolveRead(capturedAnchorID: String?, returnedIDs: [String], fallback: String?) -> ReadResolution {
         guard anchorID != capturedAnchorID else { return .ready(anchorID: fallback) }
         guard let anchorID else { return .ready(anchorID: nil) }
@@ -80,9 +91,14 @@ final class V2ListViewport {
         updateAnchor()
     }
 
-    /// List can clamp the first scroll against estimated row heights. Allow a
-    /// few layout passes, then release ownership even if the view disappears.
-    /// The page task owns cancellation; no timer survives its lifetime.
+    /// 执行一次滚动位置恢复。
+    ///
+    /// 列表可能按估算行高钳制首次滚动，因此允许若干次布局重试，随后即使视图消失也要释放所有权。
+    /// 取消由页面任务负责，本方法不会留下任何计时器。
+    ///
+    /// - Parameters:
+    ///   - request: 待执行的恢复请求。
+    ///   - scrollTo: 实际的滚动回调。
     func performRestoration(_ request: Restoration, scrollTo: (String) -> Void) async {
         await Task.yield()
         for _ in 0..<8 {

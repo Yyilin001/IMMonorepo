@@ -1,12 +1,23 @@
 import Foundation
 import SQLKit
 
-/// Budget persistence only. The caller holds the account-state lock and uses
-/// the same transaction as the successful new-device write. This component
-/// neither reads nor creates credentials.
+/// 仅负责设备注册预算的持久化。
+///
+/// 调用方需持有账号状态锁，并与新设备写入成功同处一个事务；
+/// 本组件既不读取也不签发凭据。
 struct PostgresV2DeviceRegistrationBudget: Sendable {
+    /// 本次部署使用的注册预算策略。
     let policy: V2DeviceRegistrationPolicy
 
+    /// 查询账号当前是否已被注册窗口限流。
+    ///
+    /// - Parameters:
+    ///   - sql: 与成功写入同一事务的数据库连接。
+    ///   - userID: 目标账号。
+    ///   - now: 本次判定时刻。
+    /// - Returns: 需要等待的重试秒数；未达上限或窗口已过期时返回 `nil`。
+    /// - Throws: 窗口起点无法编码或重试秒数不可表示时抛出
+    ///   ``V2DeviceCredentialServiceError/unavailable``。
     func retryAfter(
         _ sql: any SQLDatabase,
         userID: UUID,
@@ -26,6 +37,17 @@ struct PostgresV2DeviceRegistrationBudget: Sendable {
         return retryAfter
     }
 
+    /// 记录一次成功的新设备注册。
+    ///
+    /// 窗口起点按同一完整窗口判断：落在窗口内累加计数，否则重置为新窗口。
+    /// 直接使用完整时间戳写入，避免截断导致精度丢失或越过 PostgreSQL 上界。
+    ///
+    /// - Parameters:
+    ///   - sql: 与成功写入同一事务的数据库连接。
+    ///   - userID: 目标账号。
+    ///   - now: 本次写入时刻。
+    /// - Throws: 窗口起点无法编码时抛出
+    ///   ``V2DeviceCredentialServiceError/unavailable``。
     func recordSuccess(
         _ sql: any SQLDatabase,
         userID: UUID,

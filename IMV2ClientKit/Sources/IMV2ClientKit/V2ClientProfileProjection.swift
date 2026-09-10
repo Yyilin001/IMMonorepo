@@ -1,14 +1,22 @@
 import Foundation
 import IMV2Core
 
-/// A profile invalidation is durable delivery metadata, not profile content.
-/// The repository uses it to coalesce authorized batch reads after the sync
-/// transaction commits.
+/// 资料失效通知。
+///
+/// 它是持久化的投递元数据而非资料内容本身；仓储据此在同步事务提交后合并已授权的批量读取。
 struct V2ClientProfileInvalidation: Equatable, Sendable {
+    /// 资料发生变化的用户。
     let userID: UserID
+    /// 触发本次失效的最小资料修订。
     let minimumRevision: V2ProfileRevision
+    /// 用户当前资料状态。
     let state: V2ProfileState
 
+    /// 从同步记录解码资料失效通知。
+    ///
+    /// - Parameter record: 投影类型为资料失效的同步记录。
+    /// - Throws: 投影类型不符、载荷无法解码、修订或状态取值未知、用户标识非法时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let userID: String

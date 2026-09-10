@@ -3,27 +3,72 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Commits a revision-fenced text replacement, its authoritative room event,
-/// fan-out plan and durable operation replay record as one transaction.
+/// 消息编辑的 PostgreSQL 实现。
+///
+/// 受修订约束的正文替换、权威房间事件、扇出计划与持久化操作重放记录会在同一个事务内提交。
 public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMessageEditStore {
     private let database: any Database
     private let contentReviewMode: V2ContentReviewMode
     private let identities: any V2MembershipIdentitySnapshotValidating
 
+    /// 组合数据库、内容审核模式与成员身份快照校验器。
+    ///
+    /// - Parameters:
+    ///   - database: 存放房间、消息、准入与事件的数据库。
+    ///   - contentReviewMode: 内容审核模式。
+    ///   - identities: 成员身份快照校验器；为 `nil` 时使用基于同一数据库的默认实现。
     public init(database: any Database, contentReviewMode: V2ContentReviewMode, identities: (any V2MembershipIdentitySnapshotValidating)? = nil) {
         self.database = database
         self.contentReviewMode = contentReviewMode
         self.identities = identities ?? V2PostgresMembershipIdentitySnapshotValidator(database: database)
     }
 
+    /// 执行一次消息编辑（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - command: 消息编辑命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 编辑结果。
+    /// - Throws: 无权限、状态冲突、容量不足或持久化失败时抛出。
     public func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome {
         try await edit(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属执行一次消息编辑。
+    ///
+    /// - Parameters:
+    ///   - command: 消息编辑命令。
+    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 编辑结果。
+    /// - Throws: 归属已变更、无权限、状态冲突、容量不足或持久化失败时抛出。
     public func editOwnerValidated(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome {
         try await edit(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 在单个事务内完成身份校验、幂等判定、授权、容量预留与事件写入。
+    ///
+    /// 借用归属事务之前先复用控制面身份边界：编辑只有一个发起者，因此快照中的两个标识
+    /// 都必须指向该发起者。事务内依次校验可选归属、历史操作幂等性、房间容量档位、
+    /// 发起者成员资格与禁言状态、房间冻结、消息归属与作者身份。
+    /// 撤回墓碑先于修订栅栏判定，使并发撤回被判定为终态而不被误认为可重试的陈旧写入冲突。
+    ///
+    /// - Parameters:
+    ///   - command: 消息编辑命令。
+    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 编辑结果或不需要变更的结论。
+    /// - Throws: 房间或消息不存在、发起者非作者、房间冻结、账号或角色不可用、
+    ///   已达禁言状态或持久化失败时抛出。
     private func edit(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome {
         // Reuse the control identity boundary before borrowing an owner
         // transaction. An edit has one actor, so both snapshot IDs name it.
@@ -145,6 +190,25 @@ private struct EditAdmissionRow { let eligibleMemberCount: Int; let commandWindo
 extension EditAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
 private struct EditShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int }
 extension EditShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: editUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
+/// 把标识原始值解析为 UUID。
+///
+/// - Parameter id: 已校验的标识类型。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2MessageEditStoreError/corruptPersistenceState``。
 private func editUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: id.rawValue) else { throw V2MessageEditStoreError.corruptPersistenceState }; return value }
+
+/// 把非负的 64 位整数转换为无符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 无符号值。
+/// - Throws: 值为负时抛出 ``V2MessageEditStoreError/corruptPersistenceState``。
 private func editUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2MessageEditStoreError.corruptPersistenceState }; return UInt64(value) }
+
+/// 把无符号整数转换为可持久化的有符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 有符号值。
+/// - Throws: 超出 `Int64` 表示范围时抛出
+///   ``V2MessageEditStoreError/corruptPersistenceState``。
 private func editSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2MessageEditStoreError.corruptPersistenceState }; return Int64(value) }

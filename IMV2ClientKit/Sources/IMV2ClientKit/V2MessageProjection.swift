@@ -1,16 +1,18 @@
 import Foundation
 import IMV2Core
 
-/// The locally queryable representation of an immutable message acceptance
-/// event. It is decoded before the sync cursor advances, so UI readers never
-/// observe a persisted sequence whose required message projection is absent.
+/// 不可变消息接受事件的本地可查询表示。
+///
+/// 它在同步游标推进之前完成解码，因此界面读取者不会看到「序号已持久化、
+/// 但所需消息投影缺失」的中间状态。
 public struct V2ClientMessageProjection: Equatable, Sendable {
     public let sourceEventID: EventID
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
-    /// Ordering key in a room's presentation timeline. Message-only actions
-    /// (read receipts, edits and withdrawals) continue to use roomSequence.
+    /// 房间展示时间线中的排序键。
+    ///
+    /// 仅作用于消息本身的操作（已读回执、编辑与撤回）仍使用房间序号。
     public let timelineSequence: UInt64
     public let messageRevision: UInt64
     public let senderUserID: UserID
@@ -162,14 +164,23 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     }
 }
 
-/// One durable conversation-list row derived from the latest locally
-/// projected message in a room. It deliberately contains no server-owned
-/// display name or mutable membership facts: those require their own synced
-/// projection before they can be shown as authoritative UI.
+/// 由房间内最新本地投影消息派生的持久化会话列表行。
+///
+/// 它刻意不含服务端掌管的展示名或可变成员事实：这些内容必须各自拥有已同步的投影，
+/// 才能作为权威界面数据展示。
 public struct V2ClientConversationSummary: Equatable, Sendable {
+    /// 目标房间。
     public let roomID: RoomID
+    /// 该房间最新一条消息投影。
     public let lastMessage: V2ClientMessageProjection
 
+    /// 保存会话摘要。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - lastMessage: 最新消息投影，其房间必须与 `roomID` 一致。
+    ///
+    /// 房间不一致时直接失败，避免出现归属错位的摘要行。
     public init(roomID: RoomID, lastMessage: V2ClientMessageProjection) {
         precondition(roomID == lastMessage.roomID)
         self.roomID = roomID
@@ -177,17 +188,29 @@ public struct V2ClientConversationSummary: Equatable, Sendable {
     }
 }
 
-/// Stable keyset cursor for the unified room timeline.  The sequence is the
-/// authoritative order; the opaque item ID is the deterministic tie-breaker
-/// shared by message and private-activity projections.
+/// 统一房间时间线中的条目种类。
 public enum V2ClientTimelineItemKind: Int, Equatable, Sendable { case message, activity }
 
+/// 统一房间时间线的稳定键集游标。
+///
+/// 序号是权威顺序，不透明的条目标识则是消息与私有活动投影共用的确定性并列裁决键。
 public struct V2ClientTimelineCursor: Equatable, Sendable {
+    /// 时间线序号。
     public let timelineSequence: UInt64
+    /// 条目标识。
     public let itemID: String
 
+    /// 条目种类。
     public let kind: V2ClientTimelineItemKind
 
+    /// 保存时间线游标。
+    ///
+    /// - Parameters:
+    ///   - timelineSequence: 时间线序号，需大于零。
+    ///   - itemID: 条目标识，需非空。
+    ///   - kind: 条目种类，默认消息。
+    ///
+    /// 序号非正或标识为空时直接失败，避免产生无效游标。
     public init(timelineSequence: UInt64, itemID: String, kind: V2ClientTimelineItemKind = .message) {
         precondition(timelineSequence > 0 && !itemID.isEmpty)
         self.kind = kind
@@ -196,18 +219,35 @@ public struct V2ClientTimelineCursor: Equatable, Sendable {
     }
 }
 
-/// One immutable SQLite snapshot for a bounded room-timeline window.  Keeping
-/// decorations in the same read transaction prevents a message page from being
-/// paired with reactions, favorites, pins, or receipts from another generation.
+/// 有界房间时间线窗口的单次不可变 SQLite 快照。
+///
+/// 把装饰数据放在同一读事务中，可避免消息分页与来自另一代次的表情、收藏、置顶或回执配对。
 public struct V2ClientConversationTimelinePage: Equatable, Sendable {
+    /// 本页消息投影。
     public let messages: [V2ClientMessageProjection]
+    /// 本页时间线活动条目。
     public let activities: [V2ClientTimelineActivityProjection]
+    /// 本页涉及的表情记录。
     public let reactions: [V2ClientMessageReaction]
+    /// 本页涉及的置顶消息标识。
     public let pinnedMessageIDs: Set<MessageID>
+    /// 本页涉及的收藏消息标识。
     public let favoritedMessageIDs: Set<MessageID>
+    /// 私聊已读回执投影。
     public let directReadReceipt: V2DirectReadReceiptProjection?
+    /// 更早页面的游标。
     public let olderCursor: V2ClientTimelineCursor?
 
+    /// 保存时间线分页。
+    ///
+    /// - Parameters:
+    ///   - messages: 消息投影。
+    ///   - activities: 时间线活动条目。
+    ///   - reactions: 表情记录。
+    ///   - pinnedMessageIDs: 置顶消息标识。
+    ///   - favoritedMessageIDs: 收藏消息标识。
+    ///   - directReadReceipt: 私聊已读回执投影。
+    ///   - olderCursor: 更早页面游标。
     public init(
         messages: [V2ClientMessageProjection],
         activities: [V2ClientTimelineActivityProjection],
@@ -227,26 +267,36 @@ public struct V2ClientConversationTimelinePage: Equatable, Sendable {
     }
 }
 
-/// Both boundaries belong to the same snapshot as the target and decorations.
-/// `newerBoundary` is the first excluded newer item, suitable for a strict
-/// `before` refresh of this window even when that item is later deleted.
+/// 房间时间线窗口。
+///
+/// 两个边界与目标条目及装饰数据都属于同一快照。`newerBoundary` 是首个被排除的更新条目，
+/// 即使该条目之后被删除，也仍适合作为本窗口的严格 `before` 游标刷新点。
 public struct V2ClientConversationTimelineWindow: Equatable, Sendable {
+    /// 窗口内的时间线分页。
     public let page: V2ClientConversationTimelinePage
+    /// 首个被排除的更新条目游标。
     public let newerBoundary: V2ClientTimelineCursor?
 }
 
+/// 时间线定位结果。
 public enum V2ClientTimelineLocation: Equatable, Sendable {
+    /// 已定位到目标窗口。
     case found(V2ClientConversationTimelineWindow)
+    /// 目标消息已被撤回。
     case withdrawn
-    /// Missing, outside this room, or outside the bound local account. This
-    /// deliberately does not disclose another account's message existence.
+    /// 不可用。
+    ///
+    /// 表示目标不存在、不属于该房间，或不属于绑定的本地账号；
+    /// 它刻意不披露其他账号的消息是否存在。
     case unavailable
 }
 
 public enum V2ClientProjectionError: Error, Equatable, Sendable { case invalidMessagePayload }
 
-/// Text deltas require the preceding revision. Explicit complete values may
-/// bridge authorized gaps after their accepted identity is validated.
+/// 消息编辑投影。
+///
+/// 文本增量必须依赖前一个修订。显式的完整值只在其被接受的标识校验通过后，
+/// 才可以跨越被授权的缺口。
 struct V2ClientMessageEditProjection: Equatable, Sendable {
     enum Content: Equatable, Sendable {
         case textDelta(String)
@@ -317,8 +367,9 @@ struct V2ClientMessageReplacement: Decodable, Equatable, Sendable {
     }
 }
 
-/// Durable, queryable member of a message's reaction set. Incremental events
-/// add/remove this exact key; no message text or content revision is changed.
+/// 属于某条消息表态集合的、可持久查询的成员。
+///
+/// 增量事件会添加/移除这个精确的键；不会改变消息文本或内容修订。
 public struct V2ClientMessageReaction: Equatable, Sendable {
     public let roomID: RoomID
     public let messageID: MessageID

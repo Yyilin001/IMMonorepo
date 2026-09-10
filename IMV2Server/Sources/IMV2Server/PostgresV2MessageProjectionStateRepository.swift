@@ -94,17 +94,35 @@ struct V2StoredMessageProjectionState: Equatable, Sendable {
     }
 }
 
-/// SQL boundary for immutable message projection states. Every insert is an
-/// idempotent create followed by an equality verification; a retry may reuse
-/// an existing state, but can never overwrite conflicting canonical content.
+/// 不可变消息投影状态的 SQL 边界。
+///
+/// 每次写入都是「幂等创建 + 等值校验」：重试可以复用已有状态，
+/// 但绝不能覆盖内容不一致的规范状态。
 struct PostgresV2MessageProjectionStateRepository: Sendable {
+    /// 目标 schema。
     let schema: String
 
+    /// 校验并保存 schema。
+    ///
+    /// - Parameter schema: 目标 schema，需符合 `^[A-Za-z_][A-Za-z0-9_]*$`，默认 `im_v2`。
+    ///
+    /// schema 名不满足格式时直接失败，避免拼接出非法 SQL 标识符。
     init(schema: String = "im_v2") {
         precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
         self.schema = schema
     }
 
+    /// 幂等持久化一个不可变状态。
+    ///
+    /// 写入后会以状态标识与载荷等值校验确认结果：已存在不同内容时视为持久化冲突而非覆盖。
+    ///
+    /// - Parameters:
+    ///   - value: 待持久化的状态。
+    ///   - storage: 载荷存放方式，默认内联。
+    ///   - persistedCreatedAt: 已编码的创建时刻；为空时按状态自带时刻编码。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Throws: 状态标识不一致或载荷冲突时抛出
+    ///   ``V2MessageProjectionStatePersistenceError/corruptPersistence``。
     func persist(
         _ value: V2StoredMessageProjectionState,
         storage: V2MessageProjectionStateStorage = .inline,
@@ -201,6 +219,16 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
         }
     }
 
+    /// 按消息、修订与变体键读取状态。
+    ///
+    /// - Parameters:
+    ///   - messageID: 目标消息。
+    ///   - revision: 消息修订，需大于零。
+    ///   - variantKey: 变体键，需非负，默认 0。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 对应状态；不存在时返回 `nil`。
+    /// - Throws: 修订或变体键非法、或记录无法解码时抛出
+    ///   ``V2MessageProjectionStatePersistenceError/corruptPersistence``。
     func load(
         messageID: UUID,
         revision: Int64,
@@ -221,6 +249,14 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             """).first(decoding: MessageProjectionStateRow.self)?.value
     }
 
+    /// 按状态标识读取状态。
+    ///
+    /// - Parameters:
+    ///   - stateID: 状态标识。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 对应状态；不存在时返回 `nil`。
+    /// - Throws: 记录无法解码时抛出
+    ///   ``V2MessageProjectionStatePersistenceError/corruptPersistence``。
     func load(
         stateID: UUID,
         sql: any SQLDatabase
@@ -234,10 +270,18 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             """).first(decoding: MessageProjectionStateRow.self)?.value
     }
 
-    /// Transitional self-healing path for a message mutation that arrives
-    /// before the bounded historical backfill reaches this message. It reads
-    /// only control-store authority and persists one immutable current state;
-    /// normal post-migration writes always hit `load` above.
+    /// 面向「消息变更先于有界历史回填到达」的过渡期自愈路径。
+    ///
+    /// 它只读取控制面权威数据并持久化一个不可变的当前状态；
+    /// 迁移完成后的常规写入始终命中上面的 `load` 路径。
+    ///
+    /// - Parameters:
+    ///   - messageID: 目标消息。
+    ///   - revision: 目标修订。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 已存在或刚刚物化的状态。
+    /// - Throws: 控制面缺少必要记录或状态载荷非法时抛出
+    ///   ``V2MessageProjectionStatePersistenceError/corruptPersistence``。
     func loadCurrentOrMaterialize(
         messageID: UUID,
         revision: Int64,

@@ -7,6 +7,9 @@
 
 import SwiftUI
 
+/// 应用入口。
+///
+/// 它把推送代理接入 SwiftUI 生命周期，并把根视图的创建交给 `V2RootView`。
 @main
 struct IMAppApp: App {
     @UIApplicationDelegateAdaptor(V2AppPushDelegate.self) private var appPushDelegate

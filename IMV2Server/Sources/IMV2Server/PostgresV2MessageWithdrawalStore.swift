@@ -3,22 +3,59 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Persists a message tombstone and its delivery work atomically. The lock
-/// order is operation advisory lock → room → message → room admission → shard
-/// pool; an accepted withdrawal never leaves a partially visible tombstone.
+/// 消息撤回的 PostgreSQL 实现。
+///
+/// 消息墓碑与其投递工作在同一个事务内持久化。加锁顺序为
+/// 操作咨询锁 → 房间 → 消息 → 房间准入 → 分片池，
+/// 因此一次被接受的撤回不会留下部分可见的墓碑。
 public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2OwnerValidatedMessageWithdrawalStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放消息、房间、准入与撤回记录的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 执行一次消息撤回（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - command: 撤回命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 撤回结果。
+    /// - Throws: 无权限、修订冲突或持久化失败时抛出。
     public func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         try await withdraw(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属执行一次消息撤回。
+    ///
+    /// - Parameters:
+    ///   - command: 撤回命令。
+    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 撤回结果。
+    /// - Throws: 归属已变更、无权限、修订冲突或持久化失败时抛出。
     public func withdrawOwnerValidated(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         try await withdraw(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 在单个事务内完成归属校验、幂等判定、作者校验、墓碑写入与投递登记。
+    ///
+    /// - Parameters:
+    ///   - command: 撤回命令。
+    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 撤回结果或不需要变更的结论。
+    /// - Throws: 房间或消息不存在、发起者非作者、状态冲突或持久化失败时抛出。
     private func withdraw(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
@@ -192,6 +229,25 @@ private struct WithdrawalAdmissionRow { let eligibleMemberCount: Int; let comman
 extension WithdrawalAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
 private struct WithdrawalShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int }
 extension WithdrawalShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: withdrawalUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
+/// 把标识原始值解析为 UUID。
+///
+/// - Parameter identifier: 已校验的标识类型。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2MessageWithdrawalStoreError/corruptPersistenceState``。
 private func withdrawalUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: identifier.rawValue) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }; return value }
+
+/// 把非负的 64 位整数转换为无符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 无符号值。
+/// - Throws: 值为负时抛出 ``V2MessageWithdrawalStoreError/corruptPersistenceState``。
 private func withdrawalUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }; return UInt64(value) }
+
+/// 把无符号整数转换为可持久化的有符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 有符号值。
+/// - Throws: 超出 `Int64` 表示范围时抛出
+///   ``V2MessageWithdrawalStoreError/corruptPersistenceState``。
 private func withdrawalSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }; return Int64(value) }

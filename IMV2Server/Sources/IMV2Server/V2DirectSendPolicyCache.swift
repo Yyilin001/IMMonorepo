@@ -1,25 +1,34 @@
 import Foundation
 
-/// Process-local acceleration for the stable portion of direct-message
-/// authorization. It is deliberately not an authorization authority: every
-/// hit carries durable revision fences that PostgreSQL verifies before a
-/// message can be accepted.
+/// 私聊授权中稳定部分的进程内加速缓存。
+///
+/// 它刻意不承担授权权威：每次命中都携带持久化修订栅栏，
+/// 消息被接受之前仍由 PostgreSQL 逐项校验。
 public actor V2DirectSendPolicyCache {
     struct Update: Sendable {
         let entry: Entry
         let key: Key
     }
 
+    /// 缓存键，由房间与发送者确定。
     public struct Key: Hashable, Sendable {
+        /// 私聊房间标识。
         public let roomID: UUID
+        /// 发送者标识。
         public let senderID: UUID
 
+        /// 保存缓存键。
+        ///
+        /// - Parameters:
+        ///   - roomID: 私聊房间标识。
+        ///   - senderID: 发送者标识。
         public init(roomID: UUID, senderID: UUID) {
             self.roomID = roomID
             self.senderID = senderID
         }
     }
 
+    /// 单个发送方向的策略快照。
     public struct Entry: Sendable, Equatable {
         public let recipientID: UUID
         public let directPairRevision: Int64
@@ -27,17 +36,16 @@ public actor V2DirectSendPolicyCache {
         public let recipientPolicyRevision: Int64
         public let senderProfileVisibleToRecipient: Bool
         public let senderCanSend: Bool?
-        /// The sender profile/account activity observed by the durable
-        /// preflight. It may be reused only with the sender policy revision
-        /// fence; account disable increments that revision in the same
-        /// transaction.
+        /// 持久化预检观察到的发送者资料与账号活跃状态。
+        ///
+        /// 只有配合发送者策略修订栅栏才能复用：账号停用会在同一事务内递增该修订。
         public let senderIsActive: Bool
         public let recipientIsActive: Bool
         public let blocked: Bool
         public let isFriend: Bool
-        /// Monotonic, sender-specific state from `direct_room_pairs`. Once it
-        /// becomes true it never reverts, so it is safe to use only to avoid
-        /// an otherwise no-op reply-marker write on subsequent sends.
+        /// 来自 `direct_room_pairs` 的发送者维度单调状态。
+        ///
+        /// 一旦为真便不会回退，因此可以安全地用于避免后续发送中一次本无效果的回复标记写入。
         public let senderHasReplied: Bool
         public let recipientHasReplied: Bool
         public let allowsStrangers: Bool
@@ -90,10 +98,12 @@ public actor V2DirectSendPolicyCache {
             self.recipientAllowsCustomerMessages = recipientAllowsCustomerMessages
         }
 
-        /// The accepted message and this cache publication happen on opposite
-        /// sides of the database commit. Therefore this refinement never
-        /// advertises an uncommitted reply marker. The pair revision changes
-        /// in the same mutation, so retain a usable revision fence as well.
+        /// 构造「发送者已回复」的派生条目。
+        ///
+        /// 消息接受与本次缓存发布分别位于数据库提交的两侧，因此该派生不会对外宣布尚未提交的
+        /// 回复标记；同时用户对修订会在同一次变更中变化，派生条目也会保留可用的修订栅栏。
+        ///
+        /// - Returns: 已回复标记为真的派生条目。
         func markingSenderHasReplied() -> Self {
             .init(
                 recipientID: recipientID,
@@ -118,10 +128,11 @@ public actor V2DirectSendPolicyCache {
             )
         }
 
-        /// Applies the opposite participant's first committed send to this
-        /// direction's cache entry. The caller supplies and verifies the
-        /// previous durable pair revision before using this transformation;
-        /// the marker itself is monotonic in PostgreSQL.
+        /// 把对端首次已提交发送应用到本方向的缓存条目。
+        ///
+        /// 调用方需自行提供并校验此前的持久化用户对修订；该标记在 PostgreSQL 中是单调的。
+        ///
+        /// - Returns: 对端已回复标记为真的派生条目。
         func markingRecipientHasReplied() -> Self {
             .init(
                 recipientID: recipientID,
@@ -147,19 +158,27 @@ public actor V2DirectSendPolicyCache {
         }
     }
 
+    /// 缓存运行快照。
     public struct Snapshot: Equatable, Sendable {
+        /// 当前条目数。
         public let entries: Int
+        /// 命中次数。
         public let hits: UInt64
+        /// 未命中次数。
         public let misses: UInt64
+        /// 写入次数。
         public let insertions: UInt64
+        /// 因容量淘汰的次数。
         public let evictions: UInt64
+        /// 因过期移除的次数。
         public let expirations: UInt64
     }
 
-    /// Actor-isolated intrusive LRU node. Dictionary lookup, recency refresh,
-    /// insertion and capacity eviction are all O(1); the previous
-    /// `Dictionary.min` eviction scanned every cached policy after the cache
-    /// reached capacity and created a sharp throughput cliff.
+    /// actor 隔离的侵入式 LRU 节点。
+    ///
+    /// 字典查找、最近使用刷新、插入与容量淘汰均为 O(1)。
+    /// 此前使用 `Dictionary.min` 做淘汰，缓存达到容量后每次都要扫描全部策略，
+    /// 从而形成陡峭的吞吐断层。
     private final class Node {
         let key: Key
         var value: Entry
@@ -187,11 +206,22 @@ public actor V2DirectSendPolicyCache {
     private var evictions: UInt64 = 0
     private var expirations: UInt64 = 0
 
+    /// 创建容量与有效期有界的策略缓存。
+    ///
+    /// - Parameters:
+    ///   - capacity: 条目容量上限，小于一时按一处理。
+    ///   - lifetime: 条目有效期，小于一秒时按一秒处理。
     public init(capacity: Int = 50_000, lifetime: Duration = .seconds(60)) {
         self.capacity = max(1, capacity)
         self.lifetime = max(.seconds(1), lifetime)
     }
 
+    /// 查询某发送方向的策略快照。
+    ///
+    /// 过期条目会在查询时移除并返回 `nil`，有效命中会被提升为最近使用。
+    ///
+    /// - Parameter key: 缓存键。
+    /// - Returns: 有效快照；缺失或已过期时为 `nil`。
     public func value(for key: Key) -> Entry? {
         let now = clock.now
         guard let node = entries[key] else {
@@ -209,16 +239,23 @@ public actor V2DirectSendPolicyCache {
         return node.value
     }
 
-    /// Resolves one ordered micro-batch with a single actor hop.
+    /// 通过一次 actor 跳转解析一个有界且保序的微批。
     ///
-    /// Each key still goes through `value(for:)`, so expiry, hit/miss
-    /// accounting and LRU recency are exactly the same as repeated scalar
-    /// lookups. The only removed work is the cross-executor suspension for
-    /// every message in an already-coalesced PostgreSQL batch.
+    /// 每个键仍会经过 `value(for:)`，因此过期判定、命中/未命中统计以及 LRU 最近使用
+    /// 与重复的标量查找完全一致。唯一省去的开销是：在一个已经合并过的 PostgreSQL 批次里，
+    /// 不再为每条消息各发生一次跨执行器挂起。
+    ///
+    /// - Parameter keys: 本次要解析的缓存键列表。
+    /// - Returns: 与 `keys` 顺序一致的条目结果，未命中或已过期处为 `nil`。
     func values(for keys: [Key]) -> [Entry?] {
         keys.map { value(for: $0) }
     }
 
+    /// 写入或更新一条策略快照。
+    ///
+    /// - Parameters:
+    ///   - value: 策略快照。
+    ///   - key: 缓存键。
     public func insert(_ value: Entry, for key: Key) {
         let now = clock.now
         if let existing = entries[key] {
@@ -238,9 +275,11 @@ public actor V2DirectSendPolicyCache {
         insertions &+= 1
     }
 
-    /// Applies a committed micro-batch in its durable order using one actor
-    /// hop. Repeated keys are intentional: the last committed revision is the
-    /// cache state that must remain visible.
+    /// 通过一次 actor 跳转，按持久化顺序应用一个已提交微批。
+    ///
+    /// 出现重复键是刻意允许的：最后提交的修订才是必须保持可见的缓存状态。
+    ///
+    /// - Parameter updates: 已提交的缓存更新列表。
     func insert(_ updates: [Update]) {
         for update in updates {
             insert(update.entry, for: update.key)
@@ -252,10 +291,11 @@ public actor V2DirectSendPolicyCache {
         let expectedDirectPairRevision: Int64
     }
 
-    /// Advances only a cache entry proven to describe the pair revision that
-    /// immediately preceded the opposite participant's committed first send.
-    /// Missing or newer entries are left untouched and will be refreshed by
-    /// the normal revision-fenced database path.
+    /// 只推进那些被证明描述了「对端首次发送已提交之前的那一版」配对修订的缓存条目。
+    ///
+    /// 缺失或更新的条目保持不动，它们会由常规的修订围栏数据库路径刷新。
+    ///
+    /// - Parameter updates: 待标记的接收方已回复更新列表。
     func markRecipientsHaveReplied(_ updates: [RecipientReplyUpdate]) {
         let now = clock.now
         for update in updates {
@@ -270,11 +310,17 @@ public actor V2DirectSendPolicyCache {
         }
     }
 
+    /// 移除指定缓存键。
+    ///
+    /// - Parameter key: 缓存键。
     public func invalidate(_ key: Key) {
         guard let node = entries[key] else { return }
         remove(node)
     }
 
+    /// 移除指定房间下全部发送方向的缓存。
+    ///
+    /// - Parameter roomID: 目标房间。
     public func invalidate(roomID: UUID) {
         guard let keys = keysByRoomID[roomID] else { return }
         for key in keys {
@@ -285,6 +331,7 @@ public actor V2DirectSendPolicyCache {
         keysByRoomID.removeValue(forKey: roomID)
     }
 
+    /// 清空全部缓存条目，不清零统计计数。
     public func removeAll() {
         entries.removeAll(keepingCapacity: true)
         keysByRoomID.removeAll(keepingCapacity: true)
@@ -292,6 +339,9 @@ public actor V2DirectSendPolicyCache {
         leastRecent = nil
     }
 
+    /// 读取当前缓存快照。
+    ///
+    /// - Returns: 条目数与各项累计计数。
     public func snapshot() -> Snapshot {
         .init(
             entries: entries.count,

@@ -3,14 +3,23 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 转发消息的对外处理能力。
 public protocol V2ForwardMessagesHandling: Sendable {
+    /// 执行一次可能包含多个目标房间的转发。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起转发的用户。
+    ///   - command: 转发命令。
+    /// - Returns: 与源消息和目标房间组合对应的结果列表。
+    /// - Throws: 归属不匹配、授权不足或持久化失败时抛出。
     func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult]
 }
 
-/// Multi-forward is intentionally a sequence of independently durable pairs.
-/// A target may be unavailable without discarding successful targets, while a
-/// durable client-message ID makes every pair retry-safe across a crash between
-/// the operation row and normal message acceptance transaction.
+/// 转发消息服务。
+///
+/// 多目标转发刻意被设计为一串相互独立的持久化「源消息-目标房间」对：
+/// 某个目标不可用不会丢弃已经成功的目标；持久化的目标客户端消息标识使每个组合都能在
+/// 操作记录与常规消息接受事务之间发生崩溃时安全重试。
 public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling {
     private var ownerRoutes: [RoomID: V2RoomShardRoute]?
     private let database: any Database
@@ -22,11 +31,35 @@ public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling 
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
+    /// 组合数据库、写存储与转发参数。
+    ///
+    /// - Parameters:
+    ///   - database: 执行来源读取与操作记录的数据库。
+    ///   - writeStore: 目标房间的写入存储。
+    ///   - capacityProfile: 本次使用的容量档位。
+    ///   - limits: 消息命令限制。
+    ///   - acceptanceIDs: 接受标识生成器。
+    ///   - maximumTargetConcurrency: 目标房间并发上限，需大于零，默认 4。
+    ///   - makeUUID: 客户端消息标识生成方式。
+    ///   - now: 可注入的当前时刻读取函数。
+    ///
+    /// 并发上限非正时直接失败，避免出现无界并发。
     public init(database: any Database, writeStore: any V2OwnerValidatedForwardMessageWriteStore, capacityProfile: V2CapacityProfile, limits: V2MessageCommandLimits, acceptanceIDs: V2AcceptanceIDFactory = .init(), maximumTargetConcurrency: Int = 4, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init) {
         precondition(maximumTargetConcurrency > 0)
         self.database = database; self.writeStore = writeStore; self.capacityProfile = capacityProfile; self.limits = limits; self.acceptanceIDs = acceptanceIDs; self.maximumTargetConcurrency = maximumTargetConcurrency; self.makeUUID = makeUUID; self.now = now
     }
 
+    /// 按已校验的房间归属执行转发。
+    ///
+    /// 涉及的全部房间都必须出现在归属集合中，否则按归属变更处理；
+    /// 归属集合会被裁剪为本次命令涉及的范围后再执行转发。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起转发的用户。
+    ///   - command: 转发命令。
+    ///   - ownerRoutes: 本次涉及房间的已选定归属。
+    /// - Returns: 转发结果列表。
+    /// - Throws: 任一房间缺少归属时抛出 ``V2RoomOwnerFenceError/ownerChanged``。
     public func forwardOwnerValidated(actorUserID: UserID, command: V2ForwardMessagesCommand,
         ownerRoutes: [RoomID: V2RoomShardRoute]) async throws -> [V2ForwardMessageResult] {
         let rooms = Set(command.sources.map(\.roomID) + command.targetRoomIDs)
@@ -36,6 +69,15 @@ public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling 
         return try await scoped.forward(actorUserID: actorUserID, command: command)
     }
 
+    /// 在事务内校验本次涉及房间的归属。
+    ///
+    /// 未携带归属集合时为空操作，供非路由调用方复用同一实现。
+    ///
+    /// - Parameters:
+    ///   - rooms: 本次涉及的房间。
+    ///   - readOnly: 是否只加共享锁。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Throws: 缺少归属或归属已变更时抛出 ``V2RoomOwnerFenceError/ownerChanged``。
     private func requireOwners(_ rooms: [RoomID], readOnly: Bool = false, sql: any SQLDatabase) async throws {
         guard let ownerRoutes else { return }
         var routes: [UUID: V2RoomShardRoute] = [:]
@@ -46,6 +88,16 @@ public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling 
         try await v2RequireForwardOwners(routes, readOnly: readOnly, sql: sql)
     }
 
+    /// 执行一次转发。
+    ///
+    /// 流程为：先读取既有操作结果以支持幂等重放，再读取源消息内容，
+    /// 然后按目标房间并发处理并汇总结果。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起转发的用户。
+    ///   - command: 转发命令。
+    /// - Returns: 与源消息和目标房间组合对应的结果列表。
+    /// - Throws: 源消息不可用、权限不足或持久化失败时抛出。
     public func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
         let priorResults = try await replayedResults(
             actor: actorUserID,
@@ -290,10 +342,19 @@ public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling 
         }
     }
 
-    /// A successful pair is immutable even when the source is later edited,
-    /// withdrawn, or becomes invisible to the actor. The second join predicate
-    /// also repairs a crash after message acceptance but before result_message_id
-    /// was recorded: the durable target client ID is the acceptance fence.
+    /// 读取既有转发结果以支持幂等重放。
+    ///
+    /// 已成功的组合是不可变的，即使来源消息后来被编辑、撤回或对发起者不可见。
+    /// 第二个连接条件还能修复「消息已接受但尚未记录结果消息标识」时的崩溃：
+    /// 持久化的目标客户端标识就是接受栅栏。
+    ///
+    /// - Parameters:
+    ///   - actor: 发起转发的用户。
+    ///   - operation: 转发操作标识。
+    ///   - sources: 源消息引用列表。
+    ///   - targets: 目标房间列表。
+    /// - Returns: 与源消息和目标房间组合对应的既有结果。
+    /// - Throws: 查询失败或记录状态异常时抛出。
     private func replayedResults(
         actor: UserID,
         operation: MessageForwardOperationID,

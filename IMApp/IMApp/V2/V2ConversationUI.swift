@@ -7,15 +7,17 @@ import UIKit
 import AVKit
 import UniformTypeIdentifiers
 
-/// App-facing, value-only view data. The UI never reads SQLite rows or sync
-/// event payloads directly, which keeps navigation and rendering testable.
+/// 面向应用的值类型会话种类。
+///
+/// 界面不会直接读取 SQLite 行或同步事件载荷，从而使导航与渲染保持可测试。
 enum V2ConversationKind: Hashable, Sendable {
-    /// A direct room with an authorized, bounded public-identity projection.
+    /// 已获得授权且有界公开身份投影的私聊房间。
     case direct(accountKind: V2AccountKind)
-    /// A group room with a compact room-profile projection.
+    /// 带精简房间资料投影的群房间。
     case group
-    /// A message arrived before its corresponding room projection. Keep it
-    /// readable, but do not invent a direct-account classification for it.
+    /// 消息先于其房间投影到达。
+    ///
+    /// 这类房间应当保持可读，但不得凭空赋予其私聊账号分类。
     case unknown
 
     var accessibilityIdentifierComponent: String {
@@ -60,8 +62,9 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
     }
 }
 
-/// A value-only destination shown in the forward picker.  The user sees a
-/// title, while the opaque ID remains confined to the Store boundary.
+/// 转发选择器中展示的值类型目标。
+///
+/// 用户看到的是标题，不透明标识仍被限制在存储边界内部。
 struct V2ConversationForwardTarget: Hashable, Identifiable, Sendable {
     let roomID: String
     let title: String
@@ -74,23 +77,25 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     let roomSequence: UInt64
     let revision: UInt64
     let text: String
-    /// Opaque media IDs from the local projection. The UI may show that a
-    /// message has attachments, but never receives a provider URL here.
+    /// 来自本地投影的不透明媒体标识。
+    ///
+    /// 界面可以据此显示消息带有附件，但绝不会在此拿到提供方地址。
     let media: [V2MediaReference]
-    /// Server-derived, non-sensitive presentation facts for `media`. These
-    /// let the view choose image/file affordances without reading object-store
-    /// metadata or assuming a provider URL.
+    /// 针对 `media` 的、由服务端派生的非敏感展示事实。
+    ///
+    /// 视图据此选择图片或文件样式，无需读取对象存储元数据，也无需假设提供方地址。
     let mediaPresentations: [V2MediaPresentation]
-    /// Protocol-level mention targets. IDs are kept opaque in the UI; the
-    /// message bubble exposes only aggregate mention semantics.
+    /// 协议层的提及目标。
+    ///
+    /// 界面保持标识不透明，消息气泡只暴露汇总后的提及语义。
     let mentions: [V2MentionTarget]
     let entities: [V2MessageEntity]
     let replyTo: V2MessageReplyReference?
     let createdAt: Date
     let isOutgoing: Bool
-    /// Direct-room state projected from the counterpart's durable receipt.
-    /// Group details are deliberately queried on demand and do not populate
-    /// every row during normal timeline rendering.
+    /// 由对端持久化回执投影出的私聊已读状态。
+    ///
+    /// 群回执详情刻意按需查询，不会在常规时间线渲染时为每一行都填充。
     let isReadByPeer: Bool
     let isWithdrawn: Bool
     let isFavorited: Bool
@@ -127,9 +132,10 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     }
 }
 
-/// Render-only union for the conversation stream. Keeping activity separate
-/// from `V2ConversationMessageItem` prevents a local system notice from
-/// accidentally becoming replyable, forwardable or read-receipt eligible.
+/// 会话流的纯渲染联合类型。
+///
+/// 把活动条目与 `V2ConversationMessageItem` 分开，可以避免本地系统提示
+/// 意外变成可回复、可转发或可产生已读回执的对象。
 enum V2ConversationTimelineItem: Hashable, Identifiable, Sendable {
     struct Activity: Hashable, Sendable {
         enum Kind: Hashable, Sendable { case directMessageRestricted; case systemAccountReadOnly }
@@ -186,9 +192,9 @@ struct V2ConversationTimelinePage: Equatable, Sendable {
     let olderCursor: V2ConversationTimelineCursor?
 }
 
-/// A compact, cross-conversation entry for the personal Favorites screen.
-/// IDs remain navigation keys; presentation strings have already been
-/// resolved at the data-source boundary.
+/// 个人收藏页使用的跨会话紧凑条目。
+///
+/// 标识仅作为导航键使用；展示字符串已在数据源边界解析完成。
 struct V2FavoriteConversationMessageItem: Hashable, Identifiable, Sendable {
     let id: String
     let roomID: String
@@ -197,9 +203,10 @@ struct V2FavoriteConversationMessageItem: Hashable, Identifiable, Sendable {
     let createdAt: Date
 }
 
-/// A display-only aggregate. Individual reactor IDs stay in the local
-/// projection boundary; the message bubble exposes only count and whether the
-/// signed-in user currently belongs to that reaction set.
+/// 仅用于展示的表情聚合。
+///
+/// 单个互动者的标识留在本地投影边界内；消息气泡只暴露数量，
+/// 以及当前登录用户是否属于该表情集合。
 struct V2ConversationMessageReaction: Hashable, Identifiable, Sendable {
     let reaction: String
     let count: Int
@@ -263,8 +270,14 @@ protocol V2ConversationDataSource: Sendable {
 }
 
 protocol V2ConversationSendingCapabilityReading: Sendable {
-    /// `nil` means no server decision has been projected yet, so the composer
-    /// remains usable and the authoritative send command is still the gate.
+    /// 读取私聊房间当前的发送能力。
+    ///
+    /// 返回 `nil` 表示尚未投影出服务端裁决，此时输入框保持可用，
+    /// 真正的发送命令仍是最终闸门。
+    ///
+    /// - Parameter roomID: 目标房间标识。
+    /// - Returns: 允许发送为 `true`，不允许为 `false`，尚未裁决为 `nil`。
+    /// - Throws: 数据源读取失败时抛出。
     func directSendingCapability(in roomID: String) async throws -> Bool?
 }
 
@@ -290,8 +303,10 @@ protocol V2GroupRolePolicyAccessing: Sendable {
     func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState
 }
 
-/// Keeps the FTS/GRDB boundary out of the SwiftUI search state in the same way
-/// the conversation data source keeps message projections out of views.
+/// 消息搜索边界。
+///
+/// 它与会话数据源把消息投影挡在视图之外的做法一致，
+/// 把全文检索与 GRDB 边界挡在 SwiftUI 搜索状态之外。
 protocol V2ConversationMessageSearching: Sendable {
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage
     func searchSenderDisplayName(userID: UserID) async throws -> String?
@@ -312,10 +327,10 @@ extension V2ConversationMessageSearchProgressReading {
     }
 }
 
-/// A foreground-only boundary for the currently open hybrid room. It is not a
-/// member notification channel: only the device that is displaying a room
-/// polls it, and every returned event still commits through the durable local
-/// cursor before SwiftUI is refreshed.
+/// 当前打开的混合大群房间的前台专用边界。
+///
+/// 它不是成员通知通道：只有正在展示该房间的设备会去轮询，
+/// 且每个返回的事件都必须先通过本地持久化游标提交，之后才刷新 SwiftUI。
 enum V2ActiveHybridGroupSyncOutcome: Equatable, Sendable {
     case notHybridRoom
     case synchronized(appliedEventCount: Int, hasMore: Bool)
@@ -360,8 +375,14 @@ protocol V2ActiveHybridGroupSynchronizing: Sendable {
     var usesRuntimeRecoveryClock: Bool { get }
     func synchronizeOnePage(roomID: String) async throws -> V2ActiveHybridGroupSyncOutcome
     func subscribe(roomID: String) async throws -> V2ActiveHybridGroupSubscriptionOutcome
-    /// Returns true only when the complete live batch was atomically projected
-    /// at the next durable cursor positions. False means normal cursor pull.
+    /// 应用一批实时事件。
+    ///
+    /// 只有当整批实时事件都被原子地投影到紧随其后的持久化游标位置上时才返回 `true`；
+    /// 返回 `false` 表示需要走常规游标拉取。
+    ///
+    /// - Parameter wake: 本次实时唤醒信息。
+    /// - Returns: 可以按实时载荷推进时为 `true`。
+    /// - Throws: 任务取消或同步实现失败时抛出。
     func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) async throws -> Bool
     func nextWake() async throws -> V2ActiveHybridGroupWake
     func unsubscribe(roomID: String) async
@@ -403,8 +424,10 @@ final class V2ConversationListStore {
     var isLoadingMoreConversations: Bool { conversationPageOperation != nil }
     private var conversationRefreshOperation: UUID?
     private(set) var hasEarlierConversations = false
-    /// Inbox and archive are distinct views over the same durable projection;
-    /// archiving must not merely demote an item to the bottom of the inbox.
+    /// 当前是否展示归档列表。
+    ///
+    /// 收件箱与归档是同一份持久化投影上的两个不同视图；
+    /// 归档不能仅仅把条目降级到收件箱底部。
     private(set) var isShowingArchived = false
     var visibleItems: [V2ConversationListItem] {
         items.filter { $0.isArchived == isShowingArchived }
@@ -1915,8 +1938,8 @@ struct V2ConversationDetailView: View {
     }
 }
 
-/// A scrollable editor avoids the fixed-height UIKit text-field clipping that
-/// occurs in a message composer at accessibility Dynamic Type sizes.
+/// 使用可滚动编辑器，避免消息输入框在辅助功能动态字体尺寸下
+/// 因 UIKit 文本框固定高度而被裁剪。
 private struct V2ComposerTextInput: View {
     @Binding var text: String
     let placeholder: String
@@ -2295,8 +2318,9 @@ private struct V2RichMessageText: View {
     }
 }
 
-/// Makes long-press-only message operations available from the VoiceOver rotor.
-/// The operations remain conditional so inaccessible actions are never announced.
+/// 让原本只能长按触发的消息操作也能通过 VoiceOver 转子访问。
+///
+/// 操作仍然带有条件判断，使当前不可用的动作不会被朗读出来。
 private struct V2MessageAccessibilityActions: ViewModifier {
     let canEdit: Bool
     let canWithdraw: Bool
@@ -2319,9 +2343,10 @@ private struct V2MessageAccessibilityActions: ViewModifier {
     }
 }
 
-/// A bounded multi-destination picker.  It deliberately takes only the
-/// compact list snapshot supplied by the conversation list Store; querying or
-/// mutating room state does not happen while this sheet is rendering.
+/// 有界的多目标选择器。
+///
+/// 它刻意只接收会话列表存储提供的紧凑列表快照；
+/// 在该页面渲染期间不会去查询或修改房间状态。
 
 private struct V2ForwardMessagesSheet: View {
     @Bindable var store: V2ConversationDetailStore

@@ -3,9 +3,10 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL is authoritative for invite validity, approval capacity and
-/// reviewer authorization. The plaintext bearer token never crosses this
-/// boundary; only its SHA-256 digest is queried or persisted.
+/// 群邀请的 PostgreSQL 实现。
+///
+/// 邀请有效性、审批容量与审核人授权都以 PostgreSQL 为权威。
+/// 明文 Bearer 令牌绝不会跨越该边界：查询与持久化都只使用其 SHA-256 摘要。
 public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     private let database: any Database
     private let identities: any V2GroupInvitationIdentityReading

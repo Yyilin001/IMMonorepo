@@ -2,8 +2,9 @@ import Foundation
 import IMV2Core
 import Synchronization
 
-/// Metadata-only work emitted after a Hybrid room event is committed. The
-/// payload deliberately excludes event content and recipient identity.
+/// 混合群组房间事件提交后产生的纯元数据工作项。
+///
+/// 其载荷刻意不包含事件内容与接收者身份。
 public struct V2GroupEventWake: Equatable, Sendable {
     public let roomID: RoomID
     public let highWatermark: UInt64
@@ -30,9 +31,11 @@ public struct V2GroupEventWakeLease: Equatable, Sendable {
 
 public protocol V2GroupEventWakeStore: Sendable {
     func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2GroupEventWakeLease]
-    /// A newer event can replace the claimed revision while publication is in
-    /// flight. The store must preserve that newer waterline rather than delete
-    /// the coalesced row.
+    /// 在发布进行期间，更新的某个事件可能已替换掉被认领的修订。
+    ///
+    /// 存储必须保留这条更新的水位线，而不是删除已合并的那一行。
+    ///
+    /// - Parameter lease: 已完成发布的租约。
     func markPublished(_ lease: V2GroupEventWakeLease) async throws
     func scheduleRetry(_ lease: V2GroupEventWakeLease, nextAttemptAt: Date) async throws
 }
@@ -41,10 +44,10 @@ public protocol V2GroupEventWakePublishing: Sendable {
     func publish(_ wake: V2GroupEventWake) async throws
 }
 
-/// Best-effort hint emitted after a group message source transaction commits.
-/// Unlike `V2GroupEventWakePublishing`, this contract has no outbox, retry,
-/// or delivery obligation. Its only purpose is to shorten the time before an
-/// already-open detail view pulls the authorized room log.
+/// 群消息源事务提交后发出的尽力而为提示。
+///
+/// 与 `V2GroupEventWakePublishing` 不同，该契约没有发件箱、重试或投递义务。
+/// 它唯一的目的是缩短一个已打开详情页拉取授权房间日志之前的等待时间。
 public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundHint(_ hint: V2GroupEventWake) async
     func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async
@@ -52,15 +55,14 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async
 }
 
-/// Optional process-local acceleration for publishers that can complete a
-/// foreground direct-event publication without suspension.  A conformer must
-/// perform only bounded in-memory routing and enqueue work; broker I/O and
-/// actor hops remain on ``V2ForegroundGroupEventHintPublishing``.
+/// 面向能够在不挂起的情况下完成前台私聊事件发布的发布方的可选进程本地加速。
 ///
-/// Returning `false` asks the dispatcher to retain its ordinary asynchronous
-/// publication path.  This keeps multi-gateway/NATS deployments and test
-/// embeddings semantically identical while a local SwiftNIO gateway avoids a
-/// short-lived child task for every accepted private message.
+/// 遵循者只能执行有界的内存路由并入队工作；
+/// broker I/O 与 actor 跳转仍由 ``V2ForegroundGroupEventHintPublishing`` 承担。
+///
+/// 返回 `false` 表示请投递器保留其常规异步发布路径。
+/// 这使多网关/NATS 部署与测试嵌入在语义上保持一致，
+/// 同时让本地 SwiftNIO 网关无需为每条已接受的私聊消息新建一个短生命周期子任务。
 protocol V2ImmediateForegroundDirectEventPublishing: Sendable {
     func publishForegroundDirectEventImmediately(_ event: V2DirectRoomLiveEvent) -> Bool
     func publishForegroundGroupEventsImmediately(_ events: [V2DirectRoomLiveEvent]) -> Bool
@@ -72,10 +74,10 @@ extension V2ImmediateForegroundDirectEventPublishing {
     ) -> Bool { false }
 }
 
-/// Non-suspending post-commit boundary used by the Gateway acceptance path.
-/// Implementations must only perform bounded process-local enqueue work. Any
-/// broker, socket, serialization, or retry work belongs to a runtime-owned
-/// consumer behind this boundary.
+/// Gateway 接受路径使用的不挂起提交后边界。
+///
+/// 实现只能执行有界的进程本地入队工作。
+/// 任何 broker、套接字、序列化或重试工作都归该边界之后由运行时拥有的消费者负责。
 public protocol V2ForegroundGroupEventHintSubmitting: Sendable {
     func submitForegroundHint(_ hint: V2GroupEventWake)
     func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent)
@@ -106,9 +108,11 @@ extension V2ForegroundGroupEventHintSubmitting {
 }
 
 extension V2ForegroundGroupEventHintPublishing {
-    /// Compatibility fallback for publishers that have not yet been upgraded
-    /// to carry a live payload across a process boundary.  Correctness stays
-    /// with the metadata wake and durable cursor pull.
+    /// 面向尚未升级为可跨进程边界携带实时载荷的发布方的兼容回退实现。
+    ///
+    /// 正确性仍由元数据唤醒与持久游标拉取保证。
+    ///
+    /// - Parameter event: 待发布的私聊实时事件。
     public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
         await publishForegroundHint(.init(roomID: event.roomID, highWatermark: event.highWatermark))
     }
@@ -118,24 +122,24 @@ extension V2ForegroundGroupEventHintPublishing {
         await publishForegroundDirectEvent(event)
     }
 
-    /// Compatibility publishers may retain per-event forwarding. The local
-    /// Gateway overrides this through the immediate batch contract; a remote
-    /// broker that has not learned the batch wire remains correct, only less
-    /// efficient.
+    /// 兼容发布方可以保留逐事件转发。
+    ///
+    /// 本地 Gateway 会通过即时批量契约覆盖该行为；
+    /// 尚未支持批量协议格式的远端 broker 仍然正确，只是效率较低。
+    ///
+    /// - Parameter events: 待发布的群组实时事件列表。
     public func publishForegroundGroupEvents(_ events: [V2DirectRoomLiveEvent]) async {
         for event in events { await publishForegroundDirectEvent(event) }
     }
 }
 
-/// Bridges the message-admission commit boundary to the Gateway's optional
-/// Hybrid-group foreground accelerator.
+/// 把消息准入提交边界桥接到 Gateway 可选的混合群组前台加速器。
 ///
-/// The admission lane invokes this value while it still owns every room in
-/// the completed batch. Sorting accepted results by room sequence therefore
-/// gives the dispatcher one monotonic stream per room before any ACK handler
-/// resumes or the next same-room database batch starts. Cache and socket work
-/// remain bounded, process-local and best effort; PostgreSQL room-log rows are
-/// still the only recovery authority.
+/// 准入通道在仍持有已完成批次中每个房间的执行权时调用该值。
+/// 按房间序号对已接受结果排序，从而在任何 ACK 处理器恢复、
+/// 或下一个同房间数据库批次开始之前，为投递器提供每个房间一条单调流。
+/// 缓存与套接字工作保持有界、进程本地且尽力而为；
+/// PostgreSQL 房间日志行仍然是唯一的恢复权威。
 public final class V2CommittedHybridGroupEventObserver:
     V2CommittedMessageBatchObserving,
     Sendable
@@ -151,9 +155,11 @@ public final class V2CommittedHybridGroupEventObserver:
         self.directRoomLogEventCache = directRoomLogEventCache
     }
 
-    /// Runtime assembly installs the sink before opening the public listener.
-    /// Replacing it later would split a room's live stream across dispatchers,
-    /// so configuration is deliberately one-shot.
+    /// 运行时装配会在打开公开监听器之前安装接收端。
+    ///
+    /// 之后再替换会把某房间的实时流拆分到多个投递器上，因此配置刻意只允许一次。
+    ///
+    /// - Parameter sink: 要安装的前台群事件提示接收端。
     public func install(
         sink: any V2ForegroundGroupEventHintSubmitting
     ) {
@@ -184,10 +190,10 @@ public final class V2CommittedHybridGroupEventObserver:
     }
 }
 
-/// Runtime-owned mailbox for foreground hints. It coalesces watermarks per
-/// room and deliberately returns from `publishForegroundHint` before broker
-/// I/O begins, keeping a sender's acceptance response independent from an
-/// optional NATS connection or a slow local socket write.
+/// 运行时拥有的前台提示信箱。
+///
+/// 它按房间合并水位线，并刻意在 broker I/O 开始之前就从 `publishForegroundHint` 返回，
+/// 使发送方的接受响应不受可选的 NATS 连接或缓慢的本地套接字写入影响。
 public final class V2ForegroundGroupEventHintDispatcher:
     V2ForegroundGroupEventHintPublishing,
     V2ForegroundGroupEventHintSubmitting,
@@ -196,16 +202,17 @@ public final class V2ForegroundGroupEventHintDispatcher:
     private let publisher: any V2ForegroundGroupEventHintPublishing
     private let immediateDirectEventPublisher: (any V2ImmediateForegroundDirectEventPublishing)?
     private let maximumPendingRooms: Int
-    /// Live foreground sends are lossy accelerators, but a single serial
-    /// publisher must not become the throughput ceiling for unrelated rooms.
-    /// A modest bound protects the gateway executor and socket buffers while
-    /// retaining a batch boundary between successive mailbox drains.
+    /// 前台实时发送只是允许丢失的加速器，
+    /// 但单个串行发布方绝不能成为无关房间的吞吐上限。
+    ///
+    /// 适度的上限既保护网关执行器与套接字缓冲区，
+    /// 又在相邻两次信箱排空之间保留批次边界。
     private let maximumConcurrentPublications: Int
     private let maximumGroupEventsPerBatch: Int
-    /// A hot room may receive several database commit batches during one
-    /// foreground coalescing window. Keep that bounded backlog distinct from
-    /// the smaller protocol-frame batch limit so a harmless commit burst does
-    /// not discard an otherwise contiguous live stream.
+    /// 一个热房间可能在前台合并窗口内收到数个数据库提交批次。
+    ///
+    /// 把这个有界积压与更小的协议帧批量上限区分开，
+    /// 使一次无害的提交突发不会丢弃本可连续的实时流。
     private let maximumPendingGroupEventsPerRoom: Int
     private let groupBatchDelay: Duration
     private let groupBatchExtensionDelay: Duration
@@ -243,9 +250,9 @@ public final class V2ForegroundGroupEventHintDispatcher:
 
     private struct State: Sendable {
         var pending: [RoomID: Pending] = [:]
-        /// Bounded diagnostic waterlines for detecting an event that arrives
-        /// after a higher sequence has already left this dispatcher. These
-        /// values are observability hints only and never authorize delivery.
+        /// 用于检测「更高序号已离开本投递器之后才到达的事件」的有界诊断水位线。
+        ///
+        /// 这些值只是可观测性提示，绝不授权任何投递。
         var recentlyPublishedHighWatermarks: [RoomID: UInt64] = [:]
         var finished = false
     }
@@ -492,9 +499,10 @@ public final class V2ForegroundGroupEventHintDispatcher:
         )
     }
 
-    /// Called by one task whose lifetime is owned by the gateway runtime.
-    /// No durable state depends on this loop, so shutdown may discard pending
-    /// hints safely; the cursor/personal-sync recovery paths repair visibility.
+    /// 由生命周期归网关运行时所有的单个任务调用。
+    ///
+    /// 没有任何持久状态依赖该循环，因此关闭时可以安全丢弃待处理提示；
+    /// 游标与个人同步的恢复路径会修复可见性。
     public func run() async {
         for await _ in signal {
             if Task.isCancelled { return }
@@ -673,9 +681,9 @@ public struct V2GroupEventWakeRelayReport: Equatable, Sendable {
     }
 }
 
-/// Bounded bridge from the durable coalescing table to a non-authoritative
-/// routing mechanism. A publish failure never rolls back room events or
-/// fan-out; it only delays foreground visibility until a retry or cursor pull.
+/// 从持久合并表到非权威路由机制的有界桥接。
+///
+/// 发布失败绝不会回滚房间事件或扇出；它只会把前台可见性推迟到一次重试或游标拉取之后。
 public struct V2GroupEventWakeRelay: Sendable {
     private let store: any V2GroupEventWakeStore
     private let publisher: any V2GroupEventWakePublishing
@@ -728,9 +736,11 @@ public struct V2GroupEventWakeRelay: Sendable {
     }
 }
 
-/// A single-node development deployment can route directly to its local
-/// registry. Multi-gateway deployments replace this publisher with the NATS
-/// adapter; both preserve the same metadata-only wake contract.
+/// 本地群事件唤醒发布器。
+///
+/// 单节点开发部署可以直接路由到本地注册表。
+/// 多网关部署会用 NATS 适配器替换该发布器；
+/// 两者都保持相同的纯元数据唤醒契约。
 public struct V2LocalGroupEventWakePublisher:
     V2GroupEventWakePublishing,
     V2ForegroundGroupEventHintPublishing,

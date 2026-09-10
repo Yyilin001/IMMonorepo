@@ -1,28 +1,39 @@
 import Foundation
 
-/// Event-loop-confined Core NATS framing state shared by the optional wake
-/// brokers. Callers own the execution boundary: this value must live inside a
-/// `NIOLoopBoundBox` and never cross to an actor or task directly.
+/// 可选唤醒代理共用的 Core NATS 帧解析状态，限定在单个事件循环内使用。
+///
+/// 执行边界由调用方负责：该值必须存放在 `NIOLoopBoundBox` 中，
+/// 绝不能直接跨越到 actor 或任务。
 struct V2NATSInboundFrameParser {
+    /// 默认允许的单条载荷字节上限。
     static let defaultMaximumPayloadBytes = 16 * 1_024
+    /// 单条载荷的绝对上限，超过即视为协议异常。
     static let absoluteMaximumPayloadBytes = 1_024 * 1_024
     private static let maximumOutputsPerRead = 256
+
+    /// 非法消息的处置策略。
     enum InvalidMessagePolicy: Sendable {
-        /// A malformed `MSG` declaration indicates an invalid room-wake
-        /// stream, so closing makes reconnect/recovery explicit.
+        /// 关闭连接。
+        ///
+        /// 畸形的 `MSG` 声明意味着房间唤醒流已经不合法，关闭连接可以让重连与恢复显式发生。
         case closeChannel
-        /// Live-activity hints are lossy. Ignore an invalid declaration and
-        /// retain the connection for later valid hints.
+        /// 忽略该条声明。
+        ///
+        /// 实时活动提示本身允许丢失，忽略非法声明并保留连接，以便继续接收后续合法提示。
         case ignore
     }
 
+    /// 解析结果。
     enum Output: Sendable {
+        /// 收到一条完整载荷。
         case payload(subject: String, payload: Data)
-        /// The broker requests a keepalive response from this client.
+        /// 代理请求保活响应。
         case ping
-        /// Confirms that the broker parsed every command preceding our PING.
+        /// 确认代理已解析本端 PING 之前的全部命令。
         case pong
+        /// 代理返回错误响应。
         case brokerError
+        /// 需要关闭连接。
         case closeChannel
     }
 
@@ -33,6 +44,14 @@ struct V2NATSInboundFrameParser {
     private let maximumPayloadBytes: Int
     private let maximumBufferedBytes: Int
 
+    /// 构造解析器。
+    ///
+    /// 缓冲上限取默认下限 64 KiB 与「四帧加 1 KiB」中的较大值：一次 NIO 读取可能合并多条合法消息，
+    /// 因此既要有界，又不能把合法的合并读取误判为超长载荷。
+    ///
+    /// - Parameters:
+    ///   - invalidMessagePolicy: 非法消息处置策略。
+    ///   - maximumPayloadBytes: 单条载荷上限，需大于零且不超过绝对上限。
     init(
         invalidMessagePolicy: InvalidMessagePolicy,
         maximumPayloadBytes: Int = Self.defaultMaximumPayloadBytes
@@ -53,6 +72,13 @@ struct V2NATSInboundFrameParser {
         )
     }
 
+    /// 消费一段网络字节并产出解析结果。
+    ///
+    /// 缓冲超限、单条载荷超过上限、载荷结束符不匹配或单次读取产出过多时会清空缓冲并请求关闭连接；
+    /// 合法状态下则逐行解析控制指令与消息头，并把完整载荷按到达顺序输出。
+    ///
+    /// - Parameter bytes: 本次读取到的字节。
+    /// - Returns: 本次解析出的全部输出。
     mutating func consume(_ bytes: Data) -> [Output] {
         pending.append(bytes)
         guard pending.count <= maximumBufferedBytes else {
@@ -140,6 +166,13 @@ struct V2NATSInboundFrameParser {
         }
     }
 
+    /// 校验并返回合法的 NATS 主题。
+    ///
+    /// 主题长度需在 1 至 512 字节之间，由 `.` 分隔的非空段组成，
+    /// 段内字符限为字母、数字、`-` 与 `_`。
+    ///
+    /// - Parameter value: 待校验主题。
+    /// - Returns: 合法主题；否则为 `nil`。
     private func validSubject(_ value: String) -> String? {
         let bytes = value.utf8
         guard !bytes.isEmpty, bytes.count <= 512 else { return nil }
@@ -163,14 +196,21 @@ struct V2NATSInboundFrameParser {
     }
 }
 
-/// NIO can deliver many broker messages in one read. A single bounded stream
-/// owns the async hop, preserving order without spawning one unstructured Task
-/// per payload. These hints are non-authoritative, so overload coalesces old
-/// payloads and durable sync remains the recovery source.
+/// 载荷提交接口。
+///
+/// 一次 NIO 读取可能带来大量代理消息。这里用单条有界异步流承担跨界跳转，
+/// 在保持顺序的同时不必为每条载荷派生一个游离任务。这些提示不具备权威性，
+/// 因此过载时只保留较新的载荷，持久化同步仍是恢复来源。
 protocol V2NATSPayloadSubmitting: Sendable {
+    /// 提交一条载荷。
+    ///
+    /// - Parameters:
+    ///   - subject: 消息主题。
+    ///   - payload: 消息载荷。
     func submit(subject: String, payload: Data)
 }
 
+/// 以有界异步流串行转发载荷的提交器。
 final class V2NATSPayloadDispatcher: V2NATSPayloadSubmitting, Sendable {
     private struct Submission: Sendable {
         let subject: String
@@ -180,6 +220,13 @@ final class V2NATSPayloadDispatcher: V2NATSPayloadSubmitting, Sendable {
     private let continuation: AsyncStream<Submission>.Continuation
     private let worker: Task<Void, Never>
 
+    /// 构造提交器并启动消费任务。
+    ///
+    /// 缓冲策略为保留最新若干条：溢出时丢弃较旧载荷而不阻塞读取端。
+    ///
+    /// - Parameters:
+    ///   - capacity: 流缓冲上限，需大于零。
+    ///   - onPayload: 逐条异步处理载荷的闭包。
     init(
         capacity: Int = 256,
         onPayload: @escaping @Sendable (String, Data) async -> Void
@@ -197,10 +244,16 @@ final class V2NATSPayloadDispatcher: V2NATSPayloadSubmitting, Sendable {
         }
     }
 
+    /// 提交一条载荷到内部流。
+    ///
+    /// - Parameters:
+    ///   - subject: 消息主题。
+    ///   - payload: 消息载荷。
     func submit(subject: String, payload: Data) {
         continuation.yield(.init(subject: subject, payload: payload))
     }
 
+    /// 结束流并取消消费任务，避免析构后残留任务。
     deinit {
         continuation.finish()
         worker.cancel()

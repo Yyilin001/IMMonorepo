@@ -1,33 +1,63 @@
 import GRDB
 
 extension GRDBV2LocalSyncStore {
-    /// Starts with an immediate full invalidation so opening a page never relies
-    /// on observing a transaction that committed before subscription.
+    /// 订阅本地投影变更。
+    ///
+    /// 订阅会立即给出一次全量失效，因此打开页面时不需要依赖观察到订阅之前已经提交的事务。
+    ///
+    /// - Returns: 变更订阅句柄。
     public func projectionChanges() -> V2ProjectionChangeSubscription { projectionChangeHub.subscribe() }
 }
 
-/// Constructed and retained exclusively on the GRDB writer queue. No observer
-/// instance or mutable pending value crosses the queue; only the Sendable hub
-/// and immutable change summary do. GRDB buffers savepoint changes and delivers
-/// commit/rollback callbacks, so speculative writes cannot reach subscribers.
+/// 投影事务观察者。
+///
+/// 该对象只在 GRDB 写入队列上创建并持有：跨队列传递的只有 `Sendable` 的变更中枢与不可变变更摘要，
+/// 观察者实例与可变待定值都不跨界。GRDB 会缓存保存点期间的变更并在提交或回滚时回调，
+/// 因此推测性写入不会传给订阅者。
 final class V2ProjectionTransactionObserver: TransactionObserver {
     private let hub: V2ProjectionChangeHub
     private var pending = V2ProjectionChange.none
+    /// 以变更中枢构造观察者。
+    ///
+    /// - Parameter hub: 接收已提交变更的中枢。
     init(hub: V2ProjectionChangeHub) { self.hub = hub }
 
+    /// 判断是否需要观察该类型的事件。
+    ///
+    /// - Parameter kind: 数据库事件类型。
+    /// - Returns: 该表的插入事件会映射到至少一个可见作用域时为 `true`。
     func observes(eventsOfKind kind: DatabaseEventKind) -> Bool {
         !Self.change(table: kind.tableName, kind: .insert).scopes.isEmpty
     }
+    /// 累积本次事务内的变更。
+    ///
+    /// - Parameter event: 数据库变更事件。
     func databaseDidChange(with event: DatabaseEvent) {
         pending = pending.merging(Self.change(table: event.tableName, kind: event.kind))
     }
+    /// 事务提交后发布累积的变更。
+    ///
+    /// - Parameter db: 已提交的数据库。
     func databaseDidCommit(_ db: Database) {
         let committed = pending
         pending = .none
         hub.publish(committed)
     }
+    /// 事务回滚后丢弃累积的变更。
+    ///
+    /// - Parameter db: 已回滚的数据库。
     func databaseDidRollback(_ db: Database) { pending = .none }
 
+    /// 把单张表的变更映射到可见作用域。
+    ///
+    /// 影子库表在激活期间原子切换 `v2_snapshots` 之前不可见，全文索引维护另有就绪观察者，
+    /// 因此这些表一律返回无变更。派生汇总行可能因普通新消息被删除重建，
+    /// 其来源投影会单独触发立即刷新。未知表默认返回全量变更，避免未来的投影被静默延迟或隐藏。
+    ///
+    /// - Parameters:
+    ///   - table: 表名。
+    ///   - kind: 事件类型。
+    /// - Returns: 该表变更对应的作用域与刷新要求。
     static func change(table: String, kind: DatabaseEvent.Kind) -> V2ProjectionChange {
         // Shadow banks are not visible until v2_snapshots is atomically changed
         // during activation. FTS maintenance has its own index-ready observer.

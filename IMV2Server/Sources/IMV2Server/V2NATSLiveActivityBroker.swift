@@ -5,24 +5,54 @@ import Crypto
 @preconcurrency import NIOPosix
 @preconcurrency import NIOSSL
 
-/// Best-effort cross-gateway fan-out for ephemeral activity. Privacy and
-/// presence authority stay in Postgres; this broker only avoids waiting for a
-/// view to be reopened when the peer connects on another gateway replica.
+/// 面向瞬时活动的尽力而为跨网关扇出。
+///
+/// 隐私与在线状态的权威仍在 PostgreSQL；该代理只是避免当对端连接在另一个网关副本上时，
+/// 必须等对方重新打开视图才能收到提示。
 public protocol V2LiveActivityInterestManaging: Sendable {
+    /// 订阅指定用户的在线状态变化。
+    ///
+    /// - Parameter targetUserID: 被关注的用户。
+    /// - Throws: 连接或订阅失败时抛出。
     func activatePresence(targetUserID: UserID) async throws
+
+    /// 取消指定用户的在线状态订阅。
+    ///
+    /// - Parameter targetUserID: 目标用户。
     func deactivatePresence(targetUserID: UserID) async
+
+    /// 订阅指定房间的正在输入提示。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Throws: 连接或订阅失败时抛出。
     func activateTyping(roomID: RoomID) async throws
+
+    /// 取消指定房间的正在输入提示订阅。
+    ///
+    /// - Parameter roomID: 目标房间。
     func deactivateTyping(roomID: RoomID) async
 }
 
+/// 瞬时活动的发布能力。
 public protocol V2LiveActivityPublishing: Sendable {
+    /// 发布一次在线状态变化。
+    ///
+    /// - Parameters:
+    ///   - targetUserID: 状态变化的用户。
+    ///   - isOnline: 是否在线。
+    ///   - expiresAt: 该状态的过期时刻。
     func publishPresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async
+
+    /// 发布一次正在输入状态。
+    ///
+    /// - Parameter state: 正在输入状态。
     func publishTyping(_ state: V2TypingState) async
 }
 
-/// Reuses the gateway's NATS URL, credential and deployment routing key. The
-/// live-activity subjects use a distinct suffix and HMAC-derived identifiers,
-/// so raw user and room UUIDs never become broker subject names.
+/// 复用网关的 NATS 地址、凭据与部署路由密钥的实时活动代理。
+///
+/// 实时活动主题使用独立后缀与 HMAC 派生标识，因此原始的用户与房间 UUID
+/// 绝不会直接成为消息代理的主题名。
 public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveActivityPublishing {
     private struct Connect: Encodable {
         let verbose = false
@@ -82,6 +112,12 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
     private var nextSubscriptionID = 1
     private var isShutDown = false
 
+    /// 组合 NATS 配置与两个接收回调。
+    ///
+    /// - Parameters:
+    ///   - configuration: NATS 连接与主题配置。
+    ///   - receivePresence: 收到在线状态变化时的回调。
+    ///   - receiveTyping: 收到正在输入状态时的回调。
     public init(
         configuration: V2NATSGroupEventWakeConfiguration,
         receivePresence: @escaping @Sendable (UserID, Bool, Date) async -> Void,
@@ -100,6 +136,7 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         if !isShutDown { try? eventLoopGroup.syncShutdownGracefully() }
     }
 
+    /// 关闭连接与订阅，重复调用为空操作。
     public func shutdown() async {
         guard !isShutDown else { return }
         isShutDown = true
@@ -121,6 +158,12 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         try? await eventLoopGroup.shutdownGracefully()
     }
 
+    /// 订阅指定用户的在线状态变化。
+    ///
+    /// 重复订阅同一用户不会重复建立主题订阅。
+    ///
+    /// - Parameter targetUserID: 被关注的用户。
+    /// - Throws: 服务已关闭、连接失败或主题订阅失败时抛出。
     public func activatePresence(targetUserID: UserID) async throws {
         if let pending = pendingPresenceActivations[targetUserID] {
             try await pending.task.value
@@ -156,6 +199,9 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         }
     }
 
+    /// 取消指定用户的在线状态订阅。
+    ///
+    /// - Parameter targetUserID: 目标用户。
     public func deactivatePresence(targetUserID: UserID) async {
         guard let subscriptionID = presenceSubscriptions.removeValue(forKey: targetUserID) else { return }
         if pendingPresenceActivations[targetUserID]?.subscriptionID == subscriptionID {
@@ -165,6 +211,10 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         await deactivate(subscriptionID: subscriptionID)
     }
 
+    /// 订阅指定房间的正在输入提示。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Throws: 服务已关闭、连接失败或主题订阅失败时抛出。
     public func activateTyping(roomID: RoomID) async throws {
         if let pending = pendingTypingActivations[roomID] {
             try await pending.task.value
@@ -200,6 +250,9 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         }
     }
 
+    /// 取消指定房间的正在输入提示订阅。
+    ///
+    /// - Parameter roomID: 目标房间。
     public func deactivateTyping(roomID: RoomID) async {
         guard let subscriptionID = typingSubscriptions.removeValue(forKey: roomID) else { return }
         if pendingTypingActivations[roomID]?.subscriptionID == subscriptionID {
@@ -209,6 +262,14 @@ public actor V2NATSLiveActivityBroker: V2LiveActivityInterestManaging, V2LiveAct
         await deactivate(subscriptionID: subscriptionID)
     }
 
+    /// 发布一次在线状态变化。
+    ///
+    /// 未收到任何在线状态订阅时不会建立连接，避免无人关注时产生无谓的代理流量。
+    ///
+    /// - Parameters:
+    ///   - targetUserID: 状态变化的用户。
+    ///   - isOnline: 是否在线。
+    ///   - expiresAt: 该状态的过期时刻。
     public func publishPresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
         await publish(
             .init(sourceID: sourceID, kind: .presence, userID: targetUserID.rawValue, isOnline: isOnline, expiresAt: expiresAt, roomID: nil, isTyping: nil),

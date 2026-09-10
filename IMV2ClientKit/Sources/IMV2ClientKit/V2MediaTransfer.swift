@@ -4,9 +4,10 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
-/// Ephemeral provider target returned by the authenticated media edge. This is
-/// intentionally neither Codable nor persistable: a signed URL and its
-/// headers must not enter a message projection, outbox, log, or backup.
+/// 由已认证媒体边缘返回的临时提供方目标。
+///
+/// 它刻意既不支持 `Codable` 也不可持久化：
+/// 一个已签名 URL 及其头部绝不能进入消息投影、发件箱、日志或备份。
 public struct V2ClientMediaTransferTarget: Equatable, Sendable {
     public let url: URL
     public let headers: [String: String]
@@ -43,16 +44,17 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
     }
 }
 
-/// Authenticated media-edge boundary. Implementations obtain a fresh opaque
-/// server session and exchange it for a target; access tokens must stay inside
-/// that adapter rather than being copied into provider-target headers.
+/// 已认证的媒体边缘边界。
+///
+/// 实现需要获取一个全新的不透明服务端会话，并用它换取目标；
+/// 访问令牌必须留在该适配器内部，而不能被复制进提供方目标的请求头。
 public protocol V2ClientMediaDownloadTargetResolver: Sendable {
     func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ClientMediaTransferTarget
 }
 
-/// The upload edge receives only validated metadata and returns a transient
-/// write target. It never receives the local file URL or a durable provider
-/// credential from the application.
+/// 上传边缘接收的只有已校验的元数据，并返回一个临时的写入目标。
+///
+/// 它绝不会从应用收到本地文件 URL 或持久化的提供方凭据。
 public protocol V2ClientMediaUploadTargetResolver: Sendable {
     func resolveUploadTarget(
         operationID: MediaUploadOperationID,
@@ -70,9 +72,9 @@ public protocol V2ClientMediaUploadStatusReading: Sendable {
     func uploadStatus(mediaID: MediaID) async throws -> V2MediaObjectState
 }
 
-/// A coherent device-bound credential pair for the authenticated media edge.
-/// The access token must be used only in the edge request and never copied to
-/// the resulting object-provider target or any persisted client state.
+/// 用于已认证媒体边缘的、自洽且绑定设备的凭据对。
+///
+/// 访问令牌只能用于边缘请求，绝不能被复制到最终的对象提供方目标或任何持久化的客户端状态中。
 public struct V2ClientMediaEdgeCredentials: Sendable {
     public let accessToken: String
     public let deviceID: DeviceID
@@ -87,8 +89,8 @@ public protocol V2ClientMediaEdgeCredentialProvider: Sendable {
     func mediaEdgeCredentials() async throws -> V2ClientMediaEdgeCredentials
 }
 
-/// Isolates URLSession from request/response validation so resolver tests do
-/// not rely on a global URLProtocol registration or a real edge deployment.
+/// 把 URLSession 与请求/响应校验隔离开，
+/// 使解析器测试无需依赖全局 URLProtocol 注册或真实的边缘部署。
 public protocol V2ClientMediaEdgeHTTPTransport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
@@ -108,9 +110,10 @@ public actor V2URLSessionMediaEdgeHTTPTransport: V2ClientMediaEdgeHTTPTransport 
     }
 }
 
-/// HTTPS adapter for the framework-neutral `GET /v2/media/{mediaID}` edge
-/// contract. This request is deliberately no-store and non-retrying: a new
-/// target must reflect current withdrawal, membership, and device state.
+/// 面向与框架无关的 `GET /v2/media/{mediaID}` 边缘契约的 HTTPS 适配器。
+///
+/// 该请求刻意使用 no-store 且不重试：
+/// 新目标必须反映当前的撤回、成员与设备状态。
 public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetResolver, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientMediaEdgeCredentialProvider
@@ -198,10 +201,10 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
     }
 }
 
-/// HTTPS adapter for the upload request and completion contracts. Both calls
-/// use one coherent bearer-token/device pair, are explicitly no-store, and
-/// never automatically retry a write: callers decide whether a failed upload
-/// should create a fresh durable media intent.
+/// 面向上传请求与完成契约的 HTTPS 适配器。
+///
+/// 两次调用共用同一份自洽的 Bearer 令牌/设备组合，显式使用 no-store，
+/// 且绝不自动重试写入：失败的上传是否要创建新的持久媒体意图，由调用方决定。
 public struct V2HTTPMediaUploadEdgeClient: V2ClientMediaUploadTargetResolver, V2ClientMediaUploadCompleting, V2ClientMediaUploadStatusReading, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientMediaEdgeCredentialProvider
@@ -339,17 +342,19 @@ public struct V2HTTPMediaUploadEdgeClient: V2ClientMediaUploadTargetResolver, V2
     }
 }
 
-/// File transfer boundary, deliberately separate from target authorization so
-/// unit tests need no global URLProtocol or real network.
+/// 文件传输边界。
+///
+/// 它刻意与目标授权分离，使单元测试无需全局 URLProtocol 或真实网络。
 public protocol V2ClientMediaByteTransfer: Sendable {
     func upload(fileURL: URL, target: V2ClientMediaTransferTarget) async throws
     func download(target: V2ClientMediaTransferTarget, destinationURL: URL) async throws
 }
 
-/// Background transfer is intentionally not selected yet: V2 has no approved
-/// persistent transfer-operation schema or relaunch callback contract. This
-/// foreground adapter inherits caller cancellation through URLSession's async
-/// APIs and never stores a signed target on disk.
+/// 基于 URLSession 的前台媒体字节传输实现。
+///
+/// 目前刻意不选用后台传输：V2 还没有获批的持久传输操作 schema 或重新启动回调契约。
+/// 该前台适配器通过 URLSession 的异步 API 继承调用方的取消，
+/// 且绝不会把已签名目标写入磁盘。
 public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
     private let session: URLSession
     private let fileManager: FileManager

@@ -1,14 +1,19 @@
 import Foundation
 import IMV2ClientKit
 
-/// Page-scoped invalidations. Ordinary commits share a 150ms window; safety
-/// changes flush the pending union immediately. Timers and the SQLite reader
-/// belong to the current set of subscribers and cannot outlive it.
+/// 页面级投影失效通知器。
+///
+/// 普通提交共享 150 毫秒的合并窗口；安全类变更会立即冲刷待处理并集。
+/// 计时器与 SQLite 读取器都属于当前订阅者集合，不会比该集合存续更久。
 actor V2ProjectionChangeNotifier {
+    /// 一次失效请求。
     struct Request: Equatable, Sendable {
+        /// 产生该请求的投影代次。
         let generation: UInt64
+        /// 是否要求立即刷新。
         let requiresImmediateRefresh: Bool
     }
+    /// 单个订阅者的失效请求流。
     struct Subscription: AsyncSequence, Sendable {
         typealias Element = Request
         let id: UUID
@@ -72,8 +77,11 @@ actor V2ProjectionChangeNotifier {
         return request
     }
 
-    /// Also supports an explicit owner invalidation; unknown changes default
-    /// to a full immediate refresh, never to the delayed path.
+    /// 发布一次失效。
+    ///
+    /// 也支持持有者显式发起的失效；未知变更默认走全量立即刷新，而绝不会落到延迟路径。
+    ///
+    /// - Parameter change: 待发布的变更摘要，默认全量。
     func publish(_ change: V2ProjectionChange = .all) {
         guard !closed, !change.scopes.isEmpty else { return }
         pending.formUnion(change.scopes)

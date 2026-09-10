@@ -1,19 +1,31 @@
 import Foundation
 
-/// One independently scheduled loop per configured source shard. A slow owner
-/// cannot stop another owner's durable queue. Each worker bounds its own batch;
-/// workload database pools enforce the process's configured database budget.
+/// 为每个已配置的来源分片启动独立调度循环的转发投递运行时。
+///
+/// 单个缓慢的归属不会拖住其他归属的持久化队列；每个工作器各自限制批量大小，
+/// 进程整体的数据库预算由业务数据库连接池约束。
 public struct V2ForwardDeliveryRuntime: Sendable {
     private let workers: [String: V2ForwardDeliveryWorker]
     private let minimumPollMilliseconds: Int
     private let onFailure: @Sendable (String) -> Void
 
+    /// 组合各来源分片的投递工作器。
+    ///
+    /// - Parameters:
+    ///   - workers: 逻辑分片标识到投递工作器的映射。
+    ///   - minimumPollMilliseconds: 空闲轮询的最小间隔毫秒数，需大于零。
+    ///   - onFailure: 单轮投递失败时的回调，参数为对应分片标识；默认忽略。
+    /// - Throws: 轮询间隔非正时抛出 ``V2ForwardDeliveryError/invalidConfiguration``。
     public init(workers: [String: V2ForwardDeliveryWorker], minimumPollMilliseconds: Int = 100,
                 onFailure: @escaping @Sendable (String) -> Void = { _ in }) throws {
         guard minimumPollMilliseconds > 0 else { throw V2ForwardDeliveryError.invalidConfiguration }
         self.workers = workers; self.minimumPollMilliseconds = minimumPollMilliseconds; self.onFailure = onFailure
     }
 
+    /// 为每个分片启动投递循环，直到任务被取消。
+    ///
+    /// 循环按忙闲节奏自适应间隔：连续有工作量时立即继续，短暂空闲时让出执行权，
+    /// 空闲时按有界退避休眠。取消信号会结束全部循环。
     public func run() async {
         await withTaskGroup(of: Void.self) { group in
             for (shardID, worker) in workers {

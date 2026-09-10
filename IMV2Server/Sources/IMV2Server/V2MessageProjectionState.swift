@@ -2,12 +2,10 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// One immutable, self-contained message value suitable for Snapshot V3.
+/// 适用于快照 V3 的不可变、自包含消息值。
 ///
-/// Explicit complete edit events also carry this value. It is the durable
-/// folded state shared by every recipient projection for the same message
-/// revision. Keeping the fold typed and side-effect free prevents each user
-/// projector from independently mutating an unvalidated JSON dictionary.
+/// 显式的完整编辑事件同样携带该值。它是同一消息修订下所有接收者投影共享的持久化折叠状态；
+/// 把折叠过程保持为强类型且无副作用，可以避免每个用户投影器各自改写未经校验的 JSON 字典。
 struct V2MessageProjectionState: Codable, Equatable, Sendable {
     static let payloadSchemaVersion: Int16 = 1
 
@@ -117,10 +115,17 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
         )
     }
 
-    /// Reconstructs the current active state when an expand migration has
-    /// installed the shared-state table before historical rows are backfilled.
-    /// The authoritative `messages` row supplies the current revision and
-    /// mutable text while the accepted event supplies immutable envelope data.
+    /// 在扩展开启的迁移已建立共享状态表但历史行尚未回填时重建当前有效状态。
+    ///
+    /// 权威 `messages` 行提供当前修订与可变正文，已接受事件提供不可变信封数据。
+    ///
+    /// - Parameters:
+    ///   - revision: 目标修订，需不小于当前修订。
+    ///   - text: 权威正文。
+    ///   - entities: 权威富文本实体。
+    /// - Returns: 指定修订下的重建状态。
+    /// - Throws: 消息已撤回或修订倒退时抛出
+    ///   ``V2MessageProjectionStateError/invalidTransition``。
     func restoringActiveRevision(
         _ revision: UInt64,
         text: String,
@@ -321,9 +326,17 @@ enum V2MessageProjectionStateError: Error, Equatable, Sendable {
     case invalidTransition
 }
 
-/// A stable cross-shard identity derived from semantic state identity rather
-/// than from JSON bytes. The version-shaped UUID is not used as a security
-/// primitive; SHA-256 only makes independently retried writes converge.
+/// 由语义状态身份而非 JSON 字节派生的稳定跨分片标识。
+///
+/// 该版本形态的 UUID 不作为安全原语使用；SHA-256 只用于让彼此独立的重试写入收敛到同一标识。
+///
+/// - Parameters:
+///   - messageID: 目标消息。
+///   - messageRevision: 消息修订，需大于零。
+///   - variantKey: 变体键，需非负。
+/// - Returns: 派生出的稳定标识。
+/// - Throws: 修订非正或变体键为负时抛出
+///   ``V2MessageProjectionStateError/invalidPayload``。
 func v2MessageProjectionStateID(
     messageID: UUID,
     messageRevision: Int64,
@@ -379,11 +392,28 @@ private struct MediaPresentationWire: Codable {
 // The immutable projection format uses floor rounding, including before 1970.
 // SQL event writers share this conversion so their payload cannot disagree
 // with the typed projection and falsely fail the immutable-content fence.
+/// 计算已接受消息的投影毫秒时间戳。
+///
+/// 优先使用消息自带的投影时间戳，缺失时回落到创建时刻。
+///
+/// - Parameter message: 已接受消息。
+/// - Returns: 投影使用的 Unix 毫秒时间戳。
+/// - Throws: 时刻无法表示为毫秒整数时抛出
+///   ``V2MessageProjectionStateError/invalidPayload``。
 func v2MessageProjectionMilliseconds(_ message: V2AcceptedMessage) throws -> Int64 {
     let dateMilliseconds = try v2MessageProjectionMilliseconds(message.createdAt)
     return message.projectionCreatedAtUnixMilliseconds ?? dateMilliseconds
 }
 
+/// 以向下取整方式把时刻转换为 Unix 毫秒。
+///
+/// 不可变投影格式统一使用向下取整，包括 1970 年之前的时间；SQL 事件写入方共用同一转换，
+/// 使其载荷不会与强类型投影产生分歧并误判为内容栅栏不通过。
+///
+/// - Parameter date: 待转换时刻。
+/// - Returns: Unix 毫秒时间戳。
+/// - Throws: 取值超出 `Int64` 范围时抛出
+///   ``V2MessageProjectionStateError/invalidPayload``。
 func v2MessageProjectionMilliseconds(_ date: Date) throws -> Int64 {
     guard let value = Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.down)) else {
         throw V2MessageProjectionStateError.invalidPayload

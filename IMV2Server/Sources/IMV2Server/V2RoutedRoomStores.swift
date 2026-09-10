@@ -1,18 +1,27 @@
 import Foundation
 import IMV2Core
 
-/// Routes existing room writes to the physical owner recorded by the control
-/// plane. A command never tries a second owner after the selected store fails:
-/// retry/idempotency remains the caller's responsibility and the room keeps a
-/// single serial writer.
+/// 把既有房间写入路由到控制面记录的物理归属。
+///
+/// 选中的存储在失败后绝不会改试第二个归属：重试与幂等仍由调用方负责，
+/// 房间始终只对应一个串行写入者。
 public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
     private let router: any V2RoomShardRouting
     private let stores: [String: any V2OwnerValidatedRoomWriteStore]
-    /// Logical owner IDs may share one physical database during a staged
-    /// rollout.  Commands on such IDs can retain a single atomic append
-    /// transaction; commands on distinct keys never cross a physical owner.
+    /// 逻辑归属标识到物理存储键的映射。
+    ///
+    /// 分阶段发布期间多个逻辑归属可能共用同一物理库：这些标识上的命令可以保留
+    /// 单次原子追加事务，而不同物理键的命令永远不会跨库执行。
     private let physicalStoreKeyByShard: [String: String]
 
+    /// 组合路由来源、各归属存储与物理键映射。
+    ///
+    /// - Parameters:
+    ///   - router: 房间归属路由来源。
+    ///   - stores: 逻辑分片标识到归属写存储的映射。
+    ///   - physicalStoreKeyByShard: 逻辑分片到物理存储键的映射；为 `nil` 时按标识自身映射。
+    /// - Throws: 归属存储为空、含空白标识，或物理键与逻辑标识不匹配时抛出
+    ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
     public init(
         router: any V2RoomShardRouting,
         stores: [String: any V2OwnerValidatedRoomWriteStore],
@@ -32,6 +41,12 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
         self.physicalStoreKeyByShard = keys
     }
 
+    /// 按房间归属接受一条写入。
+    ///
+    /// - Parameter request: 目标房间的写入请求。
+    /// - Returns: 发送结果。
+    /// - Throws: 归属未配置时抛出
+    ///   ``V2RoomShardStorageRegistryError/unknownShardID``；其余错误来自归属存储。
     public func accept(
         command: V2SendMessageCommand,
         capacityProfile: V2CapacityProfile,
@@ -188,14 +203,24 @@ public struct V2RoutedRoomWriteStore: V2AtomicRoomWriteBatchStore {
     }
 }
 
-/// Direct-room creation has no pre-existing room ID. It uses the control
-/// directory's pair fence to select an owner once, persists that decision on
-/// success, and delegates ordinary preference writes to the control store.
+/// 私聊房间创建路由存储。
+///
+/// 创建时尚不存在房间标识，因此它借助控制面目录的用户对栅栏选定一次归属，
+/// 成功后把该决定持久化，而普通偏好写入仍交给控制面存储。
 public struct V2RoutedDirectMessagingStore: V2DirectMessagingStore {
     private let router: any V2DirectRoomShardRouting
     private let ownerStores: [String: any V2DirectMessagingStore]
     private let controlStore: any V2DirectMessagingStore
 
+    /// 组合路由来源、各归属存储与控制面存储。
+    ///
+    /// - Parameters:
+    ///   - router: 房间归属路由来源。
+    ///   - stores: 逻辑分片标识到归属写存储的映射。
+    ///   - controlStore: 处理偏好写入的控制面存储。
+    ///   - physicalStoreKeyByShard: 逻辑分片到物理存储键的映射；为 `nil` 时按标识自身映射。
+    /// - Throws: 归属存储为空、含空白标识，或物理键与逻辑标识不匹配时抛出
+    ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
     public init(
         router: any V2DirectRoomShardRouting,
         ownerStores: [String: any V2DirectMessagingStore],
@@ -207,6 +232,16 @@ public struct V2RoutedDirectMessagingStore: V2DirectMessagingStore {
         self.controlStore = controlStore
     }
 
+    /// 打开或复用一对用户的私聊房间。
+    ///
+    /// - Parameters:
+    ///   - command: 打开私聊房间命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - roomShardID: 创建时选定的房间归属分片。
+    ///   - roomID: 预分配的房间标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 打开结果。
+    /// - Throws: 归属未配置或归属存储失败时抛出。
     public func open(
         command: V2OpenDirectRoomCommand,
         capacityProfile: V2CapacityProfile,
@@ -235,12 +270,30 @@ public struct V2RoutedDirectMessagingStore: V2DirectMessagingStore {
         }
     }
 
+    /// 设置陌生人消息权限。
+    ///
+    /// 偏好属于用户维度，因此直接交给控制面存储。
+    ///
+    /// - Parameters:
+    ///   - command: 权限变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 控制面存储抛出的错误。
     public func setStrangerMessagePermission(
         command: V2SetStrangerMessagePermissionCommand, now: Date
     ) async throws -> V2SetStrangerMessagePermissionOutcome {
         try await controlStore.setStrangerMessagePermission(command: command, now: now)
     }
 
+    /// 设置被添加好友权限。
+    ///
+    /// 偏好属于用户维度，因此直接交给控制面存储。
+    ///
+    /// - Parameters:
+    ///   - command: 权限变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 控制面存储抛出的错误。
     public func setUserAddPermission(
         command: V2SetUserAddPermissionCommand, now: Date
     ) async throws -> V2SetUserAddPermissionOutcome {
@@ -248,13 +301,22 @@ public struct V2RoutedDirectMessagingStore: V2DirectMessagingStore {
     }
 }
 
-/// Room-log reads use the same owner directory as writes. Cache entries are
-/// still validated by the delegated store against that owner's durable room
-/// membership state before being returned.
+/// 房间日志读取路由存储。
+///
+/// 读取与写入使用同一套归属目录；缓存条目在返回之前仍会由被委托的存储
+/// 依据该归属的持久化房间成员状态再次校验。
 public struct V2RoutedGroupEventLogStore: V2GroupEventLogStore {
     private let router: any V2RoomShardRouting
     private let stores: [String: any V2GroupEventLogStore]
 
+    /// 组合路由来源、各归属读取存储与可选的私聊日志缓存。
+    ///
+    /// - Parameters:
+    ///   - router: 房间归属路由来源。
+    ///   - stores: 逻辑分片标识到归属读取存储的映射。
+    ///   - directRoomLogEventCache: 私聊日志加速缓存，可选。
+    /// - Throws: 归属存储为空或含空白标识时抛出
+    ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
     public init(
         router: any V2RoomShardRouting,
         stores: [String: any V2GroupEventLogStore]
@@ -264,6 +326,15 @@ public struct V2RoutedGroupEventLogStore: V2GroupEventLogStore {
         self.stores = stores
     }
 
+    /// 拉取一页房间事件。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - actorUserID: 发起拉取的用户。
+    ///   - afterRoomSequence: 起始序号。
+    ///   - pageSize: 本页条数。
+    /// - Returns: 事件分页。
+    /// - Throws: 归属未配置或归属存储失败时抛出。
     public func pull(
         roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64, pageSize: Int
     ) async throws -> V2GroupEventLogPage {
@@ -273,6 +344,13 @@ public struct V2RoutedGroupEventLogStore: V2GroupEventLogStore {
         )
     }
 
+    /// 校验订阅资格并返回当前水位。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - actorUserID: 发起订阅的用户。
+    /// - Returns: 订阅结果。
+    /// - Throws: 归属未配置或归属存储失败时抛出。
     public func subscribe(
         roomID: RoomID, actorUserID: UserID
     ) async throws -> V2GroupEventSubscription {

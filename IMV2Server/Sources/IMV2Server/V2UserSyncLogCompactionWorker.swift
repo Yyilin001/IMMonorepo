@@ -3,10 +3,21 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 用户同步日志压缩报告。
 public struct V2UserSyncLogCompactionReport: Equatable, Sendable {
+    /// 本轮认领的用户数量。
     public let claimedUserCount: Int
+    /// 删除的日志行数。
     public let deletedLogRowCount: Int
+    /// 删除的共享载荷行数。
     public let deletedSharedPayloadCount: Int
+
+    /// 保存压缩统计。
+    ///
+    /// - Parameters:
+    ///   - claimedUserCount: 认领用户数量。
+    ///   - deletedLogRowCount: 删除日志行数。
+    ///   - deletedSharedPayloadCount: 删除共享载荷行数。
     public init(
         claimedUserCount: Int,
         deletedLogRowCount: Int,
@@ -16,21 +27,30 @@ public struct V2UserSyncLogCompactionReport: Equatable, Sendable {
         self.deletedLogRowCount = deletedLogRowCount
         self.deletedSharedPayloadCount = deletedSharedPayloadCount
     }
+    /// 本轮是否产生了实际删除。
     public var didWork: Bool {
         deletedLogRowCount > 0 || deletedSharedPayloadCount > 0
     }
 }
 
-/// Advances one user's retained floor in a bounded transaction. The selected
-/// floor is no newer than the canonical projection checkpoint and no newer
-/// than any valid incremental token/receipt. Device recovery is deliberately
-/// lazy: pull serializes on this retention row and stages a shared checkpoint
-/// artifact only when an active low-watermark device actually reconnects.
+/// 在单个有界事务内推进一个用户的保留下限。
+///
+/// 选定的下限不会新于规范投影检查点，也不会新于任何有效的增量令牌或回执。
+/// 设备恢复刻意采用惰性策略：拉取会在该保留行上串行，并且只有当处于低水位的活跃设备
+/// 真正重连时才暂存共享检查点产物。
 public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
     private let database: any Database
     private let schema: String
     private let minimumLogAge: TimeInterval
 
+    /// 校验并保存数据库、schema 与最短日志年龄。
+    ///
+    /// - Parameters:
+    ///   - database: 存放用户同步日志的数据库。
+    ///   - schema: 目标 schema，需符合 `^[A-Za-z_][A-Za-z0-9_]*$`。
+    ///   - minimumLogAge: 日志在可被压缩前至少保留的秒数，需为正的有限值，默认 7 天。
+    ///
+    /// schema 名或最短年龄不满足约束时直接失败，避免越界压缩。
     public init(
         database: any Database,
         schema: String = "im_v2",
@@ -43,6 +63,17 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
         self.minimumLogAge = minimumLogAge
     }
 
+    /// 执行一轮有界压缩。
+    ///
+    /// 认领用户后逐个推进保留下限并删除低于下限的日志与共享载荷；
+    /// 每个用户都在独立的有界事务内处理，单个用户的失败不会阻塞其他用户。
+    ///
+    /// - Parameters:
+    ///   - limit: 本轮最多处理的用户数。
+    ///   - now: 本次判定的服务端时刻。
+    /// - Returns: 本轮压缩统计。
+    /// - Throws: 上限非正或持久化失败时抛出
+    ///   ``V2UserSyncLogCompactionError``。
     public func runOnce(
         now: Date = Date(),
         userLimit: Int = 8,

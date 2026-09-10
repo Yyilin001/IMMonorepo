@@ -2,12 +2,32 @@ import Fluent
 import Foundation
 import SQLKit
 
-/// Audit and paused -> pending transition share the owner's transaction.
-/// Replay preserves export, target UUID, copied digest and scan requirements.
+/// 转发工作重放的持久化实现。
+///
+/// 审计记录与「暂停转为待处理」的状态跃迁共用归属侧同一事务；
+/// 重放保留原有导出、目标标识、已复制的摘要与扫描要求，不会重新生成这些内容。
 public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
     private let database: any Database
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放转发导出、收件箱与重放审计的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 重放一条暂停的转发工作。
+    ///
+    /// 同一操作标识已存在审计记录时返回其原有结论并标记为幂等；否则先以唯一约束抢占该操作标识，
+    /// 再按工作类型校验归属并把对应任务恢复为待处理，最后回填审计结论。
+    ///
+    /// - Parameters:
+    ///   - command: 已校验的重放请求。
+    ///   - operatorPrincipal: 已认证的运维主体标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 重放结果。
+    /// - Throws: 运维主体非法时抛出 ``V2ForwardWorkReplayError/invalidTarget``；
+    ///   请求分片与导出归属不符时抛出 ``V2ForwardWorkReplayError/ownerChanged``；
+    ///   目标缺失、媒体序号越界或收件箱仍处于待处理时抛出
+    ///   ``V2ForwardWorkReplayError/targetUnavailable``；时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2ForwardWorkReplayError/corruptPersistenceState``。
     public func replay(_ command: V2ForwardWorkReplayCommand, operatorPrincipal: String, now: Date) async throws -> V2DurableWorkReplayResult {
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal) else { throw V2ForwardWorkReplayError.invalidTarget }
         return try await database.transaction { transaction in
@@ -84,6 +104,16 @@ public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
         }
     }
 
+    /// 校验命令指定的分片与房间当前归属一致。
+    ///
+    /// 房间行会被加锁，以确保校验结果在本次事务内保持有效。
+    ///
+    /// - Parameters:
+    ///   - owner: 导出记录携带的归属。
+    ///   - command: 重放请求。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Throws: 分片不符或房间当前归属与记录不一致时抛出
+    ///   ``V2ForwardWorkReplayError/ownerChanged``。
     private func assertOwner(_ owner: ReplayForwardOwner, command: V2ForwardWorkReplayCommand, sql: any SQLDatabase) async throws {
         guard owner.shardID == command.shardID else { throw V2ForwardWorkReplayError.ownerChanged }
         guard let current = try await sql.raw("""

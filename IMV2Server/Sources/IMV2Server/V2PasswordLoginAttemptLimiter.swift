@@ -3,25 +3,62 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Narrow capability used by the password transport adapter. Failure
-/// accounting and audit persistence remain one server-side transaction.
+/// 密码传输适配器使用的窄接口。
+///
+/// 失败计数与审计持久化始终位于同一个服务端事务内。
 public protocol V2PasswordLoginAttemptLimiting: Sendable {
+    /// 查询账号当前是否处于锁定状态。
+    ///
+    /// - Parameter accountHandle: 账号标识。
+    /// - Returns: 仍需等待的秒数；未锁定时返回 `nil`。
+    /// - Throws: 标识非法或存储不可用时抛出。
     func blockedRetryAfterSeconds(accountHandle: String) async throws -> Int?
+
+    /// 记录一次被拒绝的登录尝试。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - userID: 账号对应用户；账号不存在时为空。
+    ///   - deviceID: 发起尝试的设备。
+    /// - Throws: 标识非法或存储不可用时抛出。
     func recordRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws
+
+    /// 记录一次成功的登录尝试并清空失败窗口。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - userID: 账号对应用户。
+    ///   - deviceID: 发起尝试的设备。
+    /// - Throws: 标识非法或存储不可用时抛出。
     func recordSuccessfulAttempt(accountHandle: String, userID: UserID, deviceID: DeviceID) async throws
 }
 
-/// PostgreSQL-backed limiter. Failure accounting is serialized per canonical
-/// handle so all account-service replicas observe the same window and lockout.
+/// 基于 PostgreSQL 的登录限流实现。
+///
+/// 失败计数按规范化账号标识串行化，使全部账号服务副本观察到同一窗口与同一锁定状态。
 public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimiting, Sendable {
     private let database: any Database
     private let policy: V2PasswordLoginRateLimitPolicy
 
+    /// 组合数据库与限流策略。
+    ///
+    /// - Parameters:
+    ///   - database: 存放登录失败窗口的数据库。
+    ///   - policy: 部署选定的限流策略。
     public init(database: any Database, policy: V2PasswordLoginRateLimitPolicy) {
         self.database = database
         self.policy = policy
     }
 
+    /// 查询账号当前剩余锁定时间。
+    ///
+    /// 秒与微秒余数分开相减后向上取整，避免完整时间戳跨度在 `Int64` 微秒差上溢出。
+    ///
+    /// - Parameter accountHandle: 账号标识。
+    /// - Returns: 大于零的等待秒数；未锁定或锁定已过期时返回 `nil`。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordLoginRateLimitError/invalidPolicy``；连接不支持 SQL、时刻读取失败或
+    ///   等待秒数不可表示时抛出 ``V2PasswordLoginRateLimitError/unavailable``。
     public func blockedRetryAfterSeconds(accountHandle: String) async throws -> Int? {
         let handle = try canonicalAccountHandle(accountHandle)
         guard let sql = database as? any SQLDatabase else {
@@ -44,6 +81,19 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         return retryAfter
     }
 
+    /// 在单个事务内累计失败次数并在达到阈值时写入锁定。
+    ///
+    /// 已处于锁定期的尝试不再重复计数。窗口判断在时钟回拨时保留既有窗口；
+    /// 失败次数以 SQL 整数上限饱和，避免同窗口内既有锁定过期时计数溢出并回滚新的锁定与审计。
+    /// 锁定到期时刻必须确实晚于观测时刻，否则视为不可用而不落库。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - userID: 账号对应用户；账号不存在时为空。
+    ///   - deviceID: 发起尝试的设备。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordLoginRateLimitError/invalidPolicy``；连接、时刻或窗口编码不可用时抛出
+    ///   ``V2PasswordLoginRateLimitError/unavailable``。
     public func recordRejectedAttempt(
         accountHandle: String,
         userID: UserID?,
@@ -109,6 +159,15 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         }
     }
 
+    /// 在单个事务内清空失败窗口并记录成功审计。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - userID: 账号对应用户。
+    ///   - deviceID: 发起尝试的设备。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordLoginRateLimitError/invalidPolicy``；其余失败抛出
+    ///   ``V2PasswordLoginRateLimitError/unavailable``。
     public func recordSuccessfulAttempt(
         accountHandle: String,
         userID: UserID,
@@ -152,6 +211,14 @@ private struct AttemptRow: Decodable {
     }
 }
 
+/// 读取数据库当前时刻。
+///
+/// 使用 `clock_timestamp()` 而非事务起始时间，因为咨询锁可能已等待过一段时间，
+/// 计数必须基于本次尝试真正被处理时的时刻。
+///
+/// - Parameter sql: 当前事务使用的数据库连接。
+/// - Returns: 数据库给出的当前时刻。
+/// - Throws: 查询无结果时抛出 ``V2PasswordLoginRateLimitError/unavailable``。
 private func databaseNow<Value: Decodable>(on sql: any SQLDatabase) async throws -> Value {
     // CURRENT_TIMESTAMP is fixed at transaction start, before an advisory
     // lock may have waited. Account for the attempt using time observed now.
@@ -161,6 +228,12 @@ private func databaseNow<Value: Decodable>(on sql: any SQLDatabase) async throws
     return row.current
 }
 
+/// 取得指定账号的登录尝试咨询锁。
+///
+/// - Parameters:
+///   - sql: 当前事务使用的数据库连接。
+///   - handle: 已规范化的账号标识。
+/// - Throws: 加锁失败时抛出。
 func v2LockPasswordAttempts(_ sql: any SQLDatabase, handle: String) async throws {
     let lockKey = "v2-password-login-rate:" + handle
     try await sql.raw(

@@ -5,11 +5,11 @@ import IMV2Server
 @preconcurrency import NIOPosix
 @preconcurrency import NIOSSL
 
-/// A deliberately narrow client used only by `verify_v2_local_account_stack`.
-/// It proves that credentials issued through the local HTTPS account edge can
-/// authenticate and exchange ordinary direct-chat commands over the real
-/// TLS/protobuf gateway. It does not expose a gateway route, persist
-/// credentials, or print identity/credential material.
+/// 仅由 `verify_v2_local_account_stack` 使用的窄客户端。
+///
+/// 它用于证明：通过本地 HTTPS 账号边缘签发的凭据，能够在真实的 TLS/protobuf 网关上完成认证
+/// 并交换普通私聊命令。它不暴露任何网关路由，不持久化凭据，
+/// 也不会打印身份或凭据材料。
 @main
 enum IMV2LocalGatewayProbe {
     static func main() async throws {

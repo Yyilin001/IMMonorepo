@@ -2,10 +2,22 @@ import Fluent
 import Foundation
 import SQLKit
 
-/// Enumeration commits its end marker before settlement. Replays take the
-/// same room/admission/plan locks and either apply the difference once or see
-/// the already settled plan. No transaction holds a plan lock while awaiting
-/// the room lock used by completion release.
+/// 把已枚举完成的受众计划结算为实际成本。
+///
+/// 枚举会先提交结束标记再做结算。重放路径获取同样的房间、准入与计划锁，
+/// 因此要么把差额恰好应用一次，要么看到已经结算完成的计划。
+/// 任何事务都不会在持有计划锁的同时等待完成释放所用的房间锁。
+///
+/// 结算内容为：把预留成本与已枚举数量的差额退回房间与分片准入池，
+/// 把计划的目标数与预留成本改写为实际枚举值，并在枚举结果为零时直接把计划与发件箱置为终态。
+///
+/// - Parameters:
+///   - database: 执行结算的数据库。
+///   - planIDs: 待结算的计划标识列表；为空时直接返回。
+///   - now: 服务端统一授时时刻。
+/// - Throws: 计划、房间与准入记录不匹配或字段越界，准入池余额不足，
+///   求和溢出，或持久化失败时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``；
+///   死锁与序列化失败由事务重试边界处理。
 func v2SettleMessageAudiencePlans(database: any Database, planIDs: [UUID], now: Date) async throws {
     guard !planIDs.isEmpty else { return }
     let input = String(decoding: try JSONEncoder().encode(planIDs), as: UTF8.self)
@@ -141,6 +153,13 @@ func v2SettleMessageAudiencePlans(database: any Database, planIDs: [UUID], now: 
     }
 }
 
+/// 以溢出检测方式求两个 64 位整数之和。
+///
+/// - Parameters:
+///   - left: 被加数。
+///   - right: 加数。
+/// - Returns: 求和结果。
+/// - Throws: 相加溢出时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
 private func audienceSum(_ left: Int64, _ right: Int64) throws -> Int64 {
     let (sum, overflow) = left.addingReportingOverflow(right)
     guard !overflow else { throw V2RoomWriteStoreError.corruptPersistenceState }

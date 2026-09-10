@@ -3,28 +3,53 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 密码账号存储错误。
 public enum V2PasswordAccountStoreError: Error, Equatable, Sendable {
+    /// 账号标识不符合规范化规则。
     case invalidAccountHandle
+    /// 公开身份字段不合法。
     case invalidPublicIdentity
+    /// 账号标识已被占用。
     case accountAlreadyExists
+    /// 公开账号名已被占用。
     case publicHandleAlreadyExists
+    /// 存储或哈希参数当前不可用。
     case unavailable
 }
 
+/// 已持久化的密码凭据。
 public struct V2PasswordCredential: Equatable, Sendable {
+    /// 凭据所属用户。
     public let userID: UserID
+    /// 符合部署策略的密码哈希串。
     public let passwordHash: String
 
+    /// 保存密码凭据。
+    ///
+    /// - Parameters:
+    ///   - userID: 凭据所属用户。
+    ///   - passwordHash: 已完成的密码哈希串。
     public init(userID: UserID, passwordHash: String) {
         self.userID = userID
         self.passwordHash = passwordHash
     }
 }
 
-/// Persistence boundary for the password fallback. Plaintext password work
-/// belongs to the bounded application worker pool; this capability only accepts a
-/// completed password digest and returns domain identities/credentials.
+/// 密码备选登录的持久化边界。
+///
+/// 明文密码校验由有界的应用工作器线程池负责；本能力只接受已完成的密码摘要，
+/// 并返回领域身份或凭据。
 public protocol V2PasswordAccountStoring: Sendable {
+    /// 注册一个新的密码账号。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识，需符合规范化规则。
+    ///   - passwordHash: 已完成的密码哈希串。
+    ///   - publicHandle: 公开账号名。
+    ///   - displayName: 展示名称。
+    ///   - deviceID: 发起注册的设备，用于审计。
+    /// - Returns: 新账号的用户标识。
+    /// - Throws: 标识非法、已被占用或存储不可用时抛出。
     func register(
         accountHandle: String,
         passwordHash: String,
@@ -32,21 +57,58 @@ public protocol V2PasswordAccountStoring: Sendable {
         displayName: String,
         deviceID: DeviceID
     ) async throws -> UserID
+    /// 读取账号对应的密码凭据。
+    ///
+    /// - Parameter accountHandle: 账号标识。
+    /// - Returns: 可用账号的凭据；账号不存在或已停用时返回 `nil`。
+    /// - Throws: 标识非法或存储不可用时抛出。
     func passwordCredential(for accountHandle: String) async throws -> V2PasswordCredential?
-    /// Recheck the exact credential after KDF work, then commit success audit
-    /// and failure-window reset together. A concurrent reset must win cleanly.
+
+    /// 在 KDF 计算完成后复核密码凭据，并一次性提交成功审计与失败窗口重置。
+    ///
+    /// 复核要求凭据的用户与哈希串都与预期完全一致，且账号未被停用；若期间窗口已被并发重置，
+    /// 以并发结果为准，本次调用不会覆盖它。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - expected: KDF 计算前读取到的凭据。
+    ///   - deviceID: 发起登录的设备，用于审计。
+    /// - Returns: 复核通过并完成提交时为 `true`。
+    /// - Throws: 标识非法或存储不可用时抛出。
     func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool
 }
 
+/// 基于 PostgreSQL 的密码账号存储实现。
 public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable {
     private let database: any Database
     private let now: @Sendable () -> Date
 
+    /// 组合数据库与授时来源。
+    ///
+    /// - Parameters:
+    ///   - database: 存放密码凭据、公开资料与审计的数据库。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(database: any Database, now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database
         self.now = now
     }
 
+    /// 在单个事务内注册新账号。
+    ///
+    /// 事务先按账号标识与公开账号名分别加咨询锁，再校验两者未被占用，随后写入密码凭据、
+    /// 初始公开资料与注册成功审计。任一占用检查失败都会整体回滚。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - passwordHash: 已完成的密码哈希串，需符合部署策略。
+    ///   - publicHandle: 公开账号名。
+    ///   - displayName: 展示名称。
+    ///   - deviceID: 发起注册的设备。
+    /// - Returns: 新账号的用户标识。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordAccountStoreError/invalidAccountHandle``；公开身份不合法时抛出
+    ///   ``V2PasswordAccountStoreError/invalidPublicIdentity``；账号或公开账号名已存在时抛出对应错误；
+    ///   哈希参数、连接或时刻不可用时抛出 ``V2PasswordAccountStoreError/unavailable``。
     public func register(
         accountHandle: String,
         passwordHash: String,
@@ -95,6 +157,16 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
         }
     }
 
+    /// 复核凭据并提交成功审计与失败窗口重置。
+    ///
+    /// - Parameters:
+    ///   - accountHandle: 账号标识。
+    ///   - expected: KDF 计算前读取到的凭据。
+    ///   - deviceID: 发起登录的设备。
+    /// - Returns: 凭据完全一致且账号未被停用时为 `true`。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordAccountStoreError/invalidAccountHandle``；连接或时刻不可用时抛出
+    ///   ``V2PasswordAccountStoreError/unavailable``。
     public func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool {
         let handle = try canonicalAccountHandle(accountHandle)
         guard V2PasswordHashPolicy.supports(expected.passwordHash) else { return false }
@@ -113,6 +185,13 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
         }
     }
 
+    /// 读取账号的密码凭据。
+    ///
+    /// - Parameter accountHandle: 账号标识。
+    /// - Returns: 凭据；账号不存在或已被停用时返回 `nil`。
+    /// - Throws: 账号标识非法时抛出
+    ///   ``V2PasswordAccountStoreError/invalidAccountHandle``；连接不支持 SQL 时抛出
+    ///   ``V2PasswordAccountStoreError/unavailable``。
     public func passwordCredential(for accountHandle: String) async throws -> V2PasswordCredential? {
         let handle = try canonicalAccountHandle(accountHandle)
         guard let sql = database as? any SQLDatabase else {
@@ -125,6 +204,14 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
     }
 }
 
+/// 规范化账号标识。
+///
+/// 统一转为小写并要求长度为 3 至 64 个字符，字符集限定为数字、小写字母及 `_`、`-`。
+///
+/// - Parameter value: 原始账号标识。
+/// - Returns: 规范化后的账号标识。
+/// - Throws: 长度或字符集不满足要求时抛出
+///   ``V2PasswordAccountStoreError/invalidAccountHandle``。
 public func canonicalAccountHandle(_ value: String) throws -> String {
     let normalized = value.lowercased()
     let scalars = normalized.unicodeScalars

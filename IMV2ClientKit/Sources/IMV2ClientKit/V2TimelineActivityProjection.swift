@@ -1,23 +1,43 @@
 import Foundation
 import IMV2Core
 
-/// A durable, viewer-private timeline entry. It is intentionally not a
-/// message: it cannot be replied to, read-receipted, edited, reacted to or
-/// forwarded. The server stores only product-safe reason codes here.
+/// 持久化且仅对该查看者可见的时间线条目。
+///
+/// 它刻意不是消息：无法被回复、发送已读回执、编辑、加表情或转发。
+/// 服务端在此只保存产品层面安全的展示原因码。
 public struct V2ClientTimelineActivityProjection: Equatable, Sendable, Identifiable {
+    /// 条目种类。
     public enum Kind: String, Equatable, Sendable {
+        /// 私聊消息受限。
         case directMessageRestricted = "direct_message_restricted"
+        /// 系统账号只读。
         case systemAccountReadOnly = "system_account_read_only"
     }
 
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 目标房间。
     public let roomID: RoomID
+    /// 时间线序号。
     public let timelineSequence: UInt64
+    /// 条目种类。
     public let kind: Kind
+    /// 事件创建时刻。
     public let createdAt: Date
 
+    /// 用于列表标识。
     public var id: String { sourceEventID.rawValue }
 
+    /// 保存时间线条目。
+    ///
+    /// - Parameters:
+    ///   - sourceEventID: 来源事件标识。
+    ///   - roomID: 目标房间。
+    ///   - timelineSequence: 时间线序号，需大于零。
+    ///   - kind: 条目种类。
+    ///   - createdAt: 事件创建时刻。
+    ///
+    /// 序号非正时直接失败，避免产生无效的时间线位置。
     public init(sourceEventID: EventID, roomID: RoomID, timelineSequence: UInt64, kind: Kind, createdAt: Date) {
         precondition(timelineSequence > 0)
         self.sourceEventID = sourceEventID
@@ -27,6 +47,11 @@ public struct V2ClientTimelineActivityProjection: Equatable, Sendable, Identifia
         self.createdAt = createdAt
     }
 
+    /// 从同步记录解码时间线条目。
+    ///
+    /// - Parameter record: 投影类型为时间线活动的同步记录。
+    /// - Throws: 载荷无法解码、序号为零、时间戳为负或种类未知时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String
@@ -60,19 +85,34 @@ public struct V2ClientTimelineActivityProjection: Equatable, Sendable, Identifia
     }
 }
 
-/// A server-authoritative composer capability. It is a private projection so
-/// it never leaks a counterpart's block or privacy configuration.
+/// 由服务端裁决的发送能力。
+///
+/// 它是私有投影，因此不会泄漏对端是否拉黑或对端的隐私配置。
 public struct V2ClientDirectSendingCapability: Equatable, Sendable {
+    /// 目标房间。
     public let roomID: RoomID
+    /// 当前是否允许发送。
     public let canSend: Bool
+    /// 最近更新时刻。
     public let updatedAt: Date
 
+    /// 保存发送能力。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - canSend: 是否允许发送。
+    ///   - updatedAt: 最近更新时刻。
     public init(roomID: RoomID, canSend: Bool, updatedAt: Date) {
         self.roomID = roomID
         self.canSend = canSend
         self.updatedAt = updatedAt
     }
 
+    /// 从同步记录解码发送能力。
+    ///
+    /// - Parameter record: 投影类型为私聊发送能力的同步记录。
+    /// - Throws: 载荷无法解码、时间戳为负或房间标识非法时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let roomID: String

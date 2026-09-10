@@ -3,21 +3,63 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Serializes an actor's reaction operation, then commits the set change and
-/// its room-derived propagation work as one transaction. Lock order follows
-/// the other room mutations: operation → room → message → admission → shard.
+/// 消息表情变更的 PostgreSQL 实现。
+///
+/// 先串行化同一发起者的表情操作，再把集合变更与房间派生的传播工作放在同一个事务内提交。
+/// 加锁顺序与其他房间变更一致：操作 → 房间 → 消息 → 准入 → 分片。
 public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerValidatedMessageReactionStore {
     private let database: any Database
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放房间、消息、表情与准入状态的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 执行一次表情变更（不校验房间归属）。
+    ///
+    /// - Parameters:
+    ///   - command: 表情变更命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 表情变更结果。
+    /// - Throws: 无权限、状态冲突、容量不足或持久化失败时抛出。
     public func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageReactionOutcome {
         try await change(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 按房间归属执行一次表情变更。
+    ///
+    /// - Parameters:
+    ///   - command: 表情变更命令。
+    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 表情变更结果。
+    /// - Throws: 归属已变更、无权限、状态冲突、容量不足或持久化失败时抛出。
     public func changeOwnerValidated(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageReactionOutcome {
         try await change(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
     }
 
+    /// 在单个事务内完成幂等判定、授权、容量预留与事件写入。
+    ///
+    /// 会依次校验：可选归属、历史操作的幂等一致性、房间容量档位、消息未撤回、
+    /// 发起者在当前与接受修订两个时点都是成员、表情数量上限、房间与分片准入状态一致。
+    /// 通过后推进房间序号、写入或删除表情、更新两级准入用量、追加房间事件与扇出计划，
+    /// 最后登记操作记录以保证重放语义。
+    ///
+    /// - Parameters:
+    ///   - command: 表情变更命令。
+    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 表情变更结果或不需要变更的结论。
+    /// - Throws: 房间或消息不存在、发起者非成员、已达表情数量上限、
+    ///   房间与分片租约不一致或持久化失败时抛出。
     private func change(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageReactionOutcome {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
@@ -113,7 +155,32 @@ private struct ReactionAdmissionRow { let eligibleMemberCount: Int; let commandW
 extension ReactionAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
 private struct ReactionShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; let fanoutWindowLimit: Int; let fanoutWindowUsed: Int; let maxOutstandingFanoutUnits: Int; let outstandingFanoutUnits: Int; let maxOutstandingPlans: Int; let outstandingPlans: Int }
 extension ReactionShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used", maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units", maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: reactionUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed), fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed), maxOutstandingFanoutUnits: maxOutstandingFanoutUnits, maxOutstandingPlans: maxOutstandingPlans), outstandingFanoutUnits: outstandingFanoutUnits, outstandingPlans: outstandingPlans) } }
+/// 把标识原始值解析为 UUID。
+///
+/// - Parameter identifier: 已校验的标识类型。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2MessageReactionStoreError/corruptPersistenceState``。
 private func reactionUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: identifier.rawValue) else { throw V2MessageReactionStoreError.corruptPersistenceState }; return value }
+
+/// 把非负的 64 位整数转换为无符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 无符号值。
+/// - Throws: 值为负时抛出 ``V2MessageReactionStoreError/corruptPersistenceState``。
 private func reactionUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2MessageReactionStoreError.corruptPersistenceState }; return UInt64(value) }
+
+/// 把无符号整数转换为可持久化的有符号表示。
+///
+/// - Parameter value: 待转换整数。
+/// - Returns: 有符号值。
+/// - Throws: 超出 `Int64` 表示范围时抛出
+///   ``V2MessageReactionStoreError/corruptPersistenceState``。
 private func reactionSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2MessageReactionStoreError.corruptPersistenceState }; return Int64(value) }
+
+/// 把持久化字符串解析为表情动作。
+///
+/// - Parameter rawValue: 持久化取值。
+/// - Returns: 对应的表情动作。
+/// - Throws: 取值未知时抛出 ``V2MessageReactionStoreError/corruptPersistenceState``。
 private func reactionAction(_ rawValue: String) throws -> V2MessageReactionAction { guard let action = V2MessageReactionAction(rawValue: rawValue) else { throw V2MessageReactionStoreError.corruptPersistenceState }; return action }

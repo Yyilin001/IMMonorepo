@@ -1,18 +1,35 @@
 import Foundation
 import IMV2Core
 
-/// Compact group identity and the latest membership revision observed by this
-/// device. It deliberately contains no member list: fan-out never replicates
-/// a large roster into every recipient's sync history.
+/// 精简的群身份信息与本设备观察到的最新成员修订。
+///
+/// 它刻意不包含成员列表：扇出绝不会把庞大名册复制进每个接收者的同步历史。
 public struct V2ClientRoomProfileProjection: Equatable, Sendable {
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 目标房间。
     public let roomID: RoomID
+    /// 房间标题，已去除首尾空白。
     public let title: String
+    /// 群主用户。
     public let ownerUserID: UserID
+    /// 房间投递模式。
     public let deliveryMode: V2GroupDeliveryMode
+    /// 成员修订。
     public let membershipRevision: UInt64
+    /// 房间创建时刻。
     public let createdAt: Date
 
+    /// 保存房间资料投影。
+    ///
+    /// - Parameters:
+    ///   - sourceEventID: 来源事件标识。
+    ///   - roomID: 目标房间。
+    ///   - title: 房间标题。
+    ///   - ownerUserID: 群主用户。
+    ///   - deliveryMode: 投递模式。
+    ///   - membershipRevision: 成员修订。
+    ///   - createdAt: 房间创建时刻。
     init(
         sourceEventID: EventID, roomID: RoomID, title: String,
         ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode,
@@ -27,6 +44,14 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
         self.createdAt = createdAt
     }
 
+    /// 从同步记录解码房间资料投影。
+    ///
+    /// 仅接受房间创建或成员变更事件，并要求标题非空、不含控制字符且不超过命令上限，
+    /// 成员修订大于零、创建时刻不早于 Unix 纪元。
+    ///
+    /// - Parameter record: 房间或成员类同步记录。
+    /// - Throws: 载荷无法解码、事件类型不符或字段越界时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String

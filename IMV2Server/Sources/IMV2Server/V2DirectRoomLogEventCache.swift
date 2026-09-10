@@ -2,14 +2,14 @@ import Foundation
 import IMV2Core
 import Synchronization
 
-/// A bounded process-local acceleration cache for plain, canonical direct and
-/// hybrid-group room-log events. It is deliberately not an authorization cache: callers
-/// must obtain a fresh membership fence from PostgreSQL before returning a
-/// candidate page, and every uncertain range falls back to the durable log.
+/// 面向普通、规范的私聊与混合群组房间日志事件的有界进程本地加速缓存。
 ///
-/// Room state is hash-sharded so unrelated conversations do not serialize on
-/// one actor. Each shard owns an O(1) room LRU and an exact share of the global
-/// entry/byte budgets; the aggregate can never exceed the configured limits.
+/// 它刻意不是授权缓存：调用方在返回候选分页之前，必须先从 PostgreSQL 取得新的成员栅栏；
+/// 任何不确定的区间都会回退到持久日志。
+///
+/// 房间状态按哈希分片，使无关会话不会在单个 actor 上串行。
+/// 每个分片各自持有一个 O(1) 的房间 LRU，以及全局条目/字节预算中的精确份额；
+/// 总量绝不会超过配置上限。
 public final class V2DirectRoomLogEventCache: Sendable {
     public struct Configuration: Equatable, Sendable {
         public let maximumEvents: Int
@@ -94,8 +94,9 @@ public final class V2DirectRoomLogEventCache: Sendable {
         }
     }
 
-    /// Immutable cache coverage captured before the durable authorization
-    /// read. It carries no identity and cannot authorize a response by itself.
+    /// 在持久授权读取之前捕获的不可变缓存覆盖信息。
+    ///
+    /// 它不携带任何身份，本身也无法授权任何响应。
     struct Candidate: Sendable {
         struct Event: Sendable {
             let entry: V2GroupEventLogEntry
@@ -210,9 +211,11 @@ public final class V2DirectRoomLogEventCache: Sendable {
         }
     }
 
-    /// Records only an already-committed, plain room-log message. Payload
-    /// construction happens before entering the room shard, keeping JSON CPU
-    /// out of the shard's isolation domain.
+    /// 只记录已提交的普通房间日志消息。
+    ///
+    /// 载荷构建发生在进入房间分片之前，从而把 JSON 计算的 CPU 开销挡在分片隔离域之外。
+    ///
+    /// - Parameter message: 已提交的普通私聊消息。
     public func recordCommittedPlainDirectMessage(_ message: V2AcceptedMessage) async {
         guard let prepared = Self.prepare(message) else {
             await lane(for: message.roomID).cache.recordBypass()
@@ -221,9 +224,11 @@ public final class V2DirectRoomLogEventCache: Sendable {
         await lane(for: message.roomID).cache.record(prepared)
     }
 
-    /// Records an already-materialized post-commit payload before its
-    /// availability hint is published. This establishes cache-before-hint
-    /// ordering without re-encoding JSON or involving PostgreSQL.
+    /// 在可用性提示发布之前，记录一个已物化的提交后载荷。
+    ///
+    /// 这建立了「先缓存、后提示」的顺序，同时无需重新编码 JSON 或涉及 PostgreSQL。
+    ///
+    /// - Parameter event: 已物化的提交后实时事件。
     func recordCommittedPlainDirectEvent(_ event: V2DirectRoomLiveEvent) async {
         guard let prepared = Self.prepare(event) else {
             await lane(for: event.roomID).cache.recordBypass()
@@ -232,9 +237,12 @@ public final class V2DirectRoomLogEventCache: Sendable {
         await lane(for: prepared.roomID).cache.record(prepared)
     }
 
-    /// Hot-path entry point used after a durable message commit. The accepted
-    /// response waits only for one bounded shard-mailbox append; JSON creation,
-    /// ordering and LRU mutation run in the runtime-owned writer task.
+    /// 持久消息提交之后使用的热路径入口。
+    ///
+    /// 已接受的响应只需等待一次有界的分片信箱追加；
+    /// JSON 构建、排序与 LRU 变更都在运行时拥有的写者任务中执行。
+    ///
+    /// - Parameter message: 已提交的普通私聊消息。
     public func enqueueCommittedPlainDirectMessage(_ message: V2AcceptedMessage) {
         guard let prepared = Self.prepare(message) else {
             lane(for: message.roomID).mailbox.recordBypass()
@@ -243,9 +251,12 @@ public final class V2DirectRoomLogEventCache: Sendable {
         lane(for: prepared.roomID).mailbox.enqueue(prepared)
     }
 
-    /// Preferred production entry point. The foreground live event and this
-    /// cache share one immutable encoded payload, so post-commit acceleration
-    /// no longer performs two JSON encodes or retains two full message values.
+    /// 首选的生产入口。
+    ///
+    /// 前台实时事件与本缓存共享同一份不可变编码载荷，
+    /// 因此提交后加速不再执行两次 JSON 编码，也不会保留两份完整消息值。
+    ///
+    /// - Parameter event: 已物化的提交后实时事件。
     func enqueueCommittedPlainDirectEvent(_ event: V2DirectRoomLiveEvent) {
         guard let prepared = Self.prepare(event) else {
             lane(for: event.roomID).mailbox.recordBypass()
@@ -254,15 +265,17 @@ public final class V2DirectRoomLogEventCache: Sendable {
         lane(for: prepared.roomID).mailbox.enqueue(prepared)
     }
 
-    /// Batch counterpart used by the cross-Gateway relay. A decoded NATS
-    /// microbatch normally belongs to one room/lane; retain that batching
-    /// through the mailbox and shard actor instead of turning it back into one
-    /// mutex acquisition, stream signal and actor hop per event.
+    /// 跨 Gateway 中继使用的批量对应实现。
     ///
-    /// Grouping by lane also keeps the method correct for compatibility input
-    /// containing multiple rooms. Relative order within every lane is exactly
-    /// the input order, and the shard's sequence fence remains authoritative
-    /// for duplicates or rare reordering.
+    /// 一条已解码的 NATS 微批通常属于同一房间/通道；
+    /// 让这种批量形态贯穿信箱与分片 actor，而不是把它重新拆成每个事件一次互斥获取、
+    /// 一次流信号与一次 actor 跳转。
+    ///
+    /// 按通道分组也使该方法对包含多个房间的兼容输入保持正确。
+    /// 每个通道内的相对顺序与输入顺序完全一致，
+    /// 分片的序号围栏对重复或罕见乱序仍是权威。
+    ///
+    /// - Parameter events: 本批待入队的提交后实时事件。
     func enqueueCommittedPlainDirectEvents(_ events: [V2DirectRoomLiveEvent]) {
         guard !events.isEmpty else { return }
         var preparedByLane: [Int: [PreparedEvent]] = [:]
@@ -280,8 +293,10 @@ public final class V2DirectRoomLogEventCache: Sendable {
         }
     }
 
-    /// Own this loop with one runtime task. Each lane is drained by one child,
-    /// preserving room order without serializing unrelated room hashes.
+    /// 由单个运行时任务持有该循环。
+    ///
+    /// 每条通道由单独的子任务排空，既保持房间内顺序，
+    /// 又不把无关的房间哈希串行化。
     public func run() async {
         await withTaskGroup(of: Void.self) { group in
             for lane in lanes {
@@ -295,10 +310,16 @@ public final class V2DirectRoomLogEventCache: Sendable {
         for lane in lanes { lane.mailbox.finish() }
     }
 
-    /// Captures contiguous local coverage without consulting or carrying
-    /// authorization. A definite miss is recorded here so callers can skip the
-    /// separate lightweight authorization query and execute the durable,
-    /// authorization-bearing SQL directly.
+    /// 捕获连续的本地覆盖信息，既不查询也不携带授权。
+    ///
+    /// 确定未命中会在此记录，使调用方可以跳过单独的轻量授权查询，
+    /// 直接执行带授权的持久 SQL。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - afterRoomSequence: 分页起点之后的位置。
+    ///   - pageSize: 请求的分页条数，必须大于零。
+    /// - Returns: 本地候选覆盖；无法覆盖时为 `nil`。
     func candidate(
         roomID: RoomID,
         afterRoomSequence: UInt64,
@@ -320,9 +341,16 @@ public final class V2DirectRoomLogEventCache: Sendable {
         )
     }
 
-    /// Cheap identity-free coverage probe used before deciding whether the
-    /// request should spend one small authorization query or go directly to
-    /// the complete durable page query. It performs no event-array copy.
+    /// 廉价且不含身份的覆盖探测。
+    ///
+    /// 在决定该请求是花费一次小型授权查询，还是直接走完整的持久分页查询之前使用。
+    /// 它不会复制任何事件数组。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - afterRoomSequence: 分页起点之后的位置。
+    ///   - pageSize: 请求的分页条数，必须大于零。
+    /// - Returns: 本地是否已覆盖所需分页。
     func hasPreparedPageCoverage(
         roomID: RoomID,
         afterRoomSequence: UInt64,
@@ -338,9 +366,19 @@ public final class V2DirectRoomLogEventCache: Sendable {
         )
     }
 
-    /// Applies the fresh durable membership fence, derives an encoded-page
-    /// fingerprint inside the room shard, and consults the shared payload
-    /// cache before any Candidate/domain/protobuf event array is built.
+    /// 应用新的持久成员栅栏，在房间分片内推导编码分页指纹，
+    /// 并在构建任何候选/领域/protobuf 事件数组之前先查询共享载荷缓存。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - actorJoinedRevision: 请求发起者的加入修订。
+    ///   - actorLeftRevision: 请求发起者的离开修订，仍在房间内时为空。
+    ///   - currentHighWatermark: 当前持久高水位。
+    ///   - afterRoomSequence: 分页起点之后的位置。
+    ///   - pageSize: 请求的分页条数。
+    ///   - context: 编码分页所需的上下文。
+    /// - Returns: 已准备分页的结果。
+    /// - Throws: 编码或状态校验失败时抛出。
     func preparedPage(
         roomID: RoomID,
         actorJoinedRevision: UInt64,
@@ -368,9 +406,16 @@ public final class V2DirectRoomLogEventCache: Sendable {
         return result
     }
 
-    /// Applies a fresh durable membership fence to an immutable candidate.
-    /// The candidate is never authority; this method only centralizes the
-    /// visibility/continuity checks and hit/miss accounting.
+    /// 对不可变候选应用新的持久成员栅栏。
+    ///
+    /// 候选永远不是权威；该方法只集中处理可见性/连续性检查以及命中/未命中统计。
+    ///
+    /// - Parameters:
+    ///   - candidate: 待校验的不可变候选。
+    ///   - actorJoinedRevision: 请求发起者的加入修订。
+    ///   - actorLeftRevision: 请求发起者的离开修订，仍在房间内时为空。
+    ///   - currentHighWatermark: 当前持久高水位。
+    /// - Returns: 通过栅栏校验的分页；不可见或不连续时返回 `nil`。
     func page(
         candidate: Candidate,
         actorJoinedRevision: UInt64,
@@ -386,8 +431,16 @@ public final class V2DirectRoomLogEventCache: Sendable {
         return page
     }
 
-    /// Compatibility/testing convenience for callers that already hold the
-    /// durable fence.
+    /// 面向已持有持久栅栏调用方的兼容/测试便捷入口。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - actorJoinedRevision: 请求发起者的加入修订。
+    ///   - actorLeftRevision: 请求发起者的离开修订，仍在房间内时为空。
+    ///   - currentHighWatermark: 当前持久高水位。
+    ///   - afterRoomSequence: 分页起点之后的位置。
+    ///   - pageSize: 请求的分页条数。
+    /// - Returns: 通过栅栏校验的分页；不可见或不连续时返回 `nil`。
     public func page(
         roomID: RoomID,
         actorJoinedRevision: UInt64,
@@ -606,17 +659,18 @@ private actor V2DirectRoomLogEventCacheShard {
         let byteCost: Int
     }
 
-    /// Actor-confined reference storage is intentional. Keeping this as a
-    /// value type made `rooms[roomKey]` and the local mutation share the same
-    /// Array buffer, so every append to a saturated room triggered a full
-    /// Copy-on-Write clone of the retained window. The instance never crosses
-    /// the shard actor boundary.
+    /// 刻意使用局限在 actor 内的引用类型存储。
+    ///
+    /// 若保持为值类型，`rooms[roomKey]` 与本地变更会共享同一份数组缓冲区，
+    /// 于是对已饱和房间的每次追加都会触发整段保留窗口的写时复制克隆。
+    /// 该实例绝不会跨越分片 actor 边界。
     private final class RoomEntries {
         var events: [CachedEvent]
-        /// Logical head of the retained window. Removing the oldest event by
-        /// `Array.removeFirst()` shifted every retained payload on every new
-        /// message once a hot room reached capacity. Advancing this cursor is
-        /// O(1); occasional compaction amortizes the storage reclamation.
+        /// 保留窗口的逻辑头部下标。
+        ///
+        /// 若用 `Array.removeFirst()` 移除最旧事件，一旦热房间达到容量，
+        /// 每条新消息都会搬移所有保留载荷。推进该游标是 O(1)；
+        /// 偶发的压缩则摊薄存储回收成本。
         var firstEventIndex: Int
         var previousRoom: String?
         var nextRoom: String?
@@ -735,9 +789,12 @@ private actor V2DirectRoomLogEventCacheShard {
         evictIfNeeded()
     }
 
-    /// Preserve a relay microbatch across the actor boundary. `record(_:)`
-    /// still applies the identical duplicate, ordering and budget rules to
-    /// every entry; this method only removes per-event executor scheduling.
+    /// 让中继微批跨越 actor 边界时保持成批形态。
+    ///
+    /// `record(_:)` 仍会对每条记录应用完全相同的去重、排序与预算规则；
+    /// 该方法只是省去逐事件的执行器调度。
+    ///
+    /// - Parameter prepared: 本批已准备好的缓存事件。
     func record(_ prepared: [V2DirectRoomLogEventCache.PreparedEvent]) {
         for event in prepared {
             record(event)

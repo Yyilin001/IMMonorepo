@@ -3,10 +3,10 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// A target-store projection acknowledged back to the authoritative fan-out
-/// control store. The sequence is already durable in the user shard; this
-/// value is used only for the resulting worker report after the lease-fenced
-/// control completion commits.
+/// 回传给权威扇出控制存储的目标存储投影确认。
+///
+/// 序号已经在用户分片中持久化；
+/// 该值只用于租约围栏保护的控制完成提交之后生成工作者报告。
 public struct V2ExternalFanoutDeliveryAcknowledgement: Sendable {
     public let lease: V2FanoutDeliveryLease
     public let userSyncSequence: UInt64
@@ -17,10 +17,10 @@ public struct V2ExternalFanoutDeliveryAcknowledgement: Sendable {
     }
 }
 
-/// Commits a target's user-sync projection and advances the completion unit in
-/// the same transaction. Capacity release is deliberately a separate durable
-/// phase: projection transactions never acquire room or shard-admission locks.
-/// A consumer-inbox row makes broker redelivery safe.
+/// 在同一个事务中提交某一目标的用户同步投影并推进其完成单元。
+///
+/// 容量释放刻意是独立的持久阶段：投影事务绝不获取房间或分片准入锁。
+/// 一行消费者收件箱记录使 broker 重投递变得安全。
 public struct PostgresV2FanoutDeliveryStore:
     V2PartitionedFanoutDeliveryStore,
     V2FanoutCompletionReleaseStore
@@ -42,9 +42,9 @@ public struct PostgresV2FanoutDeliveryStore:
         batchSequenceReservationStrategy = .automatic
     }
 
-    /// Internal only so the isolated capacity regression can compare the
-    /// general repeated-user query with its standard fan-out fast path. The
-    /// running server always uses `.automatic` through the public initializer.
+    /// 仅供内部使用，让隔离的容量回归测试可以把通用重复用户查询与其标准扇出快速路径作对比。
+    ///
+    /// 运行中的服务端始终通过公开初始化器使用 `.automatic`。
     init(
         database: any Database,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
@@ -57,15 +57,15 @@ public struct PostgresV2FanoutDeliveryStore:
         self.payloadWriteMode = payloadWriteMode
     }
 
-    /// A fixed database lane makes fresh predicates indexable while allowing
-    /// the process to run any smaller worker count. All fresh work is assigned
-    /// by target user so sequence writers remain disjoint. Direct deliveries
-    /// separately elect one source-event payload materializer below.
+    /// 固定的数据库通道数让新谓词可被索引，同时允许进程以任意更小的工作者数量运行。
+    ///
+    /// 所有新工作都按目标用户分配，使序号写者保持互不相交。
+    /// 私聊投递则单独在下方选举出一个源事件载荷物化者。
     private static let stableFreshLaneCount: Int64 = 8
-    /// A transaction may amortize sequence/trigger work across repeated
-    /// messages for several users, but must not pre-lock an entire claim-sized
-    /// user set that it cannot actually project. Eight users keeps advisory
-    /// ownership narrow and still fills the standard 128-row commit boundary.
+    /// 一个事务可以把序号/触发器工作摊薄到若干用户的重复消息上，
+    /// 但不得预先锁定一整批认领规模、却实际无法全部投影的用户集合。
+    ///
+    /// 八个用户既让咨询锁持有面保持狭窄，又能填满标准 128 行的提交边界。
     private static let maximumFreshDirectUsersPerBatch = 8
 
     private static func dynamicTargetPartitionEligibility(
@@ -129,14 +129,21 @@ public struct PostgresV2FanoutDeliveryStore:
         )
     }
 
-    /// Cross-store delivery inlines a bounded immutable source payload on
-    /// every claimed lease. A larger payload is emitted once per source event
-    /// in that same lease-fenced result; the cross-store worker then expands
-    /// it in memory for the other leases of that event. This prevents a
-    /// member-count-scaled response without adding a second control-store
-    /// query. It is deliberately separate from the protocol-level claim
-    /// method: co-located fan-out never needs a payload in process memory
-    /// before its one-database transaction.
+    /// 跨存储投递会把有界的不可变源载荷内联到每个已认领租约上。
+    ///
+    /// 更大的载荷会在同一份受租约围栏保护的结果中按源事件只输出一次；
+    /// 跨存储工作者随后在内存中为同一事件的其余租约展开它。
+    /// 这样既避免了随成员数放大的响应，又无需增加第二次控制存储查询。
+    /// 它刻意与协议级认领方法分离：同置扇出在单库事务之前从不需要进程内载荷。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的桶过滤。
+    ///   - lane: 认领通道。
+    ///   - now: 当前时间。
+    ///   - leaseDuration: 租约时长。
+    ///   - limit: 本次认领上限。
+    /// - Returns: 附带投影载荷的已认领投递列表。
+    /// - Throws: 持久化状态损坏或查询失败时抛出。
     public func claimPendingIncludingProjectionPayload(
         bucket: String?, lane: V2FanoutDeliveryClaimLane, now: Date,
         leaseDuration: TimeInterval, limit: Int,
@@ -365,12 +372,19 @@ public struct PostgresV2FanoutDeliveryStore:
         }
     }
 
-    /// Commits brand-new, co-located direct deliveries without first turning
-    /// each row into a leased heap version. Selection, route/migration fence,
-    /// inbox effect, Sync Log append, delivery terminalization and completion
-    /// accounting all remain inside one retryable PostgreSQL transaction.
-    /// Rows that have ever failed or been leased are excluded and continue on
-    /// the ordinary claim-token recovery protocol.
+    /// 提交全新的、同置的私聊投递，而不必先把每一行变成堆上的租约版本。
+    ///
+    /// 选取、路由/迁移围栏、收件箱效果、同步日志追加、投递终结以及完成度记账
+    /// 全部留在同一个可重试的 PostgreSQL 事务内。
+    /// 曾经失败或被租约过的行会被排除，并继续走常规的认领令牌恢复协议。
+    ///
+    /// - Parameters:
+    ///   - bucket: 可选的桶过滤。
+    ///   - partition: 可选的认领分区。
+    ///   - now: 当前时间。
+    ///   - limit: 本次提交上限，必须大于零。
+    /// - Returns: 已提交的私聊扇出投递列表。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func commitFreshDirectPreplanned(
         bucket: String?, partition: V2FanoutDeliveryClaimPartition?,
         now: Date, limit: Int
@@ -651,20 +665,30 @@ public struct PostgresV2FanoutDeliveryStore:
         }
     }
 
-    /// Writes a small, deterministic group of user projections and their
-    /// completion accounting in one PostgreSQL transaction. No work is
-    /// partially committed: a failure rolls back every inbox, sequence, sync
-    /// log and delivery-terminal update in the group. The worker then retries
-    /// the whole group under the usual lease fence.
+    /// 在单个 PostgreSQL 事务中写入一小组确定性的用户投影及其完成度记账。
+    ///
+    /// 不会出现部分提交：一旦失败，会回滚该组内所有收件箱、序号、同步日志
+    /// 与投递终结更新。随后工作者会按常规租约围栏重试整组。
+    ///
+    /// - Parameters:
+    ///   - leases: 本批待提交的投递租约。
+    ///   - now: 当前时间。
+    /// - Returns: 与租约顺序对应的提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func commitBatch(_ leases: [V2FanoutDeliveryLease], now: Date) async throws -> [V2FanoutDeliveryCommit] {
         try await commitBatch(leases, fenceCurrentRoutes: false, now: now)
     }
 
-    /// Production cross-store composition uses this path even when the target
-    /// happens to be co-located with the control schema. The route comparison
-    /// and projection/terminalization share one control transaction, so a
-    /// cutover either waits for this old-owner commit or atomically reroutes
-    /// the delivery before any old-owner projection is created.
+    /// 生产跨存储组合即便碰到与控制 schema 同置的目标，也会走该路径。
+    ///
+    /// 路由比较与投影/终结共享同一个控制事务，
+    /// 因此切换要么等待这次旧所有者提交，要么在任何旧所有者投影产生之前原子地改道投递。
+    ///
+    /// - Parameters:
+    ///   - leases: 本批待提交的投递租约。
+    ///   - now: 当前时间。
+    /// - Returns: 与租约顺序对应的提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func commitBatchFencedToCurrentRoutes(
         _ leases: [V2FanoutDeliveryLease], now: Date
     ) async throws -> [V2FanoutDeliveryCommit] {
@@ -724,9 +748,13 @@ public struct PostgresV2FanoutDeliveryStore:
         }
     }
 
-    /// Reads a claimed delivery's immutable event payload from the control
-    /// store. The result contains no physical address and is safe to hand to
-    /// a target-store projector after the claim has been fenced.
+    /// 从控制存储读取某个已认领投递的不可变事件载荷。
+    ///
+    /// 结果不包含任何物理地址，在认领被围栏保护之后可以安全交给目标存储投影器。
+    ///
+    /// - Parameter lease: 已认领的投递租约。
+    /// - Returns: 投影输入；租约过期或记录缺失时为 `nil`。
+    /// - Throws: 持久化状态损坏或查询失败时抛出。
     public func projectionInput(for lease: V2FanoutDeliveryLease) async throws -> V2FanoutProjectionInput? {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let sourceEventID = try uuid(lease.sourceEventID)
@@ -758,11 +786,15 @@ public struct PostgresV2FanoutDeliveryStore:
         )
     }
 
-    /// Reads immutable event payloads for a bounded lease batch with one
-    /// control-store statement. A missing item is a stale lease, exactly as
-    /// `projectionInput(for:)` reports. The caller must still complete the
-    /// target projection through the control-store lease fence: this read is
-    /// intentionally not a distributed transaction with the target shard.
+    /// 用一条控制存储语句读取一个有界租约批次的不可变事件载荷。
+    ///
+    /// 缺失项表示租约已过期，与 `projectionInput(for:)` 的语义完全一致。
+    /// 调用方仍必须通过控制存储租约围栏完成目标投影：
+    /// 这次读取刻意不是与目标分片的分布式事务。
+    ///
+    /// - Parameter leases: 本批待读取的投递租约。
+    /// - Returns: 与 `leases` 顺序对应的投影输入，缺失处为 `nil`。
+    /// - Throws: 持久化状态损坏或查询失败时抛出。
     public func projectionInputs(for leases: [V2FanoutDeliveryLease]) async throws -> [V2FanoutProjectionInput?] {
         guard !leases.isEmpty else { return [] }
         let input = try leases.enumerated().map { index, lease in
@@ -852,10 +884,17 @@ public struct PostgresV2FanoutDeliveryStore:
         return results
     }
 
-    /// Commits only the control-store completion side after a target store has
-    /// durably projected the exact inbox effect. The lease fence turns a late
-    /// target acknowledgement into `staleLease`, leaving no way to double
-    /// increment a completion unit.
+    /// 在目标存储已持久投影精确的收件箱效果之后，只提交控制存储的完成一侧。
+    ///
+    /// 租约围栏会把迟到的目标确认转化为 `staleLease`，
+    /// 从而没有任何途径把完成单元重复加一。
+    ///
+    /// - Parameters:
+    ///   - lease: 已认领且已完成目标投影的租约。
+    ///   - userSyncSequence: 目标存储持久化的用户同步序号。
+    ///   - now: 当前时间。
+    /// - Returns: 提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func completeExternal(
         _ lease: V2FanoutDeliveryLease, userSyncSequence: UInt64, now: Date
     ) async throws -> V2FanoutDeliveryCommit {
@@ -880,15 +919,19 @@ public struct PostgresV2FanoutDeliveryStore:
         }
     }
 
-    /// Completes a bounded set of target-store acknowledgements in one
-    /// control-store transaction. This deliberately owns no target-store
-    /// writes: a cross-database crash can leave an inbox effect committed
-    /// before this control acknowledgement, and the next attempt must replay
-    /// that idempotent target effect before trying this fence again.
+    /// 在单个控制存储事务中完成一具有界的目标存储确认。
     ///
-    /// A stale lease is reported per item. Valid items terminalize their
-    /// delivery rows together, then reuse the same completion-unit accounting
-    /// and admission-release rules as the co-located batch path.
+    /// 它刻意不负责任何目标存储写入：跨库崩溃可能导致收件箱效果已提交、
+    /// 而这次控制确认尚未完成；下一次尝试必须先重放那个幂等的目标效果，再重试该围栏。
+    ///
+    /// 过期租约会逐项上报。有效项会一起终结其投递行，
+    /// 随后复用与同置批次路径相同的完成单元记账与准入释放规则。
+    ///
+    /// - Parameters:
+    ///   - acknowledgements: 本批目标存储确认。
+    ///   - now: 当前时间。
+    /// - Returns: 与确认顺序对应的提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func completeExternalBatch(
         _ acknowledgements: [V2ExternalFanoutDeliveryAcknowledgement], now: Date
     ) async throws -> [V2FanoutDeliveryCommit] {
@@ -1008,10 +1051,16 @@ public struct PostgresV2FanoutDeliveryStore:
         _ = try await handoffClaimed(lease, to: route, sql: sql)
     }
 
-    /// Per-user advisory share locks are the cutover barrier. Route control
-    /// takes the exclusive form before changing that user's override. The
-    /// global configuration row remains readable so an unrelated user's
-    /// routed operation never serializes every user in the deployment.
+    /// 每用户咨询共享锁是切换屏障。
+    ///
+    /// 路由控制在修改某用户的路由覆盖之前，会先取该锁的排他形式。
+    /// 全局配置行保持可读，使无关用户的路由操作不会把整个部署的所有用户串行化。
+    ///
+    /// - Parameters:
+    ///   - users: 待查询路由的用户列表。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 与用户顺序对应的路由。
+    /// - Throws: 持久化状态损坏或查询失败时抛出。
     private func currentRoutes(
         for users: [UserID], sql: any SQLDatabase
     ) async throws -> [V2UserShardRoute] {
@@ -1172,9 +1221,16 @@ public struct PostgresV2FanoutDeliveryStore:
         )
     }
 
-    /// Creates the inbox-backed user projection but deliberately leaves the
-    /// fan-out delivery pending. The batch finisher terminalizes all prepared
-    /// deliveries and updates each completion unit exactly once.
+    /// 创建由收件箱支撑的用户投影，但刻意让扇出投递保持待处理状态。
+    ///
+    /// 批次收尾器会终结所有已准备的投递，并对每个完成单元恰好更新一次。
+    ///
+    /// - Parameters:
+    ///   - sql: 参与当前事务的数据库连接。
+    ///   - lease: 目标投递租约。
+    ///   - now: 当前时间。
+    /// - Returns: 已准备的投递投影；租约失效时为 `nil`。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func prepareCommit(
         sql: any SQLDatabase, lease: V2FanoutDeliveryLease, now: Date
     ) async throws -> PreparedFanoutDeliveryProjection? {
@@ -1267,17 +1323,21 @@ public struct PostgresV2FanoutDeliveryStore:
         return .init(delivery: delivery, userSyncSequence: try unsigned(sequence.nextSequence))
     }
 
-    /// Projects a colocated batch with one set-based SQL statement.  The CTEs
-    /// deliberately follow the durable effect order: fence/lock delivery,
-    /// reserve one sequence range per user, insert the complete inbox fence,
-    /// append sync rows, then terminalize the fenced deliveries. Any error
-    /// rolls back the entire statement and its encompassing transaction.
+    /// 用一条集合式 SQL 语句投影一个同置批次。
     ///
-    /// `user_sync_sequence` is part of the inbox compaction index. Inserting
-    /// an incomplete inbox row and updating it after sequence allocation would
-    /// therefore force a non-HOT heap update plus another entry in every inbox
-    /// index. Building the sequence first lets the immutable result row be
-    /// inserted once without weakening the unique consumer fence.
+    /// 这些 CTE 刻意遵循持久效果顺序：为投递建立围栏/加锁、为每个用户预留一段序号、
+    /// 插入完整的收件箱围栏、追加同步行，最后终结被围栏保护的投递。
+    /// 任何错误都会回滚整条语句及其外层事务。
+    ///
+    /// `user_sync_sequence` 属于收件箱压缩索引的一部分。
+    /// 若先插入不完整的收件箱行、再在序号分配后更新它，
+    /// 就会强制一次非 HOT 的堆更新，并在每个收件箱索引中多出一条记录。
+    /// 先构建序号则可以让这条不可变的结果行只插入一次，且不削弱唯一消费者围栏。
+    ///
+    /// - Parameters:
+    ///   - sql: 参与当前事务的数据库连接。
+    ///   - ordered: 按房间顺序排列的投递租约。
+    ///   - now: 当前时间。
     private func projectAndTerminalizeBatch(
         sql: any SQLDatabase,
         ordered: [BatchFanoutDeliveryLease],
@@ -1578,14 +1638,19 @@ public struct PostgresV2FanoutDeliveryStore:
             """).run()
     }
 
-    /// Completes the accounting/release side without a completion-unit N+1.
-    /// Delivery terminalization has already occurred in the fenced set-based
-    /// projection statement; this phase aggregates by `(source event,
-    /// completion unit)`, locks those counters in canonical order, and applies
-    /// every increment in one statement. This is phase A of the durable
-    /// protocol: it terminalizes projections and completion counters, but
-    /// never acquires room/admission locks. A separate release worker owns
-    /// phase B after this transaction commits.
+    /// 在没有完成单元 N+1 查询的前提下收尾记账/释放一侧。
+    ///
+    /// 投递终结已在受围栏保护的集合式投影语句中完成；
+    /// 本阶段按 `(来源事件, 完成单元)` 聚合，按规范顺序锁定这些计数器，
+    /// 并在单条语句中应用全部增量。
+    /// 这是持久协议的阶段 A：它终结投影与完成计数器，但绝不获取房间/准入锁。
+    /// 阶段 B 由独立释放工作者在本事务提交之后负责。
+    ///
+    /// - Parameters:
+    ///   - sql: 参与当前事务的数据库连接。
+    ///   - prepared: 已准备的投递提交。
+    /// - Returns: 按原始下标标注的提交结果列表。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func completeBatch(
         sql: any SQLDatabase,
         prepared: [PreparedFanoutDeliveryCommit]
@@ -1745,10 +1810,17 @@ public struct PostgresV2FanoutDeliveryStore:
         return .committed(userSyncSequence: userSyncSequence, releasedCompletionUnit: false, closedPlan: false)
     }
 
-    /// Releases a bounded terminal batch in one transaction. Unit claiming is
-    /// skip-locked for replica safety; room, admission and shard rows are then
-    /// locked in stable order. A crash before commit rolls back every counter
-    /// and state transition, leaving the same units eligible for recovery.
+    /// 在单个事务中释放一个有界的终态批次。
+    ///
+    /// 完成单元的认领使用 skip-locked 以保障副本安全；
+    /// 随后按稳定顺序锁定房间、准入与分片行。
+    /// 提交前崩溃会回滚全部计数器与状态迁移，使同一批单元仍可被恢复。
+    ///
+    /// - Parameters:
+    ///   - now: 当前时间。
+    ///   - limit: 本次释放上限，必须大于零。
+    /// - Returns: 释放报告。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func releaseTerminalCompletionUnits(
         now: Date,
         limit: Int
@@ -2106,9 +2178,11 @@ public struct PostgresV2FanoutDeliveryStore:
 
 public enum V2FanoutDeliveryError: Error, Equatable, Sendable { case inboxAlreadyCommitted }
 
-/// The production store selects the distinct-user path automatically. The
-/// generic path remains selectable by in-module regression tests so its
-/// repeated-user sequence guarantee is continuously comparable.
+/// 批次序号预留策略。
+///
+/// 生产存储会自动选择去重用户路径。
+/// 通用路径仍可由模块内回归测试选用，
+/// 以便持续对比其重复用户序号保证。
 enum V2FanoutBatchSequenceReservationStrategy: Sendable {
     case automatic
     case forceGeneric

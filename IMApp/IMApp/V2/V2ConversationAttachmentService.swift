@@ -20,7 +20,11 @@ protocol V2ConversationAttachmentStaging: Sendable {
 }
 
 protocol V2ConversationAttachmentUploading: Sendable {
-    /// Returns only after the edge reports scanner-approved availability.
+    /// 仅在边缘报告扫描器已批准可用之后才返回。
+    ///
+    /// - Parameter attachment: 已暂存、待上传的会话附件。
+    /// - Returns: 扫描器批准后可写入消息的安全媒体引用。
+    /// - Throws: 上传失败或扫描器拒绝时抛出。
     func upload(_ attachment: V2StagedConversationAttachment) async throws -> V2MediaReference
 }
 
@@ -48,9 +52,10 @@ struct V2ConversationAttachmentStagingPolicy: Equatable, Sendable {
         self.maximumFileCount = maximumFileCount
     }
 
-    /// This device-local safety bound is deliberately independent of the
-    /// provider's authoritative limit. A provider may reject a smaller file,
-    /// but no configured provider can make the app stage an unbounded file.
+    /// 默认的本机安全上限。
+    ///
+    /// 该设备本地安全边界刻意独立于提供方的权威限制。
+    /// 提供方可能拒绝更小的文件，但任何已配置的提供方都不能让 App 暂存无上限的文件。
     static let standard = Self(
         maximumFileBytes: 50 * 1_024 * 1_024,
         maximumDirectoryBytes: 512 * 1_024 * 1_024,
@@ -249,10 +254,11 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         try? fileManager.removeItem(at: candidate)
     }
 
-    /// Staged uploads have no durable retry record by design: only a
-    /// scanner-approved opaque reference can enter the message outbox.
-    /// Therefore a fresh activation can safely remove files left by a killed
-    /// foreground upload, while never traversing outside this directory.
+    /// 清理残留的暂存文件。
+    ///
+    /// 暂存上传刻意没有持久化重试记录：只有经扫描器批准的不透明引用才能进入消息发件箱。
+    /// 因此新一次激活可以安全删除被中断的前台上传遗留的文件，
+    /// 同时绝不会遍历到该目录之外。
     func discardOrphanedStagedFiles() {
         guard let entries = try? fileManager.contentsOfDirectory(
             at: directory,

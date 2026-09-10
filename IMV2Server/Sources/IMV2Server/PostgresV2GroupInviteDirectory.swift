@@ -3,11 +3,27 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 群邀请目录与创建恢复的 PostgreSQL 持久化实现。
+///
+/// 创建邀请分为「预写意向」与「完成」两步：先以操作标识落库并登记恢复任务，
+/// 再由工作进程按租约推进到完成，使进程崩溃后的创建可以继续或安全重试。
 public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInviteCreationRecoveryStoring {
     private let database: any Database
 
+    /// 创建群邀请目录存储。
+    ///
+    /// - Parameter database: 控制面数据库连接。
     public init(database: any Database) { self.database = database }
 
+    /// 预写一条群邀请创建意向。
+    ///
+    /// 所有唯一性冲突都被显式处理，包括两次不同操作提出相同令牌或邀请标识的情形：
+    /// 此时按操作标识读取既有行，若载荷不一致则判定为冲突。
+    /// 仅当行仍处于 `prepared` 状态时才会登记创建恢复任务。
+    ///
+    /// - Parameter request: 群邀请创建持久化请求。
+    /// - Returns: 可继续推进的创建意向。
+    /// - Throws: 请求字段非法或与既有记录冲突时抛出。
     public func prepare(_ request: V2GroupInviteCreatePersistenceRequest) async throws -> V2GroupInviteCreationIntent {
         guard let actor = request.actorUserID.uuidValue,
               let operation = request.operationID.uuidValue,
@@ -57,6 +73,14 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         }
     }
 
+    /// 完成一条群邀请创建意向。
+    ///
+    /// 同时把对应的恢复任务标记为已完成，避免后续工作进程再次认领。
+    ///
+    /// - Parameters:
+    ///   - intent: 待完成的创建意向。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 请求非法、状态冲突或持久化失败时抛出。
     public func finalize(_ intent: V2GroupInviteCreationIntent, now: Date) async throws {
         let request = intent.request
         guard let actor = request.actorUserID.uuidValue,
@@ -95,6 +119,19 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         }
     }
 
+    /// 认领一批待恢复的群邀请创建任务。
+    ///
+    /// 先按 `lease_expires_at` 回收已死亡的 `claimed` 任务，再按 `next_attempt_at` 取待处理任务，
+    /// 各分支分别走自己的到期时间局部索引，避免对整个积压做宽泛 OR 扫描或全表排序。
+    /// 认领使用 `SKIP LOCKED`，重试计数上限为 1000。
+    ///
+    /// - Parameters:
+    ///   - limit: 本次最多认领数，必须落在 1…100 之间。
+    ///   - now: 当前时间。
+    ///   - lease: 本次租约时长，必须为正且不超过 300 秒。
+    ///   - maximumActiveInvitesPerRoom: 每个房间允许的最大有效邀请数，必须为正。
+    /// - Returns: 已认领的创建恢复任务列表。
+    /// - Throws: 参数越界或持久化失败时抛出。
     public func claim(limit: Int, now: Date, lease: TimeInterval, maximumActiveInvitesPerRoom: Int) async throws -> [V2GroupInviteCreationRecoveryClaim] {
         guard (1...100).contains(limit), lease > 0, lease <= 300,
               maximumActiveInvitesPerRoom > 0,
@@ -133,6 +170,17 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         }
     }
 
+    /// 把一条已认领的创建任务标记为失败或暂停。
+    ///
+    /// 只有租约仍有效且认领令牌匹配时才会更新，从而避免过期工作进程覆盖新认领者的状态。
+    ///
+    /// - Parameters:
+    ///   - claim: 本次处理持有的创建恢复任务。
+    ///   - reason: 失败原因。
+    ///   - retryAt: 下次重试时间；传 `nil` 表示暂停而非重试。
+    ///   - now: 当前时间。
+    /// - Returns: 是否确实更新了任务状态。
+    /// - Throws: 时间戳非法或持久化失败时抛出。
     public func fail(_ claim: V2GroupInviteCreationRecoveryClaim, reason: V2GroupInviteCreationRecoveryFailure, retryAt: Date?, now: Date) async throws -> Bool {
         guard v2PostgresTimestampCanEncode(now), retryAt.map({ v2PostgresTimestampPrecedes(now, $0) }) ?? true,
               let actor = claim.intent.request.actorUserID.uuidValue, let operation = claim.intent.request.operationID.uuidValue
@@ -149,6 +197,13 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         return row != nil
     }
 
+    /// 筛选出某一房间中已就绪的邀请。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间。
+    ///   - inviteIDs: 待筛选的邀请标识集合，最多 100 个。
+    /// - Returns: 处于就绪状态的邀请标识子集。
+    /// - Throws: 参数越界或持久化失败时抛出。
     public func readyInvites(roomID: RoomID, inviteIDs: Set<GroupInviteID>) async throws -> Set<GroupInviteID> {
         guard let room = roomID.uuidValue, inviteIDs.count <= 100 else { throw V2GroupInviteDirectoryError.invalidRequest }
         if inviteIDs.isEmpty { return [] }
@@ -164,6 +219,11 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         return Set(rows.map { .init(uuid: $0.inviteID) })
     }
 
+    /// 按邀请令牌摘要解析其所属群组位置。
+    ///
+    /// - Parameter tokenDigest: 邀请令牌的摘要。
+    /// - Returns: 邀请所在群组的位置；未找到时为 `nil`。
+    /// - Throws: 查询失败时抛出。
     public func resolve(tokenDigest: Data) async throws -> V2GroupInviteLocation? {
         guard tokenDigest.count == 32 else { throw V2GroupInviteDirectoryError.invalidRequest }
         let sql = try directorySQL(database)

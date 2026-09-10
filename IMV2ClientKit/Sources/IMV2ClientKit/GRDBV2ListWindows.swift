@@ -3,6 +3,18 @@ import GRDB
 import IMV2Core
 
 extension GRDBV2LocalSyncStore {
+    /// 构造关系列表的作用域与搜索筛选条件。
+    ///
+    /// 查询文本需不超过 100 字节；分词后单字符为空即视为非法输入。
+    /// 单字符查询使用单字索引，多字符查询使用相邻双字词元短语匹配，
+    /// 并返回是否需要联结资料视图与全文索引。
+    ///
+    /// - Parameters:
+    ///   - scope: 关系分页作用域（已接受、收到请求、发出请求）。
+    ///   - query: 可选的展示名或账号名搜索文本。
+    /// - Returns: SQL 条件、绑定参数与可选的搜索联结片段。
+    /// - Throws: 查询文本过长或分词结果非法时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     static func relationshipListSelection(scope: V2ClientRelationshipPageScope, matching query: String?) throws -> (clauses: [String], arguments: StatementArguments, searchJoin: String) {
         let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard trimmedQuery.utf8.count <= 100 else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -41,6 +53,20 @@ extension GRDBV2LocalSyncStore {
         return (clauses, arguments, searchJoin)
     }
 
+    /// 以锚点为中心读取关系列表窗口。
+    ///
+    /// 先按锚点定位当前位置（锚点已不存在时退回使用传入游标），再分别向更早与更晚两个方向
+    /// 执行有界键集查询，最终合成包含锚点前若干条与后续一页的窗口。
+    ///
+    /// - Parameters:
+    ///   - scope: 关系分页作用域。
+    ///   - query: 可选的搜索文本。
+    ///   - anchor: 锚点游标。
+    ///   - limit: 窗口内最多返回的条目数，需落在 `1...500`。
+    ///   - precedingCount: 锚点之前保留的条目数，需小于 `limit`。
+    /// - Returns: 关系列表窗口。
+    /// - Throws: 分页参数越界或查询文本非法时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``；数据库读取失败时抛出底层错误。
     public func relationshipWindow(
         scope: V2ClientRelationshipPageScope, matching query: String? = nil,
         around anchor: V2ClientRelationshipCursor, limit: Int = 200, precedingCount: Int = 50
@@ -74,10 +100,28 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
+    /// 由数据行构造关系游标。
+    ///
+    /// - Parameter row: 关系投影行。
+    /// - Returns: 关系游标。
+    /// - Throws: 字段缺失或类型不符时抛出。
     private static func relationshipWindowCursor(_ row: Row) throws -> V2ClientRelationshipCursor {
         try .init(updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double), targetUserID: .init(row["target_user_id"] as String))
     }
 
+    /// 以锚点为中心读取会话列表窗口（区分是否归档）。
+    ///
+    /// 排序键为「置顶标记、最近活跃时间、房间标识」三元组，
+    /// 因此置顶会话始终排在非置顶会话之前，且同一活跃时间下按房间标识稳定排序。
+    ///
+    /// - Parameters:
+    ///   - isArchived: 是否查询归档列表。
+    ///   - anchor: 锚点游标。
+    ///   - limit: 窗口内最多返回的条目数，需落在 `1...500`。
+    ///   - precedingCount: 锚点之前保留的条目数，需小于 `limit`。
+    /// - Returns: 会话列表窗口。
+    /// - Throws: 分页参数越界时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``；数据库读取失败时抛出底层错误。
     public func conversationListWindow(
         isArchived: Bool, around anchor: V2ClientConversationListCursor,
         limit: Int = 200, precedingCount: Int = 50
@@ -107,12 +151,29 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
+    /// 由数据行构造会话列表游标。
+    ///
+    /// - Parameter row: 会话列表行。
+    /// - Returns: 会话游标。
+    /// - Throws: 字段缺失或类型不符时抛出。
     private static func conversationWindowCursor(_ row: Row) throws -> V2ClientConversationListCursor {
         try .init(isPinned: row["is_pinned"], lastActivity: Date(timeIntervalSince1970: row["last_activity"] as Double), roomID: .init(row["room_id"] as String))
     }
 
-    /// Separate range seeks keep each branch indexable. Only bounded candidate
-    /// rows reach the outer merge, regardless of the anchor's list depth.
+    /// 执行有界键集查询并合并多个分支结果。
+    ///
+    /// 各比较分支单独发起范围检索以保持可用的索引，无论锚点在列表中多深，
+    /// 进入外层合并的候选行始终是有界的。
+    ///
+    /// - Parameters:
+    ///   - base: 基础查询（不含分支条件）。
+    ///   - arguments: 基础查询的绑定参数。
+    ///   - branches: 各分支的比较条件与其参数。
+    ///   - order: 分支查询的排序子句。
+    ///   - limit: 合并后最多返回的行数。
+    ///   - db: 只读数据库。
+    /// - Returns: 有序的候选行。
+    /// - Throws: SQL 执行失败时抛出底层错误。
     static func boundedKeysetRows(
         base: String, arguments: StatementArguments,
         branches: [(String, StatementArguments)], order: String, limit: Int, db: Database

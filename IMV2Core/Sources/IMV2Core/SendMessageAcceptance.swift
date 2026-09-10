@@ -160,10 +160,10 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
-    /// A room-local presentation sequence shared by ordinary messages and
-    /// private activity entries. It is deliberately independent from
-    /// `roomSequence`: read receipts and message mutations continue to use
-    /// the message-only sequence without gaps introduced by system activity.
+    /// 由普通消息与私有活动条目共享的房间本地展示序号。
+    ///
+    /// 它刻意独立于 `roomSequence`：已读回执与消息变更继续使用仅含消息的序号，
+    /// 不会因系统活动而出现空洞。
     public let timelineSequence: UInt64
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
@@ -172,13 +172,14 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     public let mentions: [V2MentionTarget]
     public let entities: [V2MessageEntity]
     public let replyTo: V2MessageReplyReference?
-    /// Present only for a group room. It is acceptance metadata used for
-    /// non-authoritative foreground availability hints; it does not change
-    /// the durable fan-out or acknowledgement contract.
+    /// 仅群组房间存在。
+    ///
+    /// 它是用于非权威前台可用性提示的准入元数据；
+    /// 不会改变持久扇出或应答契约。
     public let groupDeliveryMode: V2GroupDeliveryMode?
-    /// True when this accepted message is durably recovered from the room
-    /// event log rather than the per-user fan-out stream. The hint itself is
-    /// best effort; the room cursor remains authoritative.
+    /// 当该已接受消息是从房间事件日志而非每用户扇出流中持久恢复时为 `true`。
+    ///
+    /// 提示本身是尽力而为的；房间游标仍是权威。
     public let usesRoomEventLog: Bool
     public let createdAt: Date
 
@@ -271,7 +272,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let messageID: MessageID
     public let roomID: RoomID
     public let roomSequence: UInt64
-    /// See ``V2AcceptedMessageDraft/timelineSequence``.
+    /// 参见 ``V2AcceptedMessageDraft/timelineSequence``。
     public let timelineSequence: UInt64
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
@@ -282,11 +283,12 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     public let mentions: [V2MentionTarget]
     public let entities: [V2MessageEntity]
     public let replyTo: V2MessageReplyReference?
-    /// Present only for a group room. It is acceptance metadata used for
-    /// non-authoritative foreground availability hints; it does not change
-    /// the durable fan-out or acknowledgement contract.
+    /// 仅群组房间存在。
+    ///
+    /// 它是用于非权威前台可用性提示的准入元数据；
+    /// 不会改变持久扇出或应答契约。
     public let groupDeliveryMode: V2GroupDeliveryMode?
-    /// See ``V2AcceptedMessageDraft/usesRoomEventLog``.
+    /// 参见 ``V2AcceptedMessageDraft/usesRoomEventLog``。
     public let usesRoomEventLog: Bool
     /// canonical room-log 事件的内部持久身份。
     ///

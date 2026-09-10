@@ -3,9 +3,10 @@ import SQLKit
 
 public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailableTable(String), unsupportedDatabase }
 
-/// Startup gate for the clean V2 schema. It makes schema provisioning a
-/// deployment prerequisite instead of discovering a missing table after a TLS
-/// listener is already accepting authenticated traffic.
+/// 全新 V2 schema 的启动闸门。
+///
+/// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
+/// 才发现缺表。
 public enum V2SchemaReadiness {
     public static let currentSchemaID = "im-v2-current-30"
     private static let requiredTables = [

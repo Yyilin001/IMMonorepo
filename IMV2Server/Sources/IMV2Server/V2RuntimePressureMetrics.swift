@@ -1,19 +1,39 @@
 import Foundation
 
+/// 数据库连接池的固定指标分类，原始字符串用作 Prometheus 的 `pool` 标签。
+///
+/// 表示部署配置中的连接池用途，不是每次请求的准入类别，也不包含动态数据库或分片标识。
 public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
+    /// 多类工作共用的连接池。
     case shared
+    /// 前台消息写入、控制写入和交互读取使用的连接池。
     case foreground
+    /// 同步工作使用的连接池。
     case sync
+    /// 持久化扇出投递使用的连接池。
     case delivery
+    /// 派生状态投影使用的连接池。
     case projection
+    /// 清理等维护工作使用的连接池。
     case maintenance
 }
 
+/// 一个固定用途连接池的配置规模，不表示当前活动连接数。
 public struct V2DatabasePoolMetric: Equatable, Sendable {
+    /// 该连接池的固定用途分类。
     public let poolClass: V2DatabasePoolMetricClass
+    /// 跨应用事件循环配置的 Fluent 句柄数量。
     public let eventLoopHandles: Int
+    /// 该类连接池跨所有事件循环的 PostgreSQL 连接数配置上限。
     public let connectionCeiling: Int
 
+    /// 保存连接池配置指标，不查询实际连接池或数据库。
+    ///
+    /// - Parameters:
+    ///   - poolClass: 连接池用途。
+    ///   - eventLoopHandles: 配置的事件循环句柄总数，必须大于零。
+    ///   - connectionCeiling: 配置的连接总上限，必须大于零。
+    /// - Precondition: 两个数量均为正数；无效值触发前置条件失败。
     public init(
         poolClass: V2DatabasePoolMetricClass,
         eventLoopHandles: Int,
@@ -27,9 +47,17 @@ public struct V2DatabasePoolMetric: Equatable, Sendable {
     }
 }
 
+/// 按固定用途去重并排序的连接池配置快照。
+///
+/// 每种用途最多一项；多实例或多分片的数据应先按约定汇总，再构造此快照。
 public struct V2DatabasePoolTopologySnapshot: Equatable, Sendable {
+    /// 按用途原始字符串升序排列的非空连接池列表，保证指标输出顺序稳定。
     public let pools: [V2DatabasePoolMetric]
 
+    /// 校验用途唯一性并规范连接池列表顺序。
+    ///
+    /// - Parameter pools: 至少一个连接池配置，每个用途只能出现一次。
+    /// - Precondition: 列表非空且不存在重复用途；不满足时触发前置条件失败。
     public init(pools: [V2DatabasePoolMetric]) {
         precondition(!pools.isEmpty)
         precondition(Set(pools.map(\.poolClass)).count == pools.count)
@@ -37,51 +65,58 @@ public struct V2DatabasePoolTopologySnapshot: Equatable, Sendable {
     }
 }
 
+/// 聚合网关进程内的数据库压力、通知合并、批处理和缓存指标。
+///
+/// 必填部分描述基础工作压力，可选部分承载已接入组件的观测结果。
+/// 可选值为 `nil` 表示未提供该组观测，导出时整组省略，不能解释为所有计数均为零。
+/// 各组件独立采样，此值不提供跨 actor 或跨数据库的同一时刻事务快照。
 public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
+    /// 数据库工作准入的在途数、队列长度和累计结果。
     public let databaseWork: V2DatabaseWorkAdmissionSnapshot
+    /// 采集器提供的连接池配置拓扑，不是实时连接使用率。
     public let databasePools: V2DatabasePoolTopologySnapshot
+    /// 同步可用性提示的合并、投递和丢弃统计。
     public let syncWake: V2SyncWakeCoalescerSnapshot
-    /// Present only when direct room-log command credit batching is enabled.
-    /// This is deliberately aggregate-only: shard IDs, room IDs and leases
-    /// must never become Prometheus labels.
+    /// 分片命令额度池的聚合统计；不携带分片、房间或租约标识作为指标标签。
     public let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool.Snapshot?
-    /// Aggregate room-command credits. This intentionally has no room or
-    /// lease labels; it exists to verify that the semantic-preserving room
-    /// admission optimization is reserving bounded durable batches.
+    /// 按房间预留命令额度的聚合统计，用于观察批量预留效果，不暴露房间或租约标识。
     public let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool.Snapshot?
-    /// Present only when ordered direct-room append batching is enabled. It
-    /// exposes process-local queue and timer facts, never room/user/request
-    /// identifiers, so an adaptive rollout can be verified without a SQL
-    /// inference or high-cardinality labels.
+    /// 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。
     public let directRoomLogAppendBatching: V2SendMessageAdmissionBatcher.Snapshot?
-    /// Aggregate group read-cursor micro-batch facts. These counters contain
-    /// no room, user or operation identifiers and are sufficient to verify
-    /// that production traffic, rather than only a synthetic load shape, is
-    /// sharing transactions.
+    /// 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。
     public let readReceiptBatching: V2ReadReceiptBatcher.Snapshot?
-    /// Fixed-stage latency histograms for the authoritative shard-only direct
-    /// append transaction. Stage names are an enum, never dynamic SQL or
-    /// relation identifiers.
+    /// 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。
     public let directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot?
-    /// Scheduler delay observed on the TLS child-channel EventLoop group.
+    /// TLS 子通道事件循环上低频探测任务观察到的调度延迟，不等同于请求耗时。
     public let gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot?
-    /// Aggregate LRU facts for the policy hint cache. This proves whether a
-    /// deployment is operating at capacity without exposing cache keys.
+    /// 私聊发送策略提示缓存的占用、命中、淘汰与过期统计，不暴露缓存键。
     public let directSendPolicy: V2DirectSendPolicyCache.Snapshot?
-    /// Aggregate results from the conditional one-statement direct append.
-    /// It intentionally contains no room, user, operation, or policy labels.
+    /// 条件式单语句追加的候选缓存及提交、回退统计，不携带业务身份标签。
     public let directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot?
-    /// Best-effort local direct-event cache facts. No room, user or event ID
-    /// is exposed as a metric label.
+    /// 尽力维护的本地私聊事件缓存统计，包含占用、查询和提交后写入状态。
     public let directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot?
-    /// Shared encoded group-page occupancy and lookup outcomes. The cache key
-    /// is deliberately not exposed, so room and event identifiers never
-    /// become metrics labels.
+    /// 共享群事件编码页缓存的条目数、字节数和查询结果，不导出缓存键。
     public let preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot?
-    /// Aggregate heartbeat renewal batching facts. Connection and user IDs are
-    /// intentionally absent to keep this operational metric low-cardinality.
+    /// 心跳租约续期的合并与数据库批处理统计，不使用连接或用户标识作为标签。
     public let livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot?
 
+    /// 从各组件的观测构造聚合值，不执行采集、不清零计数，也不校验组件间的一致性。
+    ///
+    /// - Parameters:
+    ///   - databaseWork: 数据库准入观测。
+    ///   - databasePools: 连接池配置拓扑。
+    ///   - syncWake: 同步提示合并器观测。
+    ///   - shardAdmissionCommandCredits: 分片命令额度池的聚合统计；不携带分片、房间或租约标识作为指标标签。 默认 `nil`，表示未提供。
+    ///   - roomAdmissionCommandCredits: 按房间预留命令额度的聚合统计，用于观察批量预留效果，不暴露房间或租约标识。 默认 `nil`，表示未提供。
+    ///   - directRoomLogAppendBatching: 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。 默认 `nil`，表示未提供。
+    ///   - readReceiptBatching: 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。 默认 `nil`，表示未提供。
+    ///   - directRoomLogAppendStages: 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。 默认 `nil`，表示未提供。
+    ///   - gatewayEventLoopLag: TLS 子通道事件循环上低频探测任务观察到的调度延迟，不等同于请求耗时。 默认 `nil`，表示未提供。
+    ///   - directSendPolicy: 私聊发送策略提示缓存的占用、命中、淘汰与过期统计，不暴露缓存键。 默认 `nil`，表示未提供。
+    ///   - directRoomLogFastAppend: 条件式单语句追加的候选缓存及提交、回退统计，不携带业务身份标签。 默认 `nil`，表示未提供。
+    ///   - directRoomLogEventCache: 尽力维护的本地私聊事件缓存统计，包含占用、查询和提交后写入状态。 默认 `nil`，表示未提供。
+    ///   - preparedGroupEventPageCache: 共享群事件编码页缓存的条目数、字节数和查询结果，不导出缓存键。 默认 `nil`，表示未提供。
+    ///   - livePresenceRenewals: 心跳租约续期的合并与数据库批处理统计，不使用连接或用户标识作为标签。 默认 `nil`，表示未提供。
     public init(
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
         databasePools: V2DatabasePoolTopologySnapshot,
@@ -115,10 +150,20 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     }
 }
 
+/// 为运维指标接口提供可跨并发域调用的运行压力采集边界。
+///
+/// 实现负责从运行时组件读取观测；协议本身不承诺跨组件原子性或取消时的完成时限。
 public protocol V2RuntimePressureMetricsSource: Sendable {
+    /// 读取一份运行压力聚合快照。
+    ///
+    /// - Returns: 基础压力指标及当前可用的组件观测；未接入的可选组件以 `nil` 表示。
     func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot
 }
 
+/// 将网关实际运行组件适配为统一运行压力指标来源。
+///
+/// 持有调用方注入的组件和固定连接池拓扑，每次调用时重新读取组件快照。
+/// 采集不访问数据库验证持久化状态，也不启动后台轮询；跨组件的读取期间运行状态可继续变化。
 public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSource {
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController
     private let databasePools: V2DatabasePoolTopologySnapshot
@@ -135,6 +180,25 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let connectionRegistry: V2DeviceConnectionRegistry?
 
+    /// 连接指标来源，保存依赖而不立即采样。
+    ///
+    /// 可选依赖默认不提供，对应指标不会被补成零值。
+    ///
+    /// - Parameters:
+    ///   - databaseWorkAdmission: 数据库工作准入控制器。
+    ///   - databasePools: 固定连接池配置拓扑；后续采集直接复用此值。
+    ///   - syncWakeCoalescer: 同步可用性提示合并器。
+    ///   - shardAdmissionCommandCredits: 分片命令额度池。
+    ///   - roomAdmissionCommandCredits: 房间命令额度池。
+    ///   - directRoomLogAppendBatcher: 私聊追加准入组件，通过其快照接口读取批处理指标。
+    ///   - readReceiptBatcher: 已读回执批处理器。
+    ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
+    ///   - gatewayEventLoopLagMetrics: 网关事件循环延迟收集器。
+    ///   - directSendPolicyCache: 私聊发送策略提示缓存。
+    ///   - directRoomLogFastAppendCache: 条件式快速追加候选缓存。
+    ///   - directRoomLogEventCache: 本地私聊事件缓存。
+    ///   - preparedGroupEventPageCache: 共享群事件编码页缓存。
+    ///   - connectionRegistry: 设备连接注册表，用于取得在线租约续期批处理指标。
     public init(
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
@@ -167,6 +231,12 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.connectionRegistry = connectionRegistry
     }
 
+    /// 采集一次基础压力与已注入组件的状态。
+    ///
+    /// 准入与同步提示快照通过 `async let` 并行读取，其余组件按各自同步或异步接口读取。
+    /// 各读数可能来自不同时间点，适合监控趋势，不应据此推断跨组件业务事务的原子结果。
+    ///
+    /// - Returns: 固定拓扑和本轮读到的组件快照；未提供依赖或组件无快照时保留 `nil`。
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
@@ -200,6 +270,17 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     }
 }
 
+/// 将运行压力快照转换为 Prometheus 文本指标。
+///
+/// 始终输出连接池、四类数据库准入和同步提示指标；仅在可选快照存在时输出对应扩展组。
+/// 数值按快照原样输出，不重新采样、重置或修正计数。直方图输出累积桶、`+Inf`、总和及样本数；
+/// 固定阶段与事件循环耗时另外输出最大观测值。时间指标以名称所示的毫秒为单位。
+///
+/// 标签仅使用固定用途、类别、阶段和结果枚举，不引入用户、房间、请求或缓存键等动态身份。
+/// 此函数只生成文本，HTTP 内容类型、访问控制和响应缓存策略由调用方负责。
+///
+/// - Parameter snapshot: 已采集的基础指标与可选扩展指标。
+/// - Returns: 带 `HELP`、`TYPE` 声明的指标文本，各行以换行符分隔且末尾保留一个换行符。
 public func v2RenderPrometheusRuntimePressureMetrics(
     _ snapshot: V2RuntimePressureMetricsSnapshot
 ) -> String {

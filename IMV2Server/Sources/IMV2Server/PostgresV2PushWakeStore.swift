@@ -3,21 +3,37 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL implementation of the generic Push wake admission contract.
-/// Campaign, exact budget window, and outbox row are locked together before a
-/// provider can inspect any device-specific Push material. Missing budget data
-/// fails closed by suppressing that wake only. Once that admission commits,
-/// later provider retries and reclaimed leases reuse it rather than spending a
-/// second device-key-work permit.
+/// 通用推送唤醒准入契约的 PostgreSQL 实现。
+///
+/// 在提供方接触任何设备相关推送材料之前，活动、精确预算窗口与发件箱行会被一同加锁。
+/// 预算数据缺失时按失败关闭处理，仅抑制该条唤醒。准入一旦提交，
+/// 后续的提供方重试与被重新认领的租约都会复用它，而不会再次消耗设备密钥工作额度。
 public struct PostgresV2PushWakeStore: V2PushWakeStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库与标识生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放推送发件箱与预算窗口的数据库。
+    ///   - makeUUID: 认领令牌生成方式。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 认领一批已准入的推送唤醒。
+    ///
+    /// 每批先统一抑制处于禁言状态的工作，避免逐行重复执行同一条全局更新；
+    /// 随后选取候选并在同一事务内逐条完成预算准入，预算不足或其他准入条件不满足的条目不进入结果。
+    ///
+    /// - Parameters:
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数，非正时返回空结果。
+    ///   - limit: 本批最多认领的数量，非正时返回空结果。
+    /// - Returns: 本批唤醒租约。
+    /// - Throws: 租约到期时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func claimAdmitted(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2PushWakeLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
         guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
@@ -44,6 +60,15 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         }
     }
 
+    /// 标记推送已发送。
+    ///
+    /// 只有仍持有相同认领令牌且处于已认领状态的行才会被更新。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次唤醒租约。
+    ///   - now: 完成时刻。
+    /// - Throws: 时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func markSent(_ lease: V2PushWakeLease, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now),
               let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -56,6 +81,13 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
             """).run()
     }
 
+    /// 记录终态抑制。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次唤醒租约。
+    ///   - reason: 抑制原因。
+    /// - Throws: 连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func suppress(_ lease: V2PushWakeLease, reason: V2PushSuppressionReason) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""
@@ -68,6 +100,11 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
             """).run()
     }
 
+    /// 释放租约以便后续重试。
+    ///
+    /// - Parameter lease: 本次唤醒租约。
+    /// - Throws: 连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func release(_ lease: V2PushWakeLease) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         try await sql.raw("""

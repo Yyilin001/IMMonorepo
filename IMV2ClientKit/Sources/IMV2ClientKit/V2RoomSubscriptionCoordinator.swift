@@ -1,37 +1,62 @@
 import Foundation
 import IMV2Core
 
+/// 房间订阅通道。
 public enum V2RoomSubscriptionChannel: Hashable, Sendable {
-    case roomEvents, typing, presence
+    /// 房间事件。
+    case roomEvents
+    /// 正在输入提示。
+    case typing
+    /// 在线状态。
+    case presence
 }
 
-/// A complete replacement value permits a one-element consumer buffer. A slow
-/// scene cannot lose a connection reset and keep an old typing/presence lease.
+/// 房间订阅快照。
+///
+/// 它是完整替换值，因此消费者只需保留一个元素的缓冲：缓慢的场景不会漏掉连接重置，
+/// 从而不会继续持有过期的正在输入或在线状态租约。
 public struct V2RoomSubscriptionSnapshot: Equatable, Sendable {
+    /// 订阅状态。
     public enum State: Equatable, Sendable { case offline, reconciling, subscribed, revoked }
+    /// 目标房间。
     public let roomID: RoomID
+    /// 当前连接标识。
     public let connectionID: UUID?
+    /// 当前订阅状态。
     public let state: State
+    /// 恢复流程标识。
     public let recoveryID: UUID?
+    /// 房间事件可用性提示。
     public let wake: V2GroupEventAvailabilityHint?
+    /// 当前在线状态。
     public let presence: V2PresenceState?
+    /// 当前正在输入的用户状态列表。
     public let typing: [V2TypingState]
 }
 
+/// 房间订阅租约。
 public struct V2RoomSubscriptionLease: Sendable {
+    /// 租约标识，释放时需原样传回。
     public let id: UUID
+    /// 目标房间。
     public let roomID: RoomID
+    /// 该租约对应的快照流。
     public let updates: AsyncStream<V2RoomSubscriptionSnapshot>
 }
 
+/// 房间订阅错误。
 public enum V2RoomSubscriptionError: Error, Equatable, Sendable {
-    case emptyChannels, capacityExceeded
+    /// 未指定任何订阅通道。
+    case emptyChannels
+    /// 订阅容量已满。
+    case capacityExceeded
 }
 
-/// One account/runtime owns wire subscriptions and hint consumers. Scenes own
-/// only intent tokens, so closing one scene never unsubscribes another scene.
-/// Domain transports keep their shared request-ID allocator; TaskLocal scope
-/// binds reconciliation requests to the authenticated wire generation.
+/// 房间订阅协调器。
+///
+/// 单个账号或运行时持有线路订阅与提示消费者；场景只持有意图令牌，
+/// 因此关闭一个场景不会取消其他场景的订阅。领域传输保留其共享请求标识分配器，
+/// 任务局部作用域则把协调请求绑定到当前已认证的线路代次。
 public actor V2RoomSubscriptionCoordinator {
     private struct Consumer {
         let channels: Set<V2RoomSubscriptionChannel>
@@ -71,6 +96,22 @@ public actor V2RoomSubscriptionCoordinator {
     private var runState: Run?
     private var flight: (id: UUID, task: Task<Void, Error>)?
 
+    /// 组合活动服务、订阅实现与容量上限。
+    ///
+    /// - Parameters:
+    ///   - subscriptions: 房间事件订阅实现。
+    ///   - activity: 正在输入与在线状态服务。
+    ///   - groupEvents: 房间事件可用性提示来源。
+    ///   - activityEvents: 实时活动事件来源。
+    ///   - isAuthorized: 判断房间当前是否授权的闭包。
+    ///   - roomCursor: 读取房间当前持久化游标的闭包。
+    ///   - didUnsubscribeRoom: 取消订阅后的回调，默认忽略。
+    ///   - retryDelay: 重试退避间隔，需大于零。
+    ///   - refreshInterval: 周期刷新间隔，需大于零。
+    ///   - maximumRooms: 允许同时订阅的房间上限，需大于零，默认 128。
+    ///   - maximumConsumers: 允许的消费者上限，需大于零，默认 512。
+    ///
+    /// 间隔或上限非法时直接失败，避免出现无界订阅或零间隔空转。
     public init(
         subscriptions: any V2ClientGroupEventSubscriptionTransport,
         activity: any V2ClientLiveActivityTransport,
@@ -98,6 +139,14 @@ public actor V2RoomSubscriptionCoordinator {
         self.maximumConsumers = maximumConsumers
     }
 
+    /// 获取房间订阅租约。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - channels: 需要的订阅通道集合，需非空。
+    /// - Returns: 订阅租约。
+    /// - Throws: 通道为空时抛出 ``V2RoomSubscriptionError/emptyChannels``；
+    ///   超出房间容量时抛出 ``V2RoomSubscriptionError/capacityExceeded``。
     public func acquire(roomID: RoomID, channels: Set<V2RoomSubscriptionChannel>) throws -> V2RoomSubscriptionLease {
         guard !channels.isEmpty else { throw V2RoomSubscriptionError.emptyChannels }
         guard rooms[roomID] != nil || rooms.count < maximumRooms,
@@ -112,6 +161,11 @@ public actor V2RoomSubscriptionCoordinator {
         return .init(id: id, roomID: roomID, updates: stream.stream)
     }
 
+    /// 释放指定消费者在房间上的订阅。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - consumerID: 消费者标识。
     public func release(roomID: RoomID, consumerID: UUID) {
         guard let consumer = rooms[roomID]?.consumers.removeValue(forKey: consumerID) else { return }
         consumer.continuation.finish()
@@ -119,16 +173,29 @@ public actor V2RoomSubscriptionCoordinator {
         requestReconciliation()
     }
 
-    /// Personal-sync completion requests reconciliation after membership changes.
+    /// 请求一次协调。
+    ///
+    /// 个人同步在成员关系变化完成后会调用它触发协调。
     public func requestReconciliation() { runState?.wake.yield(()) }
 
+    /// 通知授权状态发生变化。
+    ///
+    /// 会清除各房间的服务端吊销标记并请求一次协调，使订阅按新的授权重新建立。
     public func authorityDidChange() {
         for roomID in rooms.keys { rooms[roomID]?.serverRevoked = false }
         requestReconciliation()
     }
 
-    /// An actual draft change/renewal belongs to the scene and connection
-    /// that observed it. Reconnecting must never replay an old typing lease.
+    /// 设置正在输入状态。
+    ///
+    /// 真正的草稿变更或续期属于观察到它的场景与连接；重连绝不能重放过期的正在输入租约。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - consumerID: 消费者标识。
+    ///   - connectionID: 观察到该状态的连接。
+    ///   - isTyping: 是否正在输入。
+    /// - Throws: 连接或订阅状态不匹配时抛出 `CancellationError`；其余失败来自活动服务。
     public func setTyping(roomID: RoomID, consumerID: UUID, connectionID: UUID, isTyping: Bool) async throws {
         try Task.checkCancellation()
         guard let run = runState, run.connectionID == connectionID,
@@ -142,6 +209,12 @@ public actor V2RoomSubscriptionCoordinator {
         try checkRun(run.id)
     }
 
+    /// 在指定连接上持续运行协调循环。
+    ///
+    /// 新的运行会先取消并等待上一轮完全收敛，使同一时刻只有一个在途协调任务。
+    ///
+    /// - Parameter connectionID: 本次运行绑定的连接标识。
+    /// - Throws: 任务取消时抛出 `CancellationError`；其余错误来自订阅实现。
     public func run(connectionID: UUID) async throws {
         while let previous = flight {
             previous.task.cancel()

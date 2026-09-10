@@ -2,23 +2,34 @@ import Fluent
 import Foundation
 import SQLKit
 
+/// 消息投影回填报告。
 public struct V2MessageProjectionBackfillReport: Equatable, Sendable {
+    /// 本次新建立状态引用的行数。
     public let linkedRowCount: Int
+    /// 本次压缩掉内联载荷的行数。
     public let compactedRowCount: Int
 
+    /// 本轮是否产生了实际变更。
     public var didWork: Bool { linkedRowCount > 0 || compactedRowCount > 0 }
 }
 
-/// Incrementally converts legacy per-user message payloads into references to
-/// immutable shard-local message states. Rows stay readable throughout the
-/// expand migration: dual mode retains their inline payload, while shared mode
-/// removes it only after the state insert has been verified in the same
-/// transaction.
+/// 把历史按用户存储的消息载荷增量转换为对不可变分片内消息状态的引用。
+///
+/// 扩展开启的迁移过程中，行始终可读：双写模式保留内联载荷，共享模式只会在同一事务内
+/// 确认状态已写入之后才移除内联副本。
 public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
     private let database: any Database
     private let schema: String
     private let compactInlinePayloads: Bool
 
+    /// 组合数据库、schema 与压缩开关。
+    ///
+    /// - Parameters:
+    ///   - database: 存放用户投影版本与消息状态的数据库。
+    ///   - schema: 目标 schema，需符合 `^[A-Za-z_][A-Za-z0-9_]*$`。
+    ///   - compactInlinePayloads: 是否在建立引用后清空内联载荷，默认保留。
+    ///
+    /// schema 名不满足格式时直接失败，避免拼接出非法 SQL 标识符。
     public init(
         database: any Database,
         schema: String = "im_v2",
@@ -35,6 +46,21 @@ public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
         self.compactInlinePayloads = compactInlinePayloads
     }
 
+    /// 执行一轮有界回填。
+    ///
+    /// 迁移栅栏仍在生效的行会被跳过；候选行使用 `FOR UPDATE SKIP LOCKED` 选取，
+    /// 因此多个实例可安全并行。已存在状态引用时，只有在压缩模式且载荷完全一致时才接受，
+    /// 否则判定为状态冲突。历史载荷必须能解码为与实体键、房间匹配且修订可写入 `Int64` 的状态。
+    ///
+    /// - Parameters:
+    ///   - now: 本次判定的服务端时刻。
+    ///   - limit: 本轮最多处理的行数。
+    /// - Returns: 本轮链接与压缩的计数。
+    /// - Throws: 上限非正时抛出 ``V2MessageProjectionBackfillError/invalidLimit``；
+    ///   任务取消时抛出 `CancellationError`；时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2MessageProjectionBackfillError/corruptPersistence``；历史载荷无法解析或与实体不符时抛出
+    ///   ``V2MessageProjectionBackfillError/invalidLegacyPayload``；已有状态与新载荷不一致时抛出
+    ///   ``V2MessageProjectionBackfillError/conflictingState``。
     public func runOnce(
         now: Date = Date(),
         limit: Int = 100
@@ -132,13 +158,22 @@ public struct PostgresV2MessageProjectionBackfillWorker: Sendable {
         }
     }
 
+    /// 拼接 schema 限定的表名。
+    ///
+    /// - Parameter name: 表名，仅允许来自代码内常量。
+    /// - Returns: 形如 `schema.table` 的限定名。
     private func table(_ name: String) -> String { "\(schema).\(name)" }
 }
 
+/// 消息投影回填错误。
 public enum V2MessageProjectionBackfillError: Error, Equatable, Sendable {
+    /// 单轮处理上限为非正值。
     case invalidLimit
+    /// 持久化状态损坏或数据库适配器不受支持。
     case corruptPersistence
+    /// 历史载荷无法解码为合法的消息投影状态。
     case invalidLegacyPayload
+    /// 已有状态引用携带的载荷与新载荷不一致。
     case conflictingState
 }
 

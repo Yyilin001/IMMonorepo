@@ -255,10 +255,6 @@ public protocol V2RealtimeSessionConnecting: Sendable {
     func disconnect() async
 }
 
-/// Apple-platform TLS 1.3 framed transport. Network.framework performs normal
-/// platform trust validation; IM bytes are never sent until the TLS connection
-/// reaches `.ready`. This actor owns bounded request correlation and fences
-/// all socket callbacks by connection generation.
 #if canImport(Network) && canImport(Security)
 /// 可注入的异步字节连接边界。
 ///
@@ -359,7 +355,7 @@ struct V2NetworkTLSByteConnection: V2TLSByteConnection {
 
 /// Apple 平台的已认证 TLS 帧连接，拥有请求关联、读取任务与提示缓冲。
 ///
-/// 连接工厂的生产实现使用 TLS 1.3 和平台信任校验，完成网络 ready 后才发送握手。
+/// 连接工厂的生产实现使用 TLS 1.3 和平台信任校验，网络进入 `.ready` 后才发送握手。
 /// 每轮连接持有独立代际与接收缓冲，异步操作恢复时核对代际，防止旧回调影响替换连接。
 public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2LiveActivityEventSource, V2RealtimeConnection {
     /// 每代创建新字节连接的工厂。

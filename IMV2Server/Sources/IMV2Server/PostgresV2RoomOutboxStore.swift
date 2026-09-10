@@ -3,17 +3,35 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Durable at-least-once outbox implementation. The lease token fences a
-/// stale worker from marking a newer claim as published or released.
+/// 持久化、至少执行一次的发件箱实现。
+///
+/// 租约令牌用于栅栏掉陈旧工作器，避免它把更新的认领标记为已发布或已释放。
 public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库与认领令牌生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放房间发件箱的数据库。
+    ///   - makeUUID: 认领令牌生成方式。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 认领一批待发布的发件箱条目。
+    ///
+    /// 候选需处于待处理状态、已到或未设置下次尝试时间、且旧租约已过期；
+    /// 候选行按创建时间排序并使用 `FOR UPDATE SKIP LOCKED` 选取，重试计数在事务内自增且不会溢出。
+    ///
+    /// - Parameters:
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数，非正时返回空结果。
+    ///   - limit: 本批最多认领的数量，非正时返回空结果。
+    /// - Returns: 本批租约。
+    /// - Throws: 租约到期时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2OutboxLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
         guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
@@ -56,6 +74,10 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
         }
     }
 
+    /// 标记单条租约已发布。
+    ///
+    /// - Parameter lease: 本次租约。
+    /// - Throws: 连接不支持 SQL 时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func markPublished(_ lease: V2OutboxLease) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -71,6 +93,12 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
             """).run()
     }
 
+    /// 以集合语句批量标记发布。
+    ///
+    /// 只需要一次往返即可完成整批终结；租约令牌仍然逐条匹配，因此被取代的陈旧认领不会被误标记。
+    ///
+    /// - Parameter leases: 本批租约。
+    /// - Throws: 连接不支持 SQL 时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func markPublished(_ leases: [V2OutboxLease]) async throws {
         guard !leases.isEmpty else { return }
         let input = try leases.map {
@@ -127,6 +155,10 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
         }
     }
 
+    /// 立即释放租约以便重试。
+    ///
+    /// - Parameter lease: 本次租约。
+    /// - Throws: 连接不支持 SQL 时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func release(_ lease: V2OutboxLease) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -141,6 +173,16 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
         """).run()
     }
 
+    /// 按处置结果安排重试或暂停。
+    ///
+    /// 重试处置写入下次尝试时刻，暂停处置清空它；两者都会清空认领令牌与租约。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次租约。
+    ///   - disposition: 下一步处置。
+    ///   - now: 记录时刻。
+    /// - Throws: 时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func scheduleRetry(_ lease: V2OutboxLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -174,8 +216,15 @@ public struct PostgresV2RoomOutboxStore: V2BatchRoomOutboxStore {
         }
     }
 
-    /// Operator replay is explicit. It never fabricates a terminal result or
-    /// alters the source event; it only returns paused work to normal leasing.
+    /// 把因该来源事件暂停的条目重新放回待处理状态。
+    ///
+    /// 运维重放是显式操作：它绝不伪造终态结果，也不改动来源事件，
+    /// 只是把暂停的工作交还给正常租约流程。
+    ///
+    /// 供运维重放使用，会清空失败码与暂停时间，使该事件可以按正常节奏重新投递。
+    ///
+    /// - Parameter sourceEventID: 来源事件标识。
+    /// - Throws: 连接不支持 SQL 时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func requeuePaused(sourceEventID: EventID) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2RoomWriteStoreError.corruptPersistenceState

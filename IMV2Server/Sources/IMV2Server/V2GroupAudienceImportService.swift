@@ -3,10 +3,12 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Bounded, durable import for a group's creation audience.  A draft is owned
-/// by one actor/operation pair; `freeze` makes its audience immutable before
-/// delegating to the existing atomic room-bootstrap transaction.
+/// 建群受众的有界持久化导入。
+///
+/// 每份草稿由唯一的「发起者 + 操作标识」组合持有；`freeze` 会先固定受众，
+/// 之后才交给既有的原子房间引导事务处理。
 public struct V2GroupAudienceImport: Equatable, Sendable {
+    /// 单次追加允许携带的最大成员数。
     public static let maximumMembersPerAppend = 512
 
     public let actorUserID: UserID
@@ -58,13 +60,17 @@ public enum V2GroupAudienceImportError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
-/// Admission and retention policy for staged group creation. Keeping it
-/// explicit makes the resource bounds testable and prevents accidental drift
-/// between gateway validation and the background reclaimer.
+/// 分阶段建群的准入与保留策略。
+///
+/// 显式声明策略使资源上限可被测试，也避免网关校验与后台回收器之间出现无意间的偏差。
 public struct V2GroupAudienceImportPolicy: Equatable, Sendable {
+    /// 单发起者允许的活跃草稿上限。
     public let maximumActiveDraftsPerActor: Int
+    /// 单发起者允许的分阶段成员总数上限。
     public let maximumStagedMembersPerActor: Int
+    /// 草稿的暂存存活时长。
     public let stagingLifetime: TimeInterval
+    /// 已完成记录的保留时长。
     public let completedRetention: TimeInterval
     public let finalizingRecoveryInterval: TimeInterval
 
@@ -99,12 +105,16 @@ public struct V2GroupAudienceRecoveryCandidate: Equatable, Sendable {
     public let operationID: GroupRoomOperationID
 }
 
-/// Outcome of one bounded frozen-audience recovery pass. A single transient
-/// group-create failure is deliberately isolated from the other claimed
-/// drafts, so maintenance retains forward progress under partial outage.
+/// 一次有界冻结受众恢复的结果。
+///
+/// 单个建群瞬时失败被刻意与其他已认领草稿隔离，
+/// 使部分依赖不可用时维护流程仍能继续推进。
 public struct V2GroupAudienceRecoveryReport: Equatable, Sendable {
+    /// 本轮认领的草稿数量。
     public let claimedCount: Int
+    /// 本轮恢复成功的数量。
     public let recoveredCount: Int
+    /// 本轮失败的数量。
     public let failedCount: Int
 
     public init(claimedCount: Int, recoveredCount: Int, failedCount: Int) {
@@ -127,9 +137,10 @@ public protocol V2GroupAudienceImportStore: Sendable {
     func recoverableFinalizing(now: Date, staleAfter: TimeInterval, limit: Int) async throws -> [V2GroupAudienceRecoveryCandidate]
 }
 
-/// Service boundary for the staged protocol.  `finalize` can safely be
-/// retried after a lost response: the draft remains frozen and the underlying
-/// group operation has its own actor/operation idempotency ledger.
+/// 分阶段协议的服务边界。
+///
+/// 响应丢失后可以安全重试 `finalize`：草稿保持冻结状态，
+/// 底层建群操作本身也有按发起者与操作标识建立的幂等台账。
 public struct V2GroupAudienceImportService: Sendable {
     private let store: any V2GroupAudienceImportStore
     private let groupMessaging: V2GroupMessagingService
@@ -202,22 +213,38 @@ public struct V2GroupAudienceImportService: Sendable {
         return outcome
     }
 
-    /// Cancellation is idempotent for an absent/expired draft. Once freeze has
-    /// started, the immutable audience cannot be cancelled because finalizing
-    /// may already be committing the same operation to the room ledger.
+    /// 取消一份草稿。
+    ///
+    /// 对不存在或已过期的草稿，取消是幂等的。一旦冻结已经开始，
+    /// 不可变受众就不允许再取消：此时收尾流程可能已经把同一操作提交进房间台账。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起建群的用户。
+    ///   - operationID: 建群操作标识。
+    /// - Throws: 存储不可用或状态不允许取消时抛出。
     public func cancel(actorUserID: UserID, operationID: GroupRoomOperationID) async throws {
         try await store.cancel(actorUserID: actorUserID, operationID: operationID, now: now())
     }
 
+    /// 清理已过期的草稿。
+    ///
+    /// - Parameter limit: 本轮最多清理的数量。
+    /// - Returns: 实际清理的数量；上限非正时返回零。
+    /// - Throws: 存储不可用时抛出。
     @discardableResult
     public func purgeExpired(limit: Int) async throws -> Int {
         guard limit > 0 else { return 0 }
         return try await store.purgeExpired(now: now(), limit: limit)
     }
 
-    /// Finalizing audiences are immutable and must never be TTL-deleted. A
-    /// bounded worker instead replays their same operation ID after a quiet
-    /// interval; the group-operation ledger remains the single commit fence.
+    /// 恢复处于收尾状态的受众。
+    ///
+    /// 正在收尾的受众不可变，绝不允许按存活时间删除。这里由有界工作器在静默一段时间之后
+    /// 重放同一操作标识，建群操作台账仍是唯一的提交栅栏。
+    ///
+    /// - Parameter limit: 本轮最多处理的草稿数量。
+    /// - Returns: 本轮恢复报告；上限非正时返回全零报告。
+    /// - Throws: 存储不可用时抛出。
     @discardableResult
     public func recoverFinalizing(limit: Int) async throws -> V2GroupAudienceRecoveryReport {
         guard limit > 0 else { return .init(claimedCount: 0, recoveredCount: 0, failedCount: 0) }

@@ -2,26 +2,26 @@ import Foundation
 import IMV2Core
 import Synchronization
 
-/// Non-suspending post-commit boundary for optional process-local delivery
-/// acceleration. The observer receives only results whose database work has
-/// finished successfully. It must enqueue bounded work and return; durable
-/// room-log visibility and request success never depend on the observer.
+/// 面向可选进程本地投递加速的不挂起提交后边界。
+///
+/// 观察者只会收到数据库工作已成功完成的结果。
+/// 它必须有界入队后立即返回；
+/// 持久房间日志的可见性与请求成功从不依赖该观察者。
 public protocol V2CommittedMessageBatchObserving: Sendable {
     func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome])
 }
 
-/// One memory bound shared by room-keyed admission lanes.
+/// 由按房间建键的准入通道共享的单一内存上限。
 ///
-/// Per-lane FIFO actors still own ordering and batch selection. Sharing only
-/// the retained-request count prevents an uneven but valid room hash
-/// distribution from rejecting work while sibling lanes leave most of the
-/// configured process budget unused.
+/// 每条通道的 FIFO actor 仍各自负责排序与批次选择。
+/// 只共享「保留请求数」可使一个不均匀但仍合法的房间哈希分布不会一边拒绝工作、
+/// 一边让兄弟通道白白闲置大部分已配置的进程预算。
 final class V2SharedSendMessagePendingCapacity: Sendable {
     private let maximum: Int
-    /// This counter is only a capacity token; it does not publish or protect
-    /// request memory. Relaxed operations are therefore sufficient. A CAS
-    /// loop preserves the hard upper bound without putting every lane through
-    /// a contended sleeping mutex on both enqueue and dequeue.
+    /// 该计数器只是容量令牌，它不发布也不保护请求内存，因此使用 relaxed 内存序即可。
+    ///
+    /// CAS 循环在保持硬上限的同时，
+    /// 又不至于让每条通道在入队和出队两端都经过一个存在竞争的睡眠互斥锁。
     private let reserved = Atomic<Int>(0)
 
     init(maximum: Int) {
@@ -49,28 +49,25 @@ final class V2SharedSendMessagePendingCapacity: Sendable {
     }
 }
 
-/// Bounded, FIFO batching boundary for command acceptance.
+/// 命令接受的有界 FIFO 批处理边界。
 ///
-/// The batcher owns no room state and never acknowledges a command before its
-/// durable path reports that command complete. A compatible subset may share
-/// one `V2AtomicRoomWriteBatchStore` transaction while preclassified,
-/// independent rooms use the ordinary path. A PostgreSQL implementation must
-/// retain per-room order inside the SQL batch. Independent rooms may run in
-/// parallel, but no room is admitted to a second in-flight batch until the
-/// first has committed or failed.
+/// 批处理器不持有任何房间状态，且在其持久路径报告命令完成之前，
+/// 绝不会先行确认该命令。一个兼容子集可以共享同一个 `V2AtomicRoomWriteBatchStore` 事务，
+/// 而预先分类为独立的房间走常规路径。
+/// PostgreSQL 实现必须在 SQL 批次内保持每房间顺序。
+/// 独立房间可以并行，但在首个批次提交或失败之前，不会有房间被接纳进第二个在途批次。
 public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     public struct Snapshot: Equatable, Sendable {
         public let pendingRequests: Int
         public let inFlightBatches: Int
         public let activeRooms: Int
-        /// Number of independently isolated batching lanes represented by
-        /// this snapshot. A single actor reports one; a keyed router sums its
-        /// lanes and also reports the busiest lane below.
+        /// 该快照所代表的、彼此隔离的批处理通道数量。
+        ///
+        /// 单个 actor 报告 1；按房间建键的路由器会汇总其各通道，并在下方同时报告最繁忙通道。
         public let laneCount: Int
         public let busiestLanePendingRequests: Int
         public let busiestLaneInFlightBatches: Int
-        /// Monotonic phase timings expose whether latency accumulates before
-        /// dequeue or after a batch starts its durable execution path.
+        /// 单调的阶段耗时，用于揭示延迟是累积在出队之前，还是在批次开始持久执行路径之后。
         public let dequeuedRequests: UInt64
         public let queueWaitMillisecondsTotal: UInt64
         public let queueWaitMillisecondsMax: UInt64
@@ -79,39 +76,35 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         public let batchExecutionMillisecondsMax: UInt64
         public let stagingQueueFullRejections: UInt64
         public let cancelledPendingRequests: UInt64
-        /// Delayed flushes that used the normal interactive latency budget.
-        /// This is deliberately a count of timers that actually fired, not
-        /// requests, so operational telemetry cannot mistake cancellations or
-        /// full-batch flushes for additional queued latency.
+        /// 使用常规交互延迟预算的延迟刷新次数。
+        ///
+        /// 它刻意统计实际触发的计时器数量，而不是请求数，
+        /// 使运维遥测不会把取消或整批刷新误当成额外的排队延迟。
         public let baseDelayFlushes: UInt64
-        /// Delayed flushes that used the explicitly configured high-activity
-        /// budget after the bounded arrival-rate detector was satisfied.
+        /// 在有界到达率检测器被满足之后，使用显式配置的高活跃预算的延迟刷新次数。
         public let highActivityDelayFlushes: UInt64
-        /// Whether the currently staged first request is waiting under the
-        /// high-activity budget. It is diagnostic only; the hard delay cap is
-        /// still owned by the scheduled timer.
+        /// 当前暂存的首个请求是否正以高活跃预算等待。
+        ///
+        /// 它仅供诊断；硬性延迟上限仍由已排定的计时器持有。
         public let highActivityDelayScheduled: Bool
-        /// Atomic append attempts containing two or more independent rooms.
-        /// These counters intentionally distinguish a successful set write
-        /// from a shape fallback, so an operator can measure actual SQL
-        /// coalescing rather than infer it from staging delay alone.
+        /// 包含两个或更多独立房间的原子追加尝试次数。
+        ///
+        /// 这些计数器刻意区分成功的集合写入与形态回退，
+        /// 使运维可以衡量真实的 SQL 合并程度，而不是仅凭暂存延迟去推断。
         public let atomicBatchAttempts: UInt64
         public let atomicBatchCommitted: UInt64
         public let atomicBatchFallbacks: UInt64
         public let atomicBatchCommittedRequests: UInt64
         public let atomicBatchFallbackRequests: UInt64
-        /// Bounded reasons reported by the authoritative store when an
-        /// attempted atomic subset rolled back before any durable commit.
+        /// 权威存储在某个原子子集于任何持久提交之前回滚时所报告的、有界的原因计数。
         public let atomicBatchFallbackReasons: [V2AtomicRoomWriteBatchError.Reason: UInt64]
-        /// Later commands for a room that were deliberately kept behind the
-        /// first command and executed in a subsequent unique-room wave.
+        /// 同一房间中刻意排在首条命令之后、并在后续唯一房间波次中执行的命令数。
         public let sameRoomDeferredRequests: UInt64
-        /// Requests known before the atomic attempt to require the ordinary
-        /// durable path.  They do not make an otherwise compatible batch
-        /// abandon its shared transaction.
+        /// 在原子尝试之前就已确知需要走常规持久路径的请求。
+        ///
+        /// 它们不会让一个本可兼容的批次放弃其共享事务。
         public let atomicPreclassifiedIndividualRequests: UInt64
-        /// A delayed underfilled batch is dispatched directly, without first
-        /// throwing the expected unsupported-shape error from the store.
+        /// 延迟后仍不足量的批次会直接派发，而不会先从存储抛出预期的不支持形态错误。
         public let singletonDispatches: UInt64
 
         public init(
@@ -172,9 +165,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     public struct Configuration: Equatable, Sendable {
-        /// A bounded, process-local detector that permits a slightly longer
-        /// wait only after sustained arrivals. It never changes FIFO, room
-        /// serialization, the staging bound, or the durable write contract.
+        /// 一个有界的进程本地检测器，只有持续到达之后才允许稍长一点的等待。
+        ///
+        /// 它绝不改变 FIFO、房间串行化、暂存上限或持久写入契约。
         public struct AdaptiveDelayPolicy: Equatable, Sendable {
             public let highActivityMaximumDelay: Duration
             public let minimumRequestsInWindow: Int
@@ -196,16 +189,16 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
         public let maximumBatchSize: Int
         public let maximumDelay: Duration
-        /// `nil` retains the exact fixed-delay behaviour used before this
-        /// policy was introduced. A configured high-activity delay must be
-        /// strictly longer than the base delay, otherwise it is misleading
-        /// configuration with no batching benefit.
+        /// 为 `nil` 时保留引入该策略之前完全相同的固定延迟行为。
+        ///
+        /// 配置的高活跃延迟必须严格长于基础延迟，
+        /// 否则就是一条具有误导性、且不会带来任何批处理收益的配置。
         public let adaptiveDelayPolicy: AdaptiveDelayPolicy?
         public let maximumInFlightBatches: Int
-        /// Commands waiting to form a batch are still retained in gateway
-        /// memory. Keep this independently bounded: moving database
-        /// admission to the batch boundary must not replace one bounded queue
-        /// with an unbounded one.
+        /// 等待成批的命令仍会保留在网关内存中。
+        ///
+        /// 必须对它单独设界：把数据库准入移到批次边界，
+        /// 不能等于用一个无界队列替换一个原本有界的队列。
         public let maximumPendingRequests: Int
 
         public init(
@@ -231,15 +224,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Reference-backed queue node.
+    /// 以引用方式持有的队列节点。
     ///
-    /// `V2RoomWriteRequest` retains several copy-on-write values and the
-    /// continuation itself is reference counted. Storing the node as a value
-    /// in the intrusive dictionary made every neighbour-link update copy the
-    /// complete request and retain/release all of those fields. The node never
-    /// escapes this actor while it is linked, so mutating the two links in
-    /// place preserves the same ownership and FIFO contract without that hot
-    /// ARC traffic.
+    /// `V2RoomWriteRequest` 会保留数个写时复制的值，而续体本身也是引用计数的。
+    /// 若把该节点作为值存进侵入式字典，
+    /// 每次更新邻居链接都会复制整个请求并对那些字段做 retain/release。
+    /// 该节点在仍被链接时绝不会离开本 actor，
+    /// 因此就地修改两个链接能在不产生这些热路径 ARC 开销的前提下，保持相同的所有权与 FIFO 契约。
     // Once dequeued, the actor clears both mutable links before handing the
     // node to a child task. No linked node crosses isolation and no detached
     // node is mutated, which makes this narrow unchecked conformance safe.
@@ -276,15 +267,16 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private let store: any V2AtomicRoomWriteBatchStore
     private let configuration: Configuration
     private let sharedPendingCapacity: V2SharedSendMessagePendingCapacity?
-    /// Intrusive FIFO storage keeps enqueue and cancellation O(1). Batch
-    /// selection still walks the staged requests in arrival order, but it no
-    /// longer copies the whole queue once or twice for every transaction.
+    /// 侵入式 FIFO 存储让入队与取消保持 O(1)。
+    ///
+    /// 批次选择仍按到达顺序遍历暂存请求，
+    /// 但不再为每个事务复制一到两次整个队列。
     private var pendingByID: [UInt64: Pending] = [:]
     private var pendingHeadID: UInt64?
     private var pendingTailID: UInt64?
-    /// Queue node identities never leave this actor or survive a restart.
-    /// A monotonic value is sufficient and avoids asking the OS for secure
-    /// entropy once per message merely to support O(1) cancellation.
+    /// 队列节点标识绝不会离开本 actor，也不会跨重启存活。
+    ///
+    /// 单调递增值已经够用，并可避免仅为支持 O(1) 取消就为每条消息向操作系统索取安全熵。
     private var nextPendingID: UInt64 = 0
     private var pendingCount = 0
     private var flushTask: Task<Void, Never>?
@@ -310,18 +302,16 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private var completedBatches: UInt64 = 0
     private var batchExecutionMillisecondsTotal: UInt64 = 0
     private var batchExecutionMillisecondsMax: UInt64 = 0
-    /// Use a monotonic clock so a wall-clock correction cannot accidentally
-    /// put the batcher into high-activity mode or keep it there forever.
+    /// 使用单调时钟，使一次墙上时钟校正不会意外把批处理器置入高活跃模式，或让它永久停留其中。
     private let clock = ContinuousClock()
     private var recentArrivalInstants: [ContinuousClock.Instant] = []
-    /// Logical head for the bounded arrival window. Advancing it is O(1);
-    /// occasional compaction replaces `Array.removeFirst` on every hot append.
+    /// 有界到达窗口的逻辑头部。推进它是 O(1)；
+    /// 偶发的压缩用来取代每次热追加都执行 `Array.removeFirst`。
     private var recentArrivalHead = 0
 
-    /// The generic gateway command handler must not acquire a second
-    /// foreground-write permit around a request that this batcher owns. A
-    /// real atomic batch instead acquires exactly one permit immediately
-    /// before its database transaction begins.
+    /// 通用网关命令处理器不得在本批处理器拥有的请求之外再获取第二次前台写入许可。
+    ///
+    /// 真正的原子批次只会在其数据库事务开始之前，恰好获取一个许可。
     nonisolated public let managesForegroundWriteAdmission: Bool
     nonisolated public let publishesCommittedGroupEvents: Bool
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
@@ -342,9 +332,17 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         publishesCommittedGroupEvents = committedMessageObserver != nil
     }
 
-    /// Internal construction path for a room-keyed router. Keeping the
-    /// shared limiter out of the public API makes it impossible for callers
-    /// to accidentally couple otherwise independent batchers.
+    /// 面向按房间建键路由器的内部构造路径。
+    ///
+    /// 把共享限流器排除在公开 API 之外，
+    /// 使调用方不可能意外地把本应彼此独立的批处理器耦合在一起。
+    ///
+    /// - Parameters:
+    ///   - store: 原子房间写入批次存储。
+    ///   - configuration: 批处理配置。
+    ///   - databaseWorkAdmission: 可选的数据库工作准入控制器。
+    ///   - sharedPendingCapacity: 由各通道共享的待处理容量。
+    ///   - committedMessageObserver: 可选的提交消息观察者。
     init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: Configuration,
@@ -471,14 +469,14 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Sustained traffic commonly starts filling the successor while its
-    /// predecessor is still in PostgreSQL. The high-activity timer begins at
-    /// that first arrival, but making the successor wait its entire remainder
-    /// after the room becomes available adds database latency and almost a
-    /// second full aggregation window to every ACK. Preserve a small, bounded
-    /// post-completion opportunity instead: production uses the ordinary
-    /// interactive delay (currently 2 ms), while an actually full batch still
-    /// starts immediately through the existing enqueue path.
+    /// 在需要时缩短高活跃后继批次的刷新等待。
+    ///
+    /// 持续流量常会在前驱仍处于 PostgreSQL 时就开始填充后继。
+    /// 高活跃计时器从那次首次到达就开始计时，
+    /// 但若让后继在房间可用之后仍等满剩余时间，
+    /// 就会给每次 ACK 增加数据库延迟以及近一整个聚合窗口。
+    /// 因此改为保留一个小而有界的完成后再聚合机会：
+    /// 生产使用常规交互延迟（当前为 2 ms），而真正装满的批次仍会经既有入队路径立即开始。
     private func shortenHighActivitySuccessorFlushIfNeeded() {
         guard pendingCount > 0,
               scheduledDelay == .highActivity,
@@ -562,19 +560,19 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// A command cannot overtake an earlier command for the same room.  The
-    /// first pass gives independent, inactive rooms priority, then the second
-    /// pass uses spare batch capacity for later commands from those same
-    /// rooms.  This is important for a hot direct conversation: a strictly
-    /// one-room-per-batch selector leaves the very write lane that needs
-    /// amortisation permanently on single-command transactions.  Conversely,
-    /// filling the first batch slot-by-slot with a hot room would starve
-    /// unrelated conversations behind it.
+    /// 挑选下一个批次。
     ///
-    /// The PostgreSQL batch store serializes equal room IDs in arrival order
-    /// and advances their room sequences in one transaction.  A room already
-    /// owned by an in-flight batch remains in `remaining`, preserving the
-    /// existing no-overtake rule across transactions.
+    /// 同一房间的命令不能越过更早的命令。
+    /// 第一轮优先照顾独立且未活跃的房间，
+    /// 第二轮再把剩余的批次容量用于这些房间中较晚的命令。
+    /// 这对热单聊很重要：严格「每批一个房间」的选择器会让最需要摊销的那条写通道
+    /// 永远停留在单命令事务上；反过来，若让热房间逐槽填满首批，
+    /// 又会把它无关的会话饿死在后。
+    ///
+    /// PostgreSQL 批次存储会按到达顺序串行化相同的房间 ID，并在单个事务中推进它们的房间序号。
+    /// 已被在途批次占有的房间会留在 `remaining` 中，从而在跨事务时保持既有的「不可越过」规则。
+    ///
+    /// - Returns: 本批选中的待处理请求；没有可选项时为 `nil`。
     private func dequeueNextBatch() -> [Pending]? {
         guard pendingCount > 0 else { return nil }
 
@@ -698,20 +696,21 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Preserves the atomic-store contract for each compatible subset.
+    /// 为每个兼容子集保持原子存储契约。
     ///
-    /// Most PostgreSQL room-log statements advance one durable cursor per
-    /// room, so their store calls use ordered, unique-room waves. A store may
-    /// explicitly advertise that one partition can reduce repeated rooms in
-    /// arrival order and persist only each room's final state; that partition
-    /// is then executed once across the whole staging batch. This keeps hot
-    /// group traffic from degenerating into one transaction per message while
-    /// preserving the default defensive contract for every other route.
+    /// 大多数 PostgreSQL 房间日志语句每个房间只推进一个持久游标，
+    /// 因此它们的存储调用采用有序的唯一房间波次。
+    /// 存储可以显式声明某个分区能够按到达顺序归并重复房间、并且只持久化每个房间的最终状态；
+    /// 该分区随后会在整个暂存批次上只执行一次。
+    /// 这既避免热群组流量退化为每条消息一个事务，也为其他所有路由保留默认的防御性契约。
     ///
-    /// Compatibility partitions execute serially inside a wave because they
-    /// can still contend on shared shard-admission rows. An atomic attempt
-    /// rejected by a durable revision check rolls back as a unit and falls
-    /// back only for that compatible subset.
+    /// 兼容分区在单个波次内串行执行，因为它们仍可能竞争共享的分片准入行。
+    /// 被持久修订校验拒绝的原子尝试会整体回滚，并且只为那个兼容子集回退。
+    ///
+    /// - Parameters:
+    ///   - batch: 当前批次中的待处理请求。
+    ///   - partitions: 与每个请求对应的原子写入分区，无法合并处为 `nil`。
+    /// - Returns: 分区执行结果。
     private func executePartitioned(
         batch: [Pending],
         partitions: [V2AtomicRoomWriteBatchPartition?]
@@ -1182,8 +1181,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 }
 
 public enum V2SendMessageAdmissionBatcherError: Error, Sendable, Equatable {
-    /// The batch staging queue or its owned database-admission queue is full
-    /// (or its bounded wait elapsed). The protocol maps this to retryable
-    /// `SERVER_BUSY`, never to a persistence failure.
+    /// 批次暂存队列或其自有的数据库准入队列已满（或有界等待已超时）。
+    ///
+    /// 协议会把它映射为可重试的 `SERVER_BUSY`，绝不映射为持久化失败。
     case serverBusy
 }

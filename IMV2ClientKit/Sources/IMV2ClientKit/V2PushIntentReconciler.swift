@@ -1,12 +1,24 @@
 import Foundation
 import IMV2Core
 
+/// 单次推送意图协调的结果。
 public enum V2PushReconcileResult: Equatable, Sendable {
-    case idle, advanced, superseded, retryScheduled, paused
+    /// 当前无需推进。
+    case idle
+    /// 已向服务端推进一步。
+    case advanced
+    /// 本次工作已被更新的状态取代。
+    case superseded
+    /// 已安排重试。
+    case retryScheduled
+    /// 已暂停等待用户或重新认证介入。
+    case paused
 }
 
-/// One account/installation owner. Local inputs coalesce independently from
-/// the one HTTP flight so an opt-out is persisted while an old PUT is pending.
+/// 单个账号与安装绑定的推送意图协调器。
+///
+/// 本地输入与那一次 HTTP 往返相互独立地合并，因此旧的 PUT 仍在进行时，
+/// 用户的关闭操作也能被持久化下来。
 public actor V2PushIntentReconciler {
     private struct Token: Sendable {
         let id: UUID; let provider: V2ClientPushEndpointProvider
@@ -28,8 +40,19 @@ public actor V2PushIntentReconciler {
     private var stopped = false
     private var signingOut = false
 
-    /// The caller must validate its current authentication lifecycle before
-    /// acquisition and after this await; a stale CAS is never retried here.
+    /// 激活一个新的推送所有者并返回协调器。
+    ///
+    /// 调用方必须在获取之前与本次等待之后校验自身的认证生命周期状态；
+    /// 这里不会对陈旧的比较并交换结果自动重试。
+    ///
+    /// - Parameters:
+    ///   - store: 本地同步存储。
+    ///   - transport: 推送意图传输实现。
+    ///   - scope: 目标作用域。
+    ///   - initialPreference: 初始偏好开关。
+    ///   - now: 可注入的当前时刻读取函数。
+    /// - Returns: 已激活的协调器。
+    /// - Throws: 任务取消或存储失败时抛出。
     public static func activate(store: GRDBV2LocalSyncStore, transport: any V2ClientPushIntentPublishing,
                                 scope: V2PushIntentScope, initialPreference: Bool, now: @escaping @Sendable () -> Date = Date.init) async throws -> V2PushIntentReconciler {
         try Task.checkCancellation()
@@ -47,14 +70,27 @@ public actor V2PushIntentReconciler {
         persistedInputID = inputID
     }
 
+    /// 订阅该所有者的意图变更。
+    ///
+    /// - Returns: 推送意图变更流。
     public nonisolated func updates() -> AsyncThrowingStream<V2LocalPushIntent, any Error> {
         store.pushIntentUpdates(scope: scope, ownerID: ownerID)
     }
 
+    /// 读取当前推送意图。
+    ///
+    /// - Returns: 当前意图。
+    /// - Throws: 记录缺失或所有者已过期时抛出。
     public func state() async throws -> V2LocalPushIntent {
         try await store.pushIntent(scope: scope, ownerID: ownerID)
     }
 
+    /// 设置推送开关。
+    ///
+    /// 期望状态发生变化时会清除已暂存的内存令牌引用。
+    ///
+    /// - Parameter enabled: 目标开关状态。
+    /// - Throws: 协调器已停止或正在登出时抛出 `CancellationError`；其余失败来自持久化。
     public func setEnabled(_ enabled: Bool) async throws {
         guard !stopped, !signingOut else { throw CancellationError() }
         if desired != enabled { token = nil }
@@ -62,6 +98,16 @@ public actor V2PushIntentReconciler {
         try await persistInputs()
     }
 
+    /// 接收系统推送令牌并暂存其引用。
+    ///
+    /// 未开启推送时忽略；令牌内容需非空、不超过 4096 字节且不含空白与控制字符。
+    ///
+    /// - Parameters:
+    ///   - provider: 推送提供方。
+    ///   - environment: 运行环境。
+    ///   - value: 令牌内容。
+    /// - Throws: 协调器已停止或正在登出时抛出 `CancellationError`；
+    ///   令牌不合法时抛出 ``V2ClientPushEndpointError/invalidRegistration``。
     public func receiveToken(provider: V2ClientPushEndpointProvider, environment: V2ClientPushEndpointEnvironment, value: String) async throws {
         guard !stopped, !signingOut else { throw CancellationError() }
         guard desired else { return }
@@ -74,15 +120,20 @@ public actor V2PushIntentReconciler {
         try await persistInputs()
     }
 
-    /// Persists the final disable before the caller clears credentials. A
-    /// later token callback cannot reverse this owner's sign-out decision.
+    /// 在调用方清除凭据之前持久化最终的关闭状态。
+    ///
+    /// 之后到达的令牌回调无法逆转该所有者的登出决定。
+    ///
+    /// - Throws: 协调器已停止时抛出 `CancellationError`；其余失败来自持久化。
     public func prepareSignOut() async throws {
         guard !stopped else { throw CancellationError() }
         signingOut = true; desired = false; token = nil; inputID = UUID()
         try await persistInputs()
     }
 
-    /// Explicit user/reauthentication recovery only. Stale never auto-reclaims.
+    /// 仅在用户显式操作或重新认证后重启会话；陈旧状态绝不会自动重新接管。
+    ///
+    /// - Throws: 协调器已停止时抛出 `CancellationError`；其余失败来自持久化。
     public func restartSession() async throws {
         guard !stopped else { throw CancellationError() }
         try await persistInputs()
@@ -91,6 +142,9 @@ public actor V2PushIntentReconciler {
         _ = try await store.restartPushIntentSession(expected: current)
     }
 
+    /// 启动按调度节奏持续协调的循环，直到任务被取消。
+    ///
+    /// - Throws: 协调器已停止时抛出 `CancellationError`；循环内部失败时抛出底层错误。
     public func run() async throws {
         guard !stopped else { throw CancellationError() }
         let current: (UUID, Task<Void, any Error>)
@@ -110,6 +164,12 @@ public actor V2PushIntentReconciler {
         try result.get()
     }
 
+    /// 执行一次协调推进。
+    ///
+    /// 同一时刻只允许一次在途推进，重复调用会等待同一结果。
+    ///
+    /// - Returns: 本次协调结果。
+    /// - Throws: 协调器已停止或任务取消时抛出 `CancellationError`。
     public func flushOnce() async throws -> V2PushReconcileResult {
         try Task.checkCancellation()
         guard !stopped else { throw CancellationError() }
@@ -122,6 +182,9 @@ public actor V2PushIntentReconciler {
         return try result.get()
     }
 
+    /// 停止协调器并等待在途任务收敛。
+    ///
+    /// 停止会取消输入保存、意图推送与循环任务，但不会清除已持久化的意图。
     public func stop() async {
         stopped = true; token = nil
         let running = runTask, sending = flight, saving = inputTask

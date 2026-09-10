@@ -3,17 +3,30 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Membership changes with an explicit room authority model. Only the owner
-/// can add members, while either owner or admin can remove a non-owner. The
-/// transaction freezes its exact audience before it changes membership, so
-/// add and remove events do not depend on whichever membership rows happen to
-/// exist when a worker runs.
+/// 采用显式房间权限模型的成员变更实现。
+///
+/// 只有群主可以添加成员，群主或管理员可以移除非群主成员。
+/// 事务会在改变成员关系之前冻结精确受众，因此添加与移除事件不依赖工作器运行时
+/// 恰好存在哪些成员行。
 public struct PostgresV2RoomMembershipStore:
     V2ControlValidatedRoomMembershipStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放房间、成员关系与准入状态的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 执行一次成员变更（不做控制面身份校验）。
+    ///
+    /// - Parameters:
+    ///   - command: 成员变更命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 无权限、修订冲突、容量不足或持久化失败时抛出。
     public func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2RoomMembershipChangeOutcome {
         try await change(
             command: command,
@@ -26,6 +39,18 @@ public struct PostgresV2RoomMembershipStore:
         )
     }
 
+    /// 以控制面校验过的身份快照与房间归属执行成员变更。
+    ///
+    /// - Parameters:
+    ///   - command: 成员变更命令。
+    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
+    ///   - identitySnapshot: 控制面提供的目标身份快照。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 归属已变更、身份不符、无权限、修订冲突或持久化失败时抛出。
     public func changeControlValidated(
         command: V2ChangeRoomMembershipCommand,
         ownerRoute: V2RoomShardRoute,
@@ -67,10 +92,23 @@ public struct PostgresV2RoomMembershipStore:
         }
     }
 
-    /// Runs inside the caller's PostgreSQL transaction. The caller owns commit
-    /// and rollback, including every membership, admission, event and outbox
-    /// write. Acquire operation locks before room locks when composing this
-    /// primitive with another owner operation.
+    /// 在调用方的 PostgreSQL 事务内执行成员变更。
+    ///
+    /// 提交与回滚由调用方负责，包括全部成员、准入、事件与发件箱写入。
+    /// 若把该原语与其他归属操作组合，必须先获取操作锁再获取房间锁。
+    ///
+    /// - Parameters:
+    ///   - sql: 调用方事务使用的数据库连接。
+    ///   - command: 成员变更命令。
+    ///   - identitySnapshot: 控制面提供的身份快照，可为空。
+    ///   - ownerRoute: 已选定的房间归属，可为空。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - eventID: 命令幂等标识。
+    ///   - planID: 本次命令关联的扇出计划标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 归属不符时抛出 ``V2RoomMembershipStoreError/ownerChanged``；
+    ///   房间或目标不存在、无权限、修订冲突或持久化失败时抛出对应错误。
     static func change(
         in sql: any SQLDatabase,
         command: V2ChangeRoomMembershipCommand,

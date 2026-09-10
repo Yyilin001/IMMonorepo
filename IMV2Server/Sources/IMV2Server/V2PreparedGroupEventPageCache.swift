@@ -3,19 +3,30 @@ import IMV2Compression
 import IMV2Core
 import Synchronization
 
-/// Bounded process-local cache of fully serialized group-event page payloads.
+/// 已完成序列化的群事件分页载荷的有界进程内缓存。
 ///
-/// Authorization and cursor visibility stay in `V2GroupEventLogStore` and run
-/// for every request. This cache is reached only after that store has returned
-/// an authorized immutable page. It stores no identity or membership fact.
-/// Protocol v21 binds request correlation to the TLS frame header, allowing
-/// the same protobuf payload to be shared without weakening request matching.
+/// 授权与游标可见性仍由 `V2GroupEventLogStore` 负责，并对每次请求都执行。
+/// 只有在存储返回了已授权的不可变分页之后才会命中该缓存，且缓存不保存任何身份或成员事实。
+/// 协议 v21 把请求关联绑定到 TLS 帧头，使同一份 protobuf 载荷可以被共享，
+/// 又不会削弱请求匹配的严格性。
 public final class V2PreparedGroupEventPageCache: Sendable {
+    /// 缓存配置。
     public struct Configuration: Equatable, Sendable {
+        /// 最大条目数。
         public let maximumEntries: Int
+        /// 最大字节数。
         public let maximumBytes: Int
+        /// 分片数量。
         public let shardCount: Int
 
+        /// 校验并保存配置。
+        ///
+        /// - Parameters:
+        ///   - maximumEntries: 条目上限，需大于零。
+        ///   - maximumBytes: 字节上限，需大于零。
+        ///   - shardCount: 分片数量，需大于零且不超过条目与字节上限。
+        ///
+        /// 参数不满足上述关系时直接失败，避免出现无法容纳任何条目的分片。
         public init(maximumEntries: Int, maximumBytes: Int, shardCount: Int) {
             precondition(maximumEntries > 0)
             precondition(maximumBytes > 0)
@@ -28,11 +39,17 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         }
     }
 
+    /// 缓存运行快照。
     public struct Snapshot: Equatable, Sendable {
+        /// 当前条目数。
         public let entries: Int
+        /// 当前占用字节数。
         public let bytes: Int
+        /// 命中次数。
         public let hits: UInt64
+        /// 未命中次数。
         public let misses: UInt64
+        /// 淘汰次数。
         public let evictions: UInt64
     }
 
@@ -121,6 +138,9 @@ public final class V2PreparedGroupEventPageCache: Sendable {
 
     private let shards: [Shard]
 
+    /// 以配置创建缓存。
+    ///
+    /// - Parameter configuration: 缓存容量配置。
     public init(configuration: Configuration) {
         shards = (0 ..< configuration.shardCount).map { index in
             Shard(
@@ -138,9 +158,20 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         }
     }
 
-    /// Returns nil for non-group-page envelopes so callers can preserve the
-    /// ordinary codec path. A cold representation has one producer inside its
-    /// shard; followers reuse the result after the short bounded encode.
+    /// 为非群分页信封返回 `nil`，使调用方保留普通编解码路径。
+    ///
+    /// 冷表示在分片内只有一个生产者；同一不可变分页的其他请求会等待这次短时有界编码，
+    /// 随后直接命中缓存。
+    ///
+    /// - Parameters:
+    ///   - envelope: 待编码信封。
+    ///   - frameVersion: 协商的帧版本，需不低于 21。
+    ///   - compression: 协商的压缩方式。
+    ///   - maximumUncompressedPayloadBytes: 未压缩载荷上限。
+    ///   - compressionThresholdBytes: 启用压缩的阈值。
+    ///   - maximumExpansionRatio: 解压膨胀比上限。
+    /// - Returns: 已编码帧；非群分页信封返回 `nil`。
+    /// - Throws: 编码失败或超出协商上限时抛出。
     func frame(
         for envelope: IMV2Envelope,
         frameVersion: UInt8,
@@ -164,11 +195,21 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         )
     }
 
-    /// Early lookup used after the durable membership fence but before a
-    /// cached event slice is copied into domain and protobuf arrays. The key
-    /// is derived from immutable event metadata inside the room-cache shard;
-    /// only a miss invokes `envelope`, making the hot hit allocation-free
-    /// apart from the tiny request-specific frame header.
+    /// 在持久化成员栅栏通过之后、把缓存事件切片复制为领域与 protobuf 数组之前使用的提前查询。
+    ///
+    /// 键由房间缓存分片内不可变的事件元数据派生；只有未命中时才会调用 `envelope`，
+    /// 因此热路径命中除极小的请求专属帧头之外不产生额外分配。
+    ///
+    /// - Parameters:
+    ///   - key: 分页键，协议版本需不低于 21。
+    ///   - requestID: 本次请求标识。
+    ///   - compression: 协商的压缩方式。
+    ///   - maximumUncompressedPayloadBytes: 未压缩载荷上限。
+    ///   - compressionThresholdBytes: 启用压缩的阈值。
+    ///   - maximumExpansionRatio: 解压膨胀比上限。
+    ///   - envelope: 未命中时构造信封的闭包。
+    /// - Returns: 已编码帧。
+    /// - Throws: 编码失败或超出协商上限时抛出。
     func frame(
         for key: PageKey,
         requestID: UInt64,
@@ -239,6 +280,9 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         )
     }
 
+    /// 读取当前缓存快照。
+    ///
+    /// - Returns: 条目数、字节数与各项累计计数。
     public func snapshot() -> Snapshot {
         shards.reduce(into: Snapshot(entries: 0, bytes: 0, hits: 0, misses: 0, evictions: 0)) {
             aggregate, shard in

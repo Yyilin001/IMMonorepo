@@ -1,21 +1,33 @@
 import Foundation
 import IMV2Core
 
-/// Group control revisions order their own objects, including each member's
-/// role. They never use a recipient's sync cursor as an object version.
+/// 群控制类投影事件。
+///
+/// 群控制修订为自己的对象（包括每个成员的角色）排序，
+/// 不会把接收端的同步游标当作对象版本使用。
 struct V2GroupPolicySnapshotEffect: Equatable {
+    /// 本次事件携带的变更内容。
     enum Value: Equatable {
+        /// 公告正文及其更新时间。
         case announcement(body: String, updatedAtMilliseconds: Int64)
+        /// 某角色的权限集合。
         case permissions(role: V2RoomMembershipRole, values: Set<V2GroupPermission>)
+        /// 某成员的角色变更。
         case memberRole(target: UUID, role: V2RoomMembershipRole, updatedAtMilliseconds: Int64?)
     }
 
+    /// 目标房间。
     let roomID: UUID
+    /// 该对象自身的修订号。
     let revision: Int64
+    /// 本次变更内容。
     let value: Value
+    /// 发起变更的用户；历史载荷可能缺失。
     let actorID: UUID?
+    /// 来源房间日志序号；历史载荷可能缺失。
     let roomSequence: Int64?
 
+    /// 投影实体键，按变更类型分别由房间、角色或目标成员唯一确定。
     var entityKey: String {
         switch value {
         case .announcement: "announcement:\(roomID.uuidString)"
@@ -24,6 +36,14 @@ struct V2GroupPolicySnapshotEffect: Equatable {
         }
     }
 
+    /// 从事件载荷解码群控制变更。
+    ///
+    /// 成员角色事件使用成员修订，其余事件使用对象修订；公告正文长度、角色取值、
+    /// 权限去重与未知权限过滤都会逐一校验，任一不符即视为载荷损坏。
+    ///
+    /// - Parameter payload: 事件载荷 JSON。
+    /// - Throws: 载荷无法解码、事件类型不受支持或字段越界时抛出
+    ///   ``V2UserProjectionWorkerError/invalidPayload``。
     init(payload: Data) throws {
         struct Wire: Decodable {
             let eventType: String; let roomID: UUID; let revision: Int64?
@@ -74,8 +94,13 @@ struct V2GroupPolicySnapshotEffect: Equatable {
         }
     }
 
-    /// Source sequence was added later. Missing metadata on the same legacy
-    /// fact is compatible; two explicit but different source versions are not.
+    /// 判断两个观测是否代表同一事实。
+    ///
+    /// 来源房间序号是后加的元数据：同一历史事实缺少序号时视为兼容，
+    /// 但两个都给出了明确且不同的序号时不视为同一事实。
+    ///
+    /// - Parameter other: 另一个观测。
+    /// - Returns: 房间、对象修订、变更内容与发起者一致，且来源序号不冲突时为 `true`。
     func representsSameFact(as other: Self) -> Bool {
         roomID == other.roomID && revision == other.revision && value == other.value && actorID == other.actorID
             && (roomSequence == nil || other.roomSequence == nil || roomSequence == other.roomSequence)

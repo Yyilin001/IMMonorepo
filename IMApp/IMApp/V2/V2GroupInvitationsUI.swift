@@ -7,6 +7,10 @@ import UIKit
 import Vision
 import VisionKit
 
+/// 群邀请管理与入群申请的界面状态容器。
+///
+/// 它同时承载「管理端」的邀请列表/待处理申请，以及「申请人端」的扫码预览与提交状态；
+/// 每个操作标识都会在本地缓存以复用，使重试保持幂等。
 @MainActor
 @Observable
 final class V2GroupInvitationStore {
@@ -15,7 +19,9 @@ final class V2GroupInvitationStore {
     private(set) var links: [V2GroupInviteLink] = []
     private(set) var requests: [V2GroupJoinRequest] = []
     private(set) var nextRequestCursor: String?
-    // A token can reach submit only through a successful matching preview.
+    /// 已成功预览、可以与提交动作配对的邀请。
+    ///
+    /// 令牌只有先经过一次成功且匹配的预览，才可能进入提交阶段。
     private struct PreviewedInvitation {
         let secret: V2GroupInviteSecret
         let preview: V2GroupInvitePreview
@@ -46,10 +52,15 @@ final class V2GroupInvitationStore {
         case .idle, .loading, .failed: nil
         }
     }
+    /// 当前预览到的邀请信息；未处于可预览状态时为 `nil`。
     var preview: V2GroupInvitePreview? { previewedInvitation?.preview }
+    /// 当前是否处于预览加载或提交过程中。
     var isJoining: Bool {
         switch joinState { case .loading, .submitting: true; default: false }
     }
+    /// 当前是否可以提交入群申请。
+    ///
+    /// 已失效、已是成员、已存在申请记录或未完成预览时都返回 `false`。
     var canSubmit: Bool {
         guard !isInvalidated else { return false }
         switch joinState {
@@ -58,6 +69,7 @@ final class V2GroupInvitationStore {
         default: return false
         }
     }
+    /// 面向用户的加入流程反馈文案；无反馈时为 `nil`。
     var joinFeedback: String? {
         switch joinState {
         case .failed(let message), .retryable(_, let message), .completed(_, let message): message
@@ -71,11 +83,20 @@ final class V2GroupInvitationStore {
 
     init(client: any V2ClientGroupInvitationManaging) { self.client = client }
 
+    /// 加载该房间的邀请列表与待处理入群申请。
+    ///
+    /// - Parameter roomID: 目标群组房间标识。
     func loadManagement(roomID: String) async {
         guard let room = try? RoomID(roomID) else { feedback = "群聊标识无效。"; return }
         await perform { try await refreshManagement(room: room) }
     }
 
+    /// 创建一条群邀请。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标群组房间标识。
+    ///   - lifetimeSeconds: 邀请有效期秒数，默认 7 天。
+    ///   - maximumUses: 最多可被批准使用的次数，默认 100。
     func create(roomID: String, lifetimeSeconds: Int = 7 * 86_400, maximumUses: Int = 100) async {
         guard let room = try? RoomID(roomID) else { feedback = "群聊标识无效。"; return }
         let operation = operationID(for: "create:\(roomID)")
@@ -86,6 +107,9 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 撤销一条群邀请。
+    ///
+    /// - Parameter link: 待撤销的邀请链接。
     func revoke(_ link: V2GroupInviteLink) async {
         let key = "revoke:\(link.inviteID.rawValue)"
         let operation = operationID(for: key)
@@ -96,6 +120,11 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 批准或拒绝一条入群申请。
+    ///
+    /// - Parameters:
+    ///   - request: 待处理的入群申请。
+    ///   - decision: 批准或拒绝。
     func decide(_ request: V2GroupJoinRequest, decision: V2GroupJoinDecision) async {
         let key = "decision:\(request.requestID.rawValue):\(decision.rawValue)"
         let operation = request.resumableDecisionOperationID?.uuidValue ?? operationID(for: key)
@@ -106,6 +135,9 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 按游标继续读取待处理入群申请。
+    ///
+    /// - Parameter roomID: 目标群组房间标识。
     func loadMoreRequests(roomID: String) async {
         guard let room = try? RoomID(roomID), let cursor = nextRequestCursor else { return }
         await perform {
@@ -116,6 +148,11 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 解析用户提供的邀请链接或二维码内容并进入预览流程。
+    ///
+    /// 只有预览成功且回传的秘密值与输入匹配时，后续才允许提交。
+    ///
+    /// - Parameter value: 邀请链接或扫码得到的原始文本。
     func open(_ value: String) async {
         guard !isInvalidated else { return }
         let secret = Self.secret(from: value)
@@ -149,6 +186,9 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 提交入群申请。
+    ///
+    /// - Parameter note: 可选的申请附言。
     func submit(note: String?) async {
         guard canSubmit, let invitation = previewedInvitation else { return }
         let generation = joinGeneration
@@ -195,6 +235,7 @@ final class V2GroupInvitationStore {
         }
     }
 
+    /// 结束当前加入流程并清空预览状态。
     func dismissJoin() {
         cancelJoinWork()
         isPresentingJoin = false
@@ -202,6 +243,7 @@ final class V2GroupInvitationStore {
         joinState = .idle
     }
 
+    /// 使整个容器失效；失效后不再接受新的提交动作。
     func invalidate() {
         isInvalidated = true
         dismissJoin()
@@ -276,6 +318,9 @@ final class V2GroupInvitationStore {
     }
 }
 
+/// 群邀请管理页。
+///
+/// 展示该房间的邀请链接、二维码与待处理入群申请，并提供创建、撤销与审批入口。
 struct V2GroupInvitationManagementSheet: View {
     @Bindable var store: V2GroupInvitationStore
     let roomID: String
@@ -335,6 +380,9 @@ struct V2GroupInvitationManagementSheet: View {
     }
 }
 
+/// 入群申请页。
+///
+/// 支持粘贴链接或扫码进入预览，并在预览通过后提交带附言的入群申请。
 struct V2GroupJoinSheet: View {
     @Bindable var store: V2GroupInvitationStore
     @State private var input = ""
@@ -371,12 +419,14 @@ struct V2GroupJoinSheet: View {
     }
 }
 
+/// 使用 VisionKit 扫描群邀请二维码的 SwiftUI 包装。
 private struct V2GroupInviteScanner: UIViewControllerRepresentable {
     let found: @MainActor (String) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(found: found) }
     func makeUIViewController(context: Context) -> DataScannerViewController { let controller = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])], recognizesMultipleItems: false); controller.delegate = context.coordinator; try? controller.startScanning(); return controller }
     func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {}
     static func dismantleUIViewController(_ uiViewController: DataScannerViewController, coordinator: Coordinator) { uiViewController.stopScanning() }
+    /// 把识别到的二维码文本回调给调用方。
     @MainActor final class Coordinator: NSObject, DataScannerViewControllerDelegate {
         let found: @MainActor (String) -> Void
         init(found: @escaping @MainActor (String) -> Void) { self.found = found }

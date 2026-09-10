@@ -2,10 +2,19 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Resolves a group's effective role policy without conflating an older group
-/// with no policy rows and a deliberate empty policy. The current policy marker
-/// survives operation-receipt cleanup; the materialized permission table
-/// intentionally has no rows for an explicit deny-all policy.
+/// 解析群聊某个角色的生效权限策略，不把「历史群无策略行」与「显式清空策略」混为一谈。
+///
+/// 策略标记行不会随操作回执清理而删除，因此可据此区分两种状态：
+/// 返回 `nil` 表示角色为群主或没有显式策略，调用方应使用内建默认权限；
+/// 返回空集合表示存在显式策略且该策略拒绝全部权限。
+///
+/// - Parameters:
+///   - roomID: 目标房间。
+///   - role: 待解析的角色；群主直接返回 `nil`。
+///   - sql: 当前事务使用的数据库连接。
+/// - Returns: 显式配置的权限集合；无显式策略时为 `nil`。
+/// - Throws: 权限行包含未知权限值时抛出
+///   ``V2RoomWriteStoreError/corruptPersistenceState``。
 func v2ResolvedGroupPermissions(
     roomID: UUID,
     role: V2RoomMembershipRole,

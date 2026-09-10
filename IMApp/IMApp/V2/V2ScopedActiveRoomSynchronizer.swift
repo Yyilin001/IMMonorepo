@@ -2,9 +2,11 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 
-/// One detail-view task owns this adapter and its lease. Cancelling a grace
-/// wait cancels only that waiter, while the snapshot pump keeps the lease live.
+/// 单个详情页任务持有该适配器及其租约。
+///
+/// 取消宽限等待只会取消对应的等待者，快照泵仍会维持租约存活。
 actor V2ScopedActiveRoomSynchronizer: V2ActiveHybridGroupSynchronizing {
+    /// 是否使用运行时恢复时钟（该适配器恒为真）。
     nonisolated let usesRuntimeRecoveryClock = true
     private let roomID: RoomID
     private let owner: V2RoomSubscriptionCoordinator
@@ -19,6 +21,12 @@ actor V2ScopedActiveRoomSynchronizer: V2ActiveHybridGroupSynchronizing {
     private var pending: V2ActiveHybridGroupWake?
     private var waiter: (id: UUID, continuation: CheckedContinuation<V2ActiveHybridGroupWake, Error>)?
 
+    /// 以房间、订阅协调器与底层同步实现构造适配器。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - owner: 负责线路订阅的协调器。
+    ///   - base: 实际的混合大群同步实现。
     init(roomID: RoomID, owner: V2RoomSubscriptionCoordinator, base: any V2ActiveHybridGroupSynchronizing) {
         self.roomID = roomID
         self.owner = owner

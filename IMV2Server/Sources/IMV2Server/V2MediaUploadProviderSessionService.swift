@@ -1,10 +1,19 @@
 import Foundation
 import IMV2Core
 
-/// Provider capability for issuing a single short-lived upload target. It is
-/// intentionally separate from the download capability so a deployment cannot
-/// accidentally grant write access to a download-only adapter.
+/// 提供方签发单个短时上传目标的能力。
+///
+/// 该能力与下载能力刻意分离，避免部署时误把写权限授予仅支持下载的适配器。
 public protocol V2MediaUploadObjectProvider: Sendable {
+    /// 为指定媒体签发上传目标。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - contentType: 媒体内容类型。
+    ///   - byteCount: 期望上传字节数。
+    ///   - expiresAt: 目标到期时刻。
+    /// - Returns: 提供方对象目标。
+    /// - Throws: 提供方失败时抛出。
     func issueUploadTarget(
         mediaID: MediaID,
         contentType: String,
@@ -13,14 +22,30 @@ public protocol V2MediaUploadObjectProvider: Sendable {
     ) async throws -> V2MediaProviderObjectTarget
 }
 
+/// 已认领的上传会话。
 public struct V2ClaimedMediaUpload: Equatable, Sendable {
+    /// 目标媒体标识。
     public let mediaID: MediaID
+    /// 上传会话标识。
     public let uploadSessionID: MediaUploadSessionID
+    /// 媒体内容类型。
     public let contentType: String
+    /// 期望上传字节数。
     public let byteCount: Int64
+    /// 会话到期时刻。
     public let expiresAt: Date
+    /// 本次认领令牌。
     public let claimToken: UUID
 
+    /// 保存已认领的上传会话。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - uploadSessionID: 上传会话标识。
+    ///   - contentType: 媒体内容类型。
+    ///   - byteCount: 期望上传字节数。
+    ///   - expiresAt: 会话到期时刻。
+    ///   - claimToken: 本次认领令牌。
     public init(
         mediaID: MediaID,
         uploadSessionID: MediaUploadSessionID,
@@ -38,9 +63,21 @@ public struct V2ClaimedMediaUpload: Equatable, Sendable {
     }
 }
 
-/// The store atomically verifies the currently authenticated device, owner,
-/// `pending_upload` state, and grant state before provider access is issued.
+/// 上传会话的持久化能力。
+///
+/// 在签发提供方访问之前，存储会原子校验当前已认证设备、会话归属、
+/// 媒体的 `pending_upload` 状态以及授权状态。
 public protocol V2MediaUploadSessionStore: Sendable {
+    /// 认领上传会话。
+    ///
+    /// - Parameters:
+    ///   - ownerUserID: 会话归属用户。
+    ///   - deviceID: 发起兑换的设备。
+    ///   - uploadSessionID: 上传会话标识。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数。
+    /// - Returns: 已认领的上传会话。
+    /// - Throws: 会话不可认领或持久化失败时抛出。
     func claimUpload(
         ownerUserID: UserID,
         deviceID: DeviceID,
@@ -48,19 +85,39 @@ public protocol V2MediaUploadSessionStore: Sendable {
         now: Date,
         leaseDuration: TimeInterval
     ) async throws -> V2ClaimedMediaUpload
+    /// 将已认领会话标记为已消费。
+    ///
+    /// - Parameters:
+    ///   - claim: 已认领的上传会话。
+    ///   - now: 完成时刻。
+    /// - Throws: 会话不可消费或持久化失败时抛出。
     func completeUploadTarget(_ claim: V2ClaimedMediaUpload, now: Date) async throws
+
+    /// 释放已认领但未消费的会话。
+    ///
+    /// - Parameter claim: 已认领的上传会话。
+    /// - Throws: 持久化失败时抛出。
     func releaseUploadTarget(_ claim: V2ClaimedMediaUpload) async throws
 }
 
-/// Exchanges one durable, device-bound upload session for one in-memory
-/// provider target. The completion callback remains separate: it may only
-/// advance the media state after this target exchange has been consumed.
+/// 把一次持久化的设备绑定上传会话兑换为内存中的提供方目标。
+///
+/// 完成回调保持独立：只有在该目标兑换被消费之后，它才可以推进媒体状态。
 public struct V2MediaUploadProviderSessionService: Sendable {
     private let store: any V2MediaUploadSessionStore
     private let provider: any V2MediaUploadObjectProvider
     private let leaseDuration: TimeInterval
     private let now: @Sendable () -> Date
 
+    /// 组合上传会话存储与提供方。
+    ///
+    /// - Parameters:
+    ///   - store: 上传会话的持久化存储。
+    ///   - provider: 签发上传目标的提供方。
+    ///   - leaseDuration: 认领租约时长秒数，需为正的有限值，默认 15 秒。
+    ///   - now: 可注入的当前时刻读取函数。
+    /// - Throws: 租约时长非正或非有限时抛出
+    ///   ``V2MediaUploadProviderSessionError/invalidLeaseDuration``。
     public init(
         store: any V2MediaUploadSessionStore,
         provider: any V2MediaUploadObjectProvider,
@@ -74,6 +131,21 @@ public struct V2MediaUploadProviderSessionService: Sendable {
         self.now = now
     }
 
+    /// 认领上传会话并兑换提供方上传目标。
+    ///
+    /// 提供方返回值必须全部通过契约校验才会被消费：目标到期时间需晚于当前时刻且不晚于会话到期、
+    /// 地址必须是带主机的 HTTPS 且不含用户信息与片段、期望字节数需与会话一致、
+    /// 响应头需满足允许策略。任一步骤失败都会释放本次认领。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起兑换的用户。
+    ///   - deviceID: 发起兑换的设备。
+    ///   - uploadSessionID: 上传会话标识。
+    /// - Returns: 提供方对象目标。
+    /// - Throws: 时刻不可编码时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``；
+    ///   会话已过期时抛出 ``V2MediaUploadProviderSessionError/expiredSession``；
+    ///   提供方返回值不满足契约时抛出
+    ///   ``V2MediaUploadProviderSessionError/invalidProviderTarget``。
     public func exchangeUpload(
         actorUserID: UserID,
         deviceID: DeviceID,
@@ -128,8 +200,12 @@ public struct V2MediaUploadProviderSessionService: Sendable {
     }
 }
 
+/// 上传提供方会话错误。
 public enum V2MediaUploadProviderSessionError: Error, Equatable, Sendable {
+    /// 租约时长非正或非有限。
     case invalidLeaseDuration
+    /// 上传会话或提供方目标已过期。
     case expiredSession
+    /// 提供方返回值不满足目标契约。
     case invalidProviderTarget
 }

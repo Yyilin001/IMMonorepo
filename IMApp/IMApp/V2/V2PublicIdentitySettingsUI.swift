@@ -117,9 +117,9 @@ final class V2PublicIdentitySettingsStore {
         }
     }
 
-    /// Loads only a device-local copy obtained from the authenticated media
-    /// edge, then decodes a bounded thumbnail away from MainActor. The view
-    /// never retains the original compressed file or a full-resolution image.
+    /// 仅加载来自已认证媒体边缘的设备本地副本，并在主线程之外解码为有界缩略图。
+    ///
+    /// 视图既不会保留原始压缩文件，也不会保留全分辨率图像。
     func avatarPreviewImage(cache: V2LocalMediaThumbnailCache) async -> UIImage? {
         do {
             let fileURL: URL

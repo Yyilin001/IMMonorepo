@@ -4,8 +4,9 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// The plaintext pair returned only to the separately trusted account/device
-/// boundary. It must never enter logs, telemetry, or gateway responses.
+/// 仅返回给单独受信的账号与设备边界的明文凭据对。
+///
+/// 它绝不能进入日志、遥测或网关响应。
 public struct V2IssuedDeviceCredentials: Equatable, Sendable {
     public let userID: UserID
     public let deviceID: DeviceID
@@ -29,9 +30,9 @@ public struct V2IssuedDeviceCredentials: Equatable, Sendable {
     }
 }
 
-/// A trusted identity system authenticates the human/account before it calls
-/// this boundary. V2 intentionally does not prescribe password, SMS, SSO, or
-/// third-party identity policy here.
+/// 受信身份系统在调用该边界之前已完成自然人/账号的认证。
+///
+/// V2 在此刻意不规定密码、短信、SSO 或第三方身份策略。
 public struct V2TrustedDeviceRegistration: Sendable {
     public let userID: UserID
     public let deviceID: DeviceID
@@ -51,9 +52,9 @@ public struct V2TrustedDeviceRegistration: Sendable {
     }
 }
 
-/// Client-supplied, non-security-sensitive information used only to make a
-/// signed-in device recognisable to its account owner. It deliberately does
-/// not contain an advertising ID, IP address, or OS version.
+/// 由客户端提供的非安全敏感信息，仅用于让账号所有者能识别已登录设备。
+///
+/// 它刻意不包含广告标识、IP 地址或系统版本。
 public struct V2DeviceRegistrationMetadata: Equatable, Sendable {
     public let displayName: String
     public let platform: String
@@ -113,10 +114,10 @@ public enum V2DeviceRegistrationOutcome: Equatable, Sendable {
 public enum V2DeviceCredentialRefreshOutcome: Equatable, Sendable {
     case rotated(V2IssuedDeviceCredentials)
     case idempotent(V2IssuedDeviceCredentials)
-    /// The refresh value was invalid or expired. A device family is revoked
-    /// only when the presented digest proves reuse of a previously consumed
-    /// refresh credential; an arbitrary mismatch is a state-preserving
-    /// rejection and cannot be used to log another installation out.
+    /// 刷新值无效或已过期。
+    ///
+    /// 只有当提交的摘要能证明复用了此前已消费的刷新凭据时，才会吊销整个设备族；
+    /// 任意的摘要不匹配只是保持状态的拒绝，不能被用来把另一台安装登出。
     case terminalRejection
 }
 
@@ -168,17 +169,18 @@ public struct V2DeviceRegistrationPolicy: Equatable, Sendable {
     }
 }
 
-/// Stable boundary used by a separately deployed account-assertion adapter.
-/// The issuer implementation owns credential persistence; HTTP and identity
-/// adapters only translate their trusted input into this domain request.
+/// 由单独部署的账号断言适配器使用的稳定边界。
+///
+/// 凭据持久化由签发实现负责；HTTP 与身份适配器只把自己的受信输入转换为该领域请求。
 public protocol V2DeviceCredentialIssuing: Sendable {
     func register(_ request: V2CancellableDeviceRegistration) async throws -> V2DeviceRegistrationOutcome
     func refresh(_ request: V2DeviceCredentialRefresh) async throws -> V2DeviceCredentialRefreshOutcome
 }
 
-/// Envelope key for the bounded replay result. The database only receives
-/// authenticated ciphertext; this key is deployment-secret material and must
-/// be supplied separately from the token HMAC key.
+/// 有界重放结果使用的信封密钥。
+///
+/// 数据库只会收到经过认证的密文；该密钥属于部署机密材料，
+/// 必须与令牌 HMAC 密钥分开提供。
 public struct V2CredentialReplayEnvelopeKey: Sendable {
     private let rawBytes: Data
 
@@ -231,9 +233,10 @@ public struct V2OpaqueCredentialGenerator: Sendable {
     }
 }
 
-/// PostgreSQL-backed Auth service. Every successful registration or rotation
-/// atomically stores the active token digest, refresh-family state, and an
-/// encrypted replay result before returning plaintext to the trusted caller.
+/// 基于 PostgreSQL 的设备认证服务。
+///
+/// 每次成功注册或轮换都会在向受信调用方返回明文之前，
+/// 原子地保存生效令牌摘要、刷新设备族状态与加密后的重放结果。
 public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Sendable {
     private let database: any Database
     private let tokenHMACKey: V2AccessTokenHMACKey

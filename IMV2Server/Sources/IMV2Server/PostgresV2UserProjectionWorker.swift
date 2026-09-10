@@ -22,9 +22,9 @@ public struct V2UserProjectionWorkerReport: Equatable, Sendable {
     }
 }
 
-/// Folds a bounded, contiguous sync-log batch into canonical current snapshot
-/// items. The checkpoint row is locked for the whole short transaction, so
-/// multiple gateway processes can safely run this worker concurrently.
+/// 把有界且连续的同步日志批次折叠为规范当前快照条目。
+///
+/// 整个短事务期间都会锁定检查点行，因此多个网关进程可以安全地并发运行该工作器。
 public struct PostgresV2UserProjectionWorker: Sendable {
     private let database: any Database
     private let schema: String
@@ -226,12 +226,15 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         }
     }
 
-    /// Returns a typed fast-path input only for the immutable revision-one
-    /// state shape produced by `PostgresV2MessageProjectionStateRepository`.
-    /// Full payload validation belongs to that single state-creation boundary;
-    /// this recipient-specific path rechecks identity, revision, room, event
-    /// and deterministic state ID without decoding the same body per user.
-    /// Anything else deliberately falls back to the established state machine.
+    /// 仅在状态符合 `PostgresV2MessageProjectionStateRepository` 产出的不可变修订 1 形态时，
+    /// 返回类型化的快速路径输入。
+    ///
+    /// 完整的载荷校验属于那个唯一的状态创建边界；这条按接收者展开的路径只复核身份、修订、
+    /// 房间、事件与确定性状态标识，避免为每个用户重复解码同一份正文。
+    /// 其余情况一律刻意回落到既有状态机。
+    ///
+    /// - Parameter row: 待判定的投影同步行。
+    /// - Returns: 可走批量快速路径的输入；不满足条件时返回 `nil`。
     private func acceptedMessageBatchInput(
         _ row: ProjectionSyncRow
     ) -> AcceptedMessageProjectionBatchInput? {
@@ -269,10 +272,16 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         )
     }
 
-    /// Closes and inserts a run of independent accepted-message versions in
-    /// one PostgreSQL round trip. The final count is an integrity fence: one
-    /// invalid state throws and rolls the entire surrounding checkpoint
-    /// transaction back, exactly like the sequential implementation.
+    /// 在一次 PostgreSQL 往返内关闭并插入一段相互独立的已接受消息版本。
+    ///
+    /// 最终计数是一道完整性栅栏：只要出现一个非法状态就抛出，并把整个外层检查点事务回滚，
+    /// 与逐条实现的语义完全一致。
+    ///
+    /// - Parameters:
+    ///   - inputs: 本批快速路径输入。
+    ///   - userID: 目标用户。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Throws: 任一状态非法或持久化失败时抛出。
     private func applyAcceptedMessageBatch(
         _ inputs: [AcceptedMessageProjectionBatchInput],
         userID: UUID,

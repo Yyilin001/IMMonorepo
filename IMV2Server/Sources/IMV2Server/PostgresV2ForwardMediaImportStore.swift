@@ -3,19 +3,36 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Reserves stable target objects before I/O, and fences copied/scanned facts
-/// by a durable lease. No byte transfer or scanner runs under these locks.
+/// 转发媒体导入的持久化实现。
+///
+/// 在执行 I/O 之前先预留稳定的目标对象，并用持久化租约栅栏复制与扫描结果；
+/// 这些锁下不会进行任何字节传输或扫描。
 public struct PostgresV2ForwardMediaImportStore: Sendable {
     private let database: any Database
     private let temporaryLifetime: TimeInterval
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库与临时对象存活时长。
+    ///
+    /// - Parameters:
+    ///   - database: 存放转发收件箱与导入任务的数据库。
+    ///   - temporaryLifetime: 临时对象存活秒数，需为正的有限值，默认 24 小时。
+    ///   - makeUUID: 导入任务标识生成方式。
+    /// - Throws: 存活时长非正或非有限时抛出
+    ///   ``V2ForwardMediaCopyError/invalidReceipt``。
     public init(database: any Database, temporaryLifetime: TimeInterval = 86_400,
                 makeUUID: @escaping @Sendable () -> UUID = UUID.init) throws {
         guard temporaryLifetime.isFinite, temporaryLifetime > 0 else { throw V2ForwardMediaCopyError.invalidReceipt }
         self.database = database; self.temporaryLifetime = temporaryLifetime; self.makeUUID = makeUUID
     }
 
+    /// 判断该导出是否存在暂停的媒体导入任务。
+    ///
+    /// 用于让源端投递在上一进程暂停后不再无限等待为「空闲」。
+    ///
+    /// - Parameter exportID: 目标导出标识。
+    /// - Returns: 存在暂停任务且收件箱仍待处理时为 `true`。
+    /// - Throws: 连接不支持 SQL 时抛出 ``V2ForwardInboxError/corruptPersistenceState``。
     func hasPausedImport(exportID: UUID) async throws -> Bool {
         guard let sql = database as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
         return try await sql.raw("""
@@ -27,6 +44,20 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
             """).first(decoding: ImportPausedRow.self)?.value == true
     }
 
+    /// 认领一次媒体导入任务。
+    ///
+    /// 事务先锁定目标收件箱，仅在其处于待处理状态时继续；随后在付出对象 I/O 之前
+    /// 复核目标房间存在性与当前权限，因此权限变化会让本次认领直接失败。
+    ///
+    /// - Parameters:
+    ///   - exportID: 目标导出标识。
+    ///   - now: 本次认领时刻。
+    ///   - leaseDuration: 租约时长秒数，需大于零且不超过 3600。
+    /// - Returns: 本次导入租约；收件箱不在待处理状态时返回 `nil`。
+    /// - Throws: 租约时长越界时抛出 ``V2ForwardMediaCopyError/invalidReceipt``；
+    ///   目标房间不存在时抛出 ``V2ForwardInboxError/targetNotFound``；
+    ///   时刻不可编码或归属校验失败时抛出
+    ///   ``V2ForwardInboxError/corruptPersistenceState``。
     public func claim(exportID: UUID, now: Date, leaseDuration: TimeInterval) async throws -> V2ForwardMediaImportLease? {
         guard leaseDuration.isFinite, leaseDuration > 0, leaseDuration <= 3_600 else { throw V2ForwardMediaCopyError.invalidReceipt }
         return try await database.transaction { transaction in
@@ -116,6 +147,14 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
         }
     }
 
+    /// 记录已完成的字节复制，并按租约栅栏判断是否仍然有效。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次导入租约。
+    ///   - receipt: 复制回执。
+    ///   - now: 记录时刻。
+    /// - Returns: 记录生效时为 `true`；租约已被取代时为 `false`。
+    /// - Throws: 持久化失败时抛出。
     public func recordCopied(_ lease: V2ForwardMediaImportLease, receipt: V2ForwardMediaCopyReceipt, now: Date) async throws -> Bool {
         guard receipt.byteCount == lease.source.byteCount else { throw V2ForwardMediaCopyError.byteCountMismatch }
         return try await mutate(lease, now: now) { sql, job, _ in
@@ -132,6 +171,15 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
         }
     }
 
+    /// 记录复制与扫描均完成的结果。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次导入租约。
+    ///   - receipt: 复制回执。
+    ///   - result: 扫描结论。
+    ///   - now: 完成时刻。
+    /// - Returns: 记录生效时为 `true`；租约已被取代时为 `false`。
+    /// - Throws: 持久化失败时抛出。
     public func complete(_ lease: V2ForwardMediaImportLease, receipt: V2ForwardMediaCopyReceipt, result: V2MediaScanResult, now: Date) async throws -> Bool {
         try await mutate(lease, now: now) { sql, job, inbox in
             guard job.digest == receipt.digest, receipt.byteCount == lease.source.byteCount else { throw V2ForwardMediaCopyError.contentConflict }
@@ -158,12 +206,27 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
         }
     }
 
+    /// 把导入标记为确定拒绝。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次导入租约。
+    ///   - now: 记录时刻。
+    /// - Returns: 记录生效时为 `true`；租约已被取代时为 `false`。
+    /// - Throws: 持久化失败时抛出。
     public func reject(_ lease: V2ForwardMediaImportLease, now: Date) async throws -> Bool {
         try await mutate(lease, now: now) { sql, job, inbox in
             try await reject(job: job, lease: lease, inbox: inbox, now: now, sql: sql)
         }
     }
 
+    /// 按处置结果安排重试或暂停。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次导入租约。
+    ///   - disposition: 下一步处置。
+    ///   - now: 记录时刻。
+    /// - Returns: 记录生效时为 `true`；租约已被取代时为 `false`。
+    /// - Throws: 持久化失败时抛出。
     public func retry(_ lease: V2ForwardMediaImportLease, disposition: V2DurableRetryDisposition, now: Date) async throws -> Bool {
         try await mutate(lease, now: now) { sql, _, _ in
             let state: String, deadline: Date?

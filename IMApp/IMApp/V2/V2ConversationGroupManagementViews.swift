@@ -5,6 +5,9 @@ import Observation
 import SwiftUI
 import UIKit
 
+/// 会话详情内的群公告横幅。
+///
+/// 展示最新公告摘要，点击后进入编辑页；横幅本身不发起网络请求。
 struct V2GroupAnnouncementBanner: View {
     let announcement: V2ClientGroupAnnouncement
     let edit: () -> Void
@@ -37,6 +40,9 @@ struct V2GroupAnnouncementBanner: View {
     }
 }
 
+/// 群公告编辑页。
+///
+/// 保存前只做长度与空内容校验，最终权限与版本冲突仍由服务端裁决。
 struct V2GroupAnnouncementSheet: View {
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
@@ -85,6 +91,10 @@ struct V2GroupAnnouncementSheet: View {
     }
 }
 
+/// 群权限编辑页。
+///
+/// 按角色（管理员/普通成员）分别编辑权限集合，
+/// 并以策略修订作为乐观并发栅栏提交。
 struct V2GroupPermissionsSheet: View {
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
@@ -245,6 +255,9 @@ private extension V2GroupPermission {
     }
 }
 
+/// 单条消息的群已读详情页。
+///
+/// 展示已读成员列表并支持按游标继续加载。
 struct V2GroupReadReceiptsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: V2ConversationDetailStore
@@ -293,6 +306,9 @@ struct V2GroupReadReceiptsSheet: View {
     }
 }
 
+/// 群成员管理页。
+///
+/// 提供成员列表、成员增删与角色调整入口，所有变更都以任务串行化。
 struct V2GroupMembersSheet: View {
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
@@ -496,6 +512,11 @@ struct V2GroupMembersSheet: View {
     }
 }
 
+/// 通过 VoiceOver 播报一条无障碍提示。
+///
+/// 仅在 VoiceOver 正在运行时才会发送通知，避免在未开启读屏时产生无效副作用。
+///
+/// - Parameter message: 待播报的文案。
 @MainActor
 func announceV2AccessibilityAnnouncement(_ message: String) {
     guard UIAccessibility.isVoiceOverRunning else { return }

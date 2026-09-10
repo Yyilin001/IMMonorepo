@@ -5,8 +5,10 @@ import IMV2Core
 import PostgresNIO
 import SQLKit
 
-/// A receipt does not acknowledge transport delivery. This transaction only
-/// advances explicit human-viewing state and records its stable operation ID.
+/// 已读回执存储。
+///
+/// 回执不代表确认了传输投递。该事务只推进明确的人工阅读状态，
+/// 并记录其稳定的操作 ID。
 public struct PostgresV2ReadReceiptStore:
     V2GroupReadReceiptOwnerStore,
     V2OwnerValidatedReadReceiptStore,
@@ -69,9 +71,16 @@ public struct PostgresV2ReadReceiptStore:
         return result.outcome
     }
 
-    /// Executes only the room-owned group receipt graph. A direct room is
-    /// reported to the routed facade instead of being handled here because
-    /// direct receipts also produce a user-owned reciprocal projection.
+    /// 只执行房间归属的群组回执图。
+    ///
+    /// 单聊房间会被上报给路由门面处理，而不在此处理，
+    /// 因为单聊回执还会产生用户归属的对向投影。
+    ///
+    /// - Parameters:
+    ///   - command: 记录已读回执的命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 群组回执记录尝试结果。
+    /// - Throws: 时间戳无法编码或持久化状态损坏时抛出。
     public func recordGroup(
         command: V2RecordReadReceiptCommand,
         now: Date
@@ -157,11 +166,18 @@ public struct PostgresV2ReadReceiptStore:
         return results
     }
 
-    /// Set-based group receipt transaction. One ordered advisory-lock graph
-    /// fences every operation and `(room,user)` cursor before a single SQL
-    /// statement validates membership, advances monotonic cursors and writes
-    /// every idempotency record. Domain-invalid rows are returned separately;
-    /// they never roll back valid rows in the same batch.
+    /// 集合式的群组回执事务。
+    ///
+    /// 单个有序的咨询锁图会为每个操作与 `(room,user)` 游标建立围栏，
+    /// 随后由一条 SQL 语句校验成员关系、推进单调游标并写入全部幂等记录。
+    /// 领域非法的行会单独返回；它们绝不会回滚同一批次中的合法行。
+    ///
+    /// - Parameters:
+    ///   - command: 记录已读回执的命令。
+    ///   - ownerRoute: 房间当前所属分片路由。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 群组回执记录尝试结果。
+    /// - Throws: 时间戳无法编码、路由非法或持久化状态损坏时抛出。
     public func recordGroupOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute, now: Date) async throws -> V2GroupReadReceiptRecordingAttempt {
         let results = try await recordGroupsOwnerValidated([.init(request: .init(command: command, now: now), ownerRoute: ownerRoute)])
         guard let result = results.first, results.count == 1 else { throw V2ReadReceiptStoreError.corruptPersistenceState }
@@ -297,18 +313,23 @@ public struct PostgresV2ReadReceiptStore:
         }
     }
 
-    /// Group read state is room-owned, monotonic state. It does not advance
-    /// `rooms.room_sequence`, so locking the room row only serializes receipts
-    /// behind unrelated message appends and membership changes. The statement
-    /// snapshot is a valid linearization point for the room/membership check;
-    /// the receipt UPSERT itself serializes concurrent cursors for one user.
+    /// 记录群组回执，或命中已有的重放结果。
     ///
-    /// The operation advisory lock is acquired by the caller in a preceding
-    /// statement. Consequently an in-flight retry has committed before this
-    /// statement takes its READ COMMITTED snapshot, allowing the same query to
-    /// return the stable prior result without a speculative operation row.
-    /// A new direct-room receipt returns nil and deliberately falls back to the
-    /// existing projection-producing transaction below.
+    /// 群组已读状态是房间归属的单调状态。它不推进 `rooms.room_sequence`，
+    /// 因此锁定房间行只会把回执排到无关的消息追加与成员变更之后。
+    /// 语句快照是房间/成员校验的有效线性化点；回执 UPSERT 本身则为单个用户串行化并发游标。
+    ///
+    /// 操作咨询锁由调用方在先前的语句中获取。因此仍在进行中的重试会在该语句
+    /// 取得 READ COMMITTED 快照之前完成提交，使同一查询无需投机写入操作行
+    /// 即可返回稳定的既有结果。
+    /// 新的单聊回执会返回 `nil`，并刻意回退到下方既有的、会生成投影的事务。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - userID: 记录回执的用户标识。
+    ///   - operationID: 该回执操作的稳定标识。
+    /// - Returns: 已提交的群组回执尝试结果；属于单聊时返回 `nil`。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func recordGroupOrReplay(
         roomID: UUID,
         userID: UUID,
@@ -989,10 +1010,11 @@ private struct GroupReceiptBatchRow: Sendable {
     let recordedAt: Date?
 }
 
-/// Operation locks must complete in a statement before the write statement
-/// starts. PostgreSQL READ COMMITTED takes a snapshot at statement start; if
-/// a retry waited for an in-flight operation lock inside the write statement,
-/// that same snapshot could not see the commit it waited for.
+/// 操作锁必须在写入语句开始之前、于单独一条语句中取得。
+///
+/// PostgreSQL READ COMMITTED 会在语句开始时取得快照；
+/// 若重试是在写入语句内部等待某个在途操作锁，
+/// 那份快照就无法看到它刚刚等待到的提交。
 private struct GroupReceiptBatchLockStatement: PostgresPreparedStatement {
     static let name = "im_v2_group_read_receipt_batch_locks_v3"
     static let sql = """
@@ -1359,9 +1381,16 @@ private struct ReceiptProjectionShadowRequest: Sendable {
     }
 }
 
-/// UUIDv5-shaped, SHA-256-derived IDs keep one preference operation stable
-/// across retries while giving each direct room its own projection identity.
-/// The database's non-fan-out uniqueness fence can therefore remain strict.
+/// 生成回执墓碑的来源事件 ID。
+///
+/// 采用 UUIDv5 形态、由 SHA-256 派生的 ID，使同一次偏好操作在重试之间保持稳定，
+/// 同时让每个单聊房间拥有自己的投影标识。
+/// 数据库的非扇出唯一性围栏因此可以保持严格。
+///
+/// - Parameters:
+///   - operationID: 偏好操作标识。
+///   - roomID: 目标房间标识。
+/// - Returns: 稳定派生的来源事件 ID。
 func receiptTombstoneSourceEventID(operationID: UUID, roomID: UUID) -> UUID {
     let input = "im-v2:read-receipt-tombstone:\(operationID.uuidString.lowercased()):\(roomID.uuidString.lowercased())"
     var bytes = Array(SHA256.hash(data: Data(input.utf8)).prefix(16))

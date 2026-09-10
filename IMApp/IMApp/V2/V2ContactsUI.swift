@@ -4,8 +4,9 @@ import IMV2Core
 import Observation
 import SwiftUI
 
-/// Presentation data assembled at the local projection boundary. Views never
-/// receive a GRDB row or a transport DTO, and never render the opaque ID.
+/// 在本地投影边界组装好的展示数据。
+///
+/// 视图既不会收到 GRDB 行或传输 DTO，也不会渲染不透明标识。
 struct V2ContactListItem: Identifiable, Sendable {
     enum Relationship: Equatable, Sendable {
         case friend
@@ -64,9 +65,9 @@ protocol V2ContactsReading: Sendable {
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws
 }
 
-/// App-side composition of the reusable ClientKit stores. The profile reader
-/// receives the relationship authorization context; it cannot turn a list of
-/// IDs into a global profile directory.
+/// 应用侧对可复用 ClientKit 存储的组合。
+///
+/// 资料读取器只会收到关系授权上下文，因此无法把一组标识变成全局资料目录。
 actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
     private let localStore: GRDBV2LocalSyncStore
     private let profiles: V2ProfileRepository

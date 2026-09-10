@@ -3,17 +3,35 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL implementation of the narrowly scoped operator replay action.
-/// The audit insert, paused-state transition and idempotency result are one
-/// transaction. A process crash therefore leaves either no audit record or a
-/// complete replay result—never an ambiguous administrative action.
+/// 范围受限的运维重放动作的 PostgreSQL 实现。
+///
+/// 审计写入、暂停状态跃迁与幂等结果属于同一个事务：进程崩溃后要么没有审计记录，
+/// 要么留下完整可重放的结果，绝不会出现含义不明的管理动作。
 public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放各工作状态表与重放审计的数据库。
     public init(database: any Database) {
         self.database = database
     }
 
+    /// 执行一次运维重放。
+    ///
+    /// 同一操作标识已有审计记录时，校验其目标与本次完全一致并返回原结论；
+    /// 否则先以唯一约束抢占该操作标识，再按目标类型把对应工作恢复为待处理，最后回填审计结论。
+    /// 目标当前不在暂停状态时会记录「未暂停」结论，作为可重放的审计证据而非错误。
+    ///
+    /// - Parameters:
+    ///   - command: 重放命令。
+    ///   - operatorPrincipal: 已认证的运维主体标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 重放结果。
+    /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2DurableWorkReplayStoreError/corruptPersistenceState``；
+    ///   同一操作标识的目标不一致时抛出
+    ///   ``V2DurableWorkReplayStoreError/idempotencyConflict``。
     public func replay(
         _ command: V2DurableWorkReplayCommand,
         operatorPrincipal: String,
@@ -209,6 +227,12 @@ private struct DurableWorkReplayAuditRow: Decodable {
     }
 }
 
+/// 把事件标识解析为 UUID。
+///
+/// - Parameter identifier: 来源事件标识。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2DurableWorkReplayStoreError/corruptPersistenceState``。
 private func replayUUID(_ identifier: EventID) throws -> UUID {
     guard let value = UUID(uuidString: identifier.rawValue) else {
         throw V2DurableWorkReplayStoreError.corruptPersistenceState
@@ -216,6 +240,12 @@ private func replayUUID(_ identifier: EventID) throws -> UUID {
     return value
 }
 
+/// 把用户标识解析为 UUID。
+///
+/// - Parameter identifier: 用户标识。
+/// - Returns: 对应的 UUID。
+/// - Throws: 原始值不是合法 UUID 时抛出
+///   ``V2DurableWorkReplayStoreError/corruptPersistenceState``。
 private func replayUUID(_ identifier: UserID) throws -> UUID {
     guard let value = UUID(uuidString: identifier.rawValue) else {
         throw V2DurableWorkReplayStoreError.corruptPersistenceState

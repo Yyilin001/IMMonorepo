@@ -187,10 +187,11 @@ final class V2PrivacySettingsStore {
         }
     }
 
-    /// Settings are durable user projections, just like conversation and
-    /// contact data. Keep an already-presented sheet current when another
-    /// installation changes a preference, rather than requiring the user to
-    /// close and reopen it.
+    /// 观察投影变更。
+    ///
+    /// 设置与会话、联系人数据一样都是持久化用户投影。
+    /// 当另一台安装改变了偏好时，已展示的设置页应当即时更新，
+    /// 而不是要求用户关闭后重新打开。
     func observeProjectionChanges() async {
         guard let projectionChangeNotifier else { return }
         await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(scopes: .privacy)) { [self] in

@@ -1,13 +1,17 @@
 import Foundation
 import IMV2Core
 
-/// Canonical JSON representation shared by the process-local direct room-log
-/// cache and the optional foreground live-event hint. PostgreSQL remains the
-/// durable source; this codec only prevents two accelerators from constructing
-/// subtly different payloads or paying an encode -> `Any` -> encode round trip.
+/// 进程内私聊房间日志缓存与可选前台实时事件提示共用的规范 JSON 表示。
+///
+/// 持久化来源仍然是 PostgreSQL；该编解码器只负责避免两个加速器构造出细微不同的载荷，
+/// 也避免付出「编码 → `Any` → 再编码」的往返代价。
 enum V2DirectRoomLogPayloadCodec {
     private static let hexadecimal = Array("0123456789abcdef".utf8)
 
+    /// 把已接受消息编码为房间日志载荷。
+    ///
+    /// - Parameter message: 已接受的消息投影。
+    /// - Returns: 规范 JSON 载荷；时间戳无法投影为毫秒时返回 `nil`。
     static func encode(_ message: V2AcceptedMessage) -> Data? {
         // This is a message projection, so pre-1970 timestamps must match the durable floor rounding.
         guard let milliseconds = try? v2MessageProjectionMilliseconds(message) else { return nil }
@@ -19,11 +23,16 @@ enum V2DirectRoomLogPayloadCodec {
         return try? encoder.encode(Payload(message: message, milliseconds: milliseconds))
     }
 
-    /// Plain direct text is the dominant room-log shape. Avoid constructing a
-    /// keyed Codable graph and a fresh JSONEncoder for every committed message,
-    /// while retaining the exact JSON contract. Dynamic strings are escaped
-    /// from their UTF-8 bytes according to RFC 8259; richer entity payloads keep
-    /// using the general encoder above.
+    /// 编码不含实体的纯文本消息，这是私聊房间日志最常见的形态。
+    ///
+    /// 直接拼接字节可以避免为每条已提交消息构造键值式 Codable 图与新的 `JSONEncoder`，
+    /// 同时保持完全一致的 JSON 契约：动态字符串按 RFC 8259 从 UTF-8 字节转义，
+    /// 含实体的富载荷仍走通用编码路径。
+    ///
+    /// - Parameters:
+    ///   - message: 已接受的消息投影，其实体列表为空。
+    ///   - milliseconds: 已投影的服务端毫秒时间戳。
+    /// - Returns: 规范 JSON 载荷。
     private static func encodePlainText(_ message: V2AcceptedMessage, milliseconds: Int64) -> Data {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(message.text.utf8.count + 512)
@@ -39,10 +48,20 @@ enum V2DirectRoomLogPayloadCodec {
         return Data(bytes)
     }
 
+    /// 把字符串的 UTF-8 字节追加到输出缓冲。
+    ///
+    /// - Parameters:
+    ///   - value: 待追加字符串。
+    ///   - bytes: 输出缓冲。
     private static func append(_ value: String, to bytes: inout [UInt8]) {
         bytes.append(contentsOf: value.utf8)
     }
 
+    /// 以 JSON 字符串形式追加内容并完成必要的转义。
+    ///
+    /// - Parameters:
+    ///   - value: 待追加字符串。
+    ///   - bytes: 输出缓冲。
     private static func appendJSONString(_ value: String, to bytes: inout [UInt8]) {
         bytes.append(0x22)
         for byte in value.utf8 {
@@ -67,6 +86,7 @@ enum V2DirectRoomLogPayloadCodec {
         bytes.append(0x22)
     }
 
+    /// 通用编码路径使用的载荷包装，统一键名与固定字段取值。
     private struct Payload: Encodable {
         let message: V2AcceptedMessage
         let milliseconds: Int64
@@ -91,6 +111,10 @@ enum V2DirectRoomLogPayloadCodec {
             case serverCreatedAtMilliseconds = "server_created_at_ms"
         }
 
+        /// 按固定字段集合写出载荷。
+        ///
+        /// - Parameter encoder: 数据编码器。
+        /// - Throws: 编码失败时抛出。
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode("message.accepted", forKey: .eventType)

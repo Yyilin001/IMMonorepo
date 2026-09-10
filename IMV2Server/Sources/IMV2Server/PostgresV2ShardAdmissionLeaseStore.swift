@@ -3,18 +3,37 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL control-plane store for fenced shard admission leases.
+/// 带栅栏的分片准入租约在 PostgreSQL 上的控制面存储。
 ///
-/// Every mutation locks the pool row. Replacement changes both lease ID and
-/// generation only after expiry; the schema's `ON UPDATE CASCADE` keeps every
-/// room admission row on the new fence in the same transaction.
+/// 每次变更都会锁定准入池行。只有在原租约确已过期后，替换才会同时更新租约标识与代次；
+/// schema 上的 `ON UPDATE CASCADE` 会在同一事务内把全部房间准入行切到新栅栏。
 public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放分片准入池的数据库。
     public init(database: any Database) {
         self.database = database
     }
 
+    /// 为一个新的准入池签发租约。
+    ///
+    /// 会先确认容量档位与准入池身份一致、到期时刻晚于当前时刻，再在同一事务内
+    /// 确认准入池尚不存在并插入租约与各项上限。
+    ///
+    /// - Parameters:
+    ///   - key: 准入池身份。
+    ///   - capacityProfile: 本次使用的容量档位。
+    ///   - leaseID: 新租约标识。
+    ///   - validUntil: 租约到期时刻。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 已签发的租约。
+    /// - Throws: 档位标识与准入池不一致时抛出
+    ///   ``V2ShardAdmissionLeaseControlError/capacityProfileDoesNotMatchPool``；
+    ///   到期时刻不晚于当前时刻时抛出
+    ///   ``V2ShardAdmissionLeaseControlError/invalidLifetime``；准入池已存在时抛出
+    ///   ``V2ShardAdmissionLeaseControlError/poolAlreadyExists``。
     public func issue(
         key: V2ShardAdmissionPoolKey,
         capacityProfile: V2CapacityProfile,
@@ -59,6 +78,20 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         }
     }
 
+    /// 按栅栏值续租。
+    ///
+    /// 只有租约标识与代次都与期望值一致且租约尚未过期时才会延期，
+    /// 代次保持不变，因此续租不会使既有房间准入行失效。
+    ///
+    /// - Parameters:
+    ///   - key: 准入池身份。
+    ///   - expectedFence: 期望的当前租约栅栏。
+    ///   - validUntil: 新的到期时刻。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 续租后的租约。
+    /// - Throws: 准入池不存在时抛出 ``V2ShardAdmissionLeaseControlError/poolNotFound``；
+    ///   栅栏不匹配时抛出 ``V2ShardAdmissionLeaseControlError/fenceMismatch``；
+    ///   租约已过期时抛出 ``V2ShardAdmissionLeaseControlError/leaseExpired``。
     public func renew(
         key: V2ShardAdmissionPoolKey,
         expectedFence: V2ShardAdmissionLeaseFence,
@@ -100,6 +133,24 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
         }
     }
 
+    /// 在原租约确已过期后签发替代租约。
+    ///
+    /// 替换会同时更新租约标识与代次，代次溢出或原租约尚未过期时拒绝执行；
+    /// 级联更新使全部房间准入行在同一事务内切到新栅栏。
+    ///
+    /// - Parameters:
+    ///   - key: 准入池身份。
+    ///   - capacityProfile: 替代租约使用的容量档位。
+    ///   - replacementLeaseID: 替代租约标识。
+    ///   - validUntil: 替代租约到期时刻。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 替代租约。
+    /// - Throws: 准入池不存在时抛出 ``V2ShardAdmissionLeaseControlError/poolNotFound``；
+    ///   档位上限已被改写时抛出
+    ///   ``V2ShardAdmissionLeaseControlError/capacityProfileLimitsChanged``；
+    ///   原租约尚未过期时抛出
+    ///   ``V2ShardAdmissionLeaseControlError/replacementRequiresExpiredLease``；
+    ///   代次溢出时抛出 ``V2ShardAdmissionLeaseControlError/generationOverflow``。
     public func replaceExpired(
         key: V2ShardAdmissionPoolKey,
         capacityProfile: V2CapacityProfile,

@@ -2,9 +2,10 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// Opaque authorization for one local-development upload. The HTTP adapter may
-/// write only to the random staging URL; signed-target claims and the final
-/// object path remain owned and revalidated by the provider actor.
+/// 一次本地开发上传的不透明授权。
+///
+/// HTTP 适配器只能写入随机暂存地址；签名目标声明与最终对象路径仍由提供方 actor
+/// 持有并重新校验。
 public struct V2LocalFilesystemStagedUpload: Sendable {
     package let fileURL: URL
     fileprivate let mediaID: MediaID
@@ -13,22 +14,21 @@ public struct V2LocalFilesystemStagedUpload: Sendable {
     fileprivate let expectedByteCount: Int64
 }
 
-/// File metadata returned after a signed local-development download target has
-/// been authorized. The byte edge streams this file instead of materializing
-/// its contents in process memory.
+/// 本地开发下载目标授权通过后返回的文件元数据。
+///
+/// 字节边缘会流式转发该文件，而不是把内容完整读入进程内存。
 public struct V2LocalFilesystemDownloadedObject: Sendable {
     package let fileURL: URL
     package let byteCount: Int64
 }
 
-/// A local-only object provider for repeatable developer and isolated-test
-/// verification. It is intentionally not composed by a production runtime:
-/// the URL host, TLS termination, durable object store and malware scanner
-/// remain deployment-owned concerns.
+/// 仅用于本地、可重复的开发者与隔离测试验证的对象提供方。
 ///
-/// The provider keeps opaque media bytes under a caller-selected private
-/// directory and signs short-lived, exact-object targets. No local file URL
-/// or filesystem path is returned to the IM domain or client protocol.
+/// 它刻意不被生产运行时装配：地址主机、TLS 终结、持久化对象存储与恶意软件扫描
+/// 仍属于部署方职责。
+///
+/// 提供方把不透明媒体字节保存在调用方指定的私有目录中，并签发短时、精确到单个对象的访问目标。
+/// 任何本地文件地址或文件系统路径都不会返回给 IM 领域层或客户端协议。
 public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploadObjectProvider, V2MediaPurgeProvider {
     private let rootDirectory: URL
     private let targetBaseURL: URL
@@ -36,6 +36,15 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     private let now: @Sendable () -> Date
     private var didPrepare = false
 
+    /// 校验并保存根目录、目标地址与签名密钥。
+    ///
+    /// - Parameters:
+    ///   - rootDirectory: 媒体字节落盘的私有根目录。
+    ///   - targetBaseURL: 对外发布的 HTTPS 基础地址，需带主机且不含查询与片段。
+    ///   - signingKey: 签名密钥，至少 32 字节。
+    ///   - now: 可注入的当前时刻读取函数。
+    /// - Throws: 任一约束不满足时抛出
+    ///   ``V2LocalFilesystemMediaProviderError/invalidConfiguration``。
     public init(
         rootDirectory: URL,
         targetBaseURL: URL,
@@ -54,9 +63,11 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         self.now = now
     }
 
-    /// Establishes the private directory at process start and removes upload
-    /// fragments left by a previous process crash. A repeated call on this
-    /// provider is a no-op so it cannot delete a currently streaming upload.
+    /// 在进程启动时建立私有目录并清理上次崩溃遗留的上传碎片。
+    ///
+    /// 对同一提供方重复调用是空操作，因此不会误删正在进行的流式上传。
+    ///
+    /// - Throws: 目录创建或清理失败时抛出。
     public func prepare() async throws {
         guard !didPrepare else { return }
         let rootDirectory = self.rootDirectory
@@ -79,6 +90,17 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         didPrepare = true
     }
 
+    /// 为一个上传会话签发短时上传目标。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - contentType: 媒体内容类型，需非空。
+    ///   - byteCount: 期望字节数，需非负。
+    ///   - expiresAt: 目标到期时刻。
+    /// - Returns: 提供方对象目标。
+    /// - Throws: 媒体标识非法、内容类型为空或字节数为负时抛出
+    ///   ``V2LocalFilesystemMediaProviderError/invalidTarget`` 或
+    ///   ``V2LocalFilesystemMediaProviderError/invalidMediaID``。
     public func issueUploadTarget(
         mediaID: MediaID,
         contentType: String,
@@ -104,6 +126,13 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         )
     }
 
+    /// 为一个下载会话签发短时下载目标。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - expiresAt: 目标到期时刻。
+    /// - Returns: 提供方对象目标。
+    /// - Throws: 媒体标识非法或对象不可用时抛出。
     public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
         _ = try validatedExpiryMilliseconds(expiresAt)
         let objectURL = try objectURL(for: mediaID)
@@ -127,9 +156,19 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         return .init(url: url, expiresAt: expiresAt, expectedByteCount: byteCount)
     }
 
-    /// Validates the signed upload claims before the HTTP body is accepted and
-    /// reserves a random file in the provider's private staging directory.
-    /// The returned path does not identify the final object.
+    /// 在接收 HTTP 正文之前校验上传目标的签名声明，并在私有暂存目录中预留随机文件。
+    ///
+    /// 返回的路径并不指向最终对象。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - targetURL: 客户端提交的已签名目标地址。
+    ///   - contentType: 声明的内容类型。
+    ///   - declaredByteCount: 声明的字节数。
+    /// - Returns: 暂存上传句柄。
+    /// - Throws: 签名声明与本次上传不一致时抛出
+    ///   ``V2LocalFilesystemMediaProviderError/byteCountMismatch``；
+    ///   目标签名不合法时抛出 ``V2LocalFilesystemMediaProviderError/invalidTarget``。
     public func beginUploadedObject(
         mediaID: MediaID,
         targetURL: URL,
@@ -158,8 +197,12 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         )
     }
 
-    /// Revalidates target expiry and exact byte count, then atomically moves
-    /// the staged file into its immutable object location on the same volume.
+    /// 重新校验目标有效期与精确字节数，然后以原子方式把暂存文件移动到同一卷上的不可变对象位置。
+    ///
+    /// - Parameters:
+    ///   - upload: 暂存上传句柄。
+    ///   - receipt: 已完成的复制回执。
+    /// - Throws: 目标已过期、字节数不符或移动失败时抛出。
     public func commitUploadedObject(
         _ upload: V2LocalFilesystemStagedUpload,
         actualByteCount: Int64
@@ -199,8 +242,14 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
-    /// Atomically install without replacement. A crash after linking but
-    /// before acknowledging is recovered by verifying the same object's hash.
+    /// 原子地安装转发导入对象，且不做替换。
+    ///
+    /// 若进程在完成链接之后、确认之前崩溃，可通过校验同一对象的哈希来恢复。
+    ///
+    /// - Parameters:
+    ///   - upload: 已完成暂存的本地上传对象。
+    ///   - receipt: 转发媒体复制回执，用于校验字节数与内容类型。
+    /// - Throws: 目标或回执不合法、哈希不一致或写入失败时抛出。
     package func commitForwardImportedObject(_ upload: V2LocalFilesystemStagedUpload, receipt: V2ForwardMediaCopyReceipt) async throws {
         let claims = try verify(targetURL: upload.targetURL, kind: .upload, mediaID: upload.mediaID)
         guard claims.contentType == upload.contentType, claims.byteCount == receipt.byteCount,
@@ -223,6 +272,9 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
+    /// 丢弃暂存上传文件，忽略文件已不存在的情况。
+    ///
+    /// - Parameter upload: 暂存上传句柄。
     public func discardUploadedObject(_ upload: V2LocalFilesystemStagedUpload) async {
         guard isValidStagingURL(upload.fileURL) else { return }
         let fileURL = upload.fileURL
@@ -232,9 +284,16 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
-    /// Accepts bytes only when they are presented with the exact signed local
-    /// upload target. This is used by local HTTP-free tests; a production
-    /// object edge must validate its own provider-native target instead.
+    /// 直接把已完成字节写入最终对象位置，供本地工具与测试使用。
+    ///
+    /// 仅当字节与精确的已签名本地上传目标一同提交时才接受。
+    /// 它供本地无 HTTP 测试使用；生产对象边缘必须改为校验其自身的提供方原生目标。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - contentType: 媒体内容类型。
+    ///   - bytes: 对象内容。
+    /// - Throws: 媒体标识非法或写入失败时抛出。
     public func storeUploadedObject(
         mediaID: MediaID,
         targetURL: URL,
@@ -258,6 +317,13 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
+    /// 按已签名的下载目标返回可供流式读取的文件元数据。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - targetURL: 客户端提交的已签名目标地址。
+    /// - Returns: 文件地址与字节数。
+    /// - Throws: 目标签名不合法、已过期或对象不可读时抛出。
     public func downloadedObject(
         mediaID: MediaID,
         targetURL: URL
@@ -277,9 +343,16 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         return .init(fileURL: objectURL, byteCount: byteCount)
     }
 
-    /// Reads bytes only when they are presented with the exact signed local
-    /// download target. The returned data is intended solely for a local
-    /// object-edge test, never for chat event serialization.
+    /// 读取已授权下载目标的完整字节，仅供扫描等本地用途。
+    ///
+    /// 仅当字节与精确的已签名本地下载目标一同提交时才允许读取。
+    /// 返回的数据只用于本地对象边缘测试，绝不用于聊天事件序列化。
+    ///
+    /// - Parameters:
+    ///   - mediaID: 目标媒体标识。
+    ///   - targetURL: 已签名目标地址。
+    /// - Returns: 文件字节。
+    /// - Throws: 目标不合法或读取失败时抛出。
     public func readDownloadedObject(mediaID: MediaID, targetURL: URL) async throws -> Data {
         let object = try await downloadedObject(mediaID: mediaID, targetURL: targetURL)
         return try await Self.performBlocking {
@@ -287,6 +360,11 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
+    /// 删除指定媒体在本地的对象与暂存文件。
+    ///
+    /// - Parameter mediaID: 目标媒体标识。
+    /// - Throws: 媒体标识非法时抛出
+    ///   ``V2LocalFilesystemMediaProviderError/invalidMediaID``。
     public func purge(mediaID: MediaID) async throws {
         let objectURL = try objectURL(for: mediaID)
         try await Self.performBlocking {
@@ -295,8 +373,14 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
-    /// Development-only inspection hook used by `V2LocalEICARMediaScanner`.
-    /// Missing objects are retryable scanner failures, not clean scans.
+    /// 读取本地媒体字节，供本地扫描器使用。
+    ///
+    /// 该入口仅供开发期的 `V2LocalEICARMediaScanner` 检查使用。
+    /// 对象缺失属于可重试的扫描失败，而不是判定为干净。
+    ///
+    /// - Parameter mediaID: 目标媒体标识。
+    /// - Returns: 对象字节。
+    /// - Throws: 媒体标识非法或对象不存在时抛出。
     public func localBytesForScanning(mediaID: MediaID) async throws -> Data {
         let objectURL = try objectURL(for: mediaID)
         return try await Self.performBlocking {
@@ -434,23 +518,37 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     }
 }
 
+/// 本地文件系统媒体提供方错误。
 public enum V2LocalFilesystemMediaProviderError: Error, Equatable, Sendable {
+    /// 提供方配置不合法。
     case invalidConfiguration
+    /// 媒体标识不合法。
     case invalidMediaID
+    /// 访问目标签名或格式不合法。
     case invalidTarget
+    /// 实际字节数与声明不符。
     case byteCountMismatch
+    /// 目标对象不存在或不可读。
     case objectUnavailable
 }
 
-/// Local scanner for a real, harmless EICAR test signature. It is useful for
-/// exercising the `passed` and `failed` scan-state transitions without a
-/// third-party daemon, but it is not malware protection and must never be
-/// selected for a production deployment.
+/// 基于真实但无害的 EICAR 测试签名的本地扫描器。
+///
+/// 它可以在没有第三方守护进程的情况下演练扫描通过与被拒两种状态跃迁，
+/// 但它不提供恶意软件防护，绝不能在生产部署中被选用。
 public struct V2LocalEICARMediaScanner: V2MediaScanProvider, Sendable {
     private let provider: V2LocalFilesystemMediaProvider
 
+    /// 组合本地媒体提供方。
+    ///
+    /// - Parameter provider: 读取待扫描字节的本地提供方。
     public init(provider: V2LocalFilesystemMediaProvider) { self.provider = provider }
 
+    /// 扫描指定媒体是否包含 EICAR 测试签名。
+    ///
+    /// - Parameter mediaID: 目标媒体标识。
+    /// - Returns: 含签名时判定不通过，否则判定通过。
+    /// - Throws: 读取本地字节失败时抛出。
     public func scan(mediaID: MediaID) async throws -> V2MediaScanResult {
         let bytes = try await provider.localBytesForScanning(mediaID: mediaID)
         return bytes.range(of: Self.eicarTestSignature) == nil ? .passed : .failed

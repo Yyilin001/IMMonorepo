@@ -3,19 +3,37 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL authority for friendship and block state. All mutations for a
-/// pair take the same advisory lock used by direct-room creation, so a block,
-/// relationship transition and direct-message admission observe one coherent
-/// ordering rather than a best-effort collection of reads.
+/// 好友关系与拉黑状态的 PostgreSQL 权威实现。
+///
+/// 同一用户对的所有变更都会获取与私聊房间创建相同的咨询锁，
+/// 因此拉黑、关系跃迁与私聊准入观察到的是同一份有序状态，而不是一组尽力而为的读取结果。
 public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     private let database: any Database
     private let shadowForwarder: any V2UserShardProjectionShadowing
 
+    /// 组合数据库与投影影子转发器。
+    ///
+    /// - Parameters:
+    ///   - database: 存放关系、拉黑与偏好设置的数据库。
+    ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
     public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
         self.database = database
         self.shadowForwarder = shadowForwarder
     }
 
+    /// 应用一次关系变更。
+    ///
+    /// 先按发起者与操作标识串行化并处理幂等，再按用户对加锁。事务内会确认发起者账号有效，
+    /// 对请求与接受动作额外校验目标账号有效，检查双向拉黑；发起好友请求时还会读取目标的
+    /// 被添加偏好，偏好被锁定后按同一顺序继续处理。
+    ///
+    /// - Parameters:
+    ///   - command: 关系变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 关系变更结果。
+    /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
+    ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
     public func changeRelationship(_ command: V2ChangeRelationshipCommand, now: Date) async throws -> V2RelationshipOutcome {
         let outcome: V2RelationshipOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
@@ -87,6 +105,17 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         return outcome
     }
 
+    /// 应用一次用户拉黑变更。
+    ///
+    /// 与关系变更共用同一用户对锁与幂等记录语义，保证拉黑与好友关系不会出现互相矛盾的提交。
+    ///
+    /// - Parameters:
+    ///   - command: 拉黑变更命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 拉黑变更结果。
+    /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
+    ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
     public func changeUserBlock(_ command: V2ChangeUserBlockCommand, now: Date) async throws -> V2UserBlockOutcome {
         let outcome: V2UserBlockOutcome = try await v2WithPostgresTransactionRetry(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
@@ -195,9 +224,16 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'user_block', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'is_blocked', \(bind: isBlocked), 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
     }
 
-    /// Reserves every user range in UUID order. Any transaction that needs
-    /// more than one user sequence must use one ordered statement so opposing
-    /// actor/target commands cannot acquire the same rows in reverse order.
+    /// 按 UUID 顺序预留每个用户的序号区间。
+    ///
+    /// 任何需要多个用户序号的事务都必须使用单条有序语句，
+    /// 这样方向相反的发起者/目标命令不会以相反顺序获取同一批行，从而避免死锁。
+    ///
+    /// - Parameters:
+    ///   - counts: 每个用户本次需要预留的序号数量。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 每个用户对应的序号预留结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func reserveSyncSequences(
         counts: [UUID: Int], sql: any SQLDatabase
     ) async throws -> [UUID: SocialSequenceReservationRow] {
@@ -246,7 +282,13 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     }
 }
 
-public enum V2SocialRelationshipStoreError: Error, Equatable, Sendable { case actorInactive, corruptPersistenceState }
+/// 社交关系存储错误。
+public enum V2SocialRelationshipStoreError: Error, Equatable, Sendable {
+    /// 发起者账号当前无效。
+    case actorInactive
+    /// 持久化记录缺失或字段无法解码。
+    case corruptPersistenceState
+}
 
 private struct RelationshipRow: Decodable { let state: String; let requestedByUserID: UUID; let updatedAt: Date; enum CodingKeys: String, CodingKey { case state; case requestedByUserID = "requested_by_user_id"; case updatedAt = "updated_at" } }
 private struct RelationshipOperationRow: Decodable {

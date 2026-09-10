@@ -3,19 +3,31 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// PostgreSQL cursor and reset fence. Pull/ack never trust a client-supplied
-/// sequence beyond the device cursor's generation and durable log watermark.
+/// PostgreSQL 游标与重置栅栏。
+///
+/// 拉取与确认绝不信任客户端提供的序号超出设备游标的代次范围或持久化日志水位。
 public struct PostgresV2SyncStore: V2SyncStore {
     private let database: any Database
     private let schema: String
     private let makeUUID: @Sendable () -> UUID
     private let capabilityLifetime: TimeInterval
     private let capabilityProfile: String
-    /// Budget for the encoded repeated `records` fields inside one sync batch.
-    /// The gateway reserves the remaining frame bytes for the envelope, token,
-    /// receipt, generation, and capability metadata.
+    /// 单个同步批次内编码后 `records` 重复字段的字节预算。
+    ///
+    /// 网关会把帧内其余字节留给信封、令牌、回执、代次与能力元数据。
     private let maximumEncodedRecordsBytes: Int
 
+    /// 校验并保存数据库、schema 与批次预算。
+    ///
+    /// - Parameters:
+    ///   - database: 存放设备游标与用户同步日志的数据库。
+    ///   - schema: 目标 schema，需符合 `^[A-Za-z_][A-Za-z0-9_]*$`。
+    ///   - capabilityProfile: 能力档位标识，需非空。
+    ///   - maximumEncodedRecordsBytes: 单批编码记录字节上限，需大于零。
+    ///   - makeUUID: 令牌与回执标识生成方式。
+    ///   - capabilityLifetime: 快照与令牌能力存活秒数，需大于零。
+    ///
+    /// 参数越界时直接失败，避免出现越界分页或非法 schema 拼接。
     public init(
         database: any Database,
         schema: String = "im_v2",
@@ -38,6 +50,17 @@ public struct PostgresV2SyncStore: V2SyncStore {
         self.maximumEncodedRecordsBytes = maximumEncodedRecordsBytes
     }
 
+    /// 拉取同步记录或要求设备重置。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - deviceID: 发起同步的设备。
+    ///   - syncToken: 上次同步令牌。
+    ///   - maxRecords: 本次最多返回的记录数。
+    ///   - requireSnapshot: 是否要求以快照方式同步。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 拉取结果。
+    /// - Throws: 设备已吊销、令牌非法或持久化失败时抛出。
     public func pull(userID: UserID, deviceID: DeviceID, syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool = false, now: Date) async throws -> V2SyncPullResult {
         guard maxRecords > 0, maxRecords < Int.max else { throw V2SyncStoreError.invalidRecordLimit }
         guard v2PostgresTimestampCanEncode(now) else {
@@ -201,6 +224,16 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
+    /// 确认已连续处理的最高序号。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - deviceID: 发起同步的设备。
+    ///   - generation: 同步代次。
+    ///   - highestContiguousSequence: 已连续处理的最高序号。
+    ///   - receipt: 本次确认回执。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 序号超出水印、设备已吊销或持久化失败时抛出。
     public func acknowledge(userID: UserID, deviceID: DeviceID, generation: UInt64, highestContiguousSequence: UInt64, receipt: V2SyncReceipt, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
@@ -256,6 +289,16 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
+    /// 读取快照清单。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - deviceID: 发起同步的设备。
+    ///   - snapshotID: 目标快照标识。
+    ///   - generation: 同步代次。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 快照清单。
+    /// - Throws: 快照不存在、代次不符或持久化失败时抛出。
     public func fetchSnapshotManifest(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, now: Date) async throws -> V2SnapshotManifest {
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
@@ -302,6 +345,18 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
+    /// 读取快照分页。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - deviceID: 发起同步的设备。
+    ///   - snapshotID: 目标快照标识。
+    ///   - generation: 同步代次。
+    ///   - rootDigest: 期望的根摘要。
+    ///   - index: 页序号。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 快照分页。
+    /// - Throws: 页面不存在、摘要不符或持久化失败时抛出。
     public func fetchSnapshotPage(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, rootDigest: String, index: UInt32, now: Date) async throws -> V2SnapshotPage {
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
@@ -343,6 +398,17 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
+    /// 确认快照已接收完成。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - deviceID: 发起同步的设备。
+    ///   - snapshotID: 目标快照标识。
+    ///   - generation: 同步代次。
+    ///   - baseSequence: 快照基准序号。
+    ///   - receipt: 本次确认回执。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 代次或基准序号不符、设备已吊销或持久化失败时抛出。
     public func acknowledgeSnapshot(userID: UserID, deviceID: DeviceID, snapshotID: SnapshotID, generation: UInt64, baseSequence: UInt64, receipt: V2SyncReceipt, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let userUUID = try uuid(userID)
@@ -438,9 +504,16 @@ public struct PostgresV2SyncStore: V2SyncStore {
         guard active.isActive else { throw V2SyncStoreError.deviceRevoked }
     }
 
-    /// Serializes cursor creation/mutation with the asynchronous revocation
-    /// cleaner. Once the monotonic tombstone commits, no in-flight or retried
-    /// sync request can recreate device-owned state.
+    /// 使游标创建与变更同异步吊销清理串行化。
+    ///
+    /// 一旦单调墓碑提交，任何在途或重试的同步请求都无法重新创建该设备的私有状态。
+    ///
+    /// - Parameters:
+    ///   - sql: 当前事务使用的数据库连接。
+    ///   - userID: 目标用户。
+    ///   - deviceID: 目标设备。
+    /// - Throws: 设备已吊销时抛出 ``V2SyncStoreError/deviceRevoked``；
+    ///   记录异常时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``。
     private func lockActiveDevice(
         sql: any SQLDatabase,
         userID: UUID,
@@ -497,9 +570,12 @@ public enum V2SyncStoreError: Error, Equatable, Sendable {
     case deviceRevoked
 }
 
-/// Exact protobuf wire size of one `IMV2SyncBatch.records` repeated field.
-/// Keeping this estimator beside cursor advancement prevents a minted token
-/// from skipping records that were trimmed later at the transport boundary.
+/// 计算单个 `IMV2SyncBatch.records` 重复字段的精确 protobuf 线路字节数。
+///
+/// 把该估算与游标推进放在一起，可避免已签发的令牌跳过后被传输边界裁剪掉的记录。
+///
+/// - Parameter record: 待估算的同步记录。
+/// - Returns: 该记录编码后的字节数。
 func v2EncodedSyncBatchRecordFieldBytes(_ record: V2SyncRecord) -> Int {
     let sequenceBytes = 1 + v2ProtobufVarintBytes(record.sequence)
     let sourceEventBytes = v2ProtobufLengthDelimitedBytes(record.sourceEventID.rawValue.utf8.count)

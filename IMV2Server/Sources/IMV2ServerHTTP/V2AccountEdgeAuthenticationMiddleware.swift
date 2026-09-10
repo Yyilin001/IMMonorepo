@@ -1,13 +1,11 @@
 import IMV2Server
 import Vapor
 
-/// All account routes remain loopback-only and require an additional secret
-/// injected by the HTTPS edge. The edge replaces caller-controlled forwarding
-/// headers before it adds this proof, so account code cannot treat a direct
-/// local request as a trusted proxy request.
+/// 账号边缘鉴权中间件。
 ///
 /// 所有账户边缘路由保持 loopback-only，并通过 HTTPS 边缘注入额外签名头。
-/// 边缘会先清理调用方可控转发头，再补充该签名。
+/// 边缘会先替换调用方可控的转发头，再补充这一证明，
+/// 因此账号代码不能把一次直接的本地请求当作可信代理请求。
 public struct V2AccountEdgeAuthenticationMiddleware: AsyncMiddleware, Sendable {
     public static let headerName = "X-IM-V2-Account-Edge-Authorization"
     public static let clientAddressHeaderName = "X-IM-V2-Account-Client-Address"

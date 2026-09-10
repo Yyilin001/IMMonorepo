@@ -3,15 +3,34 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 媒体清除发件箱的 PostgreSQL 持久化实现。
+///
+/// 它按租约认领待清除对象，并记录其清除原因与重试进度。
 public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
 
+    /// 创建清除发件箱存储。
+    ///
+    /// - Parameters:
+    ///   - database: 控制面数据库连接。
+    ///   - makeUUID: 认领令牌生成器，默认使用 `UUID.init`。
     public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
         self.database = database
         self.makeUUID = makeUUID
     }
 
+    /// 认领一待清除对象。
+    ///
+    /// 候选包含待处理项与租约已过期的已认领项；认领使用 `SKIP LOCKED`，
+    /// 使多个工作进程可以并行推进。重试计数在饱和时保持原值，避免回绕。
+    ///
+    /// - Parameters:
+    ///   - now: 当前时间。
+    ///   - leaseDuration: 本次租约时长，必须为正。
+    ///   - limit: 本次最多认领的对象数，必须为正。
+    /// - Returns: 已认领的清除租约列表。
+    /// - Throws: 时间戳无法表示、原因非法、计数非法或持久化状态损坏时抛出。
     public func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2MediaPurgeLease] {
         guard limit > 0, leaseDuration > 0 else { return [] }
         guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
@@ -54,6 +73,12 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
         }
     }
 
+    /// 标记本次清除已完成。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次处理持有的清除租约。
+    ///   - now: 当前时间。
+    /// - Throws: 租约失效或持久化失败时抛出。
     public func markCompleted(_ lease: V2MediaPurgeLease, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now),
               let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -67,6 +92,13 @@ public struct PostgresV2MediaPurgeStore: V2MediaPurgeStore {
             """).run()
     }
 
+    /// 按持久重试策略安排下一次清除尝试。
+    ///
+    /// - Parameters:
+    ///   - lease: 本次处理持有的清除租约。
+    ///   - disposition: 持久重试处置策略。
+    ///   - now: 当前时间。
+    /// - Throws: 租约失效或持久化失败时抛出。
     public func scheduleRetry(_ lease: V2MediaPurgeLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let mediaID = try mediaPurgeUUID(lease.mediaID)

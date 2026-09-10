@@ -3,15 +3,24 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Bounded high-fan-out propagation for a display-name update. The account
-/// service commits the source fact and its outbox record atomically; this
-/// worker is the only component that enumerates direct counterparts. Group
-/// membership is deliberately outside this path.
+/// 展示名称更新的有界高扇出传播。
+///
+/// 账号服务会原子提交来源事实与其发件箱记录；只有该工作器会枚举私聊对端，
+/// 群成员关系刻意不在这条路径上。
 public struct V2DirectRoomProfilePropagationReport: Equatable, Sendable {
+    /// 本轮认领的更新数量。
     public let claimedUpdateCount: Int
+    /// 已投影的接收者数量。
     public let projectedRecipientCount: Int
+    /// 已完成的更新数量。
     public let completedUpdateCount: Int
 
+    /// 保存传播统计。
+    ///
+    /// - Parameters:
+    ///   - claimedUpdateCount: 认领数量。
+    ///   - projectedRecipientCount: 投影接收者数量。
+    ///   - completedUpdateCount: 完成数量。
     public init(claimedUpdateCount: Int, projectedRecipientCount: Int, completedUpdateCount: Int) {
         self.claimedUpdateCount = claimedUpdateCount
         self.projectedRecipientCount = projectedRecipientCount
@@ -19,11 +28,11 @@ public struct V2DirectRoomProfilePropagationReport: Equatable, Sendable {
     }
 }
 
-/// The worker's durable checkpoint is advanced only after every projection in
-/// the page has reached the live user shard. A crash before that checkpoint
-/// replays the same page; `(recipient, source event, kind)` makes that replay
-/// idempotent. This avoids a distributed transaction between control and user
-/// shards without accepting a dropped profile update.
+/// 私聊资料传播工作器。
+///
+/// 只有当整页投影都已抵达存活用户分片之后，持久化检查点才会推进。
+/// 检查点之前的崩溃会重放同一页，而 `(接收者, 来源事件, 类型)` 三元组让这次重放保持幂等。
+/// 这样既避免了控制面与用户分片之间的分布式事务，也不会接受一次被丢弃的资料更新。
 public struct V2DirectRoomProfilePropagationWorker: Sendable {
     private let database: any Database
     private let shadowForwarder: any V2UserShardProjectionShadowing
@@ -32,6 +41,15 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
+    /// 组合数据库、影子转发器与租约参数。
+    ///
+    /// - Parameters:
+    ///   - database: 存放资料传播操作与检查点的数据库。
+    ///   - shadowForwarder: 把投影变更转发到影子分片的实现。
+    ///   - liveNotifier: 同步变更通知器，可选。
+    ///   - leaseDuration: 认领租约秒数，需大于零，默认 30 秒。
+    ///   - makeUUID: 标识生成方式。
+    ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
         shadowForwarder: any V2UserShardProjectionShadowing,
@@ -49,9 +67,16 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
         self.now = now
     }
 
-    /// `limit` is a recipient work budget, rather than an unbounded count of
-    /// source updates. One invocation therefore remains safe even when a
-    /// profile has a very large direct-contact graph.
+    /// 执行一轮有界资料传播。
+    ///
+    /// `limit` 是按接收者计的工作预算，而不是无界的来源更新数量；
+    /// 因此即使某个资料拥有非常大的私聊联系人图，单次调用仍然是安全的。
+    ///
+    /// - Parameter limit: 本轮按接收者计的预算，需大于零且小于 `Int.max`。
+    /// - Returns: 本轮传播统计。
+    /// - Throws: 预算越界时抛出
+    ///   ``V2DirectRoomProfilePropagationError/invalidLimit``；持久化状态异常时抛出
+    ///   ``V2DirectRoomProfilePropagationError/corruptPersistenceState``。
     public func runOnce(limit: Int) async throws -> V2DirectRoomProfilePropagationReport {
         guard limit > 0, limit < Int.max else {
             throw V2DirectRoomProfilePropagationError.invalidLimit
@@ -150,10 +175,17 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             """).all(decoding: DirectProfileTarget.self)
     }
 
-    /// Current clients use the compact direct-room projection for conversation
-    /// presentation and the revision fence for normalized profile hydration.
-    /// Both records share one source event and are appended atomically so a
-    /// retry cannot expose a half-updated projection.
+    /// 追加控制面投影。
+    ///
+    /// 当前客户端用紧凑的单聊投影做会话展示，用修订栅栏做规范化资料填充。
+    /// 两条记录共享同一个来源事件并原子追加，
+    /// 因此重试不会暴露出只更新了一半的投影。
+    ///
+    /// - Parameters:
+    ///   - target: 资料更新的目标用户与路由。
+    ///   - lease: 资料更新租约，用于围栏校验。
+    /// - Returns: 分配到的用户同步序号。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func appendControlProjections(target: DirectProfileTarget, lease: ProfileUpdateLease) async throws -> UInt64 {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
@@ -287,9 +319,13 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     }
 }
 
+/// 私聊资料传播错误。
 public enum V2DirectRoomProfilePropagationError: Error, Equatable, Sendable {
+    /// 单轮预算为非正或超出可处理范围。
     case invalidLimit
+    /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
+    /// 控制面缺少必要的投影记录。
     case missingControlProjection
 }
 

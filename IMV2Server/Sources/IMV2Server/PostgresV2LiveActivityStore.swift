@@ -3,14 +3,26 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 在线状态活动的配置错误分类。
 public enum V2LiveActivityConfigurationError: Error, Equatable, Sendable {
+    /// 在线租约时长非法：必须为正，且可被编码为 PostgreSQL 时间。
     case invalidOnlineLease
 }
 
+/// 在线状态、输入状态与连接租约的 PostgreSQL 持久化实现。
+///
+/// 隐私偏好、围观授权与连接租约都通过同一批咨询锁串行化，
+/// 使同一用户/设备的竞争不会形成锁序环。
 public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     private let database: any Database
     private let onlineLease: TimeInterval
 
+    /// 创建在线状态存储。
+    ///
+    /// - Parameters:
+    ///   - database: 控制面数据库连接。
+    ///   - onlineLease: 在线租约时长，必须为正且可编码。
+    /// - Throws: 租约时长非法时抛出 `invalidOnlineLease`。
     public init(database: any Database, onlineLease: TimeInterval = 90) throws {
         guard onlineLease > 0, Int64(exactly: (onlineLease * 1_000_000).rounded(.up)) != nil else {
             throw V2LiveActivityConfigurationError.invalidOnlineLease
@@ -19,6 +31,16 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         self.onlineLease = onlineLease
     }
 
+    /// 设置用户的实时活动隐私偏好。
+    ///
+    /// 以操作台账保证幂等：相同操作标识的相同载荷返回幂等结果，
+    /// 载荷不同则返回冲突。
+    ///
+    /// - Parameters:
+    ///   - command: 偏好设置命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 偏好设置结果。
+    /// - Throws: 时间戳非法或持久化失败时抛出。
     public func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -35,6 +57,15 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
     }
 
+    /// 读取用户的实时活动隐私偏好。
+    ///
+    /// 无持久记录时返回全开启的默认偏好，并使用传入的 `now` 作为更新时间。
+    ///
+    /// - Parameters:
+    ///   - userID: 目标用户。
+    ///   - now: 无记录时的默认更新时间。
+    /// - Returns: 该用户的隐私偏好。
+    /// - Throws: 时间戳无法编码或持久化状态损坏时抛出。
     public func preferences(userID: UserID, now: Date) async throws -> V2LiveActivityPreferences {
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
         let user = try liveActivityUUID(userID)
@@ -44,6 +75,17 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return .init(allowsOnlinePresence: true, allowsTypingIndicators: true, updatedAt: now)
     }
 
+    /// 读取单聊房间中对方的在线状态。
+    ///
+    /// 结果同时受对方在线偏好、当前有效租约与双方拉黑关系约束；
+    /// 任一不满足时都会返回离线的安全结果。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标单聊房间。
+    ///   - viewerUserID: 发起查询的成员。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 目标用户的在线状态。
+    /// - Throws: 非单聊房间、非成员或已拉黑时抛出。
     public func presence(roomID: RoomID, viewerUserID: UserID, now: Date) async throws -> V2PresenceState {
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
         return try await database.transaction { transaction in
@@ -60,6 +102,13 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
     }
 
+    /// 校验发起者可以在该房间内发送输入状态。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间。
+    ///   - actorUserID: 发起输入状态的成员。
+    ///   - now: 服务端统一授时时刻（当前实现不使用）。
+    /// - Throws: 非成员、已拉黑或关闭了输入状态偏好时抛出。
     public func authorizeTyping(roomID: RoomID, actorUserID: UserID, now _: Date) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -73,6 +122,16 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
     }
 
+    /// 校验观察者可以订阅某成员的在线活动。
+    ///
+    /// 在被观察者确实是该单聊房间内的对端且双方未拉黑时才放行。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标单聊房间。
+    ///   - viewerUserID: 发起订阅的成员。
+    ///   - subjectUserID: 被观察的成员。
+    ///   - now: 服务端统一授时时刻（当前实现不使用）。
+    /// - Throws: 非成员、目标不匹配或已拉黑时抛出。
     public func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now _: Date) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -86,6 +145,11 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
     }
 
+    /// 判断用户是否允许展示在线状态。
+    ///
+    /// - Parameter userID: 目标用户。
+    /// - Returns: 是否允许展示；无持久记录时视为允许。
+    /// - Throws: 持久化状态损坏时抛出。
     public func allowsOnlinePresence(userID: UserID) async throws -> Bool {
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
         let user = try liveActivityUUID(userID)
@@ -104,6 +168,19 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return expiry
     }
 
+    /// 接纳一条新连接，并按用户/设备上限裁决。
+    ///
+    /// 同一用户的竞争者先取同一把用户锁，再取设备锁，
+    /// 从而把更窄的上限串行化而不形成用户/设备锁序环。
+    /// 已过期的租约会先被清理；被拒绝时返回 `.rejected` 而不写入任何行。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证的连接身份。
+    ///   - connectionID: 本次连接标识。
+    ///   - policy: 连接准入策略。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 租约接纳结果。
+    /// - Throws: 租约时间无法编码或持久化状态损坏时抛出。
     public func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
@@ -159,6 +236,17 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
     }
 
+    /// 续租一条已存在的连接租约。
+    ///
+    /// 只有连接标识、用户与设备三者都匹配且租约尚未过期时才会续租；
+    /// 否则返回 `.rejected`。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证的连接身份。
+    ///   - connectionID: 本次连接标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 租约续租结果。
+    /// - Throws: 租约时间无法编码或持久化状态损坏时抛出。
     public func renewConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
@@ -184,6 +272,14 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return .accepted(expiresAt: acceptedExpiry)
     }
 
+    /// 批量续租多条连接租约。
+    ///
+    /// 同一连接在一个物理批次中最多续租一次；若调用方竞态地提交了重复心跳，以最新观测时间为准。
+    /// 被拒绝的连接会保留在结果中，成功续租的结果会覆盖同名拒绝项。
+    ///
+    /// - Parameter requests: 本批续租请求。
+    /// - Returns: 按连接标识索引的续租结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     public func renewConnections(
         _ requests: [V2LivePresenceLeaseRenewalRequest]
     ) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
@@ -261,6 +357,18 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         return rejected.merging(refreshed) { _, valid in valid }
     }
 
+    /// 移除一条连接租约，并报告该用户是否仍有其他活跃租约。
+    ///
+    /// 调用方的已认证身份始终是权威：即使租约已过期、甚至已被其他副本删除，
+    /// 删除仍会按连接标识与用户、设备三者匹配执行，
+    /// 从而避免过期的生命周期误删归属他人的同名连接。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证的连接身份。
+    ///   - connectionID: 待移除的连接标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 该用户当前是否仍存在有效租约。
+    /// - Throws: 时间戳无法编码或持久化失败时抛出。
     public func removePresence(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,

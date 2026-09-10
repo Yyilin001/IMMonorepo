@@ -8,13 +8,17 @@ import Observation
 final class V2ConversationDetailStore {
     private static let initialTimelinePageSize = 80
     private static let timelinePageSize = 80
-    /// Metadata-only repair wakes and full foreground payloads can come from
-    /// different Gateway publishers. A short, bounded grace lets the ordered
-    /// payload catch up without turning that harmless inversion into a room-log
-    /// query. A genuinely missing payload still falls back after 100 ms.
+    /// 混合大群恢复宽限期。
+    ///
+    /// 仅含元数据的修复唤醒与完整前台载荷可能来自不同的网关发布者。
+    /// 一个短且有界的宽限期可以让有序载荷追上来，
+    /// 而不至于把这种无害的顺序颠倒变成一次房间日志查询；
+    /// 若载荷确实缺失，则仍会在 100 毫秒后回退。
     private static let hybridGroupRecoveryGrace: Duration = .milliseconds(100)
-    /// Keeps SwiftUI diffing and duplicate render models bounded while still
-    /// allowing arbitrarily old history through a sliding keyset window.
+    /// 时间线保留上限。
+    ///
+    /// 它让 SwiftUI 的差异计算与重复渲染模型保持有界，
+    /// 同时仍通过滑动键集窗口允许任意久远的历史。
     private static let maximumRetainedTimelineItems = 800
 
     enum State: Equatable {
@@ -89,8 +93,9 @@ final class V2ConversationDetailStore {
     private var typingLeaseID: UUID?
     private var activityConsumerID: UUID?
     private var activityConnectionID: UUID?
-    /// One expiry task per remote user.  The wire expiry is authoritative: a
-    /// disconnect can lose the trailing `isTyping = false` event.
+    /// 每个远端用户各一个到期任务。
+    ///
+    /// 线路上的到期时间才是权威：连接中断可能丢掉收尾的 `isTyping = false` 事件。
     private var typingExpiryTasks: [UserID: Task<Void, Never>] = [:]
     private var typingExpiryDates: [UserID: Date] = [:]
     private(set) var peerPresence: V2PresenceState?
@@ -300,8 +305,12 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Search and Favorites navigate directly to a bounded snapshot around
-    /// the target, including newer targets outside a historical window.
+    /// 读取包含目标消息的时间线。
+    ///
+    /// 搜索与收藏可以直接跳到目标附近的有界快照，
+    /// 包括位于历史窗口之外的更新目标。
+    ///
+    /// - Parameter messageID: 目标消息标识。
     func loadTimeline(containing messageID: String) async {
         guard !Task.isCancelled else { return }
         let id = UUID()
@@ -381,10 +390,10 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// This task is owned by the detail view's `.task` modifier, so it stops
-    /// automatically when the user leaves the conversation or the scene tears
-    /// down. Production rooms wait for a server wake on the existing TLS
-    /// connection; a 30-second cursor pull remains only as loss recovery.
+    /// 轮询可见的混合大群事件。
+    ///
+    /// 该任务由详情视图的 `.task` 修饰符持有，因此用户离开会话或场景销毁时会自动停止。
+    /// 生产房间在既有 TLS 连接上等待服务端唤醒；30 秒一次的游标拉取仅作为丢消息后的恢复手段。
     func pollVisibleHybridGroupEvents() async {
         guard isGroupConversation,
               let activeHybridGroupSynchronizer
@@ -456,10 +465,16 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Waits only for a metadata-only wake. A malformed or non-contiguous live
-    /// payload still enters durable recovery immediately; it must never be used
-    /// to advance the cursor. The total wait is deadline-bounded even if newer
-    /// metadata wakes continue arriving.
+    /// 在混合大群恢复宽限期内等待，并判断是否应当改为拉取。
+    ///
+    /// 这里只等待仅含元数据的唤醒。畸形或不连续的实时载荷仍会立即进入持久化恢复流程，
+    /// 绝不能用于推进游标。即使不断有更新的元数据唤醒到达，总等待时间仍有截止上限。
+    ///
+    /// - Parameters:
+    ///   - initialWake: 首次收到的唤醒信息。
+    ///   - synchronizer: 当前混合大群同步实现。
+    /// - Returns: 宽限期结束后需要按游标拉取时为 `true`。
+    /// - Throws: 任务取消或同步实现失败时抛出。
     private func shouldPullAfterHybridGroupRecoveryGrace(
         initialWake: V2ActiveHybridGroupWake,
         synchronizer: any V2ActiveHybridGroupSynchronizing
@@ -489,9 +504,12 @@ final class V2ConversationDetailStore {
         return true
     }
 
-    /// Existing injected fakes and deliberately unavailable realtime paths use
-    /// the same durable sync engine at a much lower cadence. It is never the
-    /// normal online Hybrid delivery path.
+    /// 混合大群的低频兜底轮询。
+    ///
+    /// 已注入的测试替身与刻意不可用的实时路径都会以远低的频率使用同一套持久化同步引擎；
+    /// 它绝不是常规在线混合大群的投递路径。
+    ///
+    /// - Parameter synchronizer: 当前混合大群同步实现。
     private func pollHybridGroupFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
         while !Task.isCancelled {
             let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
@@ -531,8 +549,14 @@ final class V2ConversationDetailStore {
         return false
     }
 
-    /// A broker wake gives normal foreground latency. The timer only recovers
-    /// a lost best-effort wake and is deliberately not a one-second poll.
+    /// 等待下一次混合大群唤醒或兜底超时。
+    ///
+    /// 代理唤醒提供常规的前台延迟；计时器只用于恢复丢失的尽力而为唤醒，
+    /// 刻意不做成一秒一次的轮询。
+    ///
+    /// - Parameter synchronizer: 当前混合大群同步实现。
+    /// - Returns: 本次唤醒信息；无唤醒时返回 `nil`。
+    /// - Throws: 任务取消或同步实现失败时抛出。
     private func nextHybridWakeOrFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async throws -> V2ActiveHybridGroupWake? {
         if synchronizer.usesRuntimeRecoveryClock { return try await synchronizer.nextWake() }
         return try await withThrowingTaskGroup(of: V2ActiveHybridGroupWake?.self) { group in
@@ -576,8 +600,11 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Called by a lazily-rendered row only after it has entered the visible
-    /// scroll viewport. The durable outbox coalesces repeated appearances.
+    /// 上报一条可见消息。
+    ///
+    /// 仅由惰性渲染的行在进入可见滚动区域之后调用；持久化发件箱会合并重复出现。
+    ///
+    /// - Parameter message: 已进入可见区域的消息。
     func reportVisibleMessage(_ message: V2ConversationMessageItem) async {
         guard let readReceiptReporter else { return }
         do {
@@ -590,8 +617,10 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Owned by the detail view's task. Live activity is ephemeral and must
-    /// be stopped when the view disappears; message refresh remains separate.
+    /// 观察实时活动状态。
+    ///
+    /// 该任务由详情视图持有。实时活动是瞬时状态，视图消失时必须停止；
+    /// 消息刷新是另一条独立路径。
     func observeLiveActivity() async {
         if let roomSubscriptions {
             await observeSharedLiveActivity(roomSubscriptions)
@@ -681,9 +710,13 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Applies a wire event and owns the receiver-side expiry. Kept separate
-    /// from the stream loop so tests can exercise the lease boundary without
-    /// a real socket.
+    /// 应用一次线路事件并负责接收端的到期处理。
+    ///
+    /// 它与流循环分离，使测试无需真实套接字即可覆盖租约边界。
+    ///
+    /// - Parameters:
+    ///   - typing: 正在输入状态。
+    ///   - now: 本次判定时刻。
     func applyTypingState(_ typing: V2TypingState, now: Date = Date()) {
         guard typing.roomID.rawValue == roomID, typing.userID.rawValue != userID else { return }
         typingExpiryTasks[typing.userID]?.cancel()
@@ -1113,8 +1146,14 @@ final class V2ConversationDetailStore {
         message.isOutgoing && !message.isWithdrawn && message.revision > 0 && !isMessageActionInFlight(message)
     }
 
-    /// Returns whether it is safe for the editor to close. Rejected commands
-    /// leave the text visible so the user can revise or retry it.
+    /// 编辑一条消息，并返回编辑器是否可以安全关闭。
+    ///
+    /// 被拒绝的命令会保留输入文本，便于用户修改或重试。
+    ///
+    /// - Parameters:
+    ///   - message: 目标消息。
+    ///   - text: 编辑后的正文。
+    /// - Returns: 编辑器可以关闭时为 `true`。
     func editMessage(_ message: V2ConversationMessageItem, text: String) async -> Bool {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canEditMessage(message), !trimmedText.isEmpty else { return false }
@@ -1245,8 +1284,12 @@ final class V2ConversationDetailStore {
         selectedForwardMessageIDs.contains(message.id)
     }
 
-    /// Returns `true` once the destination sheet may safely dismiss.  A
-    /// queued command is durable, so it is also safe to leave the sheet then.
+    /// 转发选中的消息，并返回目标选择页是否可以安全关闭。
+    ///
+    /// 已排队的命令是持久化的，因此此时离开页面同样是安全的。
+    ///
+    /// - Parameter targetRoomIDs: 目标房间标识列表。
+    /// - Returns: 可以关闭目标选择页时为 `true`。
     func forwardSelectedMessages(to targetRoomIDs: [String]) async -> Bool {
         guard !isForwardingMessages else { return false }
         let sources = selectedForwardSources.values.sorted {
@@ -1535,9 +1578,14 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// Moderation retains its own durable command/audit trail rather than
-    /// reusing normal member removal. The server still decides authority and
-    /// target eligibility at command acceptance time.
+    /// 禁言一名群成员。
+    ///
+    /// 审核保留独立的持久化命令与审计轨迹，而不复用普通成员移除；
+    /// 权限与目标资格仍由服务端在受理命令时裁决。
+    ///
+    /// - Parameters:
+    ///   - member: 目标成员。
+    ///   - duration: 禁言时长秒数。
     func muteGroupMember(_ member: V2GroupMemberItem, for duration: TimeInterval = 60 * 60) async {
         guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration,
               canRemoveGroupMember(member)

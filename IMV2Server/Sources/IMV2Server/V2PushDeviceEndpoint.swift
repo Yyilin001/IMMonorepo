@@ -4,25 +4,42 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Provider identifiers are deliberately narrow. Adding a new provider is a
-/// reviewed server-side change rather than a client-controlled string.
+/// 推送提供方标识。
+///
+/// 取值刻意保持很窄：新增提供方是需要评审的服务端改动，而不是由客户端自由传入的字符串。
 public enum V2PushEndpointProvider: String, Codable, Equatable, Sendable {
+    /// Apple 推送通知服务。
     case apns
 }
 
+/// 推送端点所属的运行环境。
 public enum V2PushEndpointEnvironment: String, Codable, Equatable, Sendable {
+    /// 开发环境（沙盒推送地址）。
     case development
+    /// 生产环境。
     case production
 }
 
-/// Registration is authenticated as the exact device that will receive the
-/// wake. The provider token is opaque and is never suitable for logs, metrics,
-/// event payloads, or user-sync records.
+/// 推送端点注册请求。
+///
+/// 注册必须以将接收唤醒的那台具体设备身份完成认证。提供方令牌是不透明值，
+/// 绝不适合写入日志、指标、事件载荷或用户同步记录。
 public struct V2PushDeviceEndpointRegistration: Equatable, Sendable {
+    /// 推送提供方。
     public let provider: V2PushEndpointProvider
+    /// 运行环境。
     public let environment: V2PushEndpointEnvironment
+    /// 提供方令牌，已去除首尾空白。
     public let token: String
 
+    /// 校验并保存注册请求。
+    ///
+    /// - Parameters:
+    ///   - provider: 推送提供方。
+    ///   - environment: 运行环境。
+    ///   - token: 提供方令牌，去除首尾空白后需非空、不超过 4096 字节且不含空白与控制字符。
+    /// - Throws: 令牌不满足上述约束时抛出
+    ///   ``V2PushDeviceEndpointError/invalidRegistration``。
     public init(provider: V2PushEndpointProvider, environment: V2PushEndpointEnvironment, token: String) throws {
         let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized.utf8.count <= 4_096,
@@ -36,16 +53,30 @@ public struct V2PushDeviceEndpointRegistration: Equatable, Sendable {
     }
 }
 
-/// Plaintext exists only between the encrypted persistence boundary and the
-/// configured provider adapter. The generation prevents a late provider
-/// rejection from disabling a newer endpoint registration for the same device.
+/// 已注册的推送端点。
+///
+/// 明文令牌只存在于加密持久化边界与已配置的提供方适配器之间。
+/// 代次用于避免延迟到达的提供方拒绝把同一设备更新的端点注册停用。
 public struct V2PushDeviceEndpoint: Equatable, Sendable {
+    /// 目标设备。
     public let deviceID: DeviceID
+    /// 推送提供方。
     public let provider: V2PushEndpointProvider
+    /// 运行环境。
     public let environment: V2PushEndpointEnvironment
+    /// 提供方令牌明文，仅在内存与配置好的适配器之间传递。
     public let token: String
+    /// 本次注册的代次，用于栅栏掉延迟到达的停用操作。
     public let generation: UUID
 
+    /// 保存已注册端点。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - provider: 推送提供方。
+    ///   - environment: 运行环境。
+    ///   - token: 提供方令牌明文。
+    ///   - generation: 本次注册代次。
     public init(deviceID: DeviceID, provider: V2PushEndpointProvider, environment: V2PushEndpointEnvironment, token: String, generation: UUID) {
         self.deviceID = deviceID
         self.provider = provider
@@ -55,37 +86,69 @@ public struct V2PushDeviceEndpoint: Equatable, Sendable {
     }
 }
 
+/// 推送端点错误。
 public enum V2PushDeviceEndpointError: Error, Equatable, Sendable {
+    /// 注册参数不合法。
     case invalidRegistration
+    /// 目标设备当前不可用。
     case deviceUnavailable
+    /// 依赖或密钥材料不可用。
     case unavailable
+    /// 持久化记录缺失或无法解密。
     case malformedPersistence
+    /// 需要携带意图版本才能执行该操作。
     case intentVersionRequired
+    /// 意图版本已过期。
     case staleIntent
+    /// 意图与当前状态冲突。
     case intentConflict
 }
 
-/// Separate deployment-secret material from credential replay encryption.
-/// Compromise of an account replay envelope must not decrypt provider endpoint
-/// material, and vice versa.
+/// 推送端点信封密钥。
+///
+/// 它与凭据重放加密材料相互独立：账号重放信封密钥泄漏不应能解开推送端点材料，反之亦然。
 public struct V2PushEndpointEnvelopeKey: Sendable {
     private let rawBytes: Data
 
+    /// 以 32 字节原始密钥构造。
+    ///
+    /// - Parameter rawBytes: 密钥字节，长度需恰好为 32。
+    /// - Throws: 长度不符时抛出 ``V2PushDeviceEndpointError/unavailable``。
     public init(rawBytes: Data) throws {
         guard rawBytes.count == 32 else { throw V2PushDeviceEndpointError.unavailable }
         self.rawBytes = rawBytes
     }
 
+    /// 以 Base64 密钥材料构造。
+    ///
+    /// - Parameter value: Base64 编码的 32 字节密钥。
+    /// - Throws: 无法解码或长度不符时抛出
+    ///   ``V2PushDeviceEndpointError/unavailable``。
     public init(base64Encoded value: String) throws {
         guard let bytes = Data(base64Encoded: value) else { throw V2PushDeviceEndpointError.unavailable }
         try self.init(rawBytes: bytes)
     }
 
+    /// 以认证加密方式封存令牌明文。
+    ///
+    /// - Parameters:
+    ///   - plaintext: 令牌明文。
+    ///   - context: 参与完整性认证的上下文。
+    /// - Returns: Base64 编码的密文信封。
+    /// - Throws: 加密封装失败时抛出。
     fileprivate func seal(_ plaintext: String, authenticating context: Data) throws -> String {
         let box = try ChaChaPoly.seal(Data(plaintext.utf8), using: SymmetricKey(data: rawBytes), authenticating: context)
         return box.combined.base64EncodedString()
     }
 
+    /// 解封并校验令牌密文。
+    ///
+    /// - Parameters:
+    ///   - ciphertext: Base64 编码的密文信封。
+    ///   - context: 参与完整性认证的上下文。
+    /// - Returns: 令牌明文。
+    /// - Throws: 信封无法解码、认证失败，或明文为空或超过 4096 字节时抛出
+    ///   ``V2PushDeviceEndpointError/malformedPersistence``。
     fileprivate func open(_ ciphertext: String, authenticating context: Data) throws -> String {
         guard let combined = Data(base64Encoded: ciphertext) else { throw V2PushDeviceEndpointError.malformedPersistence }
         let box = try ChaChaPoly.SealedBox(combined: combined)
@@ -97,13 +160,26 @@ public struct V2PushEndpointEnvelopeKey: Sendable {
         return value
     }
 
+    /// 计算意图摘要，用于同一端点设备上的幂等与冲突判定。
+    ///
+    /// - Parameter bytes: 参与摘要的规范化字节。
+    /// - Returns: 带部署域前缀的 HMAC-SHA256 摘要。
     fileprivate func intentDigest(_ bytes: Data) -> Data {
         let derived = HMAC<SHA256>.authenticationCode(for: Data("im-v2-push-intent-digest-v1".utf8), using: SymmetricKey(data: rawBytes))
         return Data(HMAC<SHA256>.authenticationCode(for: bytes, using: SymmetricKey(data: Data(derived))))
     }
 }
 
+/// 推送端点的持久化能力。
 public protocol V2PushDeviceEndpointStore: Sendable {
+    /// 注册或更新设备的推送端点。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起注册的用户。
+    ///   - deviceID: 目标设备。
+    ///   - endpoint: 端点注册内容。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 设备不可用、意图冲突或持久化失败时抛出。
     func register(
         actorUserID: UserID,
         deviceID: DeviceID,
@@ -120,9 +196,15 @@ public protocol V2PushDeviceEndpointStore: Sendable {
 }
 
 public extension V2PushDeviceEndpointStore {
-    /// Compatibility implementation for stores that do not own an atomic
-    /// identity-aware update. PostgreSQL overrides this to avoid reading and
-    /// decrypting provider material for a user-initiated delete.
+    /// 删除某设备自有端点的兼容实现。
+    ///
+    /// 面向不具备原子身份感知更新的存储：先读取端点再停用它。
+    /// PostgreSQL 实现会覆盖该方法，避免为用户主动删除而读取并解密提供方材料。
+    ///
+    /// - Parameters:
+    ///   - deviceID: 目标设备。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 读取或停用失败时抛出。
     func disableOwnedEndpoint(
         actorUserID _: UserID,
         deviceID: DeviceID,
@@ -134,14 +216,21 @@ public extension V2PushDeviceEndpointStore {
     }
 }
 
-/// Encrypts opaque provider tokens at rest and checks the active device inside
-/// the same transaction that updates endpoint state. Nothing in fan-out,
-/// user-sync, or Push outbox stores a provider token.
+/// 推送端点的 PostgreSQL 实现。
+///
+/// 它在静态存储中对不透明提供方令牌加密，并在更新端点状态的同一事务内校验设备有效性。
+/// 扇出、用户同步与推送发件箱都不会保存提供方令牌。
 public struct PostgresV2PushDeviceEndpointStore: V2PushDeviceEndpointStore {
     private let database: any Database
     private let envelopeKey: V2PushEndpointEnvelopeKey
     private let makeUUID: @Sendable () -> UUID
 
+    /// 组合数据库、信封密钥与代次生成方式。
+    ///
+    /// - Parameters:
+    ///   - database: 存放设备与端点状态的数据库。
+    ///   - envelopeKey: 端点令牌的加密密钥。
+    ///   - makeUUID: 端点代次生成方式。
     public init(
         database: any Database,
         envelopeKey: V2PushEndpointEnvelopeKey,
@@ -152,6 +241,19 @@ public struct PostgresV2PushDeviceEndpointStore: V2PushDeviceEndpointStore {
         self.makeUUID = makeUUID
     }
 
+    /// 在单个事务内校验设备并注册或更新端点。
+    ///
+    /// 事务会确认设备未吊销且会话有效，随后以新的代次加密写入端点材料，
+    /// 使延迟到达的旧停用请求无法影响新的注册。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起注册的用户。
+    ///   - deviceID: 目标设备。
+    ///   - endpoint: 端点注册内容。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 标识非法或时刻不可编码时抛出
+    ///   ``V2PushDeviceEndpointError/unavailable``；设备无效时抛出
+    ///   ``V2PushDeviceEndpointError/deviceUnavailable``。
     public func register(
         actorUserID: UserID,
         deviceID: DeviceID,
@@ -203,6 +305,13 @@ public struct PostgresV2PushDeviceEndpointStore: V2PushDeviceEndpointStore {
         }
     }
 
+    /// 读取设备的推送端点并解密令牌。
+    ///
+    /// - Parameter deviceID: 目标设备。
+    /// - Returns: 端点；不存在或已停用时返回 `nil`。
+    /// - Throws: 标识非法或连接不支持 SQL 时抛出
+    ///   ``V2PushDeviceEndpointError/unavailable``；密文无法解密时抛出
+    ///   ``V2PushDeviceEndpointError/malformedPersistence``。
     public func endpoint(for deviceID: DeviceID) async throws -> V2PushDeviceEndpoint? {
         guard let sql = database as? any SQLDatabase else { throw V2PushDeviceEndpointError.unavailable }
         let deviceUUID = try endpointUUID(deviceID)
@@ -232,6 +341,16 @@ public struct PostgresV2PushDeviceEndpointStore: V2PushDeviceEndpointStore {
         return .init(deviceID: deviceID, provider: provider, environment: environment, token: token, generation: row.generation)
     }
 
+    /// 按代次栅栏停用给定端点。
+    ///
+    /// 只有代次仍与当前记录一致时才会停用，因此延迟到达的提供方拒绝
+    /// 不会影响同一设备之后注册的新端点。
+    ///
+    /// - Parameters:
+    ///   - endpoint: 待停用的端点。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 时刻不可编码或连接不支持 SQL 时抛出
+    ///   ``V2PushDeviceEndpointError/unavailable``。
     public func disable(_ endpoint: V2PushDeviceEndpoint, now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now),
               let sql = database as? any SQLDatabase else { throw V2PushDeviceEndpointError.unavailable }
@@ -296,8 +415,9 @@ public enum V2PushEndpointIntent: Sendable {
     case disabled
 }
 
-/// Required conditional-write capability for the versioned HTTP contract.
-/// Epochs and revisions contain no provider token and grant no authentication.
+/// 版本化 HTTP 契约所需的条件写能力。
+///
+/// 任期与修订本身不包含提供方令牌，也不授予任何认证权限。
 public protocol V2PushEndpointIntentStoring: Sendable {
     func intentEpoch(actorUserID: UserID, deviceID: DeviceID) async throws -> UInt64
     func claimIntentSession(actorUserID: UserID, deviceID: DeviceID, claim: V2PushIntentSessionClaim, now: Date) async throws -> UInt64

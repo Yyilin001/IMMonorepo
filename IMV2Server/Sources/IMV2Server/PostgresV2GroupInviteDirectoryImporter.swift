@@ -2,15 +2,25 @@ import Fluent
 import Foundation
 import SQLKit
 
-/// Reads immutable creation bindings from exactly one registered current owner.
-/// No control transaction/connection is held while reading the owner. Publication
-/// and its immutable audit are atomic; any binding conflict rolls back the page.
+/// 从唯一一个已注册的当前归属读取不可变创建绑定的导入实现。
+///
+/// 读取归属期间不持有控制面事务或连接；发布与其不可变审计是原子的，
+/// 任一绑定冲突都会回滚整页。
 public struct PostgresV2GroupInviteDirectoryImporter: V2GroupInviteDirectoryImporting {
     private let control: any Database
     private let owners: any V2RoomShardStorageResolving
     private let principal: String
     private let now: @Sendable () -> Date
 
+    /// 校验运维主体并保存控制库与归属解析器。
+    ///
+    /// - Parameters:
+    ///   - controlDatabase: 存放邀请目录与导入审计的控制库。
+    ///   - owners: 房间归属到存储位置的解析器。
+    ///   - operatorPrincipal: 运维主体标识，需符合通用运维主体格式。
+    ///   - now: 可注入的当前时刻读取函数。
+    /// - Throws: 运维主体格式非法时抛出
+    ///   ``V2GroupInviteDirectoryImportError/invalidRequest``。
     public init(controlDatabase: any Database, owners: any V2RoomShardStorageResolving,
                 operatorPrincipal: String, now: @escaping @Sendable () -> Date = Date.init) throws {
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal)
@@ -18,6 +28,19 @@ public struct PostgresV2GroupInviteDirectoryImporter: V2GroupInviteDirectoryImpo
         self.control = controlDatabase; self.owners = owners; self.principal = operatorPrincipal; self.now = now
     }
 
+    /// 导入一页房间邀请绑定。
+    ///
+    /// 先尝试完全一致的幂等重放（路由或注册表变化后仍然可用），再以共享锁校验路由与归属一致，
+    /// 随后在归属事务内读取一页绑定。发布阶段在控制库事务中重新加锁校验归属，
+    /// 并用保存点隔离绑定写入，使任一冲突都能整页回滚。
+    ///
+    /// - Parameter command: 已校验的导入命令。
+    /// - Returns: 本页导入统计。
+    /// - Throws: 运维主体非法或时刻不可编码时抛出
+    ///   ``V2GroupInviteDirectoryImportError/invalidRequest``；分片未配置或 schema 不符时抛出
+    ///   ``V2GroupInviteDirectoryImportError/unknownShard``；归属不符时抛出
+    ///   ``V2GroupInviteDirectoryImportError/ownerChanged``；其余失败抛出
+    ///   ``V2GroupInviteDirectoryImportError/corruptPersistenceState``。
     public func importPage(_ command: V2GroupInviteDirectoryImportCommand) async throws -> V2GroupInviteDirectoryImportResult {
         let sql = try importSQL(control)
         // Exact replay remains available after routes or registry entries change.
@@ -159,9 +182,10 @@ private struct ImportBinding: Decodable, Equatable, Sendable {
     }
 }
 
-/// Keep the audit's numeric Unix-second format without converting the native
-/// microseconds through Double. The database binding itself stays exact for
-/// both copying and conflict detection, including timestamps Date collapses.
+/// 保持审计使用的 Unix 秒整数格式编码。
+///
+/// 编码过程不把原生微秒经过 `Double` 转换，使数据库绑定在复制与冲突检测两种用途下
+/// 都保持精确，包括 `Date` 会折叠掉精度的时间戳。
 private struct ImportBindingSnapshot: Encodable {
     let binding: ImportBinding
 

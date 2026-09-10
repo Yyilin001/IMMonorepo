@@ -1,52 +1,85 @@
 import Foundation
 
-/// In-process consumer for a durable room outbox. Every step remains safe to
-/// run on multiple gateway replicas: claims fence concurrent workers, planning
-/// is idempotent, and the delivery store commits a user-sync record exactly
-/// once for each source event and target user.
+/// 持久化房间发件箱的进程内消费者。
+///
+/// 每一步都可以安全地在多个网关副本上运行：认领会栅栏掉并发工作器，
+/// 规划是幂等的，投递存储对每个来源事件与目标用户恰好提交一条用户同步记录。
 public struct V2LocalFanoutPlanPublisher: V2BatchFanoutPlanPublisher {
     private let planner: V2FanoutPlanner
 
+    /// 以扇出规划器构造本地发布器。
+    ///
+    /// - Parameter planner: 执行规划的规划器。
     public init(planner: V2FanoutPlanner) {
         self.planner = planner
     }
 
+    /// 发布单个扇出触发。
+    ///
+    /// - Parameter trigger: 待发布的触发。
+    /// - Throws: 规划失败时抛出。
     public func publish(_ trigger: V2FanoutPlanTrigger) async throws {
         _ = try await planner.plan(trigger)
     }
 
+    /// 批量发布扇出触发。
+    ///
+    /// - Parameter triggers: 本批触发。
+    /// - Throws: 任一触发规划失败时抛出。
     public func publishBatch(_ triggers: [V2FanoutPlanTrigger]) async throws {
         _ = try await planner.planBatch(triggers)
     }
 }
 
+/// 单轮扇出流水线统计。
 public struct V2FanoutPipelineReport: Equatable, Sendable {
+    /// 发件箱中继统计。
     public let relay: V2OutboxRelayReport
+    /// 投递统计。
     public let delivery: V2FanoutDeliveryReport
 
+    /// 组合中继与投递统计。
+    ///
+    /// - Parameters:
+    ///   - relay: 发件箱中继统计。
+    ///   - delivery: 投递统计。
     public init(relay: V2OutboxRelayReport, delivery: V2FanoutDeliveryReport) {
         self.relay = relay
         self.delivery = delivery
     }
 }
 
-/// One bounded progression of room outbox -> immutable fan-out plan ->
-/// user-sync delivery. The planner and delivery phases each have an explicit
-/// per-process concurrency cap; durable claims remain the cross-replica
-/// fence. Scheduling and cancellation are owned by the runtime.
+/// 房间发件箱 → 不可变扇出计划 → 用户同步投递的单次有界推进。
+///
+/// 规划与投递阶段各有显式的进程内并发上限；跨副本栅栏仍由持久化认领承担。
+/// 调度与取消由运行时负责。
 public struct V2FanoutPipeline: Sendable {
     private let relay: V2OutboxRelay
     private let deliveryWorkers: [V2FanoutDeliveryWorker]
     private let telemetry: any V2TelemetrySink
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
 
+    /// 组合中继、单个投递工作器与遥测。
+    ///
+    /// - Parameters:
+    ///   - relay: 发件箱中继。
+    ///   - deliveryWorker: 投递工作器。
+    ///   - telemetry: 遥测接收器。
+    ///   - monotonicNow: 可注入的单调时钟读取函数。
     public init(relay: V2OutboxRelay, deliveryWorker: V2FanoutDeliveryWorker, telemetry: any V2TelemetrySink, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.init(relay: relay, deliveryWorkers: [deliveryWorker], telemetry: telemetry, monotonicNow: monotonicNow)
     }
 
-    /// Each logical bucket receives a bounded claim pass on every pipeline
-    /// tick. `deliveryConcurrency` remains a process-wide cap, not a hidden
-    /// multiplier by bucket count.
+    /// 组合中继、多个投递工作器与遥测。
+    ///
+    /// 每个逻辑桶在每次流水线推进中都会获得一次有界认领机会；
+    /// `deliveryConcurrency` 始终是进程级上限，不会随桶数量被隐式放大。
+    ///
+    /// - Parameters:
+    ///   - relay: 发件箱中继。
+    ///   - deliveryWorkers: 投递工作器列表，需非空。
+    ///   - telemetry: 遥测接收器。
+    ///   - monotonicNow: 可注入的单调时钟读取函数。
     public init(relay: V2OutboxRelay, deliveryWorkers: [V2FanoutDeliveryWorker], telemetry: any V2TelemetrySink, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         precondition(!deliveryWorkers.isEmpty)
         self.relay = relay
@@ -55,6 +88,11 @@ public struct V2FanoutPipeline: Sendable {
         self.monotonicNow = monotonicNow
     }
 
+    /// 以同一上限与单并发推进一轮中继与投递。
+    ///
+    /// - Parameter limit: 本轮中继与投递各自的上限，需大于零。
+    /// - Returns: 本轮流水线统计。
+    /// - Throws: 中继或投递失败时抛出。
     public func runOnce(limit: Int) async throws -> V2FanoutPipelineReport {
         try await runOnce(
             relayPlannerLimit: limit,
@@ -64,9 +102,17 @@ public struct V2FanoutPipeline: Sendable {
         )
     }
 
-    /// Runs all bounded planner claims before starting delivery claims, so a
-    /// newly published plan is eligible for projection in the same runtime
-    /// tick. `limit` applies to each worker invocation, not the aggregate.
+    /// 以指定并发推进一轮流水线。
+    ///
+    /// 先完成全部有界规划认领，再开始投递认领，使新发布的计划在同一次运行时推进中
+    /// 就具备被投影的资格。`limit` 作用于每次工作器调用，而不是总上限。
+    ///
+    /// - Parameters:
+    ///   - limit: 各阶段处理上限，需大于零。
+    ///   - plannerConcurrency: 规划并发上限，需大于零。
+    ///   - deliveryConcurrency: 投递并发上限，需大于零。
+    /// - Returns: 本轮流水线统计。
+    /// - Throws: 中继或投递失败时抛出。
     public func runOnce(
         limit: Int,
         plannerConcurrency: Int,
@@ -80,10 +126,18 @@ public struct V2FanoutPipeline: Sendable {
         )
     }
 
-    /// Runs one bounded pipeline progression with independent limits for the
-    /// room-outbox/planning phase and the lease-backed delivery phase. A large
-    /// delivery claim can reduce PostgreSQL claim overhead without widening
-    /// unrelated background workers.
+    /// 以分别的上限推进一轮流水线。
+    ///
+    /// 房间发件箱与规划阶段、基于租约的投递阶段各有独立上限：
+    /// 较大的投递认领量可以降低 PostgreSQL 认领开销，又不会顺带放大其他无关后台工作器。
+    ///
+    /// - Parameters:
+    ///   - relayPlannerLimit: 中继与规划阶段上限，需大于零。
+    ///   - deliveryClaimLimit: 投递认领上限，需大于零。
+    ///   - plannerConcurrency: 规划并发上限，需大于零。
+    ///   - deliveryConcurrency: 投递并发上限，需大于零。
+    /// - Returns: 本轮流水线统计。
+    /// - Throws: 中继或投递失败时抛出。
     public func runOnce(
         relayPlannerLimit: Int,
         deliveryClaimLimit: Int,
@@ -134,9 +188,15 @@ public struct V2FanoutPipeline: Sendable {
         }
     }
 
-    /// Progresses room-outbox publication and plan creation without waiting
-    /// for an in-flight delivery drain. Runtimes can schedule this frequently
-    /// to bound the time from a committed room event to a durable plan.
+    /// 只推进房间发件箱发布与计划创建，不等候在途投递排空。
+    ///
+    /// 运行时可以较高频地调度该入口，以约束「房间事件提交到持久化计划生成」的时延。
+    ///
+    /// - Parameters:
+    ///   - limit: 本轮处理上限，需大于零。
+    ///   - concurrency: 并发上限，需大于零。
+    /// - Returns: 本轮中继统计。
+    /// - Throws: 中继失败时抛出。
     public func runRelayAndPlanOnce(
         limit: Int,
         concurrency: Int
@@ -171,9 +231,16 @@ public struct V2FanoutPipeline: Sendable {
         }
     }
 
-    /// Progresses only lease-backed user delivery. It is intentionally
-    /// callable independently from planning so a long projection drain does
-    /// not add its duration to new-message planning latency.
+    /// 只在租约支撑下推进用户投递。
+    ///
+    /// 它刻意可以独立于规划阶段调用，
+    /// 这样一次耗时的投影排空就不会把自身耗时叠加到新消息规划延迟上。
+    ///
+    /// - Parameters:
+    ///   - claimLimit: 本次最多认领的投递条数。
+    ///   - concurrency: 并发处理的工作协程数。
+    /// - Returns: 本次投递报告。
+    /// - Throws: 认领或投递失败时抛出。
     public func runDeliveryOnce(
         claimLimit: Int,
         concurrency: Int

@@ -1,21 +1,40 @@
 import Foundation
 import IMV2Core
 
-/// An immutable, privacy-safe moderation fact received through user sync. It
-/// intentionally carries identifiers and a bounded action only: report text
-/// and the audit reason remain in the protected server-side audit store.
+/// 通过用户同步收到的不可变、隐私安全的审核事实。
+///
+/// 它只携带标识与一个有界动作：举报文本与审计原因保留在受保护的服务端审计存储中。
 public struct V2ClientModerationProjection: Equatable, Sendable {
+    /// 来源事件标识。
     public let sourceEventID: EventID
+    /// 目标房间。
     public let roomID: RoomID
+    /// 事件在房间日志中的序号。
     public let roomSequence: UInt64
+    /// 发起审核的用户。
     public let actorUserID: UserID
+    /// 被禁言的成员。
     public let targetUserID: UserID
+    /// 禁言到期时刻。
     public let muteUntil: Date
+    /// 事件创建时刻。
     public let createdAt: Date
 
-    /// SQLite already stores the projected dates. Reconstructing a synthetic
-    /// wire payload would round large timestamps a second time and can turn
-    /// the largest legal Int64 timestamp into an overflowing Double.
+    /// 校验并保存审核投影。
+    ///
+    /// SQLite 已经保存了投影后的时刻，这里不再构造合成线路载荷：
+    /// 再次转换会对较大时间戳引入二次舍入，并可能把合法的最大 `Int64` 时间戳变成溢出的 `Double`。
+    ///
+    /// - Parameters:
+    ///   - sourceEventID: 来源事件标识。
+    ///   - roomID: 目标房间。
+    ///   - roomSequence: 房间序号，需大于零。
+    ///   - actorUserID: 发起审核的用户。
+    ///   - targetUserID: 被禁言的成员。
+    ///   - muteUntil: 禁言到期时刻，需晚于创建时刻且不超过可表示的毫秒上界。
+    ///   - createdAt: 事件创建时刻，需不早于 Unix 纪元。
+    /// - Throws: 任一约束不满足时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(sourceEventID: EventID, roomID: RoomID, roomSequence: UInt64,
          actorUserID: UserID, targetUserID: UserID, muteUntil: Date, createdAt: Date) throws {
         let upperBound = Double(Int64.max) / 1_000
@@ -35,6 +54,11 @@ public struct V2ClientModerationProjection: Equatable, Sendable {
         self.createdAt = createdAt
     }
 
+    /// 从同步记录解码成员禁言投影。
+    ///
+    /// - Parameter record: 投影类型为审核的同步记录。
+    /// - Throws: 载荷无法解码、事件类型不符或时间戳关系异常时抛出
+    ///   ``V2ClientProjectionError/invalidMessagePayload``。
     init(record: V2ClientSyncRecord) throws {
         struct Wire: Decodable {
             let eventType: String

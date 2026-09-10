@@ -63,12 +63,12 @@ public struct V2AuthenticatedAccountMiddleware: AsyncMiddleware, Sendable {
     }
 }
 
-/// Cross-replica device budget for authenticated account endpoints. Costs are
-/// endpoint based so batch and mutation surfaces cannot be amplified as one
-/// cheap request. Domain-level cardinality bounds remain authoritative.
 /// 鉴权后的路由级速率限制中间件。
 ///
+/// 用于已认证账号路由的跨副本设备预算。代价按端点计算，
+/// 因此批量与变更类接口无法被当作一次廉价请求来放大。
 /// 与鉴权器解耦，按路径和方法计算代价，避免单次请求消耗无限资源。
+/// 领域层的基数上限仍然是权威约束。
 public struct V2AuthenticatedAccountRateLimitMiddleware: AsyncMiddleware, Sendable {
     private let limiter: any V2AuthenticatedAccountRateLimiting
 

@@ -2,9 +2,8 @@ import Foundation
 import GRDB
 import IMV2Core
 
-/// Durable command queues are isolated from sync projection application, but
-/// keep the same actor and SQLite pool so each command transition remains a
-/// single local transaction.
+/// 持久化命令队列与同步投影应用相互隔离，但共用同一 actor 与 SQLite 连接池，
+/// 使每次命令状态跃迁都保持在单个本地事务内。
 extension GRDBV2LocalSyncStore {
     public func enqueue(_ command: V2PendingMessageCommand) throws {
         try databasePool.write { db in
@@ -89,9 +88,12 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    /// Discards completed commands after their short local diagnostic window.
-    /// Pending records are the durable source for retries and are never
-    /// eligible for this cleanup.
+    /// 在短暂的本地诊断窗口结束后丢弃已完成命令。
+    ///
+    /// 待处理记录是重试的持久化来源，永远不会成为本清理的候选。
+    ///
+    /// - Parameter cutoff: 早于该时刻的终态命令可被清理。
+    /// - Throws: 时间戳编码或数据库写入失败时抛出。
     public func pruneTerminalCommands(olderThan cutoff: Date) throws {
         try databasePool.write { db in
             let cutoffValue = try Self.commandRetryTimestamp(cutoff)
@@ -124,10 +126,13 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    /// Stops automatic replay before the server is allowed to discard the
-    /// corresponding idempotency result. This transition runs in one local
-    /// transaction and deliberately preserves the rejected rows for UI
-    /// diagnosis instead of silently deleting user intent.
+    /// 在服务端可能丢弃对应幂等结果之前停止自动重放。
+    ///
+    /// 该跃迁在单个本地事务内完成，并刻意保留被拒绝的行供界面诊断，
+    /// 而不是静默删除用户意图。
+    ///
+    /// - Parameter now: 当前时刻，用于计算过期阈值。
+    /// - Throws: 时间戳编码或数据库写入失败时抛出。
     public func expireStalePendingCommands(now: Date) throws {
         try databasePool.write { db in
             let nowValue = try Self.commandRetryTimestamp(now)
@@ -1350,8 +1355,20 @@ extension GRDBV2LocalSyncStore {
 }
 
 extension GRDBV2LocalSyncStore {
-    /// One indexed metadata read replaces the old pending-only check. Repeat
-    /// completion is safe only when every persisted canonical result agrees.
+    /// 以一次带索引的元数据读取取代原先仅检查待处理状态的判定。
+    ///
+    /// 只有当全部已持久化的规范结果都一致时，重复完成才是安全的。
+    ///
+    /// - Parameters:
+    ///   - table: 命令表名。
+    ///   - keyColumn: 命令键列名。
+    ///   - key: 命令键值。
+    ///   - completedState: 表示完成的状态值。
+    ///   - canonicalValues: 需要逐一比对的规范字段取值。
+    ///   - pendingStates: 视为待处理的状态集合。
+    ///   - db: 只读或读写数据库。
+    /// - Returns: 允许按已完成结果重复完成时为 `true`。
+    /// - Throws: 查询失败时抛出。
     private static func acceptsRepeatedCompletion(
         table: String, keyColumn: String, key: String, completedState: String,
         canonicalValues: [String: DatabaseValue], pendingStates: Set<String> = ["pending"],

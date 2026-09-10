@@ -3,13 +3,31 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Source-side terminal evidence and pin release. There are no remote effects
-/// inside this transaction. Neither timeouts nor exhausted retries are receipts.
+/// 源端终态证据与置顶释放的持久化实现。
+///
+/// 该事务内不产生任何远程副作用；超时与重试耗尽都不构成终态回执，
+/// 只有目标侧持久化的终态结果才能写入回执。
 public struct PostgresV2ForwardReceiptStore: Sendable {
     private let database: any Database
 
+    /// 组合数据库。
+    ///
+    /// - Parameter database: 存放转发导出与回执的数据库。
     public init(database: any Database) { self.database = database }
 
+    /// 记录或重放一次终态回执。
+    ///
+    /// 顺序为：复核导出原文与摘要未变、命中已有回执则校验一致性、锁定源房间并校验归属、
+    /// 写入回执、再读回校验。归属校验会与新导出串行化配额释放，并在归属迁移后栅栏掉旧源端工作器；
+    /// 完全一致的终态回放不需要重新授权原始消息。
+    ///
+    /// - Parameters:
+    ///   - receipt: 目标侧终态回执。
+    ///   - now: 服务端统一授时时刻。
+    /// - Throws: 导出记录不存在或内容不一致、归属已变更、结果仍为待处理、
+    ///   序号无法写入 `Int64` 或时刻不可编码时抛出
+    ///   ``V2ForwardExportError/idempotencyConflict`` 或
+    ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func record(_ receipt: V2ForwardTerminalReceipt, now: Date) async throws {
         let export = receipt.export
         let intent = export.intent
@@ -58,11 +76,24 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
         }
     }
 
+    /// 查询导出当前的终态结果。
+    ///
+    /// - Parameter exportID: 目标导出标识。
+    /// - Returns: 终态结果；尚无回执时返回 `nil`。
+    /// - Throws: 连接不支持 SQL 或回执行字段非法时抛出
+    ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func status(exportID: UUID) async throws -> V2ForwardImportOutcome? {
         guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
         return try await read(exportID: exportID, sql: sql)?.outcome
     }
 
+    /// 读取指定导出的回执行。
+    ///
+    /// - Parameters:
+    ///   - exportID: 目标导出标识。
+    ///   - sql: 当前事务使用的数据库连接。
+    /// - Returns: 回执行；不存在时返回 `nil`。
+    /// - Throws: 查询失败时抛出。
     private func read(exportID: UUID, sql: any SQLDatabase) async throws -> ReceiptRow? {
         try await sql.raw("""
             SELECT payload_digest, state, result_message_id, result_room_sequence, error_code
@@ -70,6 +101,13 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
             """).first(decoding: ReceiptRow.self)
     }
 
+    /// 校验已有回执与本次终态结果完全一致。
+    ///
+    /// - Parameters:
+    ///   - row: 已持久化的回执行。
+    ///   - receipt: 本次提交的终态回执。
+    /// - Throws: 摘要或结果不一致时抛出
+    ///   ``V2ForwardExportError/idempotencyConflict``。
     private func match(_ row: ReceiptRow, receipt: V2ForwardTerminalReceipt) throws {
         guard row.digest == receipt.export.digest, try row.outcome == receipt.outcome
         else { throw V2ForwardExportError.idempotencyConflict }

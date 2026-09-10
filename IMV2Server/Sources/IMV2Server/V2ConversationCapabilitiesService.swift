@@ -3,30 +3,109 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// 会话能力变更的通用结果。
+///
+/// `Value` 为变更后的领域值；幂等重放会返回与此前一致的取值。
 public enum V2ConversationCapabilitiesOutcome<Value: Equatable & Sendable>: Equatable, Sendable {
-    case applied(Value), idempotent(Value), idempotencyConflict
+    /// 本次调用实际完成了变更。
+    case applied(Value)
+    /// 该操作此前已成功提交，本次为重放，返回相同结果。
+    case idempotent(Value)
+    /// 同一操作标识提交了与首次不同的载荷。
+    case idempotencyConflict
 }
 
-public enum V2ConversationCapabilitiesStoreError: Error, Equatable, Sendable { case roomNotFound, messageNotFound, actorNotMember, invalidTimestamp, corruptPersistenceState }
+/// 会话能力存储的错误分类。
+public enum V2ConversationCapabilitiesStoreError: Error, Equatable, Sendable {
+    /// 目标房间不存在。
+    case roomNotFound
+    /// 目标消息不存在或不属于该房间。
+    case messageNotFound
+    /// 发起者不是房间的活跃成员。
+    case actorNotMember
+    /// 时间戳无法被 PostgreSQL 时间类型编码。
+    case invalidTimestamp
+    /// 持久化状态与预期不一致。
+    case corruptPersistenceState
+}
 
+/// 会话能力（会话状态与消息收藏）的持久化边界。
 public protocol V2ConversationCapabilitiesStore: Sendable {
+    /// 设置房间置顶、归档与免打扰等会话状态。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 会话状态命令，携带操作标识以支持幂等重试。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 非成员、时间戳非法或持久化失败时抛出。
     func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState>
+    /// 设置或取消某条消息的收藏。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 收藏命令，携带操作标识以支持幂等重试。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 非成员、消息不存在或持久化失败时抛出。
     func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite>
 }
 
+/// 会话能力服务。
+///
+/// 它在调用存储前统一注入服务端时钟，保证同一次请求内的时间语义一致。
 public struct V2ConversationCapabilitiesService: Sendable {
     private let store: any V2ConversationCapabilitiesStore
     private let now: @Sendable () -> Date
+    /// 创建会话能力服务。
+    ///
+    /// - Parameters:
+    ///   - store: 会话能力持久化边界。
+    ///   - now: 服务端时钟，默认取当前时间。
     public init(store: any V2ConversationCapabilitiesStore, now: @escaping @Sendable () -> Date = Date.init) { self.store = store; self.now = now }
+    /// 设置会话状态。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 会话状态命令。
+    /// - Returns: 变更结果。
+    /// - Throws: 存储拒绝或持久化失败时抛出。
     public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> { try await store.setConversationState(actorUserID: actorUserID, command: command, now: now()) }
+    /// 设置或取消消息收藏。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 收藏命令。
+    /// - Returns: 变更结果。
+    /// - Throws: 存储拒绝或持久化失败时抛出。
     public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> { try await store.setMessageFavorite(actorUserID: actorUserID, command: command, now: now()) }
 }
 
+/// 会话能力的 PostgreSQL 持久化实现。
+///
+/// 每次变更都在单事务内完成操作台账写入、权威状态更新与用户同步投影，
+/// 并在事务提交之后按需把控制面记录镜像到用户的当前写入归属。
 public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitiesStore {
     private let database: any Database
     private let shadowForwarder: any V2UserShardProjectionShadowing
+    /// 创建 PostgreSQL 会话能力存储。
+    ///
+    /// - Parameters:
+    ///   - database: 控制面数据库连接。
+    ///   - shadowForwarder: 提交后镜像控制面投影的影子转发器。
     public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) { self.database = database; self.shadowForwarder = shadowForwarder }
 
+    /// 设置会话状态，并把结果投影到发送者的用户同步日志。
+    ///
+    /// 先锁定操作台账身份再读取，使并发重试可以观察到刚提交的操作。
+    /// 免打扰时间在 PostgreSQL 内比较，避免 Swift 侧二次量化引入的微秒差异被误判为载荷冲突。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 会话状态命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 时间戳非法、非成员或持久化失败时抛出。
     public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> {
         if let muteUntil = command.muteUntil, !v2PostgresTimestampCanEncode(muteUntil) {
             throw V2ConversationCapabilitiesStoreError.invalidTimestamp
@@ -61,6 +140,16 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         return result
     }
 
+    /// 设置或取消消息收藏，并把结果投影到发送者的用户同步日志。
+    ///
+    /// 与设置会话状态相同，操作台账加锁先于读取；消息必须属于目标房间才会被接受。
+    ///
+    /// - Parameters:
+    ///   - actorUserID: 发起变更的用户。
+    ///   - command: 收藏命令。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 变更结果。
+    /// - Throws: 非成员、消息不存在或持久化失败时抛出。
     public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> {
         let result: V2ConversationCapabilitiesOutcome<V2MessageFavorite> = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }

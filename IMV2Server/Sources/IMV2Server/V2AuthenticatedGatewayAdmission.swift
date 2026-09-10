@@ -1,10 +1,20 @@
 import Foundation
 import IMV2Core
 
+/// 已认证连接准入策略。
 public struct V2AuthenticatedConnectionAdmissionPolicy: Equatable, Sendable {
+    /// 单设备允许的并发连接数。
     public let maximumConnectionsPerDevice: Int
+    /// 单用户允许的并发连接数。
     public let maximumConnectionsPerUser: Int
 
+    /// 校验并保存准入策略。
+    ///
+    /// - Parameters:
+    ///   - maximumConnectionsPerDevice: 单设备连接上限，需大于零。
+    ///   - maximumConnectionsPerUser: 单用户连接上限，需不小于单设备上限。
+    ///
+    /// 参数不满足上述关系时直接失败，避免出现用户上限小于设备上限的矛盾配置。
     public init(maximumConnectionsPerDevice: Int, maximumConnectionsPerUser: Int) {
         precondition(
             maximumConnectionsPerDevice > 0 &&
@@ -15,28 +25,61 @@ public struct V2AuthenticatedConnectionAdmissionPolicy: Equatable, Sendable {
     }
 }
 
+/// 已认证连接租约的结果。
 public enum V2AuthenticatedConnectionLeaseOutcome: Equatable, Sendable {
+    /// 准入通过，并给出租约到期时刻。
     case accepted(expiresAt: Date)
+    /// 准入被拒绝。
     case rejected
 }
 
+/// 已认证网关命令的限流准入能力。
 public protocol V2AuthenticatedGatewayCommandAdmitting: Sendable {
+    /// 以指定代价准入一条命令。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证连接身份。
+    ///   - cost: 本次消耗的额度。
+    ///   - now: 判定时刻。
+    /// - Returns: 允许通过时为 `true`。
     func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool
 }
 
 public extension V2AuthenticatedGatewayCommandAdmitting {
+    /// 以单份额度准入一条命令。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证连接身份。
+    ///   - now: 判定时刻。
+    /// - Returns: 允许通过时为 `true`。
     func admit(identity: V2AuthenticatedConnection, now: Date) async -> Bool {
         await admit(identity: identity, cost: 1, now: now)
     }
 }
 
+/// 网关命令的令牌桶限流策略。
 public struct V2GatewayCommandRateLimitPolicy: Equatable, Sendable {
+    /// 单设备每秒命令数。
     public let deviceCommandsPerSecond: Double
+    /// 单设备突发容量。
     public let deviceBurst: Int
+    /// 单用户每秒命令数。
     public let userCommandsPerSecond: Double
+    /// 单用户突发容量。
     public let userBurst: Int
+    /// 可追踪身份数量上限。
     public let maximumTrackedIdentities: Int
 
+    /// 校验并保存限流策略。
+    ///
+    /// - Parameters:
+    ///   - deviceCommandsPerSecond: 单设备每秒命令数，需大于零。
+    ///   - deviceBurst: 单设备突发容量，需大于零。
+    ///   - userCommandsPerSecond: 单用户每秒命令数，需大于零。
+    ///   - userBurst: 单用户突发容量，需不小于设备突发容量。
+    ///   - maximumTrackedIdentities: 可追踪身份数量，需不小于 2。
+    ///
+    /// 参数不满足上述关系时直接失败，避免用户突发小于设备突发的矛盾配置。
     public init(
         deviceCommandsPerSecond: Int,
         deviceBurst: Int,
@@ -57,14 +100,26 @@ public struct V2GatewayCommandRateLimitPolicy: Equatable, Sendable {
     }
 }
 
-/// A process overload boundary, not a product/abuse quota. Users are assigned
-/// to stable independent lanes so unrelated connections do not serialize on
-/// one global actor. Every device belonging to one authenticated user enters
-/// the same lane, preserving atomic device+user charging. Per-lane LRU budgets
-/// partition the configured process-wide identity ceiling exactly.
+/// 进程过载边界，而不是产品风控或滥用配额。
+///
+/// 用户会被分配到稳定且相互独立的通道，使无关连接不会在同一个全局 actor 上串行。
+/// 同一已认证用户的所有设备进入同一通道，从而保持「设备 + 用户」计费的原子性；
+/// 各通道的最近最少使用预算精确划分配置的进程级身份上限。
 public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGatewayCommandAdmitting, Sendable {
     private let shards: [V2AuthenticatedGatewayCommandRateLimiterShard]
 
+    /// 组合限流策略与通道数量。
+    ///
+    /// 通道数会按追踪容量收敛：小规模策略与刻意精简的部署仍只保留一条通道，
+    /// 生产规模则获得并行度，同时不会产生「装不下一个用户与其设备」的过小通道。
+    /// 总容量按商与余数精确分配，各通道容量之和等于配置上限。
+    ///
+    /// - Parameters:
+    ///   - policy: 令牌桶限流策略。
+    ///   - shardCount: 期望通道数量，需大于零，默认 16。
+    ///   - monotonicNow: 可注入的单调时钟读取函数。
+    ///
+    /// 通道数量非正时直接失败，避免出现空通道数组。
     public init(
         policy: V2GatewayCommandRateLimitPolicy,
         shardCount: Int = 16,
@@ -86,6 +141,16 @@ public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGate
         }
     }
 
+    /// 以指定代价准入一条命令。
+    ///
+    /// 命令按其身份稳定映射到某条通道，在同一通道内以原子方式同时扣减设备与用户额度，
+    /// 因此不会出现只扣一侧的中间状态。
+    ///
+    /// - Parameters:
+    ///   - identity: 已认证连接身份。
+    ///   - cost: 本次消耗的额度。
+    ///   - now: 判定时刻。
+    /// - Returns: 允许通过时为 `true`。
     public func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool {
         guard cost >= 0 else { return false }
         guard cost > 0 else { return true }
@@ -138,12 +203,11 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
     private var lruNodes: [TrackedIdentity: LRUNode] = [:]
     private var leastRecentlyUsed: TrackedIdentity?
     private var mostRecentlyUsed: TrackedIdentity?
-    /// Recency has no observable effect until the bounded map must evict.
-    /// Building and mutating two intrusive-LRU nodes for every command made
-    /// the normal, comfortably-under-capacity case pay four extra dictionary
-    /// writes. Keep exact last-use time in the token buckets and materialize
-    /// the LRU once, immediately before the first possible eviction. From
-    /// that point onward every access is tracked exactly as before.
+    /// 惰性构建最近最少使用链表的说明。
+    ///
+    /// 在有界映射真正需要淘汰之前，访问新旧顺序没有可观察效果：若为每条命令都创建并更新两个
+    /// 侵入式链表节点，会让容量充裕的常规路径多付四次字典写入。这里把精确的最后使用时间
+    /// 记在令牌桶中，并在首次可能发生淘汰之前一次性物化链表；此后每次访问都恢复精确追踪。
     private var recencyTrackingEnabled = false
 
     init(
@@ -229,11 +293,11 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
         }
     }
 
-    /// Reconstructs the exact access order from the buckets' last refill
-    /// timestamp. `refilledAt` is advanced on every positive elapsed access,
-    /// so no rate-limit state is discarded or refreshed by this transition.
-    /// Equal timestamps use a stable identity key only to make eviction and
-    /// tests reproducible; either ordering has identical quota semantics.
+    /// 由令牌桶的最后补充时间重建精确访问顺序。
+    ///
+    /// 每次耗时为正的访问都会推进 `refilledAt`，因此该转换不会丢弃或刷新任何限流状态。
+    /// 时间戳相同时仅使用稳定的身份键排序，使淘汰与测试结果可复现；
+    /// 两种排序在配额语义上完全等价。
     private func enableRecencyTracking() {
         precondition(!recencyTrackingEnabled)
         var identities: [(identity: TrackedIdentity, lastUsedAt: ContinuousClock.Instant)] = []

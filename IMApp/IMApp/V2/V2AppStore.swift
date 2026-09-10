@@ -5,9 +5,10 @@ import Observation
 import OSLog
 import UIKit
 
-/// Tracks the short-lived task that starts the foreground realtime runtime.
-/// The runtime itself owns its live loops after startup; this gate only keeps
-/// a completed or cancelled startup task from blocking a later retry.
+/// 跟踪那个用于启动前台实时运行时的短生命周期任务。
+///
+/// 启动完成后，实时循环归运行时自身所有；
+/// 这个闸门只负责防止一个已完成或被取消的启动任务阻塞后续重试。
 @MainActor
 struct V2RealtimeAttemptGate {
     private(set) var generation: UInt64 = 0
@@ -20,9 +21,13 @@ struct V2RealtimeAttemptGate {
         return generation
     }
 
-    /// Returns `true` only when this completion belongs to the current task.
-    /// A stopped runtime may finish its cancelled task after a newer attempt
-    /// has been created, and must not clear that newer task's ownership.
+    /// 仅当本次完成属于当前任务时才返回 `true`。
+    ///
+    /// 一个已停止的运行时可能在新尝试创建之后才完成其已取消的任务，
+    /// 此时不得清除新任务的所有权。
+    ///
+    /// - Parameter completedGeneration: 完成方持有的代次。
+    /// - Returns: 该完成是否属于当前任务。
     mutating func finish(generation completedGeneration: UInt64) -> Bool {
         guard hasInFlightAttempt, generation == completedGeneration else { return false }
         hasInFlightAttempt = false
@@ -39,9 +44,10 @@ struct V2RealtimeAttemptGate {
     }
 }
 
-/// Gives each explicit sign-in request ownership of the authentication UI
-/// state. A transport may complete after its Task was cancelled, so Task
-/// cancellation alone cannot let an older request overwrite a newer login.
+/// 让每个显式登录请求各自拥有认证 UI 状态。
+///
+/// 传输层可能在自身 Task 被取消之后才完成，
+/// 因此仅靠 Task 取消无法阻止较早的请求覆盖较新的登录。
 @MainActor
 struct V2AuthenticationAttemptGate {
     private(set) var generation: UInt64 = 0
@@ -56,9 +62,10 @@ struct V2AuthenticationAttemptGate {
     }
 }
 
-/// Sign-out owns local task shutdown and durable credential handoff. Duplicate
-/// taps and terminal-auth callbacks share this gate; network revocation has an
-/// independent App-lifetime owner.
+/// 登出闸门。
+///
+/// 登出负责本地任务关闭与持久凭据交接。重复点击与终态认证回调共用此闸门；
+/// 网络吊销则由另一个独立于 App 生命周期的所有者负责。
 @MainActor
 struct V2SignOutAttemptGate {
     private(set) var isInFlight = false
@@ -90,20 +97,19 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     enum StartupMode: Sendable, Equatable {
         case production
         case uiTestingSignedOut
-        /// Keeps the real Debug account and gateway configuration while
-        /// deliberately avoiding a restore from an existing simulator
-        /// Keychain. This mode exists only behind a DEBUG launch argument for
-        /// the opt-in local-account integration test; it is never reachable
-        /// from a Release build.
+        /// 保留真实的 Debug 账号与网关配置，同时刻意不恢复既有模拟器 Keychain。
+        ///
+        /// 该模式只存在于 DEBUG 启动参数之后，供可选的本地账号集成测试使用；
+        /// 在 Release 构建中永远无法到达。
         case uiTestingLiveLocalAccount
-        /// Reopens only the explicitly scoped Keychain and SQLite state from
-        /// a preceding local-account UI-test launch. This lets two distinct
-        /// simulator installations prove an offline recipient catches up
-        /// after it is relaunched; it cannot reach a production session.
+        /// 只重新打开此前一次本地账号 UI 测试启动所显式限定的 Keychain 与 SQLite 状态。
+        ///
+        /// 这使两个不同的模拟器安装可以验证：离线接收方在重启后能够补齐；
+        /// 它无法触达生产会话。
         case uiTestingLiveLocalAccountRestore
-        /// Performs the opt-in local-account test scope cleanup. Like the
-        /// registration mode, this is reachable only from a DEBUG launch
-        /// argument and requires a valid random test scope.
+        /// 执行可选的本地账号测试作用域清理。
+        ///
+        /// 与注册模式一样，它只能通过 DEBUG 启动参数到达，并要求有效的随机测试作用域。
         case uiTestingLiveLocalAccountCleanup
 
         var restoresPersistedSession: Bool {
@@ -126,13 +132,13 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case signedOut
         case authenticating
         case signedIn(userID: String)
-        /// A Keychain read was temporarily denied while protected data was
-        /// unavailable. This is distinct from a terminal configuration or
-        /// local-store failure because a foreground retry may recover it.
+        /// 在受保护数据不可用期间，一次 Keychain 读取被临时拒绝。
+        ///
+        /// 它与终态配置或本地存储失败不同，因为前台重试可能使其恢复。
         case protectedDataUnavailable
-        /// The user has signed out, but iOS has not yet allowed the protected
-        /// credential deletion to complete. Old credentials must not restore
-        /// until this state has finished.
+        /// 用户已登出，但 iOS 尚未允许受保护的凭据删除完成。
+        ///
+        /// 在该状态结束之前，旧凭据不得被恢复。
         case signOutPendingCredentialDeletion
         case uiTestingLiveLocalAccountCleanupCompleted
         case unavailable(message: String)
@@ -400,9 +406,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
     }
 
-    /// Retries only the explicitly recoverable protected-data state. A normal
-    /// signed-out route never restores credentials merely because a prior
-    /// sign-out deletion encountered a temporarily locked Keychain.
+    /// 只重试明确可恢复的受保护数据状态。
+    ///
+    /// 常规的已登出流程绝不会仅仅因为此前一次登出删除遇到了临时锁定的 Keychain
+    /// 就恢复凭据。
     func retryProtectedDataAccess() async {
         guard route == .protectedDataUnavailable else { return }
         // Claim the state before awaiting the actor. This coalesces a user
@@ -583,8 +590,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
     }
 
-    /// Attempts the already-persisted logout completion after protected data
-    /// becomes available. It never opens an authenticated session.
+    /// 在受保护数据可用之后，尝试完成此前已持久化的登出收尾。
+    ///
+    /// 它绝不会打开已认证会话。
     func retryPendingCredentialDeletion() async {
         guard route == .signOutPendingCredentialDeletion, signOutAttemptGate.begin() else { return }
         defer { signOutAttemptGate.finish() }
@@ -911,10 +919,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         await discardAuthenticatedPresentation(route: destination)
     }
 
-    /// Stops the foreground realtime connection only after iOS has actually
-    /// backgrounded the scene. `inactive` is intentionally not treated as a
-    /// background transition because it also occurs while system permission
-    /// UI is presented over the app.
+    /// 仅在 iOS 确实将场景切入后台之后，才停止前台实时连接。
+    ///
+    /// `inactive` 刻意不被视为进入后台，因为系统权限弹窗覆盖在 App 之上时也会出现该状态。
     func applicationDidEnterBackground() async {
         isApplicationActive = false
         deviceRevocationTask?.cancel()
@@ -926,8 +933,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         await stopRealtime()
     }
 
-    /// Reuses the signed-in local projection and makes one explicit new
-    /// realtime attempt after the app returns to the foreground.
+    /// 在 App 回到前台后，复用已登录的本地投影并显式发起一次新的实时尝试。
     func applicationDidBecomeActive() async {
         isApplicationActive = true
         startDeviceRevocationObservationIfActive()
@@ -959,8 +965,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         startRealtimeIfApplicationActive(runtime: realtimeRuntime, conversations: conversationStore)
     }
 
-    /// Retain the task until its actual network flight drains. A foreground
-    /// transition during cancellation restarts only after that old task ends.
+    /// 保留任务，直到其真实的网络在途请求排空。
+    ///
+    /// 若取消期间发生前台切换，只会在旧任务结束后才重启。
     private func startDeviceRevocationIfActive() {
         guard isApplicationActive, deviceRevocationTask == nil, let deviceRevocationRunner else { return }
         deviceRevocationNeedsRetry = false
@@ -1214,9 +1221,16 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         return managedDirectory.appending(path: fileName ?? "sync.sqlite", directoryHint: .notDirectory)
     }
 
-    /// SQLite may create its WAL/SHM after the main database file; re-apply and
-    /// verify the policy after each open rather than assuming directory state
-    /// covers every file-system implementation.
+    /// 应用数据库存储策略。
+    ///
+    /// SQLite 可能主数据库文件之后才创建 WAL/SHM 文件；
+    /// 因此每次打开之后都要重新应用并校验策略，
+    /// 而不是假设目录级状态已覆盖所有文件系统实现。
+    ///
+    /// - Parameters:
+    ///   - database: 主数据库文件地址。
+    ///   - fileManager: 使用的文件管理器。
+    /// - Throws: 策略应用或校验失败时抛出。
     private static func applyDatabaseStoragePolicy(databaseURL database: URL, fileManager: FileManager = .default) throws {
         for url in V2LocalDatabaseArtifacts(primary: database).files where fileManager.fileExists(atPath: url.path) {
             try V2DeviceLocalStoragePolicy.applyToManagedFile(url, fileManager: fileManager)

@@ -5,15 +5,13 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-/// PostgreSQL implementation of the V2 acceptance boundary.
+/// V2 接受边界的 PostgreSQL 实现。
 ///
-/// Room-local state is serialized by `rooms -> room_admission` for the
-/// general path. The plain direct shard-only path deliberately serializes on
-/// `rooms` and reserves command capacity from the shard credit pool instead.
-/// Shard admission is evaluated optimistically, then reserved with one
-/// conditional atomic increment as the final statement in the transaction.
-/// This preserves exact capacity and lease fencing without holding the shared
-/// shard row while policy checks and durable message writes run.
+/// 通用路径下，房间本地状态按 `rooms -> room_admission` 的顺序串行化。
+/// 仅分片的普通单聊路径则刻意只在 `rooms` 上串行，并改为从分片额度池预留命令容量。
+/// 分片准入先乐观评估，再在事务的最后一条语句中用一次条件式原子自增完成预留。
+/// 这既保持精确的容量与租约围栏，
+/// 又无需在策略检查与持久消息写入期间一直持有共享分片行。
 public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerValidatedForwardMessageWriteStore {
     private var database: any Database
     // Immutable for the lifetime of one scoped value copy. Shared caches and
@@ -65,9 +63,13 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         self.appendStageMetrics = appendStageMetrics
     }
 
-    /// Bind another workload pool for this exact physical owner. Value-copying
-    /// preserves all policies and the identity of shared caches/credit actors.
-    /// The composition root must resolve both pools from the same storage URL.
+    /// 为这个确切的物理归属绑定另一个工作负载连接池。
+    ///
+    /// 值拷贝会保留全部策略以及共享缓存/额度 actor 的身份。
+    /// 组合根必须让两个连接池解析到同一个存储 URL。
+    ///
+    /// - Parameter database: 要绑定的工作负载数据库连接。
+    /// - Returns: 绑定了新连接池的副本。
     public func usingWorkloadDatabase(_ database: any Database) -> Self {
         var copy = self
         copy.database = database
@@ -117,9 +119,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return scoped
     }
 
-    /// Operation locks must precede this query. NO KEY UPDATE retains the
-    /// existing append/FK lock compatibility while fencing epoch/shard updates.
-    /// A separate post-wait statement reads the new committed owner at RC.
+    /// 校验给定房间的归属路由均已选定。
+    ///
+    /// 操作锁必须先于本查询取得。`NO KEY UPDATE` 在围栏任期/分片更新的同时，
+    /// 保持与既有追加/外键锁兼容。等待之后另有一条语句在 READ COMMITTED 下读取新提交的归属。
+    ///
+    /// - Parameters:
+    ///   - roomIDs: 待校验归属的房间标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 存在未选定归属的房间时抛出。
     private func requireSelectedOwners(_ roomIDs: [UUID], sql: any SQLDatabase) async throws {
         guard let ownerRoutes else { return }
         let rooms = Set(roomIDs)
@@ -183,8 +191,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Trusted owner-to-owner import. The durable inbox authorizes only this
-    /// exact export; ordinary SendMessage never receives an import capability.
+    /// 受信的归属者到归属者导入。
+    ///
+    /// 持久收件箱只授权这一份确切的导出；普通 SendMessage 绝不会获得导入能力。
+    ///
+    /// - Parameters:
+    ///   - export: 待导入的转发导出。
+    ///   - capacityProfile: 本次导入使用的容量档位。
+    ///   - limits: 消息命令限制。
+    ///   - identifiers: 接受标识集合。
+    /// - Returns: 导入结果。
+    /// - Throws: 收件箱未授权、容量不足或持久化失败时抛出。
     public func importForwardExport(
         _ export: V2ForwardExport,
         capacityProfile: V2CapacityProfile,
@@ -269,10 +286,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// A compatible cold command may enter the authoritative standard batch;
-    /// a revision-fenced warm command may enter the accelerated batch. Neither
-    /// classification is an authorization decision. Both paths lock and
-    /// validate the durable policy rows again before appending.
+    /// 判断各请求是否可用于原子批处理。
+    ///
+    /// 兼容的冷命令可以进入权威标准批次；
+    /// 受修订围栏保护的热命令可以进入加速批次。
+    /// 这两种分类都不是授权决定。
+    /// 两条路径在追加之前都会重新锁定并校验持久策略行。
+    ///
+    /// - Parameter requests: 待分类的房间写入请求。
+    /// - Returns: 与 `requests` 顺序一致的资格判定。
     public func atomicBatchEligibility(
         requests: [V2RoomWriteRequest]
     ) async -> [Bool] {
@@ -386,9 +408,13 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return routes
     }
 
-    /// Resolves only the immutable execution shape needed by the advisory
-    /// batch classifier. Authorization, membership, policy, room state and
-    /// capacity remain exclusively in the transactional write paths.
+    /// 只解析建议性批次分类器所需的不可变执行形态。
+    ///
+    /// 授权、成员、策略、房间状态与容量仍完全只由事务写入路径负责。
+    ///
+    /// - Parameter roomIDs: 待解析路由的房间标识。
+    /// - Returns: 每个房间对应的房间标识与路由。
+    /// - Throws: 路由缺失或查询失败时抛出。
     private func loadRoomWriteBatchRoutes(
         roomIDs: [UUID]
     ) async throws -> [(roomID: UUID, route: V2RoomWriteBatchRouteCache.Route)] {
@@ -420,10 +446,21 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Owns the retry boundary for one logical command.  The transaction body
-    /// is deliberately separate so the ordered batch can reuse the exact same
-    /// locking, authorization and idempotency code without creating nested
-    /// transactions.
+    /// 持有单条逻辑命令的重试边界。
+    ///
+    /// 事务主体刻意独立出来，使有序批次可以复用完全相同的加锁、授权与幂等代码，
+    /// 而不会产生嵌套事务。
+    ///
+    /// - Parameters:
+    ///   - command: 待接受的发送消息命令。
+    ///   - capacityProfile: 本次命令使用的容量档位。
+    ///   - identifiers: 接受标识集合。
+    ///   - now: 服务端统一授时时刻。
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    ///   - cachedDirectPolicy: 可选的单聊策略缓存条目。
+    /// - Returns: 房间写入提交结果。
+    /// - Throws: 准入拒绝或持久化失败时抛出。
     private func acceptanceCommit(
         command: V2SendMessageCommand,
         capacityProfile: V2CapacityProfile,
@@ -459,15 +496,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Commits a bounded group of ordinary direct room-log messages together.
+    /// 一起提交一具有界的普通单聊房间日志消息。
     ///
-    /// This deliberately accepts only the plain-message transport shape: no
-    /// attachments, mention fan-out, or reply/forward dependency. The standard
-    /// batch still handles stranger quota, first-reply and profile/capability
-    /// effects under the same durable locks; the accelerated branch requires
-    /// those mutable effects to be complete already. Any unsupported outcome
-    /// rolls the whole batch back before the batcher retries each command via
-    /// the established scalar path.
+    /// 只接受纯消息传输形态：没有附件、@ 扇出，也没有回复/转发依赖。
+    ///
+    /// 标准批次仍在同样的持久锁下处理陌生人配额、首次回复与资料/能力效果；
+    /// 加速分支则要求这些可变效果已经完成。
+    /// 任何不受支持的结果都会回滚整批，随后由批处理器的既有标量路径逐条重试。
+    ///
+    /// - Parameter requests: 本批房间写入请求。
+    /// - Returns: 与请求顺序对应的发送结果。
+    /// - Throws: 配置不兼容、持久化状态损坏或写入失败时抛出。
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
@@ -519,12 +558,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return try await acceptStandardPlainDirectRoomLogBatch(requests: requests)
     }
 
-    /// Commits ordinary no-mention hybrid-group messages in one PostgreSQL
-    /// transaction. Rooms are locked in UUID order and repeated commands for
-    /// one hot room are reduced in their original arrival order. Persistence
-    /// updates that room once from the final reduced state while retaining
-    /// every message/event/audit row, so batching changes neither FIFO nor the
-    /// authorization, delivery, idempotency, and recovery contracts.
+    /// 在单个 PostgreSQL 事务中提交普通的、不含 @ 的混合群组消息。
+    ///
+    /// 房间按 UUID 顺序加锁，同一热房间的重复命令按原始到达顺序归并。
+    /// 持久化只按最终归并状态更新该房间一次，同时保留每一条消息/事件/审计行，
+    /// 因此批处理既不改动 FIFO，也不改动授权、投递、幂等与恢复契约。
+    ///
+    /// - Parameter requests: 本批房间写入请求。
+    /// - Returns: 与请求顺序对应的发送结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func acceptPlainHybridGroupBatch(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
@@ -818,11 +860,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return outcomes.compactMap { $0 }
     }
 
-    /// Authoritative cold/cache-miss batch. It deliberately performs no actor
-    /// or connection-pool acquisition while its PostgreSQL transaction is
-    /// open. Shard capacity is reserved by one final set-based conditional
-    /// UPDATE in that same transaction; a failed aggregate gate rolls the
-    /// entire batch back and lets the batcher retry each command independently.
+    /// 权威的冷路径/缓存未命中批次。
+    ///
+    /// 在其 PostgreSQL 事务打开期间，它刻意不获取任何 actor 或连接池资源。
+    /// 分片容量由同一事务末尾的一条集合式条件 UPDATE 预留；
+    /// 一旦聚合闸门失败，就回滚整批，随后由批处理器逐条独立重试各命令。
+    ///
+    /// - Parameter requests: 本批房间写入请求。
+    /// - Returns: 与请求顺序对应的发送结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func acceptStandardPlainDirectRoomLogBatch(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
@@ -1050,10 +1096,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Attempts the strictly steady-state branch for one ordinary direct
-    /// message.  A `nil` result is intentionally indistinguishable from a
-    /// cache miss to the caller: the established complete path owns all
-    /// denials, idempotent replays and unusual direct-message side effects.
+    /// 为一条普通单聊消息尝试严格的稳态分支。
+    ///
+    /// 对调用方而言，返回 `nil` 刻意与缓存未命中无法区分：
+    /// 所有拒绝、幂等重放以及特殊单聊副作用都由既有的完整路径负责。
+    ///
+    /// - Parameters:
+    ///   - request: 单条房间写入请求。
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    ///   - cacheKey: 单聊策略缓存键。
+    /// - Returns: 房间写入提交结果；不满足快速路径条件时为 `nil`。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func acceptFastPlainDirectRoomLogIfEligible(
         request: V2RoomWriteRequest,
         roomID: UUID,
@@ -1070,10 +1124,14 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return commits[0].commit
     }
 
-    /// Uses one conditional PostgreSQL statement for an already-warm batch
-    /// of plain direct room-log sends. The statement still takes all durable
-    /// room/membership/pair/version locks; it only avoids expanding the
-    /// stable policy graph and returning it to Swift before appending.
+    /// 对一批已经预热好的普通单聊房间日志发送，使用单条条件式 PostgreSQL 语句。
+    ///
+    /// 该语句仍会获取全部持久房间/成员/配对/版本锁；
+    /// 它只是避免了在追加之前展开稳定的策略图并将其返回 Swift。
+    ///
+    /// - Parameter requests: 本批房间写入请求。
+    /// - Returns: 与请求顺序对应的发送结果；不满足快速路径条件时为 `nil`。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func acceptFastPlainDirectRoomLogBatchIfEligible(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome]? {
@@ -1096,11 +1154,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// The fast path has deliberately narrow semantics. First-reply markers,
-    /// special accounts and profile/capability projections remain on the
-    /// complete path. An already-established stranger sender may use the
-    /// conditional statement because that same transaction also consumes its
-    /// exact durable stranger quota before advancing the room cursor.
+    /// 该快速路径刻意只具备很窄的语义。
+    ///
+    /// 首次回复标记、特殊账号以及资料/能力投影仍留在完整路径上。
+    /// 已经建立过关系的陌生人发送方可以使用该条件式语句，
+    /// 因为同一个事务在推进房间游标之前，也会消耗其精确的持久陌生人配额。
+    ///
+    /// - Parameters:
+    ///   - requests: 本批房间写入请求。
+    ///   - knownIDs: 预先解析出的房间/发送者/缓存键三元组。
+    /// - Returns: 各请求的提交结果；不满足条件时为 `nil`。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func fastPlainDirectRoomLogCommitsIfEligible(
         requests: [V2RoomWriteRequest],
         knownIDs: [(roomID: UUID, senderID: UUID, cacheKey: V2DirectSendPolicyCache.Key)]
@@ -1429,11 +1493,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         !policy.isFriend && !policy.recipientHasReplied
     }
 
-    /// A first accepted send may still be waiting for the opposite endpoint's
-    /// monotonic reply marker. Retaining that otherwise-stable snapshot lets
-    /// the post-commit reciprocal update promote it without another complete
-    /// authorization decode; the actual fast append still requires the full
-    /// predicate above and verifies every revision in PostgreSQL.
+    /// 判断某个单聊策略快照是否适合作为缓存候选。
+    ///
+    /// 首次被接受的发送可能仍在等待对端的单调回复标记。
+    /// 保留这份本已稳定的快照，
+    /// 可以让提交后的对向更新直接提升它，而无需再做一次完整授权解码；
+    /// 真正的快速追加仍需满足上方完整谓词，并在 PostgreSQL 中逐项校验每个修订。
+    ///
+    /// - Parameter policy: 待判断的单聊策略快照。
+    /// - Returns: 是否可作为缓存候选。
     private func fastPlainDirectPolicyIsCacheCandidate(
         _ policy: V2DirectSendPolicyCache.Entry
     ) -> Bool {
@@ -1446,12 +1514,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             && policy.recipientAccountKind == nil
     }
 
-    /// Uses the same authoritative preflight and append graph as an ordered
-    /// micro-batch, but for one already-proven hot direct room. The batcher
-    /// intentionally cannot place two commands from the same room into one
-    /// atomic batch because that would weaken FIFO. Without this branch, the
-    /// most active conversation would therefore never benefit from the safe
-    /// per-room credit optimization.
+    /// 使用与有序微批完全相同的权威预检与追加图，但只针对一个已确证的热单聊房间。
+    ///
+    /// 批处理器刻意不能把同一房间的两条命令放进同一个原子批次，因为那会削弱 FIFO。
+    /// 若没有该分支，最活跃的会话就永远无法享受到安全的每房间额度优化。
+    ///
+    /// - Parameters:
+    ///   - request: 单条房间写入请求。
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    /// - Returns: 房间写入提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func acceptHotDirectRoomLog(
         request: V2RoomWriteRequest,
         roomID: UUID,
@@ -1509,10 +1582,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Completes the authoritative durable append after every affected room,
-    /// membership, direct-pair and policy row has been preflight-locked.
-    /// Keeping it shared between a true micro-batch and the hot-room single
-    /// path prevents authorization, projection, or token-finalization drift.
+    /// 在所有受影响的房间、成员、单聊配对与策略行都已完成预检加锁之后，
+    /// 完成权威持久追加。
+    ///
+    /// 让真正的微批与热房间单条路径共享它，
+    /// 可以避免授权、投影或令牌收尾逻辑出现行为漂移。
+    ///
+    /// - Parameters:
+    ///   - prepared: 已准备的单聊房间日志追加。
+    ///   - sql: 参与当前事务的数据库连接。
+    ///   - stageMetrics: 可选的阶段耗时记录器。
+    /// - Returns: 各请求对应的有序提交结果。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func completePreparedDirectRoomLogAppends(
         _ prepared: [PreparedDirectRoomLogAppend],
         sql: any SQLDatabase,
@@ -1973,13 +2054,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Repeats the complete path's pre-credit gates before a shard-only batch
-    /// enters the credit actor. This is intentionally not a cache authority:
-    /// the rows were locked by `loadPlainDirectRoomLogBatchContexts`, and
-    /// `prepareDirectRoomLogAppend` applies the same checks again before using
-    /// the returned token. Keeping this helper authorization-complete prevents
-    /// invalid or blocked commands from speculatively reserving durable shard
-    /// capacity merely to make the actor call cheaper.
+    /// 在仅分片批次进入额度 actor 之前，重放完整路径的预扣费闸门。
+    ///
+    /// 它刻意不是缓存权威：
+    /// 相关行已由 `loadPlainDirectRoomLogBatchContexts` 锁定，
+    /// 且 `prepareDirectRoomLogAppend` 在使用返回的令牌之前会再执行同样的检查。
+    /// 让该辅助函数保持「授权完整」，
+    /// 可以避免非法或被阻塞的命令仅仅为了让 actor 调用更便宜，
+    /// 就去投机地预留持久分片容量。
+    ///
+    /// - Parameter item: 待校验的有序写入请求。
+    /// - Returns: 通过校验的分片额度请求；不合法时为 `nil`。
     private func validatedShardCreditRequest(
         item: OrderedRoomWriteRequest,
         preflight: PlainDirectRoomLogBatchPreflightRow
@@ -2049,15 +2134,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return nil
     }
 
-    /// A same-room batch is safe only after all direct-pair producer markers
-    /// are established and room admission is already represented by durable
-    /// credits.  That keeps the one-row-per-room set append free from
-    /// stranger-quota, first-reply, profile/capability, or room-admission
-    /// mutations whose per-command order has not been modelled here yet.
+    /// 同房间批次只有在所有单聊配对生产者标记都已建立、
+    /// 且房间准入已经由持久额度表示之后才是安全的。
     ///
-    /// The batch still locks the authoritative pair, membership, policy
-    /// versions and room row.  This is a narrow ordered append optimisation,
-    /// not a cache-based authorization shortcut.
+    /// 这使「每房间一行」的集合追加免于触发陌生人配额、首次回复、
+    /// 资料/能力或房间准入等尚未在此建模逐命令顺序的可变效果。
+    ///
+    /// 该批次仍会锁定权威配对、成员、策略版本与房间行。
+    /// 这是一种收窄的有序追加优化，而不是基于缓存的授权捷径。
+    ///
+    /// - Parameter orderedRequests: 本批有序写入请求。
+    /// - Throws: 不满足同房间批次安全前提时抛出。
     private func assertSameRoomBatchSafety(
         orderedRequests: [OrderedRoomWriteRequest],
         contexts: [PlainDirectRoomLogBatchPreflightRow]
@@ -2543,11 +2630,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             }
     }
 
-    /// Runs only after Fluent has committed the source transaction.  Keeping
-    /// these process-local and cross-store side effects outside the SQL
-    /// acceptance boundary is what lets a future atomic batch commit all
-    /// canonical room records first, then finalize each client result without
-    /// acknowledging an uncommitted prefix.
+    /// 只在 Fluent 已提交源事务之后运行。
+    ///
+    /// 把这些进程本地与跨存储副作用放在 SQL 接受边界之外，
+    /// 才能让未来的原子批次先提交全部规范房间记录，
+    /// 再逐条收尾客户端结果，而不会确认一个尚未提交的前缀。
+    ///
+    /// - Parameters:
+    ///   - command: 已提交的发送命令。
+    ///   - commit: 对应的房间写入提交结果。
+    /// - Returns: 客户端可见的发送结果。
+    /// - Throws: 后续影子写入失败时抛出。
     private func finalizeCommittedAcceptance(
         command: V2SendMessageCommand,
         cacheKey: V2DirectSendPolicyCache.Key,
@@ -2602,10 +2695,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return try roomWritePersistedAcceptanceOutcome(commit.outcome)
     }
 
-    /// Finalizes one already-committed micro-batch without paying several actor
-    /// hops per message. Every update is process-local or idempotent and happens
-    /// strictly after PostgreSQL commit; client outcomes are still withheld
-    /// until all required shadow writes have completed.
+    /// 收尾一个已提交微批，且无需为每条消息付出多次 actor 跳转。
+    ///
+    /// 每次更新都是进程本地或幂等的，且严格发生在 PostgreSQL 提交之后；
+    /// 在所有必需的影子写入完成之前，客户端结果仍会被扣留。
+    ///
+    /// - Parameters:
+    ///   - requests: 本批房间写入请求。
+    ///   - committed: 已提交的有序结果。
+    /// - Returns: 与请求顺序对应的发送结果。
+    /// - Throws: 影子写入失败时抛出。
     private func finalizeCommittedAcceptances(
         requests: [V2RoomWriteRequest],
         committed: [OrderedRoomWriteCommit]
@@ -2739,12 +2838,14 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return outcomes.compactMap { $0 }
     }
 
-    /// Applies the reducer's shard delta against the current row instead of
-    /// overwriting counters derived from an earlier snapshot. Concurrent rooms
-    /// can therefore perform all expensive work in parallel and serialize only
-    /// for this single tail update. Predicates mirror the schema constraints so
-    /// a capacity race becomes a normal admission rejection, never a partial
-    /// commit or a constraint error.
+    /// 把归并器算出的分片增量应用到当前行，而不是覆盖基于更早快照推导出的计数器。
+    ///
+    /// 这样并发房间可以并行完成全部昂贵工作，只在最后一次尾部更新时串行化。
+    /// 谓词与 schema 约束保持一致，
+    /// 使一次容量竞争变成普通的准入拒绝，而绝不会成为部分提交或约束错误。
+    ///
+    /// - Parameter initial: 预检得到的初始分片准入状态。
+    /// - Returns: 预留结果。
     private func shardAdmissionReservation(
         from initial: ShardAdmissionState,
         to next: ShardAdmissionState
@@ -2772,11 +2873,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Applies every cold-batch command reservation with one update per shard.
-    /// The input is grouped in Swift so PostgreSQL never attempts to update the
-    /// same target row twice in one statement. Cardinality is the commit gate:
-    /// a stale lease or insufficient aggregate capacity aborts the enclosing
-    /// transaction before any client outcome is finalized.
+    /// 以「每个分片一次更新」的方式应用冷路径批次的全部命令预留。
+    ///
+    /// 输入已在 Swift 侧分组，因此 PostgreSQL 绝不会在同一条语句中两次更新同一目标行。
+    /// 影响行数就是提交闸门：一个过期租约或聚合容量不足，
+    /// 都会在任何客户端结果被收尾之前中止外层事务。
+    ///
+    /// - Parameters:
+    ///   - prepared: 已准备的单聊房间日志追加。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 持久化状态损坏或预留失败时抛出。
     private func reservePreparedShardAdmissions(
         _ prepared: [PreparedDirectRoomLogAppend],
         sql: any SQLDatabase
@@ -2805,10 +2911,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try await reserveTransactionalShardAdmissions(transactional, sql: sql)
     }
 
-    /// Aggregates a shared-transaction reservation to one conditional update
-    /// per physical shard row. Callers have already performed their complete
-    /// room-local writes; a partial reservation aborts that enclosing
-    /// transaction, so no uncharged message can commit.
+    /// 把共享事务预留聚合为每个物理分片行一次条件更新。
+    ///
+    /// 调用方已经完成其全部房间本地写入；
+    /// 一次部分预留会中止外层事务，因此不会有未扣费的消息被提交。
+    ///
+    /// - Parameters:
+    ///   - transactional: 待预留的分片准入输入。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 持久化状态损坏或预留失败时抛出。
     private func reserveTransactionalShardAdmissions(
         _ transactional: [TransactionalShardAdmissionInput],
         sql: any SQLDatabase
@@ -2944,9 +3055,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Classifies the zero-row result of the conditional reservation without
-    /// weakening the authoritative predicate. This second read exists only on
-    /// a rejected transaction; a successful reservation needs no extra read.
+    /// 在不削弱权威谓词的前提下，对条件预留的「零行」结果进行分类。
+    ///
+    /// 这次额外读取只在事务被拒绝时发生；成功预留无需额外读取。
+    ///
+    /// - Parameters:
+    ///   - reservation: 本次分片准入预留。
+    ///   - room: 目标房间行。
+    ///   - retryAfterSeconds: 建议的重试等待秒数。
+    ///   - now: 服务端统一授时时刻。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 租约缺失、过期或触发限流时抛出。
     private func throwShardAdmissionRejection(
         _ reservation: ShardAdmissionReservation,
         room: RoomRow,
@@ -2970,12 +3089,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         throw LateShardAdmissionRejection.rateLimited(retryAfterSeconds: retryAfterSeconds)
     }
 
-    /// The control store remains the source of truth for direct-profile
-    /// visibility. Once a first direct message commits, mirror that profile
-    /// to the recipient's live user shard just as the direct-open path does.
-    /// Running this after the transaction is deliberate: a retry of the same
-    /// immutable client message repeats the idempotent shadow if a process
-    /// crashed after commit but before forwarding.
+    /// 在需要时镜像已提交的单聊投影。
+    ///
+    /// 控制存储仍是单聊资料可见性的事实来源。
+    /// 一旦首条单聊消息提交，就像开单聊路径那样把该资料镜像到接收方的实时用户分片。
+    /// 刻意在事务之后运行：
+    /// 若进程在提交之后、转发之前崩溃，重试同一条不可变客户端消息会重复这次幂等影子写入。
+    ///
+    /// - Parameters:
+    ///   - command: 已提交的发送命令。
+    ///   - commit: 对应的房间写入提交结果。
+    /// - Throws: 影子写入失败时抛出。
     private func shadowCommittedDirectProjectionsIfNeeded(
         command: V2SendMessageCommand,
         commit: RoomWriteCommit
@@ -3023,10 +3147,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Acquires the operation fence in its own statement. PostgreSQL fixes a
-    /// statement snapshot before evaluating a CTE; after a concurrent sender
-    /// releases this lock, the following read must therefore start with a new
-    /// snapshot to observe the committed idempotency result.
+    /// 在独立语句中获取操作围栏。
+    ///
+    /// PostgreSQL 会在求值 CTE 之前固定语句快照；
+    /// 因此在并发发送方释放该锁之后，随后的读取必须从新快照开始，
+    /// 才能观察到已提交的幂等结果。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    ///   - clientMessageID: 客户端消息标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 加锁失败时抛出。
     private func acquireMessageOperationLock(
         roomID: UUID,
         senderID: UUID,
@@ -3037,12 +3169,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
     }
 
-    /// Acquires a whole already-sorted micro-batch of idempotency fences in
-    /// one statement.  The recursive dependency is deliberate: it makes the
-    /// locking order explicit to PostgreSQL, rather than relying on an
-    /// incidental executor order for a set-returning query.  The caller must
-    /// issue its authoritative preflight as the *next* statement so it gets
-    /// a fresh post-lock snapshot.
+    /// 在单条语句中获取整个已排序微批的幂等围栏。
+    ///
+    /// 递归依赖是刻意的：它向 PostgreSQL 显式表达加锁顺序，
+    /// 而不是依赖集合返回查询偶然的执行器顺序。
+    /// 调用方必须把其权威预检作为*下一条*语句发出，
+    /// 以获得加锁后的新快照。
+    ///
+    /// - Parameter ordered: 已排序的房间写入请求。
+    /// - Throws: 加锁失败时抛出。
     private func acquireMessageOperationLocks(
         _ ordered: [OrderedRoomWriteRequest],
         sql: any SQLDatabase
@@ -3122,11 +3257,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }
 
-    /// Batch variant of the direct room-log preflight. The process-local
-    /// policy cache is deliberately *not* authority: every hit is accepted
-    /// only after this query locks and exactly matches the durable pair and
-    /// both user-policy revision fences. A miss or mismatch reads the
-    /// complete policy from PostgreSQL before the command can be accepted.
+    /// 单聊房间日志预检的批量变体。
+    ///
+    /// 进程本地策略缓存刻意*不是*权威：
+    /// 每次命中都只有在本次查询锁定并精确匹配持久配对与两条用户策略修订围栏之后才被接受。
+    /// 未命中或不匹配时，会先从事 PostgreSQL 读取完整策略，命令才可能被接受。
+    ///
+    /// - Parameters:
+    ///   - ordered: 已排序的房间写入请求。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 各请求对应的预检结果行。
+    /// - Throws: 预检不匹配或查询失败时抛出。
     private func loadPlainDirectRoomLogBatchContexts(
         _ ordered: [OrderedRoomWriteRequest],
         sql: any SQLDatabase
@@ -3465,11 +3606,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return rows
     }
 
-    /// Loads only the shard lease needed to reserve durable command credits
-    /// before the longer message transaction starts. This read is deliberately
-    /// not an authorization decision: `loadPlainHybridGroupBatchContexts`
-    /// repeats the assignment/lease checks and validates membership, mute and
-    /// role permissions while holding the established room-local locks.
+    /// 只加载在更长消息事务开始之前、用于预留持久命令额度所需的分片租约。
+    ///
+    /// 这次读取刻意不是授权决定：
+    /// `loadPlainHybridGroupBatchContexts` 会在持有既定房间本地锁的情况下，
+    /// 重新执行分配/租约检查，并校验成员、禁言与角色权限。
+    ///
+    /// - Parameters:
+    ///   - roomIDs: 待查询的房间标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 各房间对应的分片额度快照。
+    /// - Throws: 查询失败时抛出。
     private func loadPlainHybridGroupShardCreditSnapshots(
         roomIDs: [UUID],
         sql: any SQLDatabase
@@ -3516,10 +3663,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Set-based authoritative preflight for ordinary hybrid-group sends.
-    /// The room/admission/membership lock order is identical to the scalar
-    /// path. Permission resolution is evaluated from the same durable policy
-    /// rows while the room lock fences concurrent policy mutations.
+    /// 普通混合群组发送的集合式权威预检。
+    ///
+    /// 房间/准入/成员的加锁顺序与标量路径完全一致。
+    /// 权限判定基于同一批持久策略行求值，而房间锁则为并发的策略变更建立围栏。
+    ///
+    /// - Parameters:
+    ///   - ordered: 已排序的房间写入请求。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 各请求对应的预检结果行。
+    /// - Throws: 预检不匹配或查询失败时抛出。
     private func loadPlainHybridGroupBatchContexts(
         _ ordered: [OrderedRoomWriteRequest],
         sql: any SQLDatabase
@@ -3717,11 +3870,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return rows
     }
 
-    /// One transaction-scoped read loads the room, idempotency result, room
-    /// admission, sender membership, and direct-message policy together. The
-    /// operation fence has already established a fresh snapshot; the CTE lock
-    /// graph preserves room -> room admission -> sender membership -> direct
-    /// pair. The shared shard row remains a narrow final reservation.
+    /// 一次事务范围内的读取，同时加载房间、幂等结果、房间准入、发送者成员关系与单聊策略。
+    ///
+    /// 操作围栏已经建立了新快照；CTE 加锁图保持
+    /// 房间 -> 房间准入 -> 发送者成员 -> 单聊配对的顺序。
+    /// 共享分片行仍只作为最后一步的窄范围预留。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 消息接受上下文。
+    /// - Throws: 查询失败时抛出。
     private func loadMessageAcceptanceContext(
         roomID: UUID,
         senderID: UUID,
@@ -4001,9 +4161,12 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return row
     }
 
-    /// The SQL loader above owns the consistent database snapshot and locks;
-    /// this pure mapping deliberately retains the existing direct-policy
-    /// decision table unchanged.
+    /// 上方的 SQL 加载器负责一致的数据库快照与锁；
+    /// 这次纯映射刻意保持既有的单聊策略判定表不变。
+    ///
+    /// - Parameter policy: 单聊策略快照行。
+    /// - Returns: 单聊消息接受上下文。
+    /// - Throws: 快照字段非法时抛出。
     private func directMessageContext(
         from policy: DirectMessagePolicySnapshotRow
     ) throws -> DirectMessageAcceptanceContext {
@@ -4042,8 +4205,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Capacity is consumed only after the generic admission reducer accepts,
-    /// preserving the existing no-quota-loss invariant for a rejected send.
+    /// 只有在通用准入归并器接受之后才消耗容量，
+    /// 从而为被拒绝的发送保留既有的「配额不丢失」不变量。
+    ///
+    /// - Parameters:
+    ///   - senderID: 发送者标识。
+    ///   - recipientID: 接收者标识。
+    ///   - policy: 陌生人消息策略。
+    ///   - now: 服务端统一授时时刻。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 额度耗尽或写入失败时抛出。
     private func consumeDirectMessageQuota(senderID: UUID, recipientID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
         let windowStart = try roomWriteStrangerWindowStart(now: now, interval: policy.window)
         let consumed = try await sql.raw("""
@@ -4059,11 +4230,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         guard consumed != nil else { throw V2RoomWriteStoreError.strangerMessageLimitReached }
     }
 
-    /// The stranger-message policy only needs to know whether the peer has
-    /// ever replied. Keeping that monotonic fact on the already-locked direct
-    /// pair removes a per-send `messages` existence scan without changing the
-    /// point at which a reply becomes visible: this update commits atomically
-    /// with the accepted message.
+    /// 陌生人消息策略只需要知道对端是否曾经回复过。
+    ///
+    /// 把这个单调事实保存在已加锁的单聊配对上，
+    /// 可以省去每次发送时的一次 `messages` 存在性扫描，同时不改变回复变得可见的时点：
+    /// 该更新与已接受消息原子提交。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 发送者标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 是否发生了首次回复状态迁移。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     @discardableResult
     private func markDirectSenderHasReplied(
         roomID: UUID,
@@ -4096,9 +4274,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return true
     }
 
-    /// A rejection is a private fact for the sender, not a message and not a
-    /// room event. The operation table makes a transport retry idempotent and
-    /// prevents duplicate activity rows for one client message ID.
+    /// 一次拒绝只是属于发送者的私有事实，既不是消息，也不是房间事件。
+    ///
+    /// 操作表让传输层重试保持幂等，并防止同一个客户端消息 ID 产生重复的活动行。
+    ///
+    /// - Parameters:
+    ///   - fingerprint: 请求指纹。
+    ///   - roomID: 目标房间标识。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Returns: 拒绝的特有记录。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func persistDirectMessageDenied(
         fingerprint: V2SendMessageFingerprint,
         roomID: RoomID,
@@ -4140,10 +4325,12 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return .init(roomID: roomID, sourceEventID: .init(uuid: sourceEventID), timelineSequence: nextTimelineSequence, createdAt: persistedCreatedAt, reason: reason)
     }
 
-    /// The public denial reason deliberately hides whether a block, stranger
-    /// preference, or inactive special account caused the rejection. The
-    /// private timeline still uses the stable projection vocabulary consumed
-    /// by SQLite and constrained by PostgreSQL.
+    /// 公开的拒绝原因刻意隐藏了究竟是拉黑、陌生人偏好还是失活的特殊账号导致了拒绝。
+    ///
+    /// 私有时间线仍使用 SQLite 消费、PostgreSQL 约束的稳定投影词汇表。
+    ///
+    /// - Parameter reason: 私有拒绝原因。
+    /// - Returns: 稳定的时间线活动类型字符串。
     private func directMessageTimelineActivityType(for reason: V2DirectMessageDenied.Reason) -> String {
         switch reason {
         case .generic:
@@ -4207,10 +4394,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// The customer's first accepted message creates the service session in
-    /// the same transaction as the message. Retried messages reuse the room
-    /// row, while a closed session is deliberately not reopened by a stale
-    /// duplicate operation.
+    /// 客户的首条已接受消息会在与消息相同的事务中创建服务会话。
+    ///
+    /// 重试消息会复用该房间行；
+    /// 而已关闭的会话刻意不会被一次过期的重复操作重新打开。
+    ///
+    /// - Parameters:
+    ///   - roomID: 目标房间标识。
+    ///   - senderID: 客户用户标识。
+    ///   - supportAccountID: 客服账号标识。
+    ///   - createdAt: 会话创建时间。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 写入失败时抛出。
     private func openSupportSessionIfNeeded(roomID: UUID, senderID: UUID, supportAccountID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         try await sql.raw("INSERT INTO im_v2.support_conversation_sessions (room_id, support_account_user_id, customer_user_id, state, opened_at, last_activity_at, closed_at) VALUES (\(bind: roomID), \(bind: supportAccountID), \(bind: senderID), 'open', \(bind: createdAt), \(bind: createdAt), NULL) ON CONFLICT (room_id) DO UPDATE SET last_activity_at = EXCLUDED.last_activity_at, state = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN 'open' ELSE im_v2.support_conversation_sessions.state END, closed_at = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN NULL ELSE im_v2.support_conversation_sessions.closed_at END").run()
     }
@@ -4247,23 +4442,26 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Makes an unopened direct pair visible to the recipient only after its
-    /// first message has passed block, stranger-preference and quota checks in
-    /// this same transaction. The profile precedes the asynchronous message
-    /// fan-out in that recipient's sync stream, so a delivered first message
-    /// always has a stable conversation identity.
-    /// Pair-local producer markers are locked by `directMessageContext` and
-    /// therefore remain an exact, compaction-independent answer to whether a
-    /// projection changed. Established conversations return without another
-    /// PostgreSQL round trip; a state transition allocates its sequences and
-    /// advances the markers atomically with the message transaction.
+    /// 追加单聊接受后的投影。
     ///
-    /// The ordered direct micro-batch has already locked every pair and policy
-    /// row. Allocate all first-message projections in one SQL statement rather
-    /// than repeating the single-message CTE for each independent room. A
-    /// sender can occur in several rooms in one batch, so this deliberately
-    /// reserves that user's sync sequence range once and assigns its entries
-    /// in the existing ordered-batch order.
+    /// 只有在其首条消息于同一个事务中通过拉黑、陌生人偏好与配额检查之后，
+    /// 才会把一个尚未开启的单聊配对展示给接收者。
+    /// 资料投影排在该接收者同步流中异步消息扇出之前，
+    /// 因此被投递的首条消息总有一个稳定的会话身份。
+    ///
+    /// 配对本地的生产者标记由 `directMessageContext` 加锁，
+    /// 因此它们对「投影是否发生变化」始终给出精确且与压缩无关的答案。
+    /// 已建立的会话无需再走一次 PostgreSQL 往返即可返回；
+    /// 发生状态迁移时会分配其序号，并与消息事务原子地推进这些标记。
+    ///
+    /// 有序单聊微批已经锁定了每个配对与策略行。
+    /// 因此在单条 SQL 语句中分配全部首消息投影，
+    /// 而不是为每个独立房间重复执行单消息 CTE。
+    /// 一个发送者可能在同一批次中出现在多个房间里，
+    /// 因此这里刻意把该用户的同步序号区间只预留一次，并按既有的有序批次顺序分配其条目。
+    ///
+    /// - Parameter appends: 已准备的单聊房间日志追加。
+    /// - Throws: 持久化状态损坏或写入失败时抛出。
     private func appendDirectPostAcceptanceProjections(
         for appends: [PreparedDirectRoomLogAppend],
         sql: any SQLDatabase
@@ -4853,10 +5051,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// The ordinary direct/group send path used to issue one network round
-    /// trip per durable row. PostgreSQL already gives a data-modifying CTE one
-    /// statement-level transaction boundary, so chain every dependent write
-    /// through `RETURNING` and validate the exact mutation cardinality once.
+    /// 持久化标准扇出计划。
+    ///
+    /// 此前的普通单聊/群组发送路径会为每个持久行发起一次网络往返。
+    /// PostgreSQL 已为数据修改型 CTE 提供语句级事务边界，
+    /// 因此把每个依赖写入通过 `RETURNING` 串联起来，并统一校验精确的影响行数。
+    ///
+    /// - Parameters:
+    ///   - writeSet: 消息接受事务写入集合。
+    ///   - command: 发送消息命令。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistStandardFanout(
         _ writeSet: V2MessageAcceptanceTransaction,
         command: V2SendMessageCommand,
@@ -5197,11 +5402,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Persists the canonical direct-room event without manufacturing a
-    /// second durable copy for each of its two members. The event and its
-    /// revision-fenced membership checks are the recovery contract; the
-    /// foreground wake is intentionally outside this transaction and is only
-    /// a latency optimisation.
+    /// 持久化规范的单聊房间事件，而不为其两名成员各制造一份多余的持久副本。
+    ///
+    /// 该事件及其受修订围栏保护的成员校验就是恢复契约；
+    /// 前台唤醒刻意留在此事务之外，它只是一种延迟优化。
+    ///
+    /// - Parameters:
+    ///   - writeSet: 消息接受事务写入集合。
+    ///   - command: 发送消息命令。
+    ///   - room: 目标房间行。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistRoomLogMessage(
         _ writeSet: V2MessageAcceptanceTransaction,
         command: V2SendMessageCommand,
@@ -5371,9 +5582,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Adapts the legacy single-command path to the same set-based append SQL
-    /// used by the ordered micro-batch.  A future batch supplies more than one
-    /// input only after it has locked and prevalidated each distinct room.
+    /// 把旧版的单命令路径适配到有序微批所使用的同一套集合式追加 SQL。
+    ///
+    /// 未来的批次只有在锁定并预校验过每个不同房间之后，才会传入多于一个输入。
+    ///
+    /// - Parameters:
+    ///   - message: 已接受消息草稿。
+    ///   - fingerprint: 请求指纹。
+    ///   - room: 目标房间行。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 写入失败时抛出。
     private func persistPlainRoomLogMessage(
         message: V2AcceptedMessageDraft,
         fingerprint: V2SendMessageFingerprint,
@@ -5427,12 +5645,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    /// Applies the direct-only mutable policy effects for a batch whose room,
-    /// membership, pair and user-policy rows are already locked by the
-    /// authoritative preflight. Every mutation is set-based and the caller
-    /// treats a partial cardinality as an unsupported shape, so the enclosing
-    /// transaction rolls back and the established per-command path decides
-    /// each outcome without losing quota.
+    /// 为一个房间、成员、配对与用户策略行均已由权威预检锁定的批次，
+    /// 应用仅限单聊的可变策略效果。
+    ///
+    /// 每次变更都是集合式的，调用方会把部分影响行数视为不受支持的形态，
+    /// 于是外层事务回滚，改由既有的逐命令路径在不丢配额的前提下决定各结果。
+    ///
+    /// - Parameters:
+    ///   - appends: 已准备的单聊房间日志追加。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistPlainDirectRoomLogBatchPolicyMutations(
         _ appends: [PreparedDirectRoomLogAppend],
         sql: any SQLDatabase
@@ -5559,17 +5781,19 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Appends one or more already-authorized plain direct messages in one
-    /// Persists compact hybrid-group accepted events with one statement.
+    /// 用单条语句持久化紧凑的混合群组已接受事件。
     ///
-    /// The message row is both the canonical body and the immutable accepted
-    /// event identity. Room-log readers already merge that representation
-    /// with legacy `room_events`, and a statement trigger emits the same
-    /// coalesced durable wake. A zero-target terminal fan-out plan carries no
-    /// executable work, while revision-one projection state can be derived
-    /// losslessly and is materialized only if a later edit/withdraw requires
-    /// it. Repeated rooms retain every message while only their final input
-    /// advances mutable cursors and room admission.
+    /// 消息行同时是规范正文与不可变的已接受事件身份。
+    /// 房间日志读取方已将这种表示与旧版 `room_events` 合并，
+    /// 且语句触发器会发出同样的合并式持久唤醒。
+    /// 零目标的终态扇出计划不携带可执行工作；
+    /// 修订为一的投影状态可以无损推导，只有后续编辑/撤回需要时才会物化。
+    /// 重复房间会保留每一条消息，而只有其最终输入会推进可变游标与房间准入。
+    ///
+    /// - Parameters:
+    ///   - prepared: 已准备的混合群组追加。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistPlainHybridGroupMessages(
         _ prepared: [PreparedPlainHybridGroupAppend],
         sql: any SQLDatabase
@@ -5701,10 +5925,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }
 
-    /// PostgreSQL statement. Inputs are already ordered by room and arrival
-    /// sequence. A room may therefore occur more than once: the message rows
-    /// retain every input while the room/admission state is updated exactly
-    /// once from that room's final input.
+    /// 用单条 PostgreSQL 语句持久化普通房间日志消息。
+    ///
+    /// 输入已按房间与到达序号排序。因此一个房间可能出现多次：
+    /// 消息行会保留每个输入，
+    /// 而房间/准入状态只根据该房间的最终输入更新一次。
+    ///
+    /// - Parameters:
+    ///   - inputs: 本批普通房间日志消息输入。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistPlainRoomLogMessages(
         inputs: [PlainRoomLogMessageInput],
         sql: any SQLDatabase
@@ -5826,11 +6056,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Executes the steady ordinary hybrid-group contract as one conditional
-    /// PostgreSQL write graph. Shard command capacity has already been durably
-    /// charged by `V2ShardAdmissionCommandCreditPool`; the statement fences
-    /// that exact lease generation while retaining room-local admission,
-    /// authorization, idempotency and sequence allocation atomically.
+    /// 以单张条件式 PostgreSQL 写图执行稳态的普通混合群组契约。
+    ///
+    /// 分片命令容量已由 `V2ShardAdmissionCommandCreditPool` 持久预扣；
+    /// 该语句为那个确切的租约代次建立围栏，
+    /// 同时原子地保留房间本地准入、授权、幂等与序号分配。
+    ///
+    /// - Parameters:
+    ///   - ordered: 已排序的房间写入请求。
+    ///   - acquisitions: 本批取得的分片额度。
+    ///   - snapshotsByRoomID: 各房间对应的分片额度快照。
+    ///   - sql: 参与当前事务的数据库连接。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistConditionalPlainHybridGroupMessages(
         _ ordered: [OrderedRoomWriteRequest],
         acquisitions: [V2ShardAdmissionCommandCreditPool.Acquisition],
@@ -5996,14 +6233,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return isolated.sorted()
     }
 
-    /// One-statement append for a policy/cache hit. The policy booleans never
-    /// appear as SQL authority: their three durable revisions are compared
-    /// after locking the room, direct pair and both user policy rows. A stale
-    /// membership change, policy change, mute, idempotent replay or lease
-    /// replacement produces zero rows, rolls back this transaction and sends
-    /// the command through the complete path. Room/timeline sequences are
-    /// allocated from the currently locked row, so a peer append invalidates
-    /// no otherwise-stable authorization snapshot.
+    /// 针对策略/缓存命中的单语句追加。
+    ///
+    /// 策略布尔值绝不会作为 SQL 权威出现：
+    /// 它们的三条持久修订会在锁定房间、单聊配对与两条用户策略行之后进行比较。
+    /// 一次过期的成员变更、策略变更、禁言、幂等重放或租约替换都会产生零行，
+    /// 回滚本事务并把命令交给完整路径。
+    /// 房间/时间线序号从当前已锁定的行分配，
+    /// 因此对端的一次追加不会使一个本已稳定的授权快照失效。
+    ///
+    /// - Parameter appends: 本批快速单聊房间日志追加。
+    /// - Throws: 影响行数不符或写入失败时抛出。
     private func persistFastPlainDirectRoomLogMessages(
         _ appends: [FastPlainDirectRoomLogAppend],
         sql: any SQLDatabase
@@ -6482,8 +6722,12 @@ private extension V2SendMessageAcceptanceResult {
     }
 }
 
-/// Check the persisted range before addition: converting an already
-/// overflowed signed expression cannot recover a valid protocol sequence.
+/// 在相加之前先检查已持久化的取值范围：
+/// 把一个已经溢出的有符号表达式再转换回来，是无法恢复出合法协议序号的。
+///
+/// - Parameter current: 当前已持久化的序号。
+/// - Returns: 加一后的序号。
+/// - Throws: 当前值超出可编码范围时抛出。
 private func roomWriteNextSequence(_ current: Int64) throws -> UInt64 {
     guard current >= 0, current < Int64.max else {
         throw V2RoomWriteStoreError.corruptPersistenceState
@@ -6510,11 +6754,16 @@ private struct RoomRow: Decodable {
         )
     }
 
-    /// Each same-room member of one atomic append sees the preflight's
-    /// durable cursor. The batch owner assigns later members consecutive
-    /// cursors before the one set-based append mutates the room row to the
-    /// final value. Reject overflow rather than wrapping an observable room
-    /// sequence.
+    /// 推进序号。
+    ///
+    /// 同一次原子追加中的每个同房间成员都看到预检的持久游标。
+    /// 批次所有者会为后续成员分配连续的游标，
+    /// 然后由那一次集合式追加把房间行改到最终值。
+    /// 宁可拒绝溢出，也不让一个可观测的房间序号回绕。
+    ///
+    /// - Parameter offset: 需要推进的偏移量。
+    /// - Returns: 推进后的写入集合。
+    /// - Throws: 偏移为负或序号溢出时抛出。
     func advancingSequences(by offset: Int64) throws -> Self {
         guard offset >= 0,
               roomSequence <= Int64.max - offset,
@@ -6588,16 +6837,23 @@ private func roomLogReduction(
     }
 }
 
-/// Direct room-log delivery has a fixed two-user audience and does not create
-/// a fan-out plan or outstanding-work reservation. Its command budget has
-/// already been durably precharged by the shard credit pool and, when the
-/// legacy per-room policy is selected, by the room credit pool. The reduction
-/// therefore only advances the room sequence and shard snapshot needed by the
-/// batched canonical-message insert.
+/// 单聊房间日志投递的受众固定为两人，且不会创建扇出计划或未完成工作预留。
 ///
-/// Authorization is deliberately outside this helper and remains checked
-/// against locked room, membership, direct-pair, policy-version and stranger
-/// quota state by `PostgresV2RoomWriteStore.accept` before this reduction.
+/// 其命令预算已由分片额度池持久预扣；
+/// 在选用旧版每房间策略时，也由房间额度池预扣。
+/// 因此这次归并只推进批量规范消息插入所需的房间序号与分片快照。
+///
+/// 授权刻意留在此辅助函数之外，
+/// 并在归并之前由 `PostgresV2RoomWriteStore.accept` 依据已锁定的房间、成员、
+/// 单聊配对、策略版本与陌生人配额状态持续校验。
+///
+/// - Parameters:
+///   - command: 发送消息命令。
+///   - roomState: 房间命令状态。
+///   - admission: 分片准入状态。
+///   - now: 服务端统一授时时刻。
+/// - Returns: 归并结果。
+/// - Throws: 状态非法或序号溢出时抛出。
 private func directRoomLogPrechargedCommandBatchReduction(
     command: V2SendMessageCommand,
     nextRoomSequence: UInt64,
@@ -6646,10 +6902,11 @@ private func directRoomLogPrechargedCommandBatchReduction(
     ))
 }
 
-/// The direct room-log shard-only path has no room-admission mutation.  Keep
-/// this separate from `V2MessageAcceptanceTransaction`: fabricating a room
-/// admission value merely to satisfy the general fan-out transaction shape
-/// would make it too easy to accidentally persist stale admission state.
+/// 仅分片的单聊房间日志路径没有任何房间准入变更。
+///
+/// 把它与 `V2MessageAcceptanceTransaction` 分开：
+/// 若仅仅为了满足通用扇出事务的形态而伪造一个房间准入值，
+/// 就极易意外持久化过期准入状态。
 private enum DirectRoomLogPrechargedCommandReductionResult {
     case accepted(DirectRoomLogPrechargedCommandWriteSet)
     case rateLimited(retryAfterSeconds: Int)
@@ -6662,9 +6919,10 @@ private struct DirectRoomLogPrechargedCommandWriteSet {
     let nextShardState: ShardAdmissionState
 }
 
-/// The general, non-batched acceptance path still carries the full room
-/// transaction shape.  Keep this compatibility wrapper separate from the
-/// optimized batch reducer, which deliberately has no room-admission state.
+/// 通用的非批量接受路径仍携带完整的房间事务形态。
+///
+/// 把这个兼容包装与优化后的批次归并器分开，
+/// 后者刻意不保存任何房间准入状态。
 private func directRoomLogShardOnlyReduction(
     command: V2SendMessageCommand,
     roomState: V2RoomCommandState,
@@ -6789,9 +7047,11 @@ private struct OrderedMentionInput: Encodable {
     }
 }
 
-/// The one-row result of the send preflight CTE. `locked_room` is always
-/// present; every other group is optional because idempotent replay must not
-/// take fresh-send locks or policy decisions after its durable result exists.
+/// 发送预检 CTE 的单行结果。
+///
+/// `locked_room` 始终存在；
+/// 其他分组都是可选的，因为在其持久结果已经存在之后，
+/// 幂等重放不得再获取全新发送的锁或做出策略决定。
 private struct MessageAcceptanceContextRow: Decodable {
     let kind: String
     let roomShardID: String
@@ -7458,14 +7718,13 @@ private struct PlainHybridGroupConditionalAllocationRow: Sendable {
     let membershipRevision: Int64
 }
 
-/// One-statement authoritative ordinary hybrid-group append.
+/// 单语句的权威普通混合群组追加。
 ///
-/// The process cache contributes only immutable routing and lease identifiers
-/// which are compared to locked durable rows. It never contributes a member,
-/// role, mute, account-state or permission decision. The final `batch_gate`
-/// makes the DML all-or-nothing: a stale lease, replay, non-member, mute,
-/// disabled account, denied role, frozen room or exhausted room window writes
-/// no room cursor, admission counter or message row.
+/// 进程缓存只贡献不可变的路由与租约标识，且它们会与已锁定的持久行做比较。
+/// 它绝不贡献成员、角色、禁言、账号状态或权限判断。
+/// 末尾的 `batch_gate` 让 DML 全有或全无：
+/// 过期租约、重放、非成员、禁言、停用账号、被拒角色、冻结房间或耗尽的房间窗口，
+/// 都不会写入任何房间游标、准入计数器或消息行。
 private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedStatement {
     static let name = "im_v2_plain_hybrid_group_conditional_append_v7"
     static let sql = """
@@ -7778,12 +8037,12 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
     }
 }
 
-/// Named, typed-array form of the authoritative hybrid-group preflight.
+/// 权威混合群组预检的具名、类型化数组形式。
 ///
-/// This statement deliberately returns the same 36 durable fields as the
-/// SQLKit fallback. No cached permission boolean is accepted as authority:
-/// PostgreSQL still locks rooms, admission rows and sender memberships and
-/// evaluates active/mute/role permission state inside the transaction.
+/// 该语句刻意返回与 SQLKit 回退实现相同的 36 个持久字段。
+/// 任何缓存权限布尔值都不会被接受为权威：
+/// PostgreSQL 仍会锁定房间、准入行与发送者成员关系，
+/// 并在事务内求值启用/禁言/角色权限状态。
 private struct PlainHybridGroupBatchPreflightStatement: PostgresPreparedStatement {
     static let name = "im_v2_plain_hybrid_group_batch_preflight_v3"
     static let sql = """
@@ -7961,8 +8220,10 @@ private struct PlainHybridGroupBatchPreflightStatement: PostgresPreparedStatemen
     }
 }
 
-/// Sequential decoding is O(columns) without allocating a keyed Codable
-/// container or performing 36 string lookups for every returned row.
+/// 顺序解码。
+///
+/// 其复杂度为 O(列数)，既不需要分配键控 Codable 容器，
+/// 也无需为每个返回行执行 36 次字符串查找。
 private struct PlainHybridGroupPreparedRowCursor {
     private var iterator: PostgresRow.Iterator
 
@@ -8067,10 +8328,12 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
         try row.assertExhausted()
     }
 
-    /// This is the hottest row in hybrid-group admission. Decode columns
-    /// directly instead of constructing a generic keyed Codable container for
-    /// every message. PostgreSQL type validation and every authorization field
-    /// remain identical; only the Swift decoding mechanism changes.
+    /// 这是混合群组准入中最热的行。直接按列解码，
+    /// 而不是为每条消息都构造一个通用的键控 Codable 容器。
+    /// PostgreSQL 的类型校验与所有授权字段都保持不变，只有 Swift 的解码机制不同。
+    ///
+    /// - Parameter row: 待解码的数据库行。
+    /// - Throws: 类型校验失败或列缺失时抛出。
     init(row: any SQLRow) throws {
         ordinal = try row.decode(column: "ordinal")
         kind = try row.decode(column: "room_kind")
@@ -8318,9 +8581,10 @@ private struct PreparedPlainHybridGroupAppend {
     }
 }
 
-/// JSONB input for the set-based plain direct room-log append.  This is
-/// intentionally narrow: attachments, mentions and review jobs retain their
-/// dedicated path until their own batch write graph is designed and verified.
+/// 集合式普通单聊房间日志追加所用的 JSONB 输入。
+///
+/// 它刻意收窄：附件、@ 提及与审核任务仍走各自的专用路径，
+/// 直到它们各自的批量写图被设计并验证为止。
 private struct PlainRoomLogMessageInput: Encodable {
     let ordinal: Int
     let roomID: UUID
@@ -8328,8 +8592,8 @@ private struct PlainRoomLogMessageInput: Encodable {
     let eventID: UUID
     let senderID: UUID
     let clientMessageID: UUID
-    /// Cold rooms update their durable row in the append transaction. Hot
-    /// rooms have already charged a bounded command-credit batch instead.
+    /// 冷房间会在追加事务中更新其持久行；
+    /// 热房间则已经改用一个有界的命令额度批次完成扣费。
     let persistsRoomAdmission: Bool
     let roomSequence: Int64
     let timelineSequence: Int64
@@ -8388,9 +8652,10 @@ private struct PlainRoomLogMessageInput: Encodable {
     }
 }
 
-/// Input for the durable, set-based direct-send preflight. Cache fields are
-/// only immutable-by-revision policy facts; PostgreSQL treats them as usable
-/// only after matching all three locked revision fences and the recipient.
+/// 持久集合式单聊发送预检的输入。
+///
+/// 缓存字段只是「按修订不可变」的策略事实；
+/// 只有全部匹配三条已锁定修订围栏与接收者之后，PostgreSQL 才会视其为可用。
 private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
     let ordinal: Int
     let roomID: UUID
@@ -8450,10 +8715,10 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
     }
 }
 
-/// One row of the ordered idempotency-fence batch.  It intentionally keeps
-/// the original ordinal even though `OrderedRoomWriteRequest` happens to
-/// carry it too: the SQL recursive edge is the durable assertion that no
-/// command can be skipped or reordered while taking advisory locks.
+/// 有序幂等围栏批次中的一行。
+///
+/// 它刻意保留原始序号，尽管 `OrderedRoomWriteRequest` 恰好也携带该序号：
+/// SQL 中的递归边才是「在获取咨询锁期间没有命令被跳过或重排」的持久断言。
 private struct MessageOperationLockInput: Encodable {
     let ordinal: Int
     let roomID: UUID
@@ -8476,11 +8741,11 @@ private struct MessageOperationLockBatchRow: Decodable {
     }
 }
 
-/// Named, typed-array form of the ordered idempotency-fence batch.
+/// 有序幂等围栏批次的具名、类型化数组形式。
 ///
-/// The recursive edge is intentionally identical to the SQLKit fallback: a
-/// later lock is not attempted until PostgreSQL has acquired the preceding
-/// ordinal. Bump `name` whenever the SQL or binding contract changes.
+/// 递归边刻意与 SQLKit 回退实现完全一致：
+/// 在 PostgreSQL 取得前一个序号之前，不会尝试获取后一个锁。
+/// 每当 SQL 或绑定契约变化时都要提升 `name`。
 private struct MessageOperationLockBatchStatement: PostgresPreparedStatement {
     static let name = "im_v2_message_operation_lock_batch_v2"
     static let sql = """
@@ -8583,10 +8848,12 @@ private struct PlainDirectRoomLogBatchPreflightRow {
     let recipientAccountStatus: String?
     let recipientAllowsCustomerMessages: Bool?
 
-    /// This is the hottest and widest row in direct-message admission. Direct
-    /// column decoding avoids constructing a generic keyed Codable container,
-    /// allocating 49 coding keys and repeatedly looking them up for every
-    /// message while retaining the exact same PostgreSQL type validation.
+    /// 这是单聊消息准入中最热、最宽的行。直接按列解码可避免为每条消息
+    /// 构造通用键控 Codable 容器、分配 49 个编码键并反复查找它们，
+    /// 同时保留完全相同的 PostgreSQL 类型校验。
+    ///
+    /// - Parameter row: 待解码的数据库行。
+    /// - Throws: 类型校验失败或列缺失时抛出。
     init(row: any SQLRow) throws {
         ordinal = try row.decode(column: "ordinal")
         kind = try row.decode(column: "room_kind")
@@ -8751,8 +9018,11 @@ private struct PlainDirectRoomLogBatchPreflightRow {
         )
     }
 
-    /// The shard-only direct batch never materializes `room_admission`; the
-    /// shard row below is the exact state passed to the durable credit pool.
+    /// 仅分片的单聊批次绝不会物化 `room_admission`；
+    /// 下方的分片行就是传给持久额度池的确切状态。
+    ///
+    /// - Returns: 分片行。
+    /// - Throws: 分片字段缺失时抛出。
     func shard() throws -> ShardRow {
         guard let shardLeaseID, let shardGeneration, let shardValidUntil,
               let shardCommandWindowLimit, let shardCommandWindowUsed,
@@ -8800,17 +9070,16 @@ private enum DirectRoomLogBatchPreparation {
 }
 
 private enum DirectRoomLogShardAdmissionStrategy {
-    /// Capacity was durably reserved before the message transaction and is
-    /// represented by a process-local token finalized after commit.
+    /// 容量在消息事务之前就已持久预留，并由一个在提交之后收尾的进程本地令牌表示。
     case precharged
-    /// Capacity is conditionally reserved by the final SQL statement of the
-    /// same PostgreSQL transaction as the canonical message batch.
+    /// 容量由与规范消息批次同一个 PostgreSQL 事务的最后一条 SQL 语句条件式预留。
     case transactional
 }
 
-/// Minimal accepted-event material used by the plain direct room-log fast
-/// path.  In shard-only mode the room command window is intentionally absent;
-/// the durable shard credit is the sole command admission authority.
+/// 普通单聊房间日志快速路径使用的最小已接受事件材料。
+///
+/// 在仅分片模式下刻意不包含房间命令窗口；
+/// 持久分片额度是唯一的命令准入权威。
 private struct PlainDirectRoomLogWriteSet {
     let acceptedMessage: V2AcceptedMessageDraft
     let eventID: EventID
@@ -8836,10 +9105,10 @@ private struct PreparedDirectRoomLogAppend {
     let commit: RoomWriteCommit
 }
 
-/// Input and prepared value for the one-statement steady direct append. It
-/// intentionally contains only values which the statement compares against
-/// durable rows; no cache-originated permission boolean is ever written into
-/// the database or treated as an authorization predicate there.
+/// 单语句稳态单聊追加的输入与已准备值。
+///
+/// 它刻意只包含该语句用于与持久行比较的值；
+/// 任何来自缓存的权限布尔值都不会被写入数据库，也不会在那里被当作授权谓词。
 private struct FastPlainDirectRoomLogCandidate {
     let originalIndex: Int
     let request: V2RoomWriteRequest
@@ -8920,12 +9189,12 @@ private struct FastPlainDirectRoomLogAppendInput: Sendable {
     }
 }
 
-/// Named, connection-cached form of the hybrid-group canonical append.
+/// 混合群组规范追加的具名、连接级缓存形式。
 ///
-/// Arrays are deliberately columnar: PostgresNIO can encode them directly in
-/// the extended protocol and PostgreSQL can expand them with one `unnest`.
-/// The JSON-valued entity column stays JSON text until the server-side cast,
-/// so arbitrary entities retain exactly the fallback path's representation.
+/// 数组刻意采用列式：PostgresNIO 可以在扩展协议中直接编码它们，
+/// 而 PostgreSQL 可以用一次 `unnest` 展开。
+/// JSON 值的实体列在服务端转换之前一直保持 JSON 文本，
+/// 因此任意实体都能保持与回退路径完全相同的表示。
 private struct PlainHybridGroupAppendStatement: PostgresPreparedStatement {
     static let name = "im_v2_plain_hybrid_group_append_v5"
     static let sql = """
@@ -9075,12 +9344,11 @@ private struct PlainHybridGroupAppendStatement: PostgresPreparedStatement {
     }
 }
 
-/// Named, connection-cached form of the invariant fast append statement.
+/// 不变式快速追加语句的具名、连接级缓存形式。
 ///
-/// Bump `name` whenever `sql` changes. PostgresNIO prepares this once per
-/// physical foreground connection and then executes it with new array binds;
-/// the statement does not own a connection or cross the enclosing Fluent
-/// transaction boundary.
+/// 每当 `sql` 变化时都要提升 `name`。
+/// PostgresNIO 会在每条物理前台连接上准备一次，然后用新的数组绑定执行；
+/// 该语句既不拥有连接，也不跨越外层 Fluent 事务边界。
 private struct FastPlainDirectRoomLogAppendStatement: PostgresPreparedStatement {
     static let name = "im_v2_fast_plain_direct_room_log_append_v6"
     static let sql = """
@@ -9459,27 +9727,26 @@ private struct DirectReplyCacheUpdate {
 }
 private struct RoomWriteCommit {
     let outcome: V2SendMessageOutcome
-    /// `nil` means an idempotent acceptance must recover shadowing from the
-    /// committed source rows. A non-nil array is the exact delta from a new
-    /// transaction; an empty array deliberately skips all post-commit reads.
+    /// 取 `nil` 表示一次幂等接受必须从已提交的源行恢复影子写入。
+    ///
+    /// 非 `nil` 数组是新事务产生的精确增量；空数组则刻意跳过全部提交后读取。
     let acceptedDirectProjectionShadows: [DirectProjectionShadowRequest]?
     let directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry?
     let directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
-    /// When this commit sets one side's monotonic first-send marker, the
-    /// opposite cached direction can advance from the immediately preceding
-    /// pair revision without another full policy read. PostgreSQL revision
-    /// predicates remain authoritative for every later fast append.
+    /// 当本次提交设置了某一侧单调的首次发送标记时，
+    /// 反方向的缓存可以从紧邻其前的配对修订推进，而无需再做一次完整策略读取。
+    ///
+    /// PostgreSQL 的修订谓词对之后每一次快速追加仍是权威。
     let reciprocalDirectReplyCacheUpdate: DirectReplyCacheUpdate?
-    /// A command credit becomes committed only after this transaction returns
-    /// successfully from Fluent. All non-success paths return it to the local
-    /// pool from inside the retry closure.
+    /// 命令额度只有在本事务从 Fluent 成功返回之后才算已提交。
+    ///
+    /// 所有非成功路径都会在重试闭包内部把它归还给本地池。
     let shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token?
-    /// The per-room command credit is durably precharged before the message
-    /// transaction and becomes consumed only when that transaction commits.
+    /// 每房间命令额度在消息事务之前就已持久预扣，且只有在该事务提交时才被消耗。
     let roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token?
-    /// A normal committed append contributes evidence that a room is locally
-    /// hot enough for future calls to use precharged room credits. This is
-    /// intentionally finalized only after the canonical transaction commits.
+    /// 一次正常提交的追加会贡献证据，表明该房间在本地足够热，
+    /// 未来调用可以使用预扣的房间额度。
+    /// 它刻意只在规范事务提交之后才被收尾。
     let roomAdmissionHeatObservation: UUID?
 
     init(
@@ -9600,9 +9867,11 @@ private struct DirectMessagePolicySnapshotRow: Decodable {
 }
 
 private extension V2DirectSendPolicyCache.Entry {
-    /// The set preflight has already compared the durable pair and policy
-    /// revisions while holding their locks. Only after that fence matches may
-    /// these cached derived fields be reused for the unchanged decision table.
+    /// 集合预检已在持有锁的情况下比较过持久配对与策略修订。
+    ///
+    /// 只有在那道围栏匹配之后，这些缓存派生字段才可被复用于未变更的判定表。
+    ///
+    /// - Returns: 单聊策略快照行。
     func policySnapshot() -> DirectMessagePolicySnapshotRow {
         .init(
             recipientUserID: recipientID,
@@ -9623,11 +9892,15 @@ private extension V2DirectSendPolicyCache.Entry {
         )
     }
 
-    /// These two pair-local flags become true in the same source transaction
-    /// as the first accepted message. Publishing the refined value only after
-    /// commit therefore cannot make an uncommitted profile/capability visible
-    /// to a later authorization attempt. The durable preflight still checks
-    /// the pair and policy revisions before it relies on this hint.
+    /// 这两个配对本地的标志会在与首条已接受消息相同的源事务中变为真。
+    ///
+    /// 因此只在提交之后发布精化值，就不会让一个未提交的资料/能力对后续授权尝试可见。
+    /// 持久预检在依赖该提示之前，仍会校验配对与策略修订。
+    ///
+    /// - Parameters:
+    ///   - senderCapabilityInserted: 是否插入了发送方能力投影。
+    ///   - recipientProfileInserted: 是否插入了接收方资料投影。
+    /// - Returns: 应用提交后投影后的缓存条目。
     func applyingPostAcceptanceProjection(
         senderCapabilityInserted: Bool,
         recipientProfileInserted: Bool

@@ -3,12 +3,14 @@ import IMV2ClientKit
 import IMV2Core
 import Observation
 
-/// Owns debounced message-search state independently from conversation list
-/// rendering. Generation fencing prevents a slower stale result from replacing
-/// the newer query or filter selection on the main actor.
+/// 消息搜索状态存储。
+///
+/// 它独立于会话列表渲染地持有防抖搜索状态；代次栅栏确保较慢的陈旧结果
+/// 无法在主线程上覆盖更新的查询或筛选选择。
 @MainActor
 @Observable
 final class V2ConversationSearchStore {
+    /// 搜索状态。
     enum State: Equatable {
         case idle
         case indexing
@@ -139,8 +141,10 @@ final class V2ConversationSearchStore {
         generation == self.generation && query == request.query && contentFilter == request.contentFilter && senderFilter == request.senderUserID
     }
 
-    /// The view owns this observation task. The initial ready value matters:
-    /// rebuilding may finish between a failed query and stream registration.
+    /// 观察搜索索引状态。
+    ///
+    /// 该观察任务由视图持有。初始的已就绪取值很重要：
+    /// 索引重建可能在一次失败查询与流注册之间完成，只有先读取当前快照才能避免错判。
     func observeIndexState() async {
         guard let progressReader else { return }
         var previous: V2MessageSearchIndexSnapshot?
