@@ -1,5 +1,8 @@
 # 私聊 room-log R44：50,000 在线、4,000 msg/s 冷路径事务批处理复测
 
+> **历史归档。** R44 是 R36 与 R51 之间的阶段性复测，已被同日稍后的
+> [R51 配置隔离与五分钟 soak](../direct-room-log-50000-profile-isolation-r51-2026-08-28.md)
+> 取代。当前容量证据以 R51 与 [standard-100k](../standard-100k.md) 为准。
 日期：2026-08-28
 
 状态：压测通过；这是单 Gateway、单 PostgreSQL 的阶段性容量证据，不是生产容量批准

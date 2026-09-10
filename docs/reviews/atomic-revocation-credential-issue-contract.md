@@ -34,6 +34,6 @@
 
 已完成验证：ClientKit 报告 423 项 / 66 套件（418 实际执行、5 在线跳过）；App 单元报告 193 项 / 19 套件（192 实际执行、1 在线跳过）；服务端单元 10 项 / 2 套件、真实 PostgreSQL 21 项 / 1 套件通过。独立迁移和字段缺失反向门禁通过。完整真实链路通过 5 项 HTTPS、2 项 App UI 和 1 项 headless；随后增加真实 capability 兑换，定向 HTTPS 5 项通过，确认 204×3、409×1、401×1 及数据库 7|3|0|0|3。
 
-本批证据见 [manifest](evidence/20260907-atomic-revocation-issue/manifest.json)，保留失败和修正过程。需要分别核对原子回滚、完整重放、错配证明、刷新不变、短期重放清理后兑换、迁移正反向门禁，以及真实 App/Keychain/HTTPS 链路；不要用单元测试代替在线验收。
+本批证据见 [manifest](../../docs/reviews/verification-records.md#20260907-atomic-revocation-issue)，保留失败和修正过程。需要分别核对原子回滚、完整重放、错配证明、刷新不变、短期重放清理后兑换、迁移正反向门禁，以及真实 App/Keychain/HTTPS 链路；不要用单元测试代替在线验收。
 
 完整退出还需要：从旧认证 epoch 原子交接 capability 到独立持久记录、先清理本地再有界重试、401/410 与撤销确认区分、锁屏/杀进程及 A→B→A 竞态。B08 未关闭。

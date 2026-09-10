@@ -1,5 +1,9 @@
 # 1,500 online direct room-log stability boundary (2026-08-21)
 
+> **历史归档。** 这是 1,500 在线时代的单房间边界实验，已被 50,000 在线梯度与配置隔离报告取代。
+> 当前容量证据见 [R29 梯度记录](../direct-room-log-50000-gradient-r29-2026-08-27.md)、
+> [R51 配置隔离与 soak](../direct-room-log-50000-profile-isolation-r51-2026-08-28.md)、
+> [standard-100k](../standard-100k.md) 与 [implementation-status](../../implementation-status.md)。
 This records the post-batch-32 boundary on the single ARM64 8-vCPU / 16-GiB
 test host. It is an end-to-end public-TLS result, not a production capacity
 guarantee.

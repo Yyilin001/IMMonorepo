@@ -22,7 +22,7 @@
 
 最终扩展回归 **292 项服务端测试 / 25 套件**通过，耗时 300.472 秒；44 个引用场景及既有媒体、转发、迁移、索引计划与 owner 边界均通过。
 
-最终日志、源码哈希与脚本见[本批证据](evidence/20260906-message-reference-visibility/manifest.json)。本机 owner/SQL 回归不代表真实 App 到 TLS 的端到端验证。没有修改客户端；本批不重复引用过去的 ClientKit/App 通过数作为新验证。
+最终日志、源码哈希与脚本见[本批证据](../../docs/reviews/verification-records.md#20260906-message-reference-visibility)。本机 owner/SQL 回归不代表真实 App 到 TLS 的端到端验证。没有修改客户端；本批不重复引用过去的 ClientKit/App 通过数作为新验证。
 
 B03 的旧缺依赖恢复、独立无正文撤销、完整房间目录/基线、账号/access epoch 响应栅栏仍开放。置顶控制事件和引用 ID 不是正文读取凭据，其他读取入口仍应逐项审查；旧的未按消息定位媒体接口及其退役/兼容范围未在本批关闭。B04 的全局封禁、跨 owner 完整迁移及保留清理继续开放。
 

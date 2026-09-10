@@ -22,7 +22,7 @@ App 单元回归报告 **193 项 / 19 套件，192 项实际执行、1 项在线
 - 5 项真实 HTTPS：包括当前设备撤销的全部 token 失效、并发幂等、数据库 journal 失败回滚，2.743 秒。
 - 1 项真实 App host 后台入口：独立 delegate/store 未附着页面，恢复与增量同步、另一设备撤销后退出通过，1.295 秒；这不代表真实 APNs 或系统无 scene 冷启动。
 
-最终数据库 `15|5|0|0|5`：总设备、撤销设备、撤销设备残留有效 access、残留有效 refresh、撤销事件。UI 与后台测试清理后 Gateway 均为 0 连接。临时数据库、私有 CA/密钥和专用模拟器已清除。日志、xcresult 和源码散列见[证据](evidence/20260907-registration-lifecycle/manifest.json)。
+最终数据库 `15|5|0|0|5`：总设备、撤销设备、撤销设备残留有效 access、残留有效 refresh、撤销事件。UI 与后台测试清理后 Gateway 均为 0 连接。临时数据库、私有 CA/密钥和专用模拟器已清除。日志、xcresult 和源码散列见[证据](../../docs/reviews/verification-records.md#20260907-registration-lifecycle)。
 
 ## 仍需完成
 

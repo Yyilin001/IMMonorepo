@@ -42,7 +42,7 @@ fail 只接受仍处于 claimed、token 相同且租约未过期的认领。前�
 
 `20260906_group_invite_creation_recovery.sql` 要求 current-23，在单事务中建队列与约束，并为所有旧 prepared intent（包括已过期者）补任务；ready 记录不补任务，原目录输入不变。迁移前停止旧邀请写进程，避免旧 prepare 绕过队列。重复迁移拒绝。
 
-Swift 与 SQL readiness 检查全部列、精确状态 CHECK、有效主键、复合 intent 外键和两个到期索引。验证见[证据 manifest](evidence/20260906-invite-creation-recovery/manifest.json)：最终 31 项测试 / 3 套件及真实 23→24 迁移验证通过。测试覆盖真实 owner/control 提交中断、认领竞争、前台/后台并发、旧认领失败阻断、原创建人失权后的已有结果恢复、时间与额度边界、持久退避和取消后租约接管。
+Swift 与 SQL readiness 检查全部列、精确状态 CHECK、有效主键、复合 intent 外键和两个到期索引。验证见[证据 manifest](../../docs/reviews/verification-records.md#20260906-invite-creation-recovery)：最终 31 项测试 / 3 套件及真实 23→24 迁移验证通过。测试覆盖真实 owner/control 提交中断、认领竞争、前台/后台并发、旧认领失败阻断、原创建人失权后的已有结果恢复、时间与额度边界、持久退避和取消后租约接管。
 
 测试中的取消和重建 worker 使用真实数据库，但不是 OS kill -9 故障注入；Account 任务组装已编译，未部署运行中的账号服务。完整跨物理房间迁移、全局配额、压力测试和真实 TLS/客户端生命周期组合继续按原问题表推进。
 

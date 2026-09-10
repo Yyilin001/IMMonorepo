@@ -20,7 +20,7 @@ owner 校验与权限边界分开：普通调用仍不能冻结/解冻，可信�
 
 ## 验证与剩余范围
 
-修复前完整十二个场景失败，60 个断言证实旧 owner 写入；首次负向运行的两个解冻夹具约束错误单独留档，未计为该路径复现。首轮修复后 **6 项测试 / 4 套件**通过。真实双库回归覆盖普通群/大群的六种场景、无 owner profile、独立非成员安全 principal、旧 route、新命令/回执、同库多 shard 缓存、十次并发单次业务/审计提交、错误/未知 owner，以及重放等待 room 锁期间 epoch 变化。最终 **113 项测试 / 8 套件**通过；修复前失败记录及源码哈希见[证据清单](evidence/20260906-moderation-owner/manifest.json)。
+修复前完整十二个场景失败，60 个断言证实旧 owner 写入；首次负向运行的两个解冻夹具约束错误单独留档，未计为该路径复现。首轮修复后 **6 项测试 / 4 套件**通过。真实双库回归覆盖普通群/大群的六种场景、无 owner profile、独立非成员安全 principal、旧 route、新命令/回执、同库多 shard 缓存、十次并发单次业务/审计提交、错误/未知 owner，以及重放等待 room 锁期间 epoch 变化。最终 **113 项测试 / 8 套件**通过；修复前失败记录及源码哈希见[证据清单](../../docs/reviews/verification-records.md#20260906-moderation-owner)。
 
 PostgreSQL 25、protocol 25、SQLite 173/5 不变；无新迁移。Gateway 和可信审核组装已编译，三个普通网关命令有错误映射测试；没有实际 TLS/App/生产部署验收。最终回归使用本任务专用隔离 control 与两个 owner。
 

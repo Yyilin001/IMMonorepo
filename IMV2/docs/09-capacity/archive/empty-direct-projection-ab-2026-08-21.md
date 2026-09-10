@@ -1,5 +1,7 @@
 # Empty direct-projection fast-path verification (2026-08-21)
 
+> **历史归档。** 该空投影快速路径实验已被 [R29 梯度记录](../direct-room-log-50000-gradient-r29-2026-08-27.md)
+> 与 [R34 共享帧 A/B](../direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md) 取代。
 ## Scope
 
 This note records a single-host validation of commit `9c8de4fb`.  It is an

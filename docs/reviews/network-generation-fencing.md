@@ -25,7 +25,7 @@
 
 ## 验证与复现
 
-证据及精确运行结果见 [manifest](evidence/20260906-network-generation-fencing/manifest.json)。`client-run.sh --filter V2TLSFrameConnectionLifecycleTests` 可复现生命周期套件。
+证据及精确运行结果见 [manifest](../../docs/reviews/verification-records.md#20260906-network-generation-fencing)。`client-run.sh --filter V2TLSFrameConnectionLifecycleTests` 可复现生命周期套件。
 
 `negative-check.py` 会临时移除唯一的 generation close guard，运行上述实际网络测试，并在 `finally` 中恢复原文件。不要与构建或源文件编辑并行执行。此反向控制用来确认测试确实能发现旧 reader 误关新连接；不代表重新发现了当前生产实现中的缺陷。
 

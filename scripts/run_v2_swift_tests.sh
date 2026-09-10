@@ -23,3 +23,4 @@ else
 fi
 bash "${repo_root}/scripts/check_v2_runtime_env_examples.sh"
 bash "${repo_root}/scripts/check_v2_document_links.sh"
+bash "${repo_root}/scripts/check_v2_document_structure.sh"

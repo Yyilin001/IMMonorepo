@@ -1,5 +1,10 @@
 # IM V2 修复实施与验证记录
 
+> **历史归档。** 本文按批次记录整改过程与当轮验证结果，**不是当前状态**，
+> 也不构成发布批准。**判断当前状态请看** [问题状态表](../status.md)，
+> **判断当前合同请看** [合同索引](../README.md)，**判断能力与证据等级请看**
+> [`implementation-status.md`](../../../IMV2/docs/implementation-status.md)。
+
 目标：逐一完成[问题表](2026-09-05-system-design-implementation-audit.md)与[修复方案](2026-09-05-system-remediation-plan.md)的全部 47 项。起始基准为 HEAD `220f5be78ed347bbe8a343be634720070efbb597` 加已有未提交工作；保留原有工作区改动。状态不等于发布批准。
 
 状态：未开始、实施中、已实现待验证、已验证、待外部验收。只有具体证据覆盖问题的全部关闭条件才记已验证；需要真实设备/凭据/部署的项目单列，不用本机测试替代。
@@ -9,7 +14,7 @@
 | B01 | 幂等比较可因 revision 整数越界终止 Gateway | 实施中 | 新增有界 Message/Membership revision；三个命令在进入存储前拒绝越界，重放比较使用安全值。补充富文本 offset+length 的 checked addition，并重验 JSON 解码后实体约束。 | 最新 Core 76 测试通过，覆盖 Int.max 溢出、负数/零长度和非法 link；Gateway revision 越界测试已通过；继续核对恢复 DTO 与其余递增路径。 |
 | B02 | 编辑旧消息绕过当前群写入权限 | 实施中 | 发送与编辑共享当前发言授权；编辑校验控制面账号与 owner 内成员/禁言/冻结/权限。 | 35 项相关服务端测试通过，含五类拒绝与零写入断言；并发权限变更提交顺序尚待覆盖。 |
 | B03 | room-log 消息的 mutation 缺少原始消息投影，阻塞恢复 | 未开始 | — | — |
-| B04 | 转发源缺少消息提交时的成员可见性检查 | 实施中 | 初始源读取与最终接受共用历史区间 ∩ 当前区间 SQL，支持 room_event/message_row 两种 accepted 形式，缺失或身份不符的原始事件拒绝；同 owner 在目标准入前按 UUID 顺序锁完整源/目标房间集合，最终核对源房间、正文与实体。 | 真实 PostgreSQL 与相邻网关/发送回归 57 tests / 3 suites 通过；覆盖新成员、离群/重入、离群期间 accepted、缺失/不匹配证据、实体篡改、16 个反向并发转发、读取后源退群与旧完成重放。已补强类型源版本、转发 v2 指纹和持久 pair 版本绑定，schema 7→8 迁移、ABA 与最终依赖回归通过：Core 76 / ClientKit 291 / Server 59。当前编辑版本受众已补齐转发初读与最终接受，schema 9 与服务端 61 项回归通过；同库多跳媒体、撤销引用与失效素材拒绝已通过 64 项服务端回归；App 父计划完成展示已通过新增 8 项测试；源房间/选中版本已贯穿协议 23 与 SQLite，owner 路由与稳定分块 UUID 已修复，最新 Core 80 / ClientKit 294 / App 170 / Server 82 通过；schema 11 源端不可变 export、owner epoch 栅栏和媒体保留已实现；schema 12 目标 inbox、共享目标接受与提交后恢复已有双库验证；schema 13 实际文件导入、schema 14 源端终态回执与 pin/配额释放已实现并通过 Server 89 项相邻回归；schema 15 持久投递 worker 已通过最终 Server 90 项回归；运行接线、暂停任务恢复、正文保留清理及 owner 迁移仍开放，见 [转发合同](forward-source-authorization.md)。 |
+| B04 | 转发源缺少消息提交时的成员可见性检查 | 实施中 | 初始源读取与最终接受共用历史区间 ∩ 当前区间 SQL，支持 room_event/message_row 两种 accepted 形式，缺失或身份不符的原始事件拒绝；同 owner 在目标准入前按 UUID 顺序锁完整源/目标房间集合，最终核对源房间、正文与实体。 | 真实 PostgreSQL 与相邻网关/发送回归 57 tests / 3 suites 通过；覆盖新成员、离群/重入、离群期间 accepted、缺失/不匹配证据、实体篡改、16 个反向并发转发、读取后源退群与旧完成重放。已补强类型源版本、转发 v2 指纹和持久 pair 版本绑定，schema 7→8 迁移、ABA 与最终依赖回归通过：Core 76 / ClientKit 291 / Server 59。当前编辑版本受众已补齐转发初读与最终接受，schema 9 与服务端 61 项回归通过；同库多跳媒体、撤销引用与失效素材拒绝已通过 64 项服务端回归；App 父计划完成展示已通过新增 8 项测试；源房间/选中版本已贯穿协议 23 与 SQLite，owner 路由与稳定分块 UUID 已修复，最新 Core 80 / ClientKit 294 / App 170 / Server 82 通过；schema 11 源端不可变 export、owner epoch 栅栏和媒体保留已实现；schema 12 目标 inbox、共享目标接受与提交后恢复已有双库验证；schema 13 实际文件导入、schema 14 源端终态回执与 pin/配额释放已实现并通过 Server 89 项相邻回归；schema 15 持久投递 worker 已通过最终 Server 90 项回归；运行接线、暂停任务恢复、正文保留清理及 owner 迁移仍开放，见 [转发合同](../forward-source-authorization.md)。 |
 | B05 | 密码长度规则与 bcrypt 实际输入不一致 | 未开始 | — | — |
 | B06 | 同一编辑/撤回经两条事件流到达时不幂等 | 未开始 | — | — |
 | B07 | outbox 记录了重试时间，却没有到时唤醒任务 | 已实现待验证 | runtime 拥有重试 worker；SQLite 分 lane 读取索引最早到期时间，有限缓冲变更通知与单个定时器唤醒；预算用尽继续。批量转发等待重试时不再重建同分块。 | 59 项 outbox/runtime/scheduler 测试通过；SQLite EXPLAIN 验证 ready 索引，覆盖安静到期、休眠竞态、预算续跑及延迟分块。全量客户端 223 tests / 40 suites 通过；继续补真实连接重连/休眠及多 lane 组合。 |
@@ -77,7 +82,7 @@
 - 本批最终 App 全量复验：123 tests / 11 suites 通过，日志 `/private/tmp/im-remediation-app-final-batch.log`；xcresult `/Users/yyl/Library/Developer/Xcode/DerivedData/IMApp-cjlmjtyfhinneffrzbtwrknpoomw/Logs/Test/Test-IMApp-2026.09.05_12-31-12-+0800.xcresult`。
 - 本批 PostgreSQL 专用实例 `/private/tmp/im-remediation-pg/primary`（端口 56440）已正常停止。未操作其他数据库，未提交代码或部署。全部 47 项仍保留在表内；当前 3 项已验证，7 项实施中，3 项已实现待验证，2 项待外部验收，32 项未开始。
 
-- 2026-09-05 后续批：B11/D07 接入 Core 请求指纹与纯 reducer 原始输入比较，详见 [指纹实施合同](2026-09-05-send-message-fingerprint-contract.md)。补充 B01 富文本整型溢出和 Codable 绕过校验的边界修复。数据库实际重放仍待改造，没有把 B11 记为已验证。
+- 2026-09-05 后续批：B11/D07 接入 Core 请求指纹与纯 reducer 原始输入比较，详见 [指纹实施合同](../2026-09-05-send-message-fingerprint-contract.md)。补充 B01 富文本整型溢出和 Codable 绕过校验的边界修复。数据库实际重放仍待改造，没有把 B11 记为已验证。
 - `swift test --package-path IMV2Core --disable-automatic-resolution --jobs 4`：76 tests / 22 suites 通过，日志 `/private/tmp/im-remediation-core-fingerprint.log`。包括 Python 独立编码黄金向量、21 类业务字段变化、原转发/投递规则冲突、Unicode/UUID、字段边界和恶意 entity JSON。
 - `swift test --package-path IMV2Server --disable-automatic-resolution --jobs 4 --filter 'V2SendMessageServiceTests|V2SpecialAccountMessagingServiceTests|V2GatewayDomainCommandHandlerTests'`：52 tests / 3 suites 通过，日志 `/private/tmp/im-remediation-server-fingerprint.log`。首次编译发现 Gateway 测试仍按旧完成记录结构取 sender，已适配后重跑通过；本批没有运行 PostgreSQL 场景。
 - `swift test --package-path IMV2ClientKit --disable-automatic-resolution --disable-build-manifest-caching --jobs 4`：223 tests / 40 suites 通过，日志 `/private/tmp/im-remediation-client-fingerprint.log`。初次 SwiftPM 缓存构建清单未发现新增本地 Core 文件，刷新构建清单后通过，未删除用户数据库或整个 build 缓存。
@@ -117,7 +122,7 @@
 - 新增 `V2RoomSubscriptionCoordinatorTests`：多 scene 同 room 单次 wire 订阅与末 token 取消；顺序和重叠的两个 run 都重建订阅、清旧瞬态 lease；失败无 hint 重试；membership revoke/rejoin；旧 token 重复释放不影响替换。TLS 生命周期增加旧 request scope 不能向新 socket 注册命令或提示等待者的测试。最终针对性 14 tests / 2 suites 通过，日志 `/private/tmp/im-remediation-room-subscriptions.log`。
 - 首轮夹具编译缺少 try，随后运行暴露 optional-chain 写 rooms 时同表达式再次读 rooms 的 Swift 独占访问冲突。已使用局部新值后再写回修正，保持 Swift 独占检查开启，完整重跑通过。
 - 最终客户端全量 246 tests / 44 suites 通过，日志 `/private/tmp/im-remediation-subscription-client-full.log`。App iPhone 17 / iOS 26.2 全量单元 123 tests / 11 suites 通过，日志 `/private/tmp/im-remediation-subscription-app.log`，xcresult `/Users/yyl/Library/Developer/Xcode/DerivedData/IMApp-cjlmjtyfhinneffrzbtwrknpoomw/Logs/Test/Test-IMApp-2026.09.05_14-32-58-+0800.xcresult`。
-- [B17 订阅实施合同](2026-09-05-room-subscription-contract.md) 列出当前组件及未完成的 App 接线。下一步必须把 runtime 和页面迁移到共享 coordinator，保留现有 live payload、100 ms metadata grace、gap recovery，并让 nextWake 的单次超时取消不结束整个 scene lease。现有 App 回归通过只证明当前兼容性，不能替代这条尚未接入的新用户路径证据。
+- [B17 订阅实施合同](../2026-09-05-room-subscription-contract.md) 列出当前组件及未完成的 App 接线。下一步必须把 runtime 和页面迁移到共享 coordinator，保留现有 live payload、100 ms metadata grace、gap recovery，并让 nextWake 的单次超时取消不结束整个 scene lease。现有 App 回归通过只证明当前兼容性，不能替代这条尚未接入的新用户路径证据。
 - 全部 47 项保留：5 已验证、9 实施中、4 已实现待验证、2 待外部验收、27 未开始。测试进程均已结束；git diff 检查和当前协议文档门禁通过。本批未启动数据库、提交或部署，整体修复目标继续保持未完成。
 
 - 2026-09-05 后续批：完成 B17 App 接入。`V2AppRealtimeRuntime` 创建唯一 coordinator，使用 localStore 授权、durable/preview cursor 和共享 transport；`V2ClientRuntime` 在认证及初始同步成功后以真实 connection UUID 运行订阅任务，停止和其他循环失败时取消。个人同步完成后触发授权复核。测试显式检查 runtime 传入的连接身份与停止取消。
@@ -129,7 +134,7 @@
 - 全部 47 项保留：6 已验证、8 实施中、4 已实现待验证、2 待外部验收、27 未开始。所有测试进程已结束，`git diff --check` 与当前协议文档检查通过。本批没有启动数据库、提交或部署。整体修复目标仍未完成；后续继续 B03/B04/B06 的历史受众/双流投影，以及 B15/B16 的账号清理与 Push 生命周期。
 
 - 2026-09-05 后续批：开始 B15。新增 `V2LocalDatabaseArtifacts`，安装绑定失配/缺失与 App E2E 清理不再遗漏搜索库及其 WAL/SHM，App 文件保护集合也统一。`GRDBV2LocalSyncStore` 初始化失败显式关闭已打开 pool；新增非 MainActor 的双 pool close，迟到调用保留已关闭句柄而不能重建旧文件。
-- 新增 `V2AccountStorageScope` / `V2AccountStorageDirectory`，以 UUID incarnation 绑定目录和待清理记录。清理记录先于 active 指针撤去，关闭成功后才删旧目录；失败保留可恢复状态，旧清理不按账号名寻找删除目标。完整实现和未接入项记录在 [B15 存储生命周期合同](2026-09-05-account-storage-lifecycle-contract.md)。
+- 新增 `V2AccountStorageScope` / `V2AccountStorageDirectory`，以 UUID incarnation 绑定目录和待清理记录。清理记录先于 active 指针撤去，关闭成功后才删旧目录；失败保留可恢复状态，旧清理不按账号名寻找删除目标。完整实现和未接入项记录在 [B15 存储生命周期合同](../2026-09-05-account-storage-lifecycle-contract.md)。
 - 针对性命令 filter `V2AccountStorageScopeTests|V2LocalStoreBootstrapperTests|V2ClientSessionBootstrapperTests`：15 tests / 3 suites 通过，日志 `/private/tmp/im-remediation-account-storage-foundation-2.log`。新增 suite 8 项包含命名与清理步骤参数化；验证真实 indexer/观察任务排空后双库关闭、关闭失败不删除、旧写不重建、重启恢复、A→B→A、无效记录失败。首次恢复测试暴露 Foundation URL 表示方式导致等值比较失败，改为校验已枚举固定目录内的精确 UUID 文件名后全部通过。
 - 最终客户端全量 257 tests / 45 suites 通过，日志 `/private/tmp/im-remediation-account-storage-client-full.log`；App iPhone 17 / iOS 26.2 全量 129 tests / 12 suites 通过，日志 `/private/tmp/im-remediation-account-storage-app.log`，xcresult `/Users/yyl/Library/Developer/Xcode/DerivedData/IMApp-cjlmjtyfhinneffrzbtwrknpoomw/Logs/Test/Test-IMApp-2026.09.05_15-04-14-+0800.xcresult`。
 - B15 继续实施中：新 catalog 尚未接入生产 bootstrap/退出，App 的 account epoch、任务 drain、legacy 主库迁移和媒体路径迁移仍未完成。不能将组件模拟重启等同真实 kill App 验收，也不能改变未发送 outbox 保留规则来简化清理。所有 47 项保留：6 已验证、9 实施中、4 已实现待验证、2 待外部验收、26 未开始。测试进程均已结束，本批未启动数据库、提交或部署。
@@ -142,7 +147,7 @@
 
 - 2026-09-05 后续批：推进 B08/B09。检查发现旧 store.save 在 await 内挂起时，仅前后检查 generation 仍可能让旧写在新写之后落盘；新增实际 credentialIO 串行队列，旧操作排空后才允许新 save/delete，且旧结果不修改新内存状态。restore/load 也增加单飞，refresh 维持原持久 operation ID 与 caller cancellation 语义。
 - 账号 provider 请求前预留进程内 epoch，后开始的认证/logout invalidation 使旧 provider 无法提交；bootstrap 在提交和打开 store 的 await 后检查。TLS tuple 带 epoch，旧连接认证成功/失败不能作用于新账号；失败还比较实际被拒绝的 access token，刷新后继 token 或刷新进行中不会被旧握手删除。该 epoch 明确不是服务端持久 session epoch。
-- terminal deletion 暂时失败后，auth owner 保留只可重试删除的状态，不在 protected-data retry 时重新加载已终止旧凭据。App 在现有持久 logout intent 后调用 invalidateOutstandingWork。新增 [认证生命周期合同](2026-09-05-authentication-lifecycle-contract.md) 区分本轮已实现与跨重启/离线补偿/Router 尚未完成的要求。
+- terminal deletion 暂时失败后，auth owner 保留只可重试删除的状态，不在 protected-data retry 时重新加载已终止旧凭据。App 在现有持久 logout intent 后调用 invalidateOutstandingWork。新增 [认证生命周期合同](../2026-09-05-authentication-lifecycle-contract.md) 区分本轮已实现与跨重启/离线补偿/Router 尚未完成的要求。
 - 最终客户端全量 271 tests / 47 suites，日志 `/private/tmp/im-remediation-auth-epoch-client-verified.log`；App iPhone 17 / iOS 26.2 全量 129 tests / 12 suites，日志 `/private/tmp/im-remediation-auth-epoch-app-verified.log`。新 suite 覆盖四种挂起 store effects、并发 restore 一次读、锁屏删除、旧 epoch/旧 TLS 拒绝与 token 轮换；bootstrap 测试覆盖 A provider 迟到时 B 凭据和 store 不变。
 - B08/B09 继续实施中：当前进程内次序已验证，尚未实现绑定旧账号的持久退出 checkpoint、远端专用撤销 capability、离线期限及完整认证状态观察。全部 47 项保留，计数仍为 6 已验证、9 实施中、4 已实现待验证、2 待外部验收、26 未开始。测试进程均已结束，本批未启动数据库、提交或部署；差异与协议文档门禁通过。
 
@@ -232,7 +237,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 精确组合测试让初始读取成功后提交源房间成员移除，目标成员资格保持；实际最终接受返回 FORBIDDEN，消息数和完成记录数不增加。另以 16 个独立 store 实例同时执行两个方向转发，全部接受且各有一条完成记录。
 - 验证命令：专用 56440 PostgreSQL + `swift test --package-path IMV2Server --disable-automatic-resolution --jobs 4 --filter 'forwardRequiresHistoricalAndCurrentMembership|oppositeForwardsUseCanonicalRoomLocks|multiForwardUsesBoundedTargetLanesAndStableResultOrder|sendCompletionIsIndependentOfMutableContent|V2GatewayDomainCommandHandlerTests|V2SendMessageServiceTests|editsRespectCurrentContentWriteAuthorization|withdrawalWritesTombstoneTransaction'`，最终 **57 tests / 3 suites 通过**，进程退出 0；日志 `/private/tmp/im-remediation-forward-authorization-final.log`。
 - 历史区间测试有 room_event/message_row 两个参数；完成重放覆盖 standard/hybrid/hybrid-mention 三种模式。首次夹具修改 immutable event 被数据库拒绝，改为离群期间真实接受第二条消息；并发夹具的房间窗口与 profile 最初不匹配，已修正。未关闭约束或把失败运行计入通过证据。
-- 当前全部 **47 项：10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。B04 保持实施中；精确源版本/指纹、当前内容版本受众、跨 owner export/inbox、媒体与迁移仍开放，详见 [转发源授权合同](forward-source-authorization.md)。没有提交或部署。
+- 当前全部 **47 项：10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。B04 保持实施中；精确源版本/指纹、当前内容版本受众、跨 owner export/inbox、媒体与迁移仍开放，详见 [转发源授权合同](../forward-source-authorization.md)。没有提交或部署。
 
 ## B04/B11 第二批：精确源版本、指纹 v2 与 schema 8
 
@@ -251,7 +256,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新增仅覆盖 message.edited 的唯一表达式索引 `room_events_message_edit_revision_idx`，按 room/message/version 点查，并禁止同一版本存在两份不同提交权威。真实 EXPLAIN 在 2,000 条其他历史编辑事件下使用该索引；这只是有界查询计划证据，不是长期容量验收。
 - canonical schema、Swift gate、实际 SQL gate 升为 9；迁移 `20260905_message_version_audience.sql` 从 schema 8 在一个事务中创建索引后最后更新合同。测试在已有真实编辑事件上迁移；模拟旧数据同版本的两份不同受众事件时，索引创建失败且整笔回滚，schema 保持 8、两份事件保留、部分索引不存在，服务仍拒绝启动。两套 gate 还拒绝缺索引和同名错误键形状。
 - 最终 `IMV2_POSTGRES_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:56440/im_remediation IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1 swift test --package-path IMV2Server --disable-automatic-resolution --disable-build-manifest-caching --jobs 4`，filter 为 `forwardChecksEditedVersionAudience|contentAudienceMigrationRejectsDuplicateVersions|forwardSourceRevisionFencesABAAndRetry|forwardRequiresHistoricalAndCurrentMembership|oppositeForwardsUseCanonicalRoomLocks|multiForwardUsesBoundedTargetLanesAndStableResultOrder|sendCompletionIsIndependentOfMutableContent|sendCompletionSchemaReadinessRejectsIncompleteContract|V2GatewayDomainCommandHandlerTests|V2SendMessageServiceTests|editsRespectCurrentContentWriteAuthorization|withdrawalWritesTombstoneTransaction`：**61 tests / 3 suites 通过**，退出 0。日志 `/private/tmp/im-remediation-forward-content-audience-final.log`。普通群/混合群分别验证成员区间，已有两种 accepted 表示、ABA、反向并发、v1/v2 完成重放和 7→8→9 链式迁移一并回归。
-- 全部 47 项状态仍为 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。这不关闭 B03 的其他事件流、读取、snapshot/repair 与媒体 grant，也不关闭 B04 的跨 owner export/inbox、多跳媒体、媒体导入和迁移。详见 [转发源授权合同](forward-source-authorization.md)。未修改开发者现有数据库，未提交或部署。
+- 全部 47 项状态仍为 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。这不关闭 B03 的其他事件流、读取、snapshot/repair 与媒体 grant，也不关闭 B04 的跨 owner export/inbox、多跳媒体、媒体导入和迁移。详见 [转发源授权合同](../forward-source-authorization.md)。未修改开发者现有数据库，未提交或部署。
 
 ## B04 第四批：同库多跳媒体与引用撤销
 
@@ -327,7 +332,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - B04 仍实施中：投递 worker 与 runtime 路由装配、跨 owner pending 反馈、终态 envelope 正文保留/擦除、全局封禁及 owner 迁移仍未闭环。router 仍明确拒绝跨物理库请求，不能把当前组件回归当作完整 App 功能验收。47 项状态计数保持 10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始。
 
 - 文件级追加验收终态通过：2 tests / 1 suite（13 种媒体场景与 4 种回执场景），日志 `/private/tmp/im-remediation-receipts-file-purge.log`。真实 PostgreSQL purge worker + 本地 provider 删除全部源文件，逐附件请求下载返回 objectUnavailable；目标副本仍可读，重复 purge 不再领取工作。此处验证了实际文件删除，区别于仅生成清理 outbox。
-- 本批三次完整日志与最终生产/测试文件 SHA-256 已保存到 [持久证据目录](evidence/20260905-forward-receipts/manifest.json)，避免临时目录被清理后只剩测试数量描述。`git diff --check`、schema readiness relation coverage 与协议文档门禁均通过。没有提交或部署，完整 47 项目标继续保持开放。
+- 本批三次完整日志与最终生产/测试文件 SHA-256 已保存到 [持久证据目录](../../../docs/reviews/verification-records.md#20260905-forward-receipts)，避免临时目录被清理后只剩测试数量描述。`git diff --check`、schema readiness relation coverage 与协议文档门禁均通过。没有提交或部署，完整 47 项目标继续保持开放。
 - 收尾：两座专用测试库的 im_v2 schema 均已清理（查询均为 true），本轮临时 PostgreSQL 已正常停止。全部测试会话均已有退出码 0；未触碰其他数据库或其他编译任务。
 
 
@@ -339,7 +344,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - B04 仍开放：Gateway/runtime 接线、跨 owner pending 的 wire 映射、暂停任务的 operator 审计恢复、owner 迁移及终态 envelope 清理尚未完成。完整 47 项状态计数保持不变，不把 worker 组件测试当成跨库 App 功能验收。
 
 - 最终 schema 15 回归：90 tests / 8 suites，通过日志 `/private/tmp/im-remediation-delivery-deadline-final.log`。投递 worker 的 16 种场景和 29 种 schema gate 故障全部通过；超时夹具确认目标 await 已取消且 drained，源任务随后退避重试并接受一次，未留下游离调用。包含前几批真实媒体复制、source pin/实际 purge、inbox 后处理恢复与源受众/版本/迁移回归。
-- 首轮夹具失败日志、修正后的中间成功日志、最终成功日志及最终相关源码 SHA-256 均保存到 [投递 worker 持久证据](evidence/20260905-forward-delivery/manifest.json)。schema readiness relation coverage、协议文档门禁和 `git diff --check` 通过。未改 App/ClientKit/wire 合同，也未提交或部署；完整 47 项目标继续开放。
+- 首轮夹具失败日志、修正后的中间成功日志、最终成功日志及最终相关源码 SHA-256 均保存到 [投递 worker 持久证据](../../../docs/reviews/verification-records.md#20260905-forward-delivery)。schema readiness relation coverage、协议文档门禁和 `git diff --check` 通过。未改 App/ClientKit/wire 合同，也未提交或部署；完整 47 项目标继续开放。
 - 本轮收尾：最终测试进程退出码 0，两座专用库的测试 schema 已清理；临时 PostgreSQL 正常停止。未改变其他数据库/编译任务。下一步接通 runtime/Gateway 与暂停任务恢复，47 项计数保持 10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始。
 
 
@@ -350,7 +355,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 本地 Compose 为 Gateway 与 Account 明确共享测试媒体根目录、配置密钥来源与 volume。Gateway 不执行 provider.prepare，避免其启动清理 Account 上传 staging。未启动或部署该 Compose；生产 provider/scanner 与 Account 重启 staging 所有权仍需单独处理。
 - 真实 room directory、router、源服务、目标端点、数据库与 runtime 的双库测试覆盖 standardFanout / largeGroupHybrid：运行中入队、停止期间积压、重启恢复、相同操作不重复、源撤回后的原结果重放及修改源版本的幂等冲突。运行中的 worker 可能在前台读回执前完成，因此测试允许合法的立即完成或 pending，最终用持久回执和消息数量验证结果。停止期间则严格断言 pending 和目标无新增。
 - 复核发现并修复目标已暂停但响应丢失的恢复漏洞：旧 `claim == nil` 把持久 paused 当作 idle，使新源 worker 一直延期。现在在无 claim 时查询该 export 的持久暂停状态，并保持源 delivery paused。新故障用例先用真实文件复制与失败扫描提交 paused，再换新 media worker / endpoint / source worker，验证 paused 被恢复、源无回执、目标无消息且之后不再领取。没有释放源 pin 或伪造完成。
-- 回归日志依次为：51 tests / 3 suites；扩大 71 tests / 7 suites；最终 **95 tests / 8 suites**，含 17 种投递场景、29 种 schema gate 故障和两种真实运行时模式。配置另用同一编译制品 `--skip-build` 跑 **37 tests / 2 suites**。四次测试会话均退出 0，完整日志及 29 份源码/配置 SHA-256 保存于 [运行时持久证据](evidence/20260906-forward-runtime/manifest.json)。
+- 回归日志依次为：51 tests / 3 suites；扩大 71 tests / 7 suites；最终 **95 tests / 8 suites**，含 17 种投递场景、29 种 schema gate 故障和两种真实运行时模式。配置另用同一编译制品 `--skip-build` 跑 **37 tests / 2 suites**。四次测试会话均退出 0，完整日志及 29 份源码/配置 SHA-256 保存于 [运行时持久证据](../../../docs/reviews/verification-records.md#20260906-forward-runtime)。
 - 服务端主回归命令：两条专用 PostgreSQL URL 与 disposable=1，`swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4 --filter 'V2RoutedForwardMessagesServiceTests|V2GatewayDomainCommandHandlerTests|V2GatewaySessionTests|V2LocalFilesystemMediaProviderTests|V2MediaScanWorkerTests|V2MediaPurgeWorkerTests|V2SendMessageServiceTests|PostgresV2RoomWriteStoreIntegrationTests/(forward|sendCompletionSchemaReadiness)'`。schema relation coverage、协议文档门禁、本地环境 contract 和 `git diff --check` 均通过。schema 15 / protocol 23 未变；未提交或部署。
 - B04 仍开放，新增确认 Account HTTP 的 media grant/session 服务固定控制库，无法为第二 owner 的媒体元数据提供完整下载链路。尚需媒体 HTTP owner 路由、operator 审计重放 paused delivery/media import、owner 迁移及终态 envelope 清理/全局内容封禁。没有把组件运行时测试称为真实 TLS Gateway/App 端到端验收；本轮未重跑 App、ClientKit、Linux 或负载。
 - 完整 47 项状态保持 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。两座专用测试库的 im_v2 schema 已确认不存在，临时 PostgreSQL 正常停止；不影响用户其他数据库、App 构建或未提交改动。
@@ -365,9 +370,9 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 双库分别测试源 delivery 与目标 media：16 个相同 operationID 并发仅产生一条审计，8 个不同 operationID 同时恢复同一任务恰好一项 requeued、七项 not_paused；未知/错误 owner、epoch 改变、旧 lease 写回、原审计结果跨 owner 状态变化重放、审计终态改写/删除拒绝均验证。源无伪造回执、目标无额外消息。
 - 真实文件场景先让扫描失败持久暂停、丢失响应，再通过目标 media 和源 delivery 的独立审计操作恢复。两份附件实际复制/扫描后仅生成一条消息与一份源回执，重复恢复返回原结果，目标文件逐个读回验证。追加恢复后禁言，目标按当前权限记录 ACTOR_MUTED，源下一轮取得拒绝回执，不生成消息。
 - 首轮 **22 tests / 3 suites** 通过。扩展回归初次 **104 tests / 11 suites** 有两个新增断言失败：禁言用例错误要求“媒体 worker 提交拒绝”和“源取得终态回执”在同一 pass 完成。检查实际协议后，测试明确第一轮延期但目标已持久拒绝、源尚无回执，第二轮恢复拒绝终态；没有削弱无消息和最终拒绝断言，也未为测试修改生产调度语义。
-- 修正后最终 **104 tests / 11 suites** 全通过，包含 18 种投递场景和 34 种 schema gate 故障。完整初次成功、扩展失败与最终成功日志，以及最终 37 份相关源码/配置 SHA-256 保存到 [operator 恢复持久证据](evidence/20260906-forward-operator/manifest.json)。测试使用专用端口 56440 双数据库及 disposable=1；主命令沿用 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 含 forward、sendCompletionSchemaReadiness、durableWorkRetryPauseAndReplay、operator config/HTTP、Gateway、普通写入和媒体组件。
+- 修正后最终 **104 tests / 11 suites** 全通过，包含 18 种投递场景和 34 种 schema gate 故障。完整初次成功、扩展失败与最终成功日志，以及最终 37 份相关源码/配置 SHA-256 保存到 [operator 恢复持久证据](../../../docs/reviews/verification-records.md#20260906-forward-operator)。测试使用专用端口 56440 双数据库及 disposable=1；主命令沿用 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 含 forward、sendCompletionSchemaReadiness、durableWorkRetryPauseAndReplay、operator config/HTTP、Gateway、普通写入和媒体组件。
 - schema relation coverage、协议文档门禁、本地环境 contract、Compose YAML 和 `git diff --check` 通过。两个专用测试库的 schema 已确认不存在，临时 PostgreSQL 已正常停止；所有测试会话均记录终态。未提交、部署、重跑 App/ClientKit/Linux 或做负载验收。
-- 恢复步骤与错误处理见 [转发暂停恢复操作合同](forward-operator-replay.md)。B04 仍缺跨 owner 媒体 HTTP 路由、owner 迁移、终态 envelope 保留/清理与全局内容封禁；本地跨进程 staging 所有权与生产媒体 provider 仍开放。完整 47 项状态保持 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。
+- 恢复步骤与错误处理见 [转发暂停恢复操作合同](../forward-operator-replay.md)。B04 仍缺跨 owner 媒体 HTTP 路由、owner 迁移、终态 envelope 保留/清理与全局内容封禁；本地跨进程 staging 所有权与生产媒体 provider 仍开放。完整 47 项状态保持 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。
 
 
 ## 2026-09-06：B04 / E03 消息媒体下载的 owner 与授权路由
@@ -377,7 +382,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - grant 创建、claim 和 provider 返回后的消费均重新授权；签名等待期间撤回、撤销设备或关闭投影时不返回 URL，claim 释放。取消等待 provider 退出。新 schema **17** 持久完整消息/owner/epoch 范围，去掉本地 auth_devices FK，身份不可改写、consumed 不可重开；旧 store 不能 claim scoped grant。16→17 及已有迁移链、39 种 schema 门禁故障验证。
 - 首轮服务端 29 tests / 4 suites 因新增夹具路由与 registry 不一致而失败；客户端 294 tests / 52 suites 中新增夹具使用非法 identifier 字符失败。修正夹具，并修正个人授权查询兼容 Swift 大写与 PostgreSQL 小写 UUID 文本后，第二轮服务端 **39 tests / 5 suites**、ClientKit **294 / 52**、Core **80 / 24** 全通过。
 - App 在 iPhone 17 / iOS 26.2 模拟器完成构建与 **170 tests / 17 suites**。扩大回归的两个群模式夹具先因使用不存在的 rooms.group_delivery_mode 列而失败，修正列名后确认现有数据库 trigger 禁止模式变更；最终夹具断言准确的不可变错误，再检查原下载权限，没有禁用 trigger 或改动生产授权规则。最后服务端扩大回归：**Test run with 113 tests in 13 suites passed after 81.899 seconds.**。覆盖 15 个下载场景、群模式变更被拒绝、签名期间撤权与取消；实际跨 owner 两份附件完成导入后，经新 HTTP handler 取得目标并逐字节读回，个人投影夹具使用目标实际 accepted event payload；不把该夹具称为投影 worker 或真实网络端到端验收。
-- 初次失败、后续成功及最终源码 SHA-256 见 [媒体路由持久证据](evidence/20260906-scoped-media/manifest.json)。schema relation coverage、协议文档、本地环境 contract、Compose YAML 和 diff 检查通过。升级合同见 [转发源与媒体授权合同](forward-source-authorization.md)。schema 17 尚未部署，protocol 23 未变。
+- 初次失败、后续成功及最终源码 SHA-256 见 [媒体路由持久证据](../../../docs/reviews/verification-records.md#20260906-scoped-media)。schema relation coverage、协议文档、本地环境 contract、Compose YAML 和 diff 检查通过。升级合同见 [转发源与媒体授权合同](../forward-source-authorization.md)。schema 17 尚未部署，protocol 23 未变。
 - B04 仍实施中：owner 迁移、终态 envelope 清理及全局内容封禁未完成；E03 生产 provider/scanner、普通多 owner 上传分配、各 owner 清理与跨进程 staging 仍开放。未进行生产迁移、真实 TLS/App 服务链路、Linux 或负载验收。47 项状态保持 **10 已验证、8 实施中、3 已实现待验证、2 待外部验收、24 未开始**。
 
 - 本轮所有测试会话已确认终态；专用端口 56440 的两个数据库均无 im_v2 测试 schema，PostgreSQL 已正常停止。28 份源码及 9 份日志校验值一致，完整主表为 47 个唯一问题 ID。
@@ -391,7 +396,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - `recordSharedMessageEffects` 从旧的已提交个人/room 事件逐行回填摘要。新表参与快照原子切换，只保留新基线同 room/message 且不超出其 revision 的效果记录。升级时若旧版快照正在暂存或已准备激活，补齐 shadow 表；已准备的快照同步筛选记录，避免升级后激活缺表。旧版没有持久事件的预览历史不能凭空补出完整原始事件证据，仍需恢复合同覆盖。
 - 新测试覆盖四种入口/升级顺序、关闭重开、三个入口回放、JSON 格式等价、冲突不推进游标、不重发搜索任务、无基线失败后的重试、撤回先于编辑、快照后旧 accepted，以及暂存/已准备快照升级。主 SQLite schema 基线更新为 **163 个对象**，搜索库保持 **5 个**。
 - 初始测试构造修正了 GroupEventPage 参数和 GRDB async 调用；随后修正 schema 指纹、同一个人流重复事件的非法夹具，以及刻意编辑后的快照预期正文。中间 **297**、**298** 项 ClientKit 测试先后通过。App 首轮暴露新内部表落入“未知投影→立即全局刷新”分支，导致普通消息计时器等待超时；把效果表列入内部元数据，并增加实际 SQLite observer 验证，没有改变 UI 合并策略。
-- 最终 `swift test --disable-automatic-resolution --jobs 2`：**299 tests / 52 suites** 全通过。`xcodebuild test` 在 iPhone 17 / iOS 26.2、IMApp/Debug、only-testing:IMAppTests、关闭签名下：**170 tests / 17 suites** 全通过。失败与成功的 10 份日志、最终源码校验值见 [消息效果持久证据](evidence/20260906-message-effects/manifest.json)。diff 与 protocol 文档门禁通过，所有测试会话终态已确认。
+- 最终 `swift test --disable-automatic-resolution --jobs 2`：**299 tests / 52 suites** 全通过。`xcodebuild test` 在 iPhone 17 / iOS 26.2、IMApp/Debug、only-testing:IMAppTests、关闭签名下：**170 tests / 17 suites** 全通过。失败与成功的 10 份日志、最终源码校验值见 [消息效果持久证据](../../../docs/reviews/verification-records.md#20260906-message-effects)。diff 与 protocol 文档门禁通过，所有测试会话终态已确认。
 - PostgreSQL schema **17**、protocol **23** 未变，本轮未启动 PostgreSQL，也未部署、进行服务器/真实网络/Linux/负载验证。B06 进入实施中，reaction、置顶与其他投影的顺序/撤销处理、完整保留窗口与 replay generation fence 仍开放；B03 未关闭。全表状态为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
@@ -403,7 +408,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 服务端投影 worker 依据 room_sequence 比较当前状态，较晚个人流序号不能覆盖较新房间事实；remove 保留为当前负投影，进入后续快照。已知消息已撤回时关闭 reaction 投影并忽略迟到事实。真实 PostgreSQL 测试走 send→reaction add→fanout→projection→remove→fanout→negative snapshot，再注入晚到旧 add，最后真实 withdrawal 后再次注入迟到 add，核对快照不会复活 reaction。
 - SQLite `orderReactionEffects` 从已持久事件回填版本。旧版暂存快照已丢掉 reaction source version，升级保留 live bank/outbox/pending reset，但清空 staging 后从同一 snapshot 重新导入，不能直接激活无版本影子表；暂存中与已准备两种升级场景通过。新快照同步保留负状态及对应版本/摘要。主库 **165 个对象**、搜索库 **5 个对象**。
 - 首轮 ClientKit 的两项失败为新增表后的 schema count/fingerprint，更新为实际结构后，最终 **302 tests / 52 suites** 通过；额外扩展撤回后首次收到迟到 reaction 的测试后再次全量通过。App 在 iPhone 17 / iOS 26.2、IMApp Debug、only-testing:IMAppTests、关闭签名下 **170 tests / 17 suites** 通过。服务端两轮均 **8 tests / 3 suites** 通过，使用专用 56440 PostgreSQL，覆盖实际 reaction pipeline 和选定 snapshot/service 回归；没有把它称为服务端全量测试。
-- 6 份失败/成功日志、最终 9 份源码 SHA-256 保存到 [reaction 顺序证据](evidence/20260906-reaction-effects/manifest.json)。使用 `swift test --disable-automatic-resolution --jobs 2` 跑 ClientKit；Server 使用 `--disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 为 reaction service、sync snapshot 及 PostgreSQL reaction/userProjection/snapshot/v3 匹配项。protocol 文档、schema relation coverage 和 diff 门禁通过。测试会话均已确认终态，临时 schema 清理并正常停止 PostgreSQL。
+- 6 份失败/成功日志、最终 9 份源码 SHA-256 保存到 [reaction 顺序证据](../../../docs/reviews/verification-records.md#20260906-reaction-effects)。使用 `swift test --disable-automatic-resolution --jobs 2` 跑 ClientKit；Server 使用 `--disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 为 reaction service、sync snapshot 及 PostgreSQL reaction/userProjection/snapshot/v3 匹配项。protocol 文档、schema relation coverage 和 diff 门禁通过。测试会话均已确认终态，临时 schema 清理并正常停止 PostgreSQL。
 - PostgreSQL schema **17**、protocol **23** 未变，尚未部署；新服务端负投影行为需要一致版本的 worker。旧版本已删除/压缩的 reaction 移除历史不能由此次迁移凭空恢复，历史回填/代次恢复仍开放。B06 还需置顶等对象的统一版本处理和完整保留窗口；B03 缺基线及 delivery authority 合同未关闭。本轮未做 Linux、负载、真实 TLS/App 到服务器链路验收。全表状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 ## 2026-09-06：B06 群管理源版本与权限幂等
@@ -411,8 +416,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 本轮开始前 reaction 批的 9 份源码指纹无漂移。检查置顶、公告、角色权限、成员角色发现源事件正文没有 `room_sequence`，客户端把个人同步 cursor 写进 room sequence。现于源提交的 room lock 事务中给新事件正文补上与事件列相同的源序号。
 - 真实 PostgreSQL 用例覆盖四类命令、取消置顶、清空权限、重复操作、变更请求冲突及 stale revision，核对六个群控制事实的序号为 2 至 7。普通模式给三位收件人预设不同消费位置，检查 18 条分发记录解析共享 payload 后保留原事件；混合模式核对 room log 正文，并断言没有个人 outbox/投递。
 - 首轮在两种模式均复现多个权限的相同请求被误判为幂等冲突，原因是 `jsonb::text` 与 JSONEncoder 的文本格式不同。现按解析后的权限集合比较，仍绑定 room/role/expectedRevision。首轮投递断言未解析 shared payload，第二轮仅剩混合模式误设个人 fanout 数量的测试问题；已按实际合同修正测试，没有改变分发模式。
-- 最终 **9 tests / 3 suites** 通过，新群管理 test 含两个模式参数实例。使用 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 覆盖群管理、reaction service、sync snapshot 及选定 PostgreSQL reaction/userProjection/snapshot/v3 测试。三轮失败/成功日志和最终 9 份源文件 SHA-256 见 [群管理源事件证据](evidence/20260906-group-source-versions/manifest.json)。所有会话已确认终态，专用 56440 数据库无测试 schema，PostgreSQL 正常停止；diff、协议文档、schema relation coverage 检查通过。
-- 新增 [群管理效果合同](group-control-effect-contract.md)。额外静态发现权限操作回执同时作为显式空策略标记，又会被 housekeeping 删除，过期后可能回退默认允许；尚未运行复现或修复。后续必须让当前策略与幂等回执保留解耦，并覆盖各消息写入优化路径。
+- 最终 **9 tests / 3 suites** 通过，新群管理 test 含两个模式参数实例。使用 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`，filter 覆盖群管理、reaction service、sync snapshot 及选定 PostgreSQL reaction/userProjection/snapshot/v3 测试。三轮失败/成功日志和最终 9 份源文件 SHA-256 见 [群管理源事件证据](../../../docs/reviews/verification-records.md#20260906-group-source-versions)。所有会话已确认终态，专用 56440 数据库无测试 schema，PostgreSQL 正常停止；diff、协议文档、schema relation coverage 检查通过。
+- 新增 [群管理效果合同](../group-control-effect-contract.md)。额外静态发现权限操作回执同时作为显式空策略标记，又会被 housekeeping 删除，过期后可能回退默认允许；尚未运行复现或修复。后续必须让当前策略与幂等回执保留解耦，并覆盖各消息写入优化路径。
 - **B06 仍实施中**。本批未改客户端群管理 reducer、snapshot ordering、历史和旧 staging 迁移。仅新源事件增加字段，PostgreSQL 17 / protocol 23 / SQLite 165+5 对象不变，未部署。没有新跑 ClientKit、App、Linux、负载或真实 TLS 链路。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
@@ -422,8 +427,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 普通 resolver 与三处批量消息授权 SQL 改读当前策略，不再查回执作为授权依据。优化 SQL 同时检查已有非空权限行，避免无标记旧数据回退默认允许；回执继续按照原期限清理，不无界保留历史操作。
 - 新增 schema 17 到 18 事务迁移，从源事件及保留回执验证完整 policy revision 历史，再回填角色标记。历史缺口、非法角色或重复 revision 对应多角色明确失败并回滚；不伪造默认权限。旧进程需停止后统一切换。角色 PK、FK、CHECK 和字段类型同时纳入 Swift readiness 与 SQL 门禁；缺约束的负向用例通过。
 - 集成用例覆盖普通/混合两种模式：默认策略可发送，设置空成员策略和独立 admin 策略后拒绝，真实 housekeeping 删除两条回执后仍拒绝单条与预热后的批量发送；标记数仍为两行。模拟 schema 17、回执已清理的旧库，可由源历史恢复；缺口迁移回滚、成功回填、重复迁移拒绝、后续明确授权重新允许发送均通过。
-- 初次编译因新 SQL 多行字符串缩进失败，修正后 **5 tests / 1 suite** 通过。扩大到批量路径、跨 owner inbox 权限和恢复、schema 7/8 迁移链、housekeeping、reaction 与 snapshot 后，最终 **20 tests / 3 suites** 通过。三份日志及十份最终源文件指纹见 [权限保留证据](evidence/20260906-group-policy-retention/manifest.json)。使用专用 56440 的 primary/owner2 数据库和 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`；详细 filter 保存在 manifest。
-- 所有测试会话已确认终态；两个数据库均无测试 schema，PostgreSQL 正常停止。diff、协议文档和 schema relation coverage 检查通过。迁移发布与回退限制见 [权限保留合同](group-policy-retention.md)。没有部署、Linux/负载/真实 TLS 验收，本批未新跑 ClientKit/App；protocol 23、SQLite 165+5 对象未改。
+- 初次编译因新 SQL 多行字符串缩进失败，修正后 **5 tests / 1 suite** 通过。扩大到批量路径、跨 owner inbox 权限和恢复、schema 7/8 迁移链、housekeeping、reaction 与 snapshot 后，最终 **20 tests / 3 suites** 通过。三份日志及十份最终源文件指纹见 [权限保留证据](../../../docs/reviews/verification-records.md#20260906-group-policy-retention)。使用专用 56440 的 primary/owner2 数据库和 `swift test --disable-build-manifest-caching --disable-automatic-resolution --jobs 4`；详细 filter 保存在 manifest。
+- 所有测试会话已确认终态；两个数据库均无测试 schema，PostgreSQL 正常停止。diff、协议文档和 schema relation coverage 检查通过。迁移发布与回退限制见 [权限保留合同](../group-policy-retention.md)。没有部署、Linux/负载/真实 TLS 验收，本批未新跑 ClientKit/App；protocol 23、SQLite 165+5 对象未改。
 - B06 仍需客户端群控制 reducer、快照负状态与版本、历史和 staging 迁移；其余 47 项范围不变。状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
@@ -433,7 +438,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新增 `V2GroupPolicySnapshotEffect`，校验 UUID、正 revision、权限集合和公告字节上限。权限顺序无关；拒绝重复/未知权限、owner 策略、布尔/溢出 revision、非法源序号。相同旧事实可以补充后来引入的 room sequence；两份都明确携带该字段时必须相同。
 - `PostgresV2UserProjectionWorker` 分别按 room 公告和 room/role 权限比较 revision。旧版本不覆盖当前状态，同版本异来源或异事实失败并回滚本次 checkpoint；空权限、空公告 replacement 保留版本。大小写 UUID 快照键不创建第二个对象；未改允许提交空公告的用户命令。
 - PostgreSQL 用例用真实命令生成两版公告、成员权限从非空到空及独立 admin 权限，按源序号倒序 plan/deliver/project。随后注入不带 source room sequence 的空公告、迟到旧公告与旧权限，验证三个对象不退回；同版本冲突失败且 checkpoint 保持 8。覆盖已有小写 UUID key 的继续更新。
-- 首轮编译发现测试辅助解析方法为 private；调整后第二轮因手工追加日志未同步分配个人流高水位，worker 未消费迟到夹具，产生 5 个断言失败。修正夹具的序号分配，并未改变生产调度合同。最终 **24 tests / 4 suites** 通过，包含策略边界、真实快照、原有权限 GC、批量发送、跨 owner inbox、迁移链、reaction 和 snapshot 回归。三份日志与十份最终源码指纹见 [策略快照证据](evidence/20260906-group-policy-snapshots/manifest.json)。
+- 首轮编译发现测试辅助解析方法为 private；调整后第二轮因手工追加日志未同步分配个人流高水位，worker 未消费迟到夹具，产生 5 个断言失败。修正夹具的序号分配，并未改变生产调度合同。最终 **24 tests / 4 suites** 通过，包含策略边界、真实快照、原有权限 GC、批量发送、跨 owner inbox、迁移链、reaction 和 snapshot 回归。三份日志与十份最终源码指纹见 [策略快照证据](../../../docs/reviews/verification-records.md#20260906-group-policy-snapshots)。
 - 所有测试会话已确认终态，专用 56440 的两个数据库均无测试 schema，PostgreSQL 已停止。diff、协议文档、schema relation coverage 检查通过。PostgreSQL 18 / protocol 23 / SQLite 165+5 未改，未部署；本批未新跑 ClientKit/App/Linux/负载/真实 TLS。
 - 继续保留完整 B06 范围：客户端 reducer、旧本地完整基线恢复、置顶源历史、成员移除/角色版本和全局保留/代次边界未完成。代码复核确认 token 缺失只会从服务端设备 ACK 继续，不能将清 token 当成完整快照请求；该前置条件已写入群控制合同。47 项状态仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
@@ -444,8 +449,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 服务端复用既有 reset stager/builder/capability 流程，待处理请求复用相同 snapshot/generation；显式重建不校验旧 token，基线下限为 max(retention floor, device ACK)，已确认游标仍在窗口内也会重建。空账户按无非零个人序列的条件补零 checkpoint。PostgreSQL schema **18** 不变。
 - 新客户端测试覆盖旧库迁移、重启、丢响应、跨代恢复、取消、导入/激活、outbox 不丢失和 wire 编码。真实 SQL 测试覆盖非空/空账户、普通缺 token 续拉对照、preparing/pending 复用、发布、重复 ACK、新代次继续及撤销设备；gateway 与 routed store 验证标志、认证身份和 owner 转发。
 - ClientKit 初始编译失败为测试把 UInt32 envelope protocol version 传给 UInt8 frame version 参数；修正后第二轮仅 schema migration/count/fingerprint 三项契约预期失败，按实际迁移结构更新。最终 **305 tests / 52 suites** 全通过。服务端首轮 **8 / 3** 通过，加入 gateway 转发及扩大策略/GC/跨 owner 回归后 **56 / 6** 通过。App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **170 / 17** 通过。
-- 失败与成功日志、命令、最终源码 SHA-256 见[个人基线恢复证据](evidence/20260906-personal-snapshot-rebuild/manifest.json)。协议生成物、协议文档、schema relation coverage 和 git diff 检查通过。所有测试进程终态已确认，专用双库 schema 清理后停止 PostgreSQL。
-- 新增[个人基线恢复合同](personal-snapshot-rebuild.md)。尚未接入群 reducer 升级触发，未恢复已丢失历史；可以复用满足下限的已有快照，不保证每次重新计算最新 artifact。个人快照不能代替独立 room_log/hybrid 基线，B03 也未关闭。未部署，未执行真实 App-gateway 链路、Linux 或负载验收。47 项状态仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- 失败与成功日志、命令、最终源码 SHA-256 见[个人基线恢复证据](../../../docs/reviews/verification-records.md#20260906-personal-snapshot-rebuild)。协议生成物、协议文档、schema relation coverage 和 git diff 检查通过。所有测试进程终态已确认，专用双库 schema 清理后停止 PostgreSQL。
+- 新增[个人基线恢复合同](../personal-snapshot-rebuild.md)。尚未接入群 reducer 升级触发，未恢复已丢失历史；可以复用满足下限的已有快照，不保证每次重新计算最新 artifact。个人快照不能代替独立 room_log/hybrid 基线，B03 也未关闭。未部署，未执行真实 App-gateway 链路、Linux 或负载验收。47 项状态仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 ## 2026-09-06：B06 客户端公告效果与旧库升级
 
@@ -455,8 +460,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 追加 orderAnnouncementEffects 迁移，主库 **167** 个对象，搜索库 **5**。旧表规范化 room ID，保留正文/revision/时间，不信任原 room_sequence；从现存个人和房间日志回填来源，只为仍存续的公告处理事件，避免退群后残留日志恢复已删除投影。没有日志的旧来源保留未知，不声称已还原。旧暂存与已准备快照丢掉 staging/import 后从同一 artifact 重导入，live bank/outbox/pending reset 保留。
 - 公告和 receipts 随快照原子切换，只保留新基线可证明的 room/revision 范围；混合房间仍依照新快照的授权保留独立日志状态。效果表归入内部元数据，不触发全量 UI 刷新。移除旧的未使用公告 DTO。
 - 初次测试追加因工作目录错误未写入，首轮只跑既有 **305 项 / 52 套件**，三项失败均为 schema migration/count/fingerprint 预期；按实际新库结构更新。新测试加入后的 **309 项**首轮仅 UUID 边界失败：Core 通用 RoomID 接受非 UUID 字符串，现公告边界显式校验并与服务端合同一致。之后 309 项全通过；额外补充迁移不恢复已清除公告及房间 envelope 校验后，最终 **309 tests / 52 suites** 再次全通过。
-- App 在 iPhone 17 / iOS 26.2、IMApp Debug、仅 IMAppTests、关闭签名下 **170 tests / 17 suites** 全通过。五份失败/成功日志、命令与最终七份源码 SHA-256 见[公告效果证据](evidence/20260906-announcement-effects/manifest.json)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 检查通过；此次未启动 PostgreSQL，未更改服务端/协议。
-- 新增[公告效果合同](announcement-effect-contract.md)，更新群管理合同及问题总表。protocol **24**、PostgreSQL schema **18** 不变。未部署，未做真实 App-gateway 网络、Linux、负载或无障碍人工验收。公告历史 sourceEventID 缺证据仍有限制；客户端各角色显式空策略与迁移、置顶负状态、成员离开/重入及完整保留/代次合同继续开放。B06 状态不变，47 项仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- App 在 iPhone 17 / iOS 26.2、IMApp Debug、仅 IMAppTests、关闭签名下 **170 tests / 17 suites** 全通过。五份失败/成功日志、命令与最终七份源码 SHA-256 见[公告效果证据](../../../docs/reviews/verification-records.md#20260906-announcement-effects)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 检查通过；此次未启动 PostgreSQL，未更改服务端/协议。
+- 新增[公告效果合同](../announcement-effect-contract.md)，更新群管理合同及问题总表。protocol **24**、PostgreSQL schema **18** 不变。未部署，未做真实 App-gateway 网络、Linux、负载或无障碍人工验收。公告历史 sourceEventID 缺证据仍有限制；客户端各角色显式空策略与迁移、置顶负状态、成员离开/重入及完整保留/代次合同继续开放。B06 状态不变，47 项仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 ## 2026-09-06：B06 当前角色权限基线与 owner 复核
 
@@ -466,8 +471,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新增 V2RoutedGroupRolePolicyBaselineStore：公共构造器只接收控制库并创建不缓存的 PostgreSQL router，避免把两次缓存命中当作 owner 校验。读取前后比较实际 owner/epoch，拒绝不匹配的 room 和路由变化，不尝试 fallback；内部 router 注入供测试使用。
 - Core 首轮 82 项通过，但真实 PostgreSQL 两种模式均暴露模型误把初始 membershipRevision=0 判为非法；根据 rooms 的实际 schema 修正，最终 Core **82 tests / 25 suites** 全通过。服务端首轮 **9 / 3** 失败两项；修正后扩展 **29 / 6** 只剩混合模式并发提交失败。诊断轮保留真实结果：revision 7 返回 rateLimited(retryAfterSeconds:3)，新增并发写入耗尽原测试夹具窗口。仅将这一夹具的 profile/room/shard command window 从 10 扩至 20，生产准入逻辑未改。
 - 最终真实 SQL 在普通/混合模式分别验证默认、显式空、非空、GC 后相同基线、schema 17→18 迁移后相同基线、授权拒绝、退群与重入；四次真实策略提交与 32 次基线读取并发，检查 revision 与权限集合始终匹配。另在读取后实际插入控制库新 epoch，断言拒绝旧结果。路由单测验证选址、原 actor 传递、epoch 变化及无 fallback。最终 **29 tests / 6 suites** 全通过，包含原快照、权限保留与选定跨 owner 转发回归，非服务端全套。
-- 六份运行日志、命令及源码 SHA-256 见[权限基线证据](evidence/20260906-policy-baseline/manifest.json)。所有会话已确认终态，双库无 im_v2 schema，专用 56440 PostgreSQL 已停止；diff、协议文档、schema relation coverage 通过。
-- 新增[权限基线合同](group-policy-baseline-contract.md)，明确后续网关认证请求、客户端持久恢复、membership/账号生命周期栅栏、各角色 reducer 与全局 expectedRevision 的接入要求。本轮 protocol **24**、PostgreSQL schema **18**、SQLite **167/5** 不变；没有部署，没有新增 App/ClientKit、真实网络、Linux、负载或完整 owner 迁移验收。基线读取尚未接入网关或客户端，不能宣称空权限缺陷已经关闭。47 项仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- 六份运行日志、命令及源码 SHA-256 见[权限基线证据](../../../docs/reviews/verification-records.md#20260906-policy-baseline)。所有会话已确认终态，双库无 im_v2 schema，专用 56440 PostgreSQL 已停止；diff、协议文档、schema relation coverage 通过。
+- 新增[权限基线合同](../group-policy-baseline-contract.md)，明确后续网关认证请求、客户端持久恢复、membership/账号生命周期栅栏、各角色 reducer 与全局 expectedRevision 的接入要求。本轮 protocol **24**、PostgreSQL schema **18**、SQLite **167/5** 不变；没有部署，没有新增 App/ClientKit、真实网络、Linux、负载或完整 owner 迁移验收。基线读取尚未接入网关或客户端，不能宣称空权限缺陷已经关闭。47 项仍为 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
 ## 2026-09-06：B06 权限基线协议与认证网关接线
@@ -476,7 +481,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - gateway 使用已认证身份读取，非法 room UUID 在存储前拒绝；interactiveRead 准入、成本 2 和固定监控标签已接入。当前成员撤销、房间不存在、owner 变化及配置/持久化错误分别映射为 FORBIDDEN、NOT_FOUND、可重试 ROOM_OWNER_CHANGED 与 UNAVAILABLE。生产入口为每个配置的群 owner 构造读取 store，并使用控制库上的无缓存路由复核；必需依赖没有静默 fallback。
 - ClientKit 新增基线传输协议与 fetch 实现，校验房间、恰好两个角色、重复/未知权限、数值溢出、响应关联及协商版本。通用 requestEnvelope 从只检查 request ID 改为同时检查 envelope 与 frame 版本。该 transport 的配置版本同时用于帧和 envelope；生产 App 配置 current，不是 transport 无条件覆盖为生成的当前版本。
 - 新回归覆盖空策略、合法零 membership revision、13 类错误响应、重试元数据、非法请求不发包，以及 gateway 认证前/撤销后拒绝、真实身份转发、错误映射和读准入。ClientKit 首轮 **312 项 / 53 套件，14 issues** 和服务端首轮 **72 项 / 8 套件，1 issue** 均源于新测试配置 frame/version 为 1 却期望 protocol 25；修正测试配置后通过，保留初始日志。
-- 最终 Core **82 tests / 25 suites**、ClientKit **312 / 53**、服务端定向回归 **72 / 8**、编解码及监控 **14 / 2** 全通过；App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **170 / 17** 全通过。九份运行日志、命令与三十份最终源码 SHA-256 见[协议接线证据](evidence/20260906-policy-wire/manifest.json)。服务端包含真实双库 SQL 回归，不是全套或真实 TLS E2E；生产入口编译通过。
+- 最终 Core **82 tests / 25 suites**、ClientKit **312 / 53**、服务端定向回归 **72 / 8**、编解码及监控 **14 / 2** 全通过；App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **170 / 17** 全通过。九份运行日志、命令与三十份最终源码 SHA-256 见[协议接线证据](../../../docs/reviews/verification-records.md#20260906-policy-wire)。服务端包含真实双库 SQL 回归，不是全套或真实 TLS E2E；生产入口编译通过。
 - 所有测试会话终态已确认；专用 56440 两个数据库均无 im_v2 schema，PostgreSQL 已正常停止。diff、协议文档、schema relation coverage 和生成物检查通过。PostgreSQL **18** 与 SQLite **167/5** 未变，未部署，未执行 Linux、负载或无障碍人工验收。
 - fetch 尚不写 SQLite，也不清除恢复意图或更改待发命令；客户端持久恢复、各角色 reducer/迁移、置顶负状态、成员离开/重入和完整保留/代次边界仍开放。问题总表仍为 **47 项：10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 继续实施中。
 
@@ -489,8 +494,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 追加 orderRolePolicyEffects 迁移，移除旧正权限行表，将其观察到的值与版本转换为完整集合；旧 source/room_sequence 保持未知。不存在的角色不再返回默认授权，也不从可能残缺或已清除房间的历史日志猜测当前策略。旧 staging/prepared snapshot 重新导入，保留 live bank、outbox、pending reset。主 schema **168**、搜索 **5**，指纹 **0x337f64a4788a624a**。
 - 快照保留合法范围内的效果记录，同一来源在新快照中被改成不同版本或事实时拒绝准备；source sequence 的已知值可以补齐 receipts。仍获授权的混合群按角色比较 live/shadow，保留更高版本和房间全局命令 revision，避免房间游标领先于回退后的权限状态。内部效果表不触发全量 UI 刷新。
 - 首轮既有 **312 项 / 53 套件**只有三项 schema 契约预期失败，按实际结构更新。一次在仓库根执行 swift test 因没有 Package.swift 失败；正确目录新增测试编译轮发现两个测试 API 名称错误，改用已有 beginReset 与 cursor.pendingReset。之后 **316 / 53** 通过；再补快照来源冲突回归，最终 **317 tests / 53 suites** 全通过。App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **170 tests / 17 suites** 全通过。
-- 六份日志和最终七份源码 SHA-256 见[角色效果证据](evidence/20260906-role-policy-effects/manifest.json)。测试覆盖两种跨流顺序、持久房间日志、乱序/空集合、独立角色、重启、非法字段/房间、普通及混合快照、两种 staging 阶段迁移和 outbox 保留。所有会话已确认终态；diff、协议文档、schema relation coverage 通过。本批未启动 PostgreSQL、未修改协议/服务端、未部署，未做真实网络、Linux、负载或无障碍人工验收。
-- 新增[角色效果合同](role-policy-effect-contract.md)，更新问题总表和当前 schema 文档。仍需完整基线的持久恢复 worker、账号/设备及 membership 栅栏、基线观察点下限、缺失角色主动获取，以及置顶、成员角色和完整 receipts 保留/清理合同。现有 App 对缺失角色禁用保存，恢复接线前该角色尚不可编辑。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- 六份日志和最终七份源码 SHA-256 见[角色效果证据](../../../docs/reviews/verification-records.md#20260906-role-policy-effects)。测试覆盖两种跨流顺序、持久房间日志、乱序/空集合、独立角色、重启、非法字段/房间、普通及混合快照、两种 staging 阶段迁移和 outbox 保留。所有会话已确认终态；diff、协议文档、schema relation coverage 通过。本批未启动 PostgreSQL、未修改协议/服务端、未部署，未做真实网络、Linux、负载或无障碍人工验收。
+- 新增[角色效果合同](../role-policy-effect-contract.md)，更新问题总表和当前 schema 文档。仍需完整基线的持久恢复 worker、账号/设备及 membership 栅栏、基线观察点下限、缺失角色主动获取，以及置顶、成员角色和完整 receipts 保留/清理合同。现有 App 对缺失角色禁用保存，恢复接线前该角色尚不可编辑。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
 ## 2026-09-06：B06 权限基线持久请求与本地事务栅栏
@@ -502,8 +507,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 请求位于 snapshot bank 外；观察点只为 incoming/live 成员版本和来源一致且仍获授权的房间保留，覆盖范围内的 receipts 同步保留。旧请求在 reset 期间被拒绝、换代后不能写入，发现接口可更新请求身份。移除房间不保留其观察点。
 - 追加 recordRolePolicyRecovery 迁移，主 schema **170**、搜索 **5**，主库指纹 **0xfda1ba89465de725**。两张新表不触碰待发命令；旧 staging/prepared snapshot 重新导入，live bank/outbox/pending reset 保留。内部请求表不触发全量 UI 刷新。
 - 一次根目录 swift test 调用因没有 Package.swift 失败。正确目录首轮 **317 项 / 53 套件**仅三项 schema 预期失败，按实际结构更新；新测试轮 **321 / 53** 通过，增加受控迁移后 **322 / 53** 通过；最后补充基线与已观察同版本角色冲突、以及更高版本完成恢复的断言，最终 **322 tests / 53 suites** 全通过。App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **170 tests / 17 suites** 全通过。
-- 六份日志、命令与八份最终源码 SHA-256 见[恢复存储证据](evidence/20260906-policy-recovery-store/manifest.json)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 通过；本批未启动 PostgreSQL，未新跑 Core/server，未执行真实网络、Linux、负载、部署或无障碍人工验收。
-- 新增[恢复存储合同](role-policy-recovery-store-contract.md)。自动发现/重试 runner、网络失败与 FORBIDDEN 分类、认证设备/连接取消生命周期及 App 调用仍未接入；本地请求 token 不是服务端授权证明。缺失角色的自动获取、置顶、成员角色、完整 receipts 保留和广义退出生命周期仍开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- 六份日志、命令与八份最终源码 SHA-256 见[恢复存储证据](../../../docs/reviews/verification-records.md#20260906-policy-recovery-store)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 通过；本批未启动 PostgreSQL，未新跑 Core/server，未执行真实网络、Linux、负载、部署或无障碍人工验收。
+- 新增[恢复存储合同](../role-policy-recovery-store-contract.md)。自动发现/重试 runner、网络失败与 FORBIDDEN 分类、认证设备/连接取消生命周期及 App 调用仍未接入；本地请求 token 不是服务端授权证明。缺失角色的自动获取、置顶、成员角色、完整 receipts 保留和广义退出生命周期仍开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
 ## 2026-09-06：B06 自动权限恢复与 App 生命周期接线
@@ -514,8 +519,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - V2ClientRuntime 在初始认证/同步/优先命令完成后启动独立恢复 loop；显式 stop 取消并等待，后台失败也取消。App 每个连接创建新 runner，避免被旧取消任务占用。执行器和存储入口检查取消；忽略取消的测试传输返回迟到结果仍不写入。
 - App 会话刷新同时读取权限投影；专用读取 generation 阻止旧显式读取覆盖新恢复结果。权限弹层未知时禁用编辑和保存，第一次恢复时初始化草稿；草稿保留开始编辑时的版本，新投影到来不静默改 expectedRevision，用户可选择重新载入。
 - 首轮 **322 项 / 53 套件**仅三项 schema 契约预期失败，按实际新结构更新。新增 runner/runtime 回归后 **326 / 53** 通过；补旧请求表迁移后最终 **327 tests / 53 suites** 全通过。App 在 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名下 **171 tests / 17 suites** 全通过，新增权限读取交错回归。
-- 四份日志、命令与十四份最终源码 SHA-256 见[执行器证据](evidence/20260906-policy-runner/manifest.json)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 通过；protocol **25**、PostgreSQL **18** 未变。本批未启动 PostgreSQL、未新跑 Core/server、未部署，未做真实网络、Linux、负载、权限弹层点击 E2E 或无障碍人工验收。
-- 新增[执行器合同](role-policy-recovery-runner-contract.md)。暂停状态尚缺 App 反馈和显式重试入口，当前只有存储 resume API；自动恢复的真实 App–TLS Gateway 链路仍待验收。置顶/成员角色、完整 receipts 保留与组合验收继续开放，B06 仍实施中。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
+- 四份日志、命令与十四份最终源码 SHA-256 见[执行器证据](../../../docs/reviews/verification-records.md#20260906-policy-runner)。所有测试会话终态已确认，diff、协议文档、schema relation coverage 通过；protocol **25**、PostgreSQL **18** 未变。本批未启动 PostgreSQL、未新跑 Core/server、未部署，未做真实网络、Linux、负载、权限弹层点击 E2E 或无障碍人工验收。
+- 新增[执行器合同](../role-policy-recovery-runner-contract.md)。暂停状态尚缺 App 反馈和显式重试入口，当前只有存储 resume API；自动恢复的真实 App–TLS Gateway 链路仍待验收。置顶/成员角色、完整 receipts 保留与组合验收继续开放，B06 仍实施中。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**。
 
 
 ## 2026-09-06：B06 权限恢复状态与显式重试入口
@@ -526,8 +531,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 权限弹层增加分状态文案、“请求同步权限”按钮及无障碍标签/提示和稳定标识。失败保留当前状态并允许再试；提示状态无法确认，不误称持久意图必定未保存。授权撤销或选中角色消失清除旧草稿；新投影不静默更新既有编辑 expectedRevision。
 - 读取 generation 同样保护重试返回；新状态已到达时，旧重试随后失败不会覆盖它或留下错误提示。当前失败在恢复阶段改变时清除。新增交错回归实际验证以上行为。
 - ClientKit 既有 **327 / 53** 与新增回归后的 **329 tests / 53 suites** 均通过。App 初轮 **174 / 17**、补能力缺失后的 **175 / 17**、补失败交错后的最终 **176 tests / 17 suites** 全通过；环境为 iPhone 17 / iOS 26.2、Debug、仅 IMAppTests、关闭签名。本批没有失败测试运行。
-- 五份运行日志、命令与十份最终源码 SHA-256 见[状态与重试证据](evidence/20260906-policy-recovery-ui/manifest.json)。测试会话均已结束，最终 App 日志含 TEST SUCCEEDED。diff、协议文档、schema relation coverage、五份日志和十份源码哈希检查通过，问题表确认 47 个唯一编号。protocol **25**、PostgreSQL **18**、SQLite **171/5** 未变；未启动 PostgreSQL、未新跑 Core/server、未部署。
-- 新增[状态与重试合同](role-policy-recovery-ui-contract.md)。Store 与 SQLite 测试不等于权限弹层点击 E2E、真实 App–TLS Gateway、VoiceOver、最大 Dynamic Type 或 RTL 人工验收，这些仍未执行。置顶、成员角色、历史负事实、完整 receipts 保留/GC 和组合边界继续开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
+- 五份运行日志、命令与十份最终源码 SHA-256 见[状态与重试证据](../../../docs/reviews/verification-records.md#20260906-policy-recovery-ui)。测试会话均已结束，最终 App 日志含 TEST SUCCEEDED。diff、协议文档、schema relation coverage、五份日志和十份源码哈希检查通过，问题表确认 47 个唯一编号。protocol **25**、PostgreSQL **18**、SQLite **171/5** 未变；未启动 PostgreSQL、未新跑 Core/server、未部署。
+- 新增[状态与重试合同](../role-policy-recovery-ui-contract.md)。Store 与 SQLite 测试不等于权限弹层点击 E2E、真实 App–TLS Gateway、VoiceOver、最大 Dynamic Type 或 RTL 人工验收，这些仍未执行。置顶、成员角色、历史负事实、完整 receipts 保留/GC 和组合边界继续开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
 
 
 ## 2026-09-06：B06 置顶快照负状态与源版本比较
@@ -538,8 +543,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 缺源序号的旧正文继续接受但不伪造版本，不能覆盖已知源版本；两条未知旧来源仍保留兼容的到达顺序，真实历史顺序尚未恢复。已丢失的旧 unpin 不能从本批新比较规则重建，后续还需权威恢复和 writer/worker 一致切换；客户端置顶 reducer 仍待实现。
 - 首次 PostgreSQL 启动受沙箱共享内存限制，SwiftPM 也受默认 Clang 缓存写入限制；获准使用独立临时库和构建环境后继续。首轮编译发现 EventID.uuidValue 可空，改为显式 UUID guard。之后 **11 项 / 4 套件**一例失败：测试预期工作器拒绝变更来源，但数据库现有不可变 effect 约束在日志写入阶段已提前拒绝。修正测试预期，并让夹具序列分配与日志写入同事务，验证拒绝后没有游标缺口。
 - 最终服务端定向 **19 tests / 4 suites** 全通过；包含实际源提交、逆序 fanout、日志移除后重复、旧负事实、混合 UUID 键、快照 build/manifest/page/ACK、同版本冲突回滚，以及原策略保留/源版本、reaction、schema 和快照合同回归。不是服务端全套。ClientKit **331 tests / 53 suites**、iPhone 17 / iOS 26.2 Debug IMAppTests **176 tests / 17 suites** 全通过，App 关闭签名。
-- 六份运行日志、命令与六份最终源码哈希见[置顶快照证据](evidence/20260906-pin-snapshots/manifest.json)。所有测试会话终态已确认，两临时库均无 im_v2 schema，专用 PostgreSQL 已停止。diff、协议文档和 schema relation coverage 检查通过。
-- 新增[置顶快照合同](pin-snapshot-contract.md)，更新问题表。protocol **25**、PostgreSQL **18**、SQLite **171/5** 未变。没有部署，没有真实 App–TLS、Linux、负载、无障碍人工或旧置顶历史迁移验收。成员退出/重入、撤回与置顶组合、客户端四路 reducer、完整 receipts 保留/GC 仍开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
+- 六份运行日志、命令与六份最终源码哈希见[置顶快照证据](../../../docs/reviews/verification-records.md#20260906-pin-snapshots)。所有测试会话终态已确认，两临时库均无 im_v2 schema，专用 PostgreSQL 已停止。diff、协议文档和 schema relation coverage 检查通过。
+- 新增[置顶快照合同](../pin-snapshot-contract.md)，更新问题表。protocol **25**、PostgreSQL **18**、SQLite **171/5** 未变。没有部署，没有真实 App–TLS、Linux、负载、无障碍人工或旧置顶历史迁移验收。成员退出/重入、撤回与置顶组合、客户端四路 reducer、完整 receipts 保留/GC 仍开放。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
 
 
 ## 2026-09-06：B06 客户端置顶效果、旧库迁移与快照保留
@@ -550,8 +555,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 普通快照保留覆盖范围内的 receipts；仍获授权的 hybrid 房间比较 live/shadow 源版本，保留较新事实。新快照来源与 live receipt 冲突时拒绝，即使旧消息不在新 bank。保留的同来源 receipt 可补齐快照缺失的源序号。移除对象不带旧 receipts，本人退群清理包括新表；内部摘要表不触发全量 UI 刷新。
 - 两次合并编辑/测试命令误从仓库根调用 swift test，均因无 Package.swift 结束，没有测试运行，日志保留。正确目录首轮 **331 / 53**仅三项 schema 预期失败，按实际新库更新。新增用例一轮因观察器类型名错误未编译；修正后 **337 / 53**仅重复投递夹具触发现有同步日志唯一约束，改为先清理旧日志、保留 receipt 再投递，以验证独立摘要保护。
 - 最终 ClientKit **339 tests / 53 suites** 全通过，覆盖两种跨流顺序、重启、不同消息独立排序、来源冲突、旧 receipt 补序号、非法数值/UUID/envelope、普通/hybrid 快照、来源重用、元数据保留/移除、两种暂存阶段迁移与本人退群。App 在 iPhone 17 / iOS 26.2 Debug、仅 IMAppTests、关闭签名下 **176 tests / 17 suites** 全通过。
-- 七份失败/成功日志、命令和七份最终源码哈希见[置顶效果证据](evidence/20260906-pin-effects/manifest.json)。所有测试会话终态已确认；diff、协议文档及 schema relation coverage 通过。本批未启动 PostgreSQL，未新跑 Core/server，protocol **25** 与 PostgreSQL **18** 未变。
-- 新增[置顶效果合同](pin-effect-contract.md)，更新问题表。两条都缺源序号的旧事实仍不能证明真实顺序，已经丢失的旧取消事实、置顶权威基线、writer/worker 一致切换、成员角色、迟到授权/重新入群与撤回组合、完整 receipts 保留/GC 继续开放。没有部署或真实 App–TLS、Linux、负载、无障碍人工验收。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
+- 七份失败/成功日志、命令和七份最终源码哈希见[置顶效果证据](../../../docs/reviews/verification-records.md#20260906-pin-effects)。所有测试会话终态已确认；diff、协议文档及 schema relation coverage 通过。本批未启动 PostgreSQL，未新跑 Core/server，protocol **25** 与 PostgreSQL **18** 未变。
+- 新增[置顶效果合同](../pin-effect-contract.md)，更新问题表。两条都缺源序号的旧事实仍不能证明真实顺序，已经丢失的旧取消事实、置顶权威基线、writer/worker 一致切换、成员角色、迟到授权/重新入群与撤回组合、完整 receipts 保留/GC 继续开放。没有部署或真实 App–TLS、Linux、负载、无障碍人工验收。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 仍实施中。
 
 
 ## 2026-09-06：B06 服务端成员角色快照排序
@@ -560,9 +565,9 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - V2GroupPolicySnapshotEffect 扩展为解析目标成员角色，以 membership_revision 为版本，room/target 为对象键；不读取角色 payload 的普通 revision 作为排序依据。UUID、admin/member、正 Int64 版本、可选源序号/时间均校验。owner 角色变更拒绝，与 Core 命令及生产写入一致。
 - 工作器按目标成员复用组策略投影事务，较旧角色不能覆盖较新角色；普通 member 是明确当前值。重复当前 source 先验证事实与版本，不因低版本分支跳过来源冲突；同版本不同来源拒绝。UUID 大小写候选查询延续旧物理键，重复当前对象拒绝。
 - 新增真实 PostgreSQL 测试：两名成员三次角色变更经逆序 planner/fanout 投递，检查各自当前状态；追加无源序号旧事件不覆盖新版本；实际构建、读取和 ACK 快照后，同版本冲突仍回滚并保留 checkpoint。类型回归验证目标、版本选择、非法角色、数值与字段边界。
-- 本批 **22 tests / 4 suites** 全通过，没有失败测试运行；还包括已有置顶、公告、权限保留/源版本、reaction、schema 和快照定向回归，不是服务端全套。日志、命令与四份最终源码哈希见[成员角色快照证据](evidence/20260906-member-role-snapshots/manifest.json)。
+- 本批 **22 tests / 4 suites** 全通过，没有失败测试运行；还包括已有置顶、公告、权限保留/源版本、reaction、schema 和快照定向回归，不是服务端全套。日志、命令与四份最终源码哈希见[成员角色快照证据](../../../docs/reviews/verification-records.md#20260906-member-role-snapshots)。
 - 测试会话终态已确认，两临时库均无 im_v2 schema，专用 PostgreSQL 正常停止；diff、协议文档、schema relation coverage 通过。protocol **25**、PostgreSQL **18**、SQLite **172/5** 未变；未新跑 Core/ClientKit/App，未部署，未做真实 App–TLS、Linux、负载或无障碍人工验收。
-- 新增[成员角色快照合同](member-role-snapshot-contract.md)。现有 remove 会删除角色并丢失版本屏障，迟到 role 和较旧 remove/较新重入仍未闭环；不能用全局最近 membership 事件替代逐成员事实。下一步仍需持久 add/remove 负状态、客户端统一处理、历史恢复与完整授权代次/保留合同。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 继续实施中。
+- 新增[成员角色快照合同](../member-role-snapshot-contract.md)。现有 remove 会删除角色并丢失版本屏障，迟到 role 和较旧 remove/较新重入仍未闭环；不能用全局最近 membership 事件替代逐成员事实。下一步仍需持久 add/remove 负状态、客户端统一处理、历史恢复与完整授权代次/保留合同。47 项状态保持 **10 已验证、9 实施中、3 已实现待验证、2 待外部验收、23 未开始**，B06 继续实施中。
 
 
 ## 2026-09-06：B27 消息编辑、撤回与 reaction 的 owner 事务栅栏
@@ -571,8 +576,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新增三类必传 ownerRoute 的内部存储能力，路由 wrapper 保留完整 route，单库/同物理库也核查注册表与 epoch。Gateway 两种组装分支均接入；编辑继续在 owner 事务外读取 control 身份。
 - 事务取得 operation advisory lock 后锁定 room，核对 shard/owner_epoch，再允许重放或当前授权/准入和写入。旧 owner 的成功回执也不能绕过栅栏。网关现有 UNAVAILABLE 保持 retryable=true，无协议/schema 变更。
 - 首轮 4 项 / 2 套件通过；工具返回在上下文切换时丢失，已核实终态测试日志和进程结束，不虚构该次 exit code。最终可追踪会话退出 0，**87 项测试 / 7 套件**通过：六类 owner 并发/旧缓存/错库/锁等待场景，三类网关映射及既有消息、成员、邀请、审批、恢复和历史迁移回归。
-- 五份日志、两个检查/清理脚本、11 份最终源码哈希和六份修复前哈希见[本批证据](evidence/20260906-message-mutation-owner/manifest.json)。三个临时库均无 schema/其他连接，本批创建的 control 库已删除，专用 56440 PostgreSQL 已停止。
-- 新增[消息变更栅栏合同](message-mutation-owner-fence-contract.md)，更新问题表/方案及成员合同的剩余范围。增加一次短查询，重放也需 room 锁，未进行吞吐压测。完整迁移必须先 fence 旧 owner；发送/批量/fast append、其他房间命令、读取和后台工作仍需统一。PostgreSQL 25、protocol 25、SQLite 173/5 不变。47 项当前为 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**，B27 保持实施中。
+- 五份日志、两个检查/清理脚本、11 份最终源码哈希和六份修复前哈希见[本批证据](../../../docs/reviews/verification-records.md#20260906-message-mutation-owner)。三个临时库均无 schema/其他连接，本批创建的 control 库已删除，专用 56440 PostgreSQL 已停止。
+- 新增[消息变更栅栏合同](../message-mutation-owner-fence-contract.md)，更新问题表/方案及成员合同的剩余范围。增加一次短查询，重放也需 room 锁，未进行吞吐压测。完整迁移必须先 fence 旧 owner；发送/批量/fast append、其他房间命令、读取和后台工作仍需统一。PostgreSQL 25、protocol 25、SQLite 173/5 不变。47 项当前为 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**，B27 保持实施中。
 
 
 ## 2026-09-06：B27 公告、置顶、权限与成员角色的 owner 栅栏
@@ -580,8 +585,8 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 复现四类群管理命令同样丢弃所选 epoch、跳过同库路由并在锁房间之前重放回执的问题。修复前真实双库八个参数场景均提交到旧 owner，32 个断言检查操作回执、完整 room 状态和序号而失败。
 - 新增必传 ownerRoute 的群管理存储能力。四个路由入口保留完整 route，Gateway 单库及多 owner 两个组装分支均使用新能力，复用已有连接池。操作 advisory lock 后复用统一 room owner 栅栏，先校验再重放或执行当前业务授权/准入；self-role 提前返回也不能绕过。
 - 首轮 **5 项测试 / 3 套件**通过，最终 **93 项测试 / 7 套件**通过，均可追踪会话退出 0。包含普通群/大群、四类命令、十次并发一次提交、旧缓存及同库多 shard、错误/未知 owner、self-role、回执等待 room 锁时 epoch 变化和四类 Gateway UNAVAILABLE 映射；还覆盖公告/置顶/角色投影、空权限保留、已有成员/消息栅栏、三库邀请/审批/恢复及历史迁移链。
-- 最终运行触发依赖重编译，核实 Swift 6.3.3 和活跃编译进程后等待原会话完成，没有重启测试或把缺少新日志当作终止。五份日志、两个脚本、八份最终源码和四份修复前哈希见[本批证据](evidence/20260906-group-capability-owner/manifest.json)。
-- 更新[群管理栅栏合同](group-capability-owner-fence-contract.md)、当前问题表、方案及前两批合同的剩余范围。迁移须先 fence 旧 owner；moderation、已读回执、通用发送/批量/fast append、读取/后台任务及完整历史复制/切换/恢复仍开放。新增短查询及回执 room 锁未做吞吐压测，未做实际 TLS/App/生产迁移验收。
+- 最终运行触发依赖重编译，核实 Swift 6.3.3 和活跃编译进程后等待原会话完成，没有重启测试或把缺少新日志当作终止。五份日志、两个脚本、八份最终源码和四份修复前哈希见[本批证据](../../../docs/reviews/verification-records.md#20260906-group-capability-owner)。
+- 更新[群管理栅栏合同](../group-capability-owner-fence-contract.md)、当前问题表、方案及前两批合同的剩余范围。迁移须先 fence 旧 owner；moderation、已读回执、通用发送/批量/fast append、读取/后台任务及完整历史复制/切换/恢复仍开放。新增短查询及回执 room 锁未做吞吐压测，未做实际 TLS/App/生产迁移验收。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变。47 项保持 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**；B27 继续实施中。
 
 
@@ -592,7 +597,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新增 V2OwnerValidatedModerationStore，普通和可信安全两个入口必传 ownerRoute；四个事务在 operation advisory lock 后、旧回执之前复用 room owner 栅栏。Gateway 两个组装分支和内容审核的可信服务均使用路由 wrapper。同库多 shard 也保留 epoch，普通与可信权限入口保持独立。
 - 首轮 **6 项 / 4 套件**通过，包含十二个双库场景、三类 Gateway UNAVAILABLE 映射和审核重试/暂停的两个参数场景。所有私有 selector 调用方已改用完整 route，随后删除无人调用的同库跳过路由入口。
 - 最终 **113 项测试 / 8 套件**通过、退出 0，覆盖新 owner 栅栏、无 owner profile 与非成员安全主体、十次并发只写一份业务/审计、旧缓存/错库/未知 shard/等锁 epoch 变化、审核失败不误 resolve，以及既有 moderation/内容审核、其他房间变更、投影、三库邀请/审批/恢复和七条历史迁移链。
-- 六份原始日志、三个运行/检查/清理脚本、十份最终源码哈希及两组修复前哈希见[本批证据](evidence/20260906-moderation-owner/manifest.json)。新增[moderation 栅栏合同](moderation-owner-fence-contract.md)，更新问题表/方案及此前 owner 合同的剩余范围。
+- 六份原始日志、三个运行/检查/清理脚本、十份最终源码哈希及两组修复前哈希见[本批证据](../../../docs/reviews/verification-records.md#20260906-moderation-owner)。新增[moderation 栅栏合同](../moderation-owner-fence-contract.md)，更新问题表/方案及此前 owner 合同的剩余范围。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变，无新 schema 迁移或生产部署。owner 校验增加短查询及回执 room 锁，未做吞吐压测；审核 job 全量迁移、进程故障和实际 TLS/App 仍未验收。已读回执、通用发送/批量/fast append、读取和其他后台任务的统一 owner 检查、完整历史复制/切换/恢复仍开放。
 - 47 项保持 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**；B27 和完整修复目标继续开放。
 
@@ -604,7 +609,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 集合 SQL 保留批量单调 UPSERT，owner 错误行不进入 eligible，返回状态也先于回执重放/冲突判定；同批合法行正常提交。prepared record statement 升至 v2，无 schema 变化。候选每页先取共享锁验 owner，再查消息/成员/候选，结束 owner 事务后由 control 过滤身份/隐私。
 - Gateway 单库和多 owner 都接入；写入与读者列表 ownerChanged 映射 UNAVAILABLE/retryable。首轮 **7 项 / 3 套件**通过。扩展测试夹具缺少一个 try 导致编译失败、没有测试运行，日志独立保留；修正后 **8 项 / 3 套件**通过。
 - 最终日志确认 **126 项测试 / 11 套件**通过；原终端返回在上下文切换后不可恢复，证据清单将进程退出码记为未知。覆盖六种 owner 场景、混合正确/过期/错误 shard/缺失房间/成员/序号的逐行结果、20 次单条/批量同 operation 竞争只提交一次、同库 route 传递、无 owner profile 的 control 隐私过滤、两个房间的 32 轮消息/回执并发（有/无 owner 栅栏两种路径均无新增 deadlock），以及既有网关、其他房间变更、投影、三库邀请审批恢复和历史迁移链。
-- 七份日志、三个运行/检查/清理脚本、十份最终与四份修复前源码哈希见[本批证据](evidence/20260906-read-receipt-owner/manifest.json)。更新[群回执合同](read-receipt-owner-fence-contract.md)、问题总表和方案。每个物理批次多一次共享锁查询，尚未做新的吞吐/延迟验收。
+- 七份日志、三个运行/检查/清理脚本、十份最终与四份修复前源码哈希见[本批证据](../../../docs/reviews/verification-records.md#20260906-read-receipt-owner)。更新[群回执合同](../read-receipt-owner-fence-contract.md)、问题总表和方案。每个物理批次多一次共享锁查询，尚未做新的吞吐/延迟验收。
 - 私聊 notGroup 分类虽然已验证 owner，后续 reciprocal projection 仍为既有 control/user 事务，其跨库迁移交接尚未闭环。通用发送/批量/fast append、其他读取与后台任务、完整历史复制/切换/故障恢复仍开放，不宣称所有已读回执迁移已完成。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变。47 项保持 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**；B27 和完整修复目标继续开放。
 
@@ -617,7 +622,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 删除同物理库绕过路由的入口，同库合批保留每个逻辑 shard/epoch。核对 Gateway 时发现共享房间依赖只登记 group shard，补齐全部 roomShardStorage，包括独立命名的 direct shard；本地依然共享原缓存与额度 actor。单条 direct/group 路由测试和组装源代码检查覆盖该接线，未作真实 TLS 启动验收。
 - 首轮 4 项 / 2 套件中的 9 issues 来自旧缓存夹具实际使用实时路由；改用真实缓存后通过。扩展 7 项 / 3 套件只余一项旧指标断言，因新增重放使后续缓存探测变冷；明确重新预热后通过。69 项 / 4 套件扩展中新增冷/暖批量 owner 回滚、credit 归还均通过，四个阶段计数断言尚写死旧的两次调用；按新增拒绝请求更新为三次，保持后续 preflight/persistence 计数为两次。
 - 接线补充前 **161 项 / 13 套件**通过；最终组装后 **162 项测试 / 13 套件**通过、退出 0，包含真实缓存 fast append、混合 epoch 冷/暖批量、额度归还、旧缓存新写/重放、错库/未知 shard、等锁 owner 更新、两房间发送/回执 32 轮并发，以及既有消息变更/邀请/审批恢复和七条历史 schema 迁移链。
-- 九份日志、三个运行/检查/清理脚本、十份最终源码哈希、三份修复前生产哈希及接线补充前 main 哈希见[证据清单](evidence/20260906-send-owner/manifest.json)。新增[发送 owner 合同](send-message-owner-fence-contract.md)，同步问题表、方案和既有 owner 合同。
+- 九份日志、三个运行/检查/清理脚本、十份最终源码哈希、三份修复前生产哈希及接线补充前 main 哈希见[证据清单](../../../docs/reviews/verification-records.md#20260906-send-owner)。新增[发送 owner 合同](../send-message-owner-fence-contract.md)，同步问题表、方案和既有 owner 合同。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变。发送的 control 身份/策略边界、后台转发导入/来源读取、其他 worker、post-commit 投影交接及完整复制/核验/切换/故障恢复仍开放。未做新的负载、Linux/container、TLS/App/设备或生产部署验收。
 - 三个临时 schema 和其他连接归零，临时控制库删除，专用 56440 PostgreSQL 停止。47 项保持 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**，B27 与完整修复目标继续开放。
 
@@ -630,7 +635,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 明确区分 accepted 活跃工作与 completed/rejected 不可变终态。旧 owner 上 accepted 抛 ownerChanged 并保留 pending finalization；已完成的事实仍可跨后续 epoch 重读。相同 owner 的退群、目标副本撤回、部署文字上限缩小依然可以恢复原回执，不重复消息。
 - 首轮 **7 项集成测试 / 1 套件**通过，包含 19 个后台投递场景。新增真实 endpoint/worker 场景证明旧 accepted 不写源 receipt、不完成 job，未终态 export 占用保留；恢复后只完成一条目标消息。媒体 owner、并发导入、终态证据等相邻测试通过。
 - 最终 **176 项测试 / 14 套件**通过、退出 0，包含媒体复制/租约、后台运行时、operator、发送与此前各房间变更栅栏、三库邀请/审批/恢复和历史 schema 迁移链。源码在首轮与最终运行之间未改变。
-- 六份日志、三个运行/检查/清理脚本、七份最终源码哈希与两份修复前生产哈希见[证据清单](evidence/20260906-forward-import-owner/manifest.json)。新增[后台导入 owner 合同](forward-import-owner-fence-contract.md)，修正历史合同中 accepted 可跨 epoch 继续恢复的表述，更新问题表和方案。
+- 六份日志、三个运行/检查/清理脚本、七份最终源码哈希与两份修复前生产哈希见[证据清单](../../../docs/reviews/verification-records.md#20260906-forward-import-owner)。新增[后台导入 owner 合同](../forward-import-owner-fence-contract.md)，修正历史合同中 accepted 可跨 epoch 继续恢复的表述，更新问题表和方案。
 - post-commit 用户投影与目标完成标记仍是不同事务，不能据本批声称撤销已经发生的投影或完成所有迁移交接。前台同库转发仍有独立路由快捷分支；原 envelope 与活跃工作迁移承接、完整复制/核验/切换/故障恢复、全局内容封禁和终态清理仍开放。测试恢复临时库 epoch 只用于同 owner 重试验证，不是生产迁移策略。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变；三库临时 schema 和其他连接清零、临时控制库删除、专用 56440 PostgreSQL 停止。未做生产 TLS/App、Linux/container 或新的负载验收。47 项保持 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**，完整修复目标继续开放。
 
@@ -642,7 +647,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 来源批量读取在事务中取 SHARE；重放/结果修复、client ID 创建、消息接受和结果补记各在自身事务内取完整且按 UUID 排序的房间 UPDATE 锁，验证 shard/epoch 后处理。普通发送的目标-only 能力拒绝 forwardedFrom，不能以单端校验代替转发能力。
 - 首次修复构建报告局部查询函数捕获缺少 @Sendable；补齐并保留日志，未把编译失败计作通过。最终源码在回归运行期间不变。
 - 最终 **184 项测试 / 14 套件**通过、退出 0。新增来源/目标初始过期、真实旧缓存新写/重放、错误 shard/库、等锁期间更新 owner；接受前/接受后两端变化四场景证明保留稳定 client ID、未错误补记结果，当前 owner 恢复和八次并发重试只保留一条目标消息。既有 16 路反向转发增加显式 owner 模式；来源受众、媒体、顺序/并发及历史撤回后重放通过。
-- 既有发送冷/暖批量、群能力/成员/消息/moderation/回执栅栏，后台转发媒体、worker、运行时、三库邀请与七条历史 schema 迁移链均通过。日志、运行/检查/清理脚本及源码哈希见[证据清单](evidence/20260906-local-forward-owner/manifest.json)。新增[前台转发合同](foreground-forward-owner-fence-contract.md)，同步当前总表、方案与历史合同；纠正总表 B29 的旧协议号为 25。
+- 既有发送冷/暖批量、群能力/成员/消息/moderation/回执栅栏，后台转发媒体、worker、运行时、三库邀请与七条历史 schema 迁移链均通过。日志、运行/检查/清理脚本及源码哈希见[证据清单](../../../docs/reviews/verification-records.md#20260906-local-forward-owner)。新增[前台转发合同](../foreground-forward-owner-fence-contract.md)，同步当前总表、方案与历史合同；纠正总表 B29 的旧协议号为 25。
 - 本批不关闭 B04/B27：仍需完整房间历史复制/核验/切换/故障恢复、活跃操作/export/inbox 承接、post-commit 用户投影交接、其他读取/worker、control 身份/策略隔离、全局内容封禁和终态清理。未做新负载、真实 TLS/App、Linux 或生产发布验收。
 - PostgreSQL 25、protocol 25、SQLite 173/5 不变。47 项仍为 **12 已验证、13 实施中、3 已实现待验证、2 待外部验收、17 未开始**；完整修复目标保持开放。
 
@@ -660,7 +665,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 最终 **39 项测试 / 7 套件**通过、退出 0。覆盖官方 v19 Argon2id 向量、71/72/73/1024、NUL、跨字节 Unicode、空白和规范化差异、随机盐、畸形/超预算参数、取消/饱和/停机、真实 PostgreSQL HTTP 注册登录、旧凭据限制、并发替换、审计故障回滚，以及设备轮换/重复 HTTP/终止与账号禁用。
 - 真实 32 请求突发为 2 次派生、30 次立即 busy，随后正常哈希/验证恢复；本地 Debug 此阶段总计 1.596 秒，不宣称生产吞吐或 Linux 峰值 RSS。当前参数符合既有方案的候选 p=1 配置，未冒充 RFC 推荐的完整 p=4 组合。
 - schema 25、protocol 25、SQLite 173/5 不变。当前绿地输入/存储/认证合同下 B05 已验证；真实旧账号可信恢复/提示、生产 Passkey、Linux/container 和多副本负载继续按发布缺口跟踪。完整修复目标未完成。
-- 问题状态更新为 **13 已验证、13 实施中、3 已实现待验证、2 待外部验收、16 未开始**，仍有 34 项未完全关闭。详见[密码合同](password-hash-contract.md)与[证据清单](evidence/20260906-password-hash/manifest.json)。
+- 问题状态更新为 **13 已验证、13 实施中、3 已实现待验证、2 待外部验收、16 未开始**，仍有 34 项未完全关闭。详见[密码合同](../password-hash-contract.md)与[证据清单](../../../docs/reviews/verification-records.md#20260906-password-hash)。
 
 本批收尾：两个临时 schema 和其他连接清零，专用 56440 PostgreSQL 停止；七份运行日志、三份脚本、十三份最终源码哈希、三份修复前生产哈希与十四份上游文件哈希已归档。
 
@@ -670,7 +675,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 固定绝对期限加 10 分钟收尾；取得账号锁后检查当前时间及绑定，复用原子设备撤销并补齐已撤销设备清理。
 - 实际验证：Core 93/30、服务端单元 16/2、PostgreSQL 20/1，独立 26→27 迁移及 schema 安全门禁正反向通过。初次格式长度断言、Swift SQL 缩进、SQL 括号及迁移种子失败均留证；未计为成功。
 - 仍未在登录/刷新中交付 capability，HTTP/ClientKit/App 仍待实现；未重跑真实 App/TLS 全链路。本批保持 B08 实施中，完整 47 项目标未完成。
-- [合同](device-revocation-capability-storage-contract.md)；[证据](evidence/20260907-revocation-capability-storage/manifest.json)。
+- [合同](../device-revocation-capability-storage-contract.md)；[证据](../../../docs/reviews/verification-records.md#20260907-revocation-capability-storage)。
 
 ## 2026-09-07：B08 撤销 HTTP 和独立客户端传输
 
@@ -678,7 +683,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - ClientKit 不依赖当前账号认证；固定旧 capability/operationID 重试，分别处理 revoked/expired/invalid/conflict，保留限流提示和取消。
 - 服务端单元 20/4、真实 PostgreSQL pipeline 4/1 通过；客户端报告 421/66，416 实际执行，5 在线跳过。初始响应头类型、测试宏嵌套及内存 body 大小保护失败均留证。
 - 未执行本批 App/HTTPS socket 验收；登录响应交付与持久退出补偿尚未接线。B08 保持实施中。
-- [合同](device-revocation-capability-http-contract.md)；[证据](evidence/20260907-revocation-capability-http/manifest.json)。
+- [合同](../device-revocation-capability-http-contract.md)；[证据](../../../docs/reviews/verification-records.md#20260907-revocation-capability-http)。
 
 ## 2026-09-07：B08 原子交付撤销凭据
 
@@ -688,7 +693,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 完整真实链路：HTTPS 5/2、UI 2、headless 1/1，DB 15|5|0|0|5。新增 capability 定向 HTTPS 5/2，204×3、409×1、401×1，DB 7|3|0|0|3。完整 UI 运行在增加定向测试之前，生产实现相同。
 - 保留旧假响应缺字段导致的 3 项失败，以及编辑 guard 未通过后的前置 HTTPS 运行；不把前置运行算作新 capability socket 验证。自建资源已清理。
 - App 持久退出交接与离线补偿尚未接通，B08 仍实施中。
-- [合同](atomic-revocation-credential-issue-contract.md)；[证据](evidence/20260907-atomic-revocation-issue/manifest.json)。
+- [合同](../atomic-revocation-credential-issue-contract.md)；[证据](../../../docs/reviews/verification-records.md#20260907-atomic-revocation-issue)。
 
 ## 2026-09-07：B08 凭据删除前的持久交接
 
@@ -698,7 +703,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 真实签名模拟器 Keychain 验证两个 item、保护等级、删除失败恢复、原 ID 重用、换号隔离及清理；不代表物理设备锁屏或任意指令处强杀验收。
 - 保留首轮沙箱构建缓存失败、测试 ID 构造编译失败、无签名 App 宿主 Keychain -34018 失败。修正测试构造并改用正常签名宿主后回归通过，无生产权限绕过。
 - 未新跑 PostgreSQL/HTTPS/UI/headless。App 旧 Push 网络清理仍会阻塞断网退出，独立联网 runner 尚未实现；B08 和完整 47 项目标仍开放，16 已验证、31 待完成。
-- [合同](device-revocation-handoff-contract.md)；[证据](evidence/20260907-revocation-handoff/manifest.json)。
+- [合同](../device-revocation-handoff-contract.md)；[证据](../../../docs/reviews/verification-records.md#20260907-revocation-handoff)。
 
 ## 2026-09-07：B08 独立执行器与不依赖网络的本地退出
 
@@ -707,7 +712,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - ClientKit 439 报告/434 实际/5 在线跳过（68 套件，5.465 秒），App 195 报告/194 实际/1 在线跳过（20 套件，4.910 秒）。定向 16/2 通过。保留 runner 括号编译错误和 App 依赖创建顺序编译错误，均已修正。
 - 真实 HTTPS/PostgreSQL 5/2（2.947 秒）：服务端提交后丢弃客户端解码结果，新 owner 用原操作重放，兑换 204×4、401×1、409×1，DB 7|3|0|0|3；自建资源已清理。
 - 未新跑完整 UI/Gateway/headless 或真机 OS 后台/锁屏；暂停反馈/恢复入口及完整生命周期交互仍开放。B08 不关闭；47 项状态保持 16 已验证、31 开放。
-- [合同](device-revocation-runner-contract.md)；[证据](evidence/20260907-revocation-runner/manifest.json)。
+- [合同](../device-revocation-runner-contract.md)；[证据](../../../docs/reviews/verification-records.md#20260907-revocation-runner)。
 
 ## 2026-09-07：B08 聚合状态与显式恢复
 
@@ -716,7 +721,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - ClientKit 442 报告/437 实际/5 跳过（69 套件，5.274 秒）；App 196 报告/195 实际/1 跳过（20 套件，4.708 秒），含真实 App/Keychain 暂停恢复和另一登录保护。
 - 两项最终 UI 点击/审计和截图通过（6.347/6.806 秒）。初期启动参数未在截图显示最大字号/RTL，不能算对应证据；改用 DEBUG 显式环境后核实字号/镜像，并折叠说明、验证登录可触达。保留全部过程日志。
 - 未新跑在线 HTTPS/PostgreSQL/Gateway/headless；不证明真机 VoiceOver、全语言翻译、系统后台或任意指令处强杀。其他旧启动参数测试需独立核实。B08 仍实施中，16 已验证、31 开放。
-- [合同](device-revocation-status-contract.md)，[证据](evidence/20260907-revocation-status/manifest.json)。
+- [合同](../device-revocation-status-contract.md)，[证据](../../../docs/reviews/verification-records.md#20260907-revocation-status)。
 
 ## 2026-09-07：B08 签发取消与活动凭据替换
 
@@ -724,7 +729,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 新登录替换不同账号/设备时，活动旧凭据也先保存撤销标记、入队再替换；队列失败不覆盖。原实现反例产生 4 个失败断言。
 - 最终 ClientKit 444 报告/439 实际/5 跳过（70 套件，5.497 秒）；App 196 报告/195 实际/1 跳过（20 套件，5.168 秒）。真实 HTTPS/PostgreSQL 5/2（2.708 秒），DB 7|3|0|0|3，资源已清理；在线运行早于最后取消错误映射分支，最终离线回归覆盖该分支。
 - 已发出请求的迟到或完全丢失响应仍无跨进程结果交接，不能靠一次内存清理回调宣称完成。未新跑 UI/Gateway/headless/真机。B08 保持实施中，16 已验证、31 开放。
-- [合同](credential-issuance-boundaries-contract.md)，[证据](evidence/20260907-issuance-boundaries/manifest.json)。
+- [合同](../credential-issuance-boundaries-contract.md)，[证据](../../../docs/reviews/verification-records.md#20260907-issuance-boundaries)。
 
 
 ## 2026-09-07：B08 已收到签发结果的持久交接
@@ -734,7 +739,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - ClientKit 452 报告/447 实际/5 在线跳过（71 套件，5.940 秒）；App 197 报告/196 实际/1 在线跳过（20 套件，4.913 秒），含真实模拟器 Keychain 与重新创建 App 的两种接管状态。xcresult 首次导出受沙箱文件权限限制，随后授权导出成功；测试本身通过。
 - 最后在线夹具改用生产恢复 actor 与内存持久适配器，真实 HTTPS/PostgreSQL 5/2（2.648 秒）验证返回前有记录、正常完成后移除且无误撤销。DB 7|3|0|0|3，能力兑换 204×4、401×1、409×1；自建临时资源已独立核实移除。
 - 未收到响应、首次中间记录落盘失败、任意 SDK 并行共享注册身份及真正逐指令强杀仍不能据此宣称全部恢复。未新跑 UI/Gateway/headless/真机。B08 保持实施中；47 项状态为 16 已验证、31 开放。
-- [合同](received-credential-recovery-contract.md)，[证据](evidence/20260907-issued-result-recovery/manifest.json)。
+- [合同](../received-credential-recovery-contract.md)，[证据](../../../docs/reviews/verification-records.md#20260907-issued-result-recovery)。
 
 
 ## 2026-09-07：B08 注册取消的服务端仲裁
@@ -744,7 +749,7 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - PostgreSQL 28→29 迁移保留既有凭据、不补造历史证明；启动检查验证精确约束及唯一绑定索引。七条旧迁移链追加新迁移，原有17项及新增4项真实数据库回归，共21项/1套件（28.843秒）通过，包含7个新增参数场景。
 - Core 95项/31套件（0.006秒）通过；原有凭据与撤销HTTP单元10项/2套件（0.009秒）通过。首次服务端编译过滤器没有匹配测试，仅作为编译记录，不计入测试证据。
 - 原HTTP/App尚未使用新域入口；下一步强制HTTP签发证明、增加受保护的取消路由并接通请求前持久化和恢复队列。新增表尚未启用GC，保留合同与真机/系统中断继续开放。B08保持实施中，仍16项已验证、31项开放。
-- [合同](registration-cancellation-contract.md)，[证据](evidence/20260907-registration-cancellation/manifest.json)。
+- [合同](../registration-cancellation-contract.md)，[证据](../../../docs/reviews/verification-records.md#20260907-registration-cancellation)。
 
 - 本批补充现有真实 HTTPS/原生账号服务回归 5项/2套件（2.743秒），DB 7|3|0|0|3；当前仍走原HTTP入口，只证明schema-29未破坏已有链路。各自独立数据库及证书根目录均已核实移除。未新跑App UI/Gateway/headless/真机。
 
@@ -756,28 +761,28 @@ B21 按修复方案逐项关闭审计（仅此问题，不代表全部目标完�
 - 真实PostgreSQL22项/1套件（29.356秒）通过，覆盖可信边界、实际限流、取消先到后的签发拒绝、签发后HTTP撤销及503整体回滚；原有仲裁和迁移回归保留。
 - 真实HTTPS5项/2套件（2.685秒），取消204×2、410×1、400×1；提交后丢弃客户端结果，用原证明重放，数据库取消总数/绑定账号/取消数1|0|1，设备计数7|3|0|0|3。在线夹具补充在完整离线回归之后，生产代码未变；不是物理断包或跨进程持久队列证据。
 - HTTP签发仍未强制证明，App还没有请求前保存及独立取消队列。未新跑App/UI/Gateway/headless/真机；自建数据库与证书已清理。B08保持实施中；全部47项仍16已验证、31开放。
-- [合同](registration-cancellation-http-contract.md)，[证据](evidence/20260907-registration-cancellation-http/manifest.json)。
+- [合同](../registration-cancellation-http-contract.md)，[证据](../../../docs/reviews/verification-records.md#20260907-registration-cancellation-http)。
 
 
-最新补充（2026-09-07，B08 签发证明绑定）：[请求前持久化与强制 HTTP 绑定](proof-bound-issuance-contract.md)已实现，注册 ledger 升为 format 2；缺少或不匹配确认会先交接收到的撤销能力再拒绝登录，旧记录保留档案，过期尝试保留证明并换用新身份。客户端 **462 项报告 / 457 项实际执行**、接口 **14 项**、真实 PostgreSQL **22 项**、App **197 项报告 / 196 项实际执行**通过；最终真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过。数据库设备/撤销/残留访问/残留刷新/事件为 **16|7|0|0|7**，取消记录总数/绑定/取消为 **17|16|2**；独立补偿允许多个操作指向同一已撤销设备，事件仍不重复。脚本调用同步补齐证明，Compose 栈脚本只做语法及共用工具离线检查。初始解码错误、旧 UI 夹具和旧统计假设的失败均留档；最终专用资源已移除。见[证据](evidence/20260907-proof-bound-issuance/manifest.json)。自动取消执行器、冷启动请求前证明归属、旧会话清理和真机系统中断仍开放；47 项仍为 **16 已验证、31 开放**，B08 不关闭。
+最新补充（2026-09-07，B08 签发证明绑定）：[请求前持久化与强制 HTTP 绑定](../proof-bound-issuance-contract.md)已实现，注册 ledger 升为 format 2；缺少或不匹配确认会先交接收到的撤销能力再拒绝登录，旧记录保留档案，过期尝试保留证明并换用新身份。客户端 **462 项报告 / 457 项实际执行**、接口 **14 项**、真实 PostgreSQL **22 项**、App **197 项报告 / 196 项实际执行**通过；最终真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过。数据库设备/撤销/残留访问/残留刷新/事件为 **16|7|0|0|7**，取消记录总数/绑定/取消为 **17|16|2**；独立补偿允许多个操作指向同一已撤销设备，事件仍不重复。脚本调用同步补齐证明，Compose 栈脚本只做语法及共用工具离线检查。初始解码错误、旧 UI 夹具和旧统计假设的失败均留档；最终专用资源已移除。见[证据](../../../docs/reviews/verification-records.md#20260907-proof-bound-issuance)。自动取消执行器、冷启动请求前证明归属、旧会话清理和真机系统中断仍开放；47 项仍为 **16 已验证、31 开放**，B08 不关闭。
 
 
-最新补充（2026-09-07，B08 遗弃注册自动取消）：[执行器与冷启动归属](registration-cancellation-runner-contract.md)已接入 App。format 3 原子迁移旧证明并保存尝试次数、退避和暂停，冷启动只把未被当前持久凭据接管的 pending 入队；前台观察自动执行，后台取消并等待实际请求结束，清理反馈和手动重试覆盖两类队列。客户端 **472 项报告 / 467 项实际执行**、签名 App **199 项报告 / 198 项实际执行**通过；真实 Keychain 验证归属及暂停反馈。真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过，验证签发和取消响应相继丢失后仍使用原证明重试。数据库 **16|7|0|0|7**，取消记录 **17|16|2**，取消 HTTP 204 四次但记录不重复；专用资源已清理。见[证据](evidence/20260907-registration-cancellation-runner/manifest.json)。旧会话/legacy 档案清理、真实强杀/锁屏/系统后台和记录 GC 仍开放；B08 保持实施中，全部 47 项仍 **16 已验证、31 开放**。
+最新补充（2026-09-07，B08 遗弃注册自动取消）：[执行器与冷启动归属](../registration-cancellation-runner-contract.md)已接入 App。format 3 原子迁移旧证明并保存尝试次数、退避和暂停，冷启动只把未被当前持久凭据接管的 pending 入队；前台观察自动执行，后台取消并等待实际请求结束，清理反馈和手动重试覆盖两类队列。客户端 **472 项报告 / 467 项实际执行**、签名 App **199 项报告 / 198 项实际执行**通过；真实 Keychain 验证归属及暂停反馈。真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过，验证签发和取消响应相继丢失后仍使用原证明重试。数据库 **16|7|0|0|7**，取消记录 **17|16|2**，取消 HTTP 204 四次但记录不重复；专用资源已清理。见[证据](../../../docs/reviews/verification-records.md#20260907-registration-cancellation-runner)。旧会话/legacy 档案清理、真实强杀/锁屏/系统后台和记录 GC 仍开放；B08 保持实施中，全部 47 项仍 **16 已验证、31 开放**。
 
 
-最新补充（2026-09-07，B08 实际进程中断）：[真实 App 两次终止后恢复](registration-process-interruption-contract.md)已通过。HTTPS 代理在服务端签发/取消分别提交后保留响应，受控终止专用模拟器里的 App；第二次重启从真实 Keychain 使用原证明重放，并完成新设备登录。原设备单独核对 **2|1|1|1|0|0**（账号设备数/原设备撤销/证明取消记录/事件/有效 access/有效 refresh）；没有重复事件。同期修复命令行证明将 DeviceID 误编码为字符串的问题，真实凭据准备脚本的签发、鉴权和取消通过。最终 **5 项原生 HTTPS、3 项 App UI、1 项独立后台入口**通过，全库 **19|9|0|0|9**、取消记录 **20|19|4**。见[证据](evidence/20260907-registration-process-interruption/manifest.json)。这是 simctl 受控进程终止，不等同于 SIGKILL/OS jetsam/真机锁屏；legacy 清理及其他检查点仍开放。47 项仍 **16 已验证、31 开放**。
+最新补充（2026-09-07，B08 实际进程中断）：[真实 App 两次终止后恢复](../registration-process-interruption-contract.md)已通过。HTTPS 代理在服务端签发/取消分别提交后保留响应，受控终止专用模拟器里的 App；第二次重启从真实 Keychain 使用原证明重放，并完成新设备登录。原设备单独核对 **2|1|1|1|0|0**（账号设备数/原设备撤销/证明取消记录/事件/有效 access/有效 refresh）；没有重复事件。同期修复命令行证明将 DeviceID 误编码为字符串的问题，真实凭据准备脚本的签发、鉴权和取消通过。最终 **5 项原生 HTTPS、3 项 App UI、1 项独立后台入口**通过，全库 **19|9|0|0|9**、取消记录 **20|19|4**。见[证据](../../../docs/reviews/verification-records.md#20260907-registration-process-interruption)。这是 simctl 受控进程终止，不等同于 SIGKILL/OS jetsam/真机锁屏；legacy 清理及其他检查点仍开放。47 项仍 **16 已验证、31 开放**。
 
 
-最新补充（2026-09-07，B08 旧档案服务端仲裁）：[账号范围的持久取消](legacy-registration-arbitration-contract.md)已实现，PostgreSQL 更新为 **30**。取消与签发共用账号/注册锁，原子撤销已签发会话并拒绝同账号迟到签发；其他账号不受旧 ID 阻断。真实 PostgreSQL **26 项 / 1 套件（32.416 秒）**通过，覆盖新增四项隔离、回滚、并发和配额测试及七条历史迁移链；29→30 保留凭据、约束正反向门禁通过。HTTP 单元 **14 项 / 3 套件（0.011 秒）**、原生 HTTPS **5 项 / 2 套件（2.729 秒）**通过，数据库 **8|4|0|0|4**，注册取消记录 **9|8|2**。首次新增测试未清理 schema，导致后续测试初始化失败；修正成功/失败清理后全组通过，失败日志保留，早先回滚通过的过早进度说明已纠正。三个专用资源根目录已独立确认移除。见[证据](evidence/20260907-legacy-registration-arbitration/manifest.json)。尚未提供 legacy HTTP 入口或 ClientKit/App 清理接线，启用前必须停止旧签发进程；本批未新跑 App/UI/Gateway/headless/真机。47 项仍 **16 已验证、31 开放**，B08 不关闭。
+最新补充（2026-09-07，B08 旧档案服务端仲裁）：[账号范围的持久取消](../legacy-registration-arbitration-contract.md)已实现，PostgreSQL 更新为 **30**。取消与签发共用账号/注册锁，原子撤销已签发会话并拒绝同账号迟到签发；其他账号不受旧 ID 阻断。真实 PostgreSQL **26 项 / 1 套件（32.416 秒）**通过，覆盖新增四项隔离、回滚、并发和配额测试及七条历史迁移链；29→30 保留凭据、约束正反向门禁通过。HTTP 单元 **14 项 / 3 套件（0.011 秒）**、原生 HTTPS **5 项 / 2 套件（2.729 秒）**通过，数据库 **8|4|0|0|4**，注册取消记录 **9|8|2**。首次新增测试未清理 schema，导致后续测试初始化失败；修正成功/失败清理后全组通过，失败日志保留，早先回滚通过的过早进度说明已纠正。三个专用资源根目录已独立确认移除。见[证据](../../../docs/reviews/verification-records.md#20260907-legacy-registration-arbitration)。尚未提供 legacy HTTP 入口或 ClientKit/App 清理接线，启用前必须停止旧签发进程；本批未新跑 App/UI/Gateway/headless/真机。47 项仍 **16 已验证、31 开放**，B08 不关闭。
 
 
-最新补充（2026-09-07，B08 旧档案 HTTP）：[账号证明与受保护清理入口](legacy-registration-http-contract.md)已接入生产 Account 组装及地址限流。严格四字段、UUID、新旧设备不同及证明边界先于域调用；真实 HMAC 验证与 18 项接口测试 / 4 套件（0.012 秒）通过。真实 HTTPS 基线 5 项 / 2 套件（2.691 秒）通过，新增扩展使用真实密码因子验证 503 整体回滚、204 幂等、同一证明新设备签发、迟到签发 403、另一账号隔离 404 及容量 507/原操作 204；仅记录目标计数，不保存密码或令牌。扩展在基线统计后执行，另增 3 个设备、1 条撤销事件和 256 条账号范围取消记录（254 条为配额种子）。相邻 PostgreSQL 与七条历史迁移链共 26 项 / 1 套件（30.563 秒）通过，三个专用资源根目录已独立核实移除。首轮扩展把既有签发 403 错写为 401，修正预期后完整通过，失败日志保留。见[证据](evidence/20260907-legacy-registration-http/manifest.json)。ClientKit/App 的旧档案 CAS 与登录接线尚未完成，本批未新跑 App/UI/Gateway/headless/真机；schema 30、protocol 27、SQLite 173/5 不变，仍 **16 已验证、31 开放**。
+最新补充（2026-09-07，B08 旧档案 HTTP）：[账号证明与受保护清理入口](../legacy-registration-http-contract.md)已接入生产 Account 组装及地址限流。严格四字段、UUID、新旧设备不同及证明边界先于域调用；真实 HMAC 验证与 18 项接口测试 / 4 套件（0.012 秒）通过。真实 HTTPS 基线 5 项 / 2 套件（2.691 秒）通过，新增扩展使用真实密码因子验证 503 整体回滚、204 幂等、同一证明新设备签发、迟到签发 403、另一账号隔离 404 及容量 507/原操作 204；仅记录目标计数，不保存密码或令牌。扩展在基线统计后执行，另增 3 个设备、1 条撤销事件和 256 条账号范围取消记录（254 条为配额种子）。相邻 PostgreSQL 与七条历史迁移链共 26 项 / 1 套件（30.563 秒）通过，三个专用资源根目录已独立核实移除。首轮扩展把既有签发 403 错写为 401，修正预期后完整通过，失败日志保留。见[证据](../../../docs/reviews/verification-records.md#20260907-legacy-registration-http)。ClientKit/App 的旧档案 CAS 与登录接线尚未完成，本批未新跑 App/UI/Gateway/headless/真机；schema 30、protocol 27、SQLite 173/5 不变，仍 **16 已验证、31 开放**。
 
 
-最新补充（2026-09-07，B08 旧档案客户端恢复）：[ClientKit/App 登录接线](legacy-registration-client-recovery-contract.md)已实现，同一次账号因子先清理、完整本地确认后再签发。失败保留，完整注册尝试和旧档案 CAS 防止迟到确认；一个恢复专用位置解决 256 条旧档案满额时无法创建清理尝试的问题。最终 ClientKit 480 项报告 / 474 项实际 / 6 项在线跳过（76 套件，6.167 秒），签名 App 200 项报告 / 199 项实际 / 1 项在线跳过（21 套件，5.143 秒）通过。真实 HTTPS 5 项 / 2 套件（2.714 秒）、新增旧档案恢复 1 项 / 1 套件（1.556 秒）、App UI 2 项（64.579 秒）、后台入口 1 项（1.323 秒）通过。数据库 18|8|0|0|8，注册取消记录 19|18|2，无旧有效凭据残留或重复事件。三套件并行触发两个密码 worker 的 503，首次分组仍带入第三套件；最终拆为独立文件顺序运行，两轮失败留档。三个临时根目录和一个模拟器已独立核实移除。见[证据](evidence/20260907-legacy-registration-client/manifest.json)。真实 HTTPS 的 owner 重建使用内存持久适配器，真实 Keychain 单独验收；不替代实际 App legacy 跨进程、旧二进制升级或真机锁屏/系统后台验收。B08 仍实施中，全部47项保持 **16 已验证、31 开放**。
+最新补充（2026-09-07，B08 旧档案客户端恢复）：[ClientKit/App 登录接线](../legacy-registration-client-recovery-contract.md)已实现，同一次账号因子先清理、完整本地确认后再签发。失败保留，完整注册尝试和旧档案 CAS 防止迟到确认；一个恢复专用位置解决 256 条旧档案满额时无法创建清理尝试的问题。最终 ClientKit 480 项报告 / 474 项实际 / 6 项在线跳过（76 套件，6.167 秒），签名 App 200 项报告 / 199 项实际 / 1 项在线跳过（21 套件，5.143 秒）通过。真实 HTTPS 5 项 / 2 套件（2.714 秒）、新增旧档案恢复 1 项 / 1 套件（1.556 秒）、App UI 2 项（64.579 秒）、后台入口 1 项（1.323 秒）通过。数据库 18|8|0|0|8，注册取消记录 19|18|2，无旧有效凭据残留或重复事件。三套件并行触发两个密码 worker 的 503，首次分组仍带入第三套件；最终拆为独立文件顺序运行，两轮失败留档。三个临时根目录和一个模拟器已独立核实移除。见[证据](../../../docs/reviews/verification-records.md#20260907-legacy-registration-client)。真实 HTTPS 的 owner 重建使用内存持久适配器，真实 Keychain 单独验收；不替代实际 App legacy 跨进程、旧二进制升级或真机锁屏/系统后台验收。B08 仍实施中，全部47项保持 **16 已验证、31 开放**。
 
 
-最新补充（2026-09-07，B08 实际 App 旧档案恢复）：[跨进程清理检查点](legacy-registration-app-process-contract.md)已通过。真实签发的旧设备/原操作以 format 1 写入隔离 Keychain，清理提交后代理不转发响应并受控终止 App；不带种子参数的重启从真实档案重放，新证明绑定新设备，登录后再次冷恢复仍保持新会话。目标数据库核对 **2|1|1|1|0|0|0|1**，旧设备只有一条取消记录和撤销事件，无有效 access/refresh；首次准备设备未签发且已持久取消。真实 HTTPS **5 项（2.717 秒）**、App UI **3 项（104.240 秒）**及后台入口 **1 项（1.289 秒）**通过，全库 **18|8|0|0|8**、注册取消记录 **20|18|3**。签名 App 全量 **201 项报告 / 200 项实际 / 1 项跳过**通过（22 套件，5.063 秒），新增测试验证夹具要求隔离域、拒绝覆盖、清理不影响未加测试域的 Keychain。专用数据库根与模拟器已独立核实移除。见[证据](evidence/20260907-legacy-app-process/manifest.json)。这验证受控 simctl 终止和明确构造的旧格式数据，不是旧二进制升级、SIGKILL/OS jetsam、掉电或真机锁屏验收；其他检查点、永久冲突与 GC 仍开放。全部47项保持 **16 已验证、31 开放**。
+最新补充（2026-09-07，B08 实际 App 旧档案恢复）：[跨进程清理检查点](../legacy-registration-app-process-contract.md)已通过。真实签发的旧设备/原操作以 format 1 写入隔离 Keychain，清理提交后代理不转发响应并受控终止 App；不带种子参数的重启从真实档案重放，新证明绑定新设备，登录后再次冷恢复仍保持新会话。目标数据库核对 **2|1|1|1|0|0|0|1**，旧设备只有一条取消记录和撤销事件，无有效 access/refresh；首次准备设备未签发且已持久取消。真实 HTTPS **5 项（2.717 秒）**、App UI **3 项（104.240 秒）**及后台入口 **1 项（1.289 秒）**通过，全库 **18|8|0|0|8**、注册取消记录 **20|18|3**。签名 App 全量 **201 项报告 / 200 项实际 / 1 项跳过**通过（22 套件，5.063 秒），新增测试验证夹具要求隔离域、拒绝覆盖、清理不影响未加测试域的 Keychain。专用数据库根与模拟器已独立核实移除。见[证据](../../../docs/reviews/verification-records.md#20260907-legacy-app-process)。这验证受控 simctl 终止和明确构造的旧格式数据，不是旧二进制升级、SIGKILL/OS jetsam、掉电或真机锁屏验收；其他检查点、永久冲突与 GC 仍开放。全部47项保持 **16 已验证、31 开放**。
 
 
-最新补充（2026-09-07，B01 服务端时钟）：[账号证明与 Gateway 时钟边界](server-clock-integer-boundaries.md)已补检查；独立进程复现 NaN 转 Int64 fatal error 后，新增非有限值、有效期相加越界和不可用编码截止的拒绝。Hello 在状态变更前检查，心跳覆盖异步准入后再次失效并释放请求关联；凭据接口将时钟故障返回为空正文、不缓存的 503，修复前错误 401 的三条失败断言留档。最终服务端 **57 项 / 7 套件（6.387 秒）**、真实 HTTPS **5 项 / 2 套件（2.734 秒）**、App UI **2 项（64.268 秒）**、独立后台入口 **1 项（1.298 秒）**通过。数据库 **16|7|0|0|7**、注册取消记录 **17|16|2**，专用数据库根与模拟器已独立核实移除。见[证据](evidence/20260907-server-clock-boundaries/manifest.json)。这不是远端可控时间戳攻击的证明；其余恢复 DTO、计数和时间消费者继续审计，B01 仍实施中，全部47项保持 **16 已验证、31 开放**。
+最新补充（2026-09-07，B01 服务端时钟）：[账号证明与 Gateway 时钟边界](../server-clock-integer-boundaries.md)已补检查；独立进程复现 NaN 转 Int64 fatal error 后，新增非有限值、有效期相加越界和不可用编码截止的拒绝。Hello 在状态变更前检查，心跳覆盖异步准入后再次失效并释放请求关联；凭据接口将时钟故障返回为空正文、不缓存的 503，修复前错误 401 的三条失败断言留档。最终服务端 **57 项 / 7 套件（6.387 秒）**、真实 HTTPS **5 项 / 2 套件（2.734 秒）**、App UI **2 项（64.268 秒）**、独立后台入口 **1 项（1.298 秒）**通过。数据库 **16|7|0|0|7**、注册取消记录 **17|16|2**，专用数据库根与模拟器已独立核实移除。见[证据](../../../docs/reviews/verification-records.md#20260907-server-clock-boundaries)。这不是远端可控时间戳攻击的证明；其余恢复 DTO、计数和时间消费者继续审计，B01 仍实施中，全部47项保持 **16 已验证、31 开放**。

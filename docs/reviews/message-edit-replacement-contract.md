@@ -32,7 +32,7 @@ protocol 从 26 升至 27，生成物同步更新；PostgreSQL 25、SQLite 173/5
 
 这不是 B03 的整体关闭。其他内容读取、具体版本受众、media grant、完整 room baseline/directory、access epoch 与账号响应栅栏、独立无正文撤销及旧积压恢复仍开放。reaction、pin 和角色等对象的版本并不变成 message content revision。普通撤回与审核追溯撤销仍遵守各自合同，不能借完整编辑扩大历史受众。
 
-日志、实际 owner 载荷、运行脚本与源码哈希见[本批验证证据](evidence/20260906-message-edit-replacement/manifest.json)。本机真实数据库载荷交给 ClientKit 的测试属于跨层载荷验证，不能冒充 App 到 TLS 网关的端到端验收。
+日志、实际 owner 载荷、运行脚本与源码哈希见[本批验证证据](../../docs/reviews/verification-records.md#20260906-message-edit-replacement)。本机真实数据库载荷交给 ClientKit 的测试属于跨层载荷验证，不能冒充 App 到 TLS 网关的端到端验收。
 
 ## 本批验证结果
 

@@ -32,6 +32,6 @@ UI 用例观察两次进程终止与重新登录。代理记录签发终止一�
 
 ## 边界
 
-证据位于 [本批目录](evidence/20260907-registration-process-interruption/manifest.json)。本批修改验证工具、UI 测试和命令行证明编码；没有修改 Swift 认证/取消生产逻辑。
+证据位于 [本批目录](../../docs/reviews/verification-records.md#20260907-registration-process-interruption)。本批修改验证工具、UI 测试和命令行证明编码；没有修改 Swift 认证/取消生产逻辑。
 
 `simctl terminate` 证明实际 App 进程边界与 Keychain 恢复，不等同于设备断电、OS jetsam、SIGKILL、首次解锁前或真实锁屏行为。旧版本会话/legacy 档案清理、其他退出/换号检查点、真机系统中断和保留/GC 仍未完成，B08 不关闭。

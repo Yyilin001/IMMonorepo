@@ -24,4 +24,4 @@ Store 使用独立读取 generation，避免较早读取或旧失败覆盖新状
 
 按钮采用标准 SwiftUI Form/Button，提供状态值、操作提示和稳定标识 `v2.group.permissions.retry-recovery`；状态区标识为 `v2.group.permissions.recovery`。文案使用 SwiftUI 可本地化文字，不用颜色单独表示状态，也未增加固定高度或单行限制。
 
-五份运行日志与最终源码绑定见[状态与重试证据](evidence/20260906-policy-recovery-ui/manifest.json)。未执行真实 App–Gateway TLS、权限弹层点击 E2E、VoiceOver、超大字号或 RTL 人工验收，不能将编译/Store 测试当成这些验收。protocol 25、PostgreSQL 18 和 SQLite 171/5 未改，没有部署。B06 的置顶、成员角色、完整 receipts 保留和组合边界仍开放。
+五份运行日志与最终源码绑定见[状态与重试证据](../../docs/reviews/verification-records.md#20260906-policy-recovery-ui)。未执行真实 App–Gateway TLS、权限弹层点击 E2E、VoiceOver、超大字号或 RTL 人工验收，不能将编译/Store 测试当成这些验收。protocol 25、PostgreSQL 18 和 SQLite 171/5 未改，没有部署。B06 的置顶、成员角色、完整 receipts 保留和组合边界仍开放。

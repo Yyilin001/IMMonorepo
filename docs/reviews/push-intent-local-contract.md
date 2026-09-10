@@ -28,4 +28,4 @@
 
 `recordPushIntent` 仅增加空表，不推断历史远端端点和用户意图；App 后续应在首次激活时明确导入该用户的原偏好。迁移保留账号绑定、真实 pending reset 和待发送消息。测试覆盖数据库重开后继续原 claim、token 更新前后旧 ACK、先关闭后 claim 回包、偏好与退出分离、退避/暂停/显式重启、跨账号/安装/设备/owner 拒绝、迟到接管、事务回滚、版本溢出、SQL 非法状态，以及快照重建期间保留 Push 元数据。
 
-结果见[本地存储证据](evidence/20260906-push-intent-local/manifest.json)。本批没有执行远端 HTTP；没有证明自动重试、定时器、真实杀进程、App 点击或 A→B→A 的组合行为。后续继续实现一个有界单飞 reconciler、token 内存所有权及账号/安装/退出生命周期接线，再做远端最终状态验收。
+结果见[本地存储证据](../../docs/reviews/verification-records.md#20260906-push-intent-local)。本批没有执行远端 HTTP；没有证明自动重试、定时器、真实杀进程、App 点击或 A→B→A 的组合行为。后续继续实现一个有界单飞 reconciler、token 内存所有权及账号/安装/退出生命周期接线，再做远端最终状态验收。

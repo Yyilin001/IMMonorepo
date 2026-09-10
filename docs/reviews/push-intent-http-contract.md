@@ -24,6 +24,6 @@ Account 主程序给新旧路由注入同一 PostgreSQL store，并通过既有�
 
 ## 已验证与未完成
 
-证据见 [日志和源码摘要](evidence/20260906-push-intent-http/manifest.json)：ClientKit 完整回归、App 单元测试、服务端路由/中间件和真实 PostgreSQL 定向回归。覆盖准确整数编码、设备不匹配拒绝、响应域校验、不自动重试、路由身份传递、输入拒绝、固定错误分类、Push 限流成本，以及真实 HTTP 的先关闭后旧注册、随后新注册和 legacy 写入拒绝。
+证据见 [日志和源码摘要](../../docs/reviews/verification-records.md#20260906-push-intent-http)：ClientKit 完整回归、App 单元测试、服务端路由/中间件和真实 PostgreSQL 定向回归。覆盖准确整数编码、设备不匹配拒绝、响应域校验、不自动重试、路由身份传递、输入拒绝、固定错误分类、Push 限流成本，以及真实 HTTP 的先关闭后旧注册、随后新注册和 legacy 写入拒绝。
 
 VaporTesting 通过内存 HTTP pipeline 调用实际 PostgreSQL，尚未证明 HTTPS socket、真实 Account 进程、App 开关点击、杀进程恢复或账号 A→B→A。后续必须先持久保存用户 desired 和版本，再通过一个 reconciler 发送；处理 claim 丢 ACK、OS token 更新、退后台、重启及退出。App 仍使用旧协议，不应将本批兼容测试误认为开关竞态已经修复。

@@ -41,4 +41,4 @@
 
 前一批 HTTP transport 使用受控替身和合成凭据；后续已补[本地原生账号与真实 URLSession HTTPS](live-account-https-authorization.md)四项验收。App 界面与实时 Gateway 的完整链路仍未覆盖。既有 ClientKit 全套继续包含消息替换 owner 夹具，本批没有重新运行服务端或生成新 owner 夹具。Protocol 27、PostgreSQL 25 与 SQLite 173/5 未变。
 
-源码摘要、原始失败/中断/最终日志与运行脚本见[本批证据](evidence/20260906-session-http-authorization/manifest.json)。B09 保留“已实现待验证”，完整 App 认证终止、实时 Gateway 重连、退出/换号和外部验收仍需继续；47 项中仍有 33 项开放。
+源码摘要、原始失败/中断/最终日志与运行脚本见[本批证据](../../docs/reviews/verification-records.md#20260906-session-http-authorization)。B09 保留“已实现待验证”，完整 App 认证终止、实时 Gateway 重连、退出/换号和外部验收仍需继续；47 项中仍有 33 项开放。

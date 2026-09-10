@@ -28,6 +28,6 @@ App 在前台观察状态，后台取消观察并保留上次状态。观察和�
 
 本批未重跑 HTTPS/PostgreSQL、完整 Gateway/headless、物理设备锁屏、任意指令强杀或系统后台调度。注册响应迟到等剩余 B08 生命周期边界仍待完成。schema 28、protocol 27、SQLite 173/5 和 47 项状态不变，16 项已验证、31 项开放。
 
-日志、截图和最终源码哈希见[证据](evidence/20260907-revocation-status/manifest.json)。
+日志、截图和最终源码哈希见[证据](../../docs/reviews/verification-records.md#20260907-revocation-status)。
 
-最终截图：[普通字号](evidence/20260907-revocation-status/screenshots/normal.png)、[最大字号 RTL](evidence/20260907-revocation-status/screenshots/accessibility-rtl.png)。
+最终截图（普通字号、最大字号 RTL）为一次性本机运行产物，未纳入版本控制；如需复核请按上节命令重跑 UI 测试并自行导出截图。

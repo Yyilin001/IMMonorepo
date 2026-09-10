@@ -25,7 +25,7 @@
 
 1. 旧群管理事件正文没有 source room sequence。旧客户端保存的 `room_sequence` 可能来自个人游标，不能作为可信回填来源。仍保留的权威 room event 列可以用于受控恢复；丢失源证据时必须走明确的代次/基线恢复合同，不能猜测。
 2. 已签发快照、分发共享正文和 sourceEventID 绑定的摘要不能原地改写。增加强制字段之前必须处理旧 reader、旧 staging 和历史 payload；新客户端直接拒绝所有旧事件会破坏升级。
-3. 权限回执过期导致显式空策略丢失的路径已修复：schema 18 的 `group_role_policies` 保存持久标记，resolver 和三处批量消息 SQL 均改用当前策略。真实 GC、单条与预热批量授权、迁移回填和历史缺口回滚已通过验证，见 [权限保留合同](group-policy-retention.md) 和 [20 项测试证据](evidence/20260906-group-policy-retention/manifest.json)。客户端现已独立保存空策略版本；旧库缺失角色仍需当前态恢复。
+3. 权限回执过期导致显式空策略丢失的路径已修复：schema 18 的 `group_role_policies` 保存持久标记，resolver 和三处批量消息 SQL 均改用当前策略。真实 GC、单条与预热批量授权、迁移回填和历史缺口回滚已通过验证，见 [权限保留合同](group-policy-retention.md) 和 [20 项测试证据](../../docs/reviews/verification-records.md#20260906-group-policy-retention)。客户端现已独立保存空策略版本；旧库缺失角色仍需当前态恢复。
 4. 服务端现保留新消费的取消置顶负事实并按已知源序号排序；此前已经丢失的负事实不能从最新正状态推断，两条缺源序号的旧事实仍无法证明真实顺序。需要历史回放/权威基线以及源 writer 和投影 worker 的统一切换安排，见[置顶快照合同](pin-snapshot-contract.md)。
 5. 旧 SQLite 已丢失空策略的独立 role revision 时，不能仅清空本地 sync token 来获取完整基线。protocol 24 现已提供 `require_snapshot`，ClientKit 通过 `requestSnapshotRebuild()` 持久请求个人基线；服务端即使 ACK 未落后于保留起点也会 stage snapshot，重复请求复用待完成 reset。旧 token 缺失的普通续拉行为不变，live bank 和 outbox 保留到受控切换。该基础通路已验证，群 reducer 迁移触发、旧数据修复和独立房间日志基线仍未实现，见[个人基线恢复合同](personal-snapshot-rebuild.md)。
 6. 角色权限恢复还需当前有效策略读取，不能依赖不完整的入群历史。现已实现领域基线、PostgreSQL 单一读取点的两类角色策略与当前成员检查，以及不缓存的 owner 前后复核；protocol 25 已接通认证网关、生产组装和客户端传输，客户端各角色 reducer、完整观察点及本地持久恢复栅栏已实现，自动 runner 和 App 生命周期已接通，[暂停反馈与显式重试入口](role-policy-recovery-ui-contract.md)已接通，完整链路及人工交互验收仍待完成，见[权限基线合同](group-policy-baseline-contract.md)。基线 revision 是完整策略的观察点，不能伪造为两类角色的历史修改事件。

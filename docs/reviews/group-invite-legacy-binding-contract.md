@@ -24,4 +24,4 @@
 
 未修复版本的初版回归在两种分发模式均以 ownerResultMismatch 失败。修复后新增 2 项测试覆盖普通群/大群各四种链接状态、每种十次并发重试、完整服务层原 token/日期返回、终态预览限制、发布失败恢复、epoch 拒绝及三类绑定冲突。最终 33 项测试 / 3 套件通过，包含三库 owner/control 回归和七条历史迁移链。Account 可执行目标已编译；没有执行真实 TLS 客户端、进程 kill -9 或生产部署。
 
-本批不修改 PostgreSQL schema 24、protocol 25 或 SQLite 173/5。验证记录见[本批证据](evidence/20260906-legacy-invite-retry/manifest.json)。后续 schema 25 已接通独立 owner 旧链接的[显式分页导入与不可变审计](group-invite-directory-import-contract.md)；已有矛盾绑定的调查与处置、完整房间历史迁移和 B23 全局申请配额继续开放。
+本批不修改 PostgreSQL schema 24、protocol 25 或 SQLite 173/5。验证记录见[本批证据](../../docs/reviews/verification-records.md#20260906-legacy-invite-retry)。后续 schema 25 已接通独立 owner 旧链接的[显式分页导入与不可变审计](group-invite-directory-import-contract.md)；已有矛盾绑定的调查与处置、完整房间历史迁移和 B23 全局申请配额继续开放。

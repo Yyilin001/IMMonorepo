@@ -8,6 +8,6 @@
 
 真实 HTTPS/PostgreSQL 测试创建同账号 A/B 两个设备，刷新 A，再验证旧/新 access 均被撤销，当前 refresh 被拒绝，B 仍可使用。十次并发投递只增加一条操作记录。临时数据库专用 AFTER INSERT trigger 在指定 journal 写入时抛错，HTTP 返回 503 后 A 的两代 access 和 B access 均仍可使用，随后正常撤销成功。故障 trigger 不进入生产 schema。
 
-最终真实测试 5 项 / 2 套件通过（2.629 秒），数据库计数为 `7|2|0|0|2`（总设备、撤销设备、撤销设备残留有效 access、残留有效 refresh、撤销事件）。服务端路由、认证中间件、凭据路由及撤销 worker 定向回归 19 项 / 4 套件通过。独立数据库及私有 CA/密钥目录已清除，未运行 App/模拟器/Gateway 进程，也未注入 APNs；本批未种入 Push endpoint，因此不把共享 SQL 更新视作新增的真实 Push 验收。原始日志和源码散列见[证据](evidence/20260906-current-device-logout/manifest.json)。
+最终真实测试 5 项 / 2 套件通过（2.629 秒），数据库计数为 `7|2|0|0|2`（总设备、撤销设备、撤销设备残留有效 access、残留有效 refresh、撤销事件）。服务端路由、认证中间件、凭据路由及撤销 worker 定向回归 19 项 / 4 套件通过。独立数据库及私有 CA/密钥目录已清除，未运行 App/模拟器/Gateway 进程，也未注入 APNs；本批未种入 Push endpoint，因此不把共享 SQL 更新视作新增的真实 Push 验收。原始日志和源码散列见[证据](../../docs/reviews/verification-records.md#20260906-current-device-logout)。
 
 服务端已撤销的 device ID 不会恢复。客户端下一步必须为新登录生成新的会话设备身份，并持久保存注册重试身份；不能直接接入撤销 API 后继续使用当前安装级固定 device ID。退出补偿也不能使用后来登录账号的凭据。

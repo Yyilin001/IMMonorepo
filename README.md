@@ -16,8 +16,14 @@ cache participates in this path.
 
 ## Documentation
 
+- [Documentation entry](docs/README.md): start here — current state, current
+  contracts, and where history is archived.
 - [Current V2 architecture](docs/current-system-map.md): component boundaries,
   durable delivery path, group semantics and NATS limitations.
+- [Current contracts index](docs/reviews/README.md): which document is the
+  authoritative contract for each topic.
+- [Problem status](docs/reviews/status.md): which of the 47 tracked issues are
+  still open, and on what evidence they close.
 - [V2 document entry](IMV2/docs/README.md): ADRs, implementation evidence,
   capacity contract and operations runbooks.
 - [iOS application](IMApp/README.md): native client workflow and release

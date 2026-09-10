@@ -28,4 +28,4 @@ B08 保持实施中。本批把退出流程中的非敏感意图改为文件记�
 
 模拟器可验证排除备份属性，但不返回文件保护属性。两次初始测试已记录这一限制；最终保留真机上的 Complete 属性断言，模拟器不把它计作已验证。锁屏 Keychain/FileProtection 验收仍开放。
 
-具体运行、失败记录、日志和源文件哈希见 [manifest](evidence/20260906-durable-sign-out-marker/manifest.json)。现有真实认证终止 UI 验收只验证本次改动没有破坏登录恢复、远端撤销后的退出及冷启动，不等同于显式退出全部步骤的崩溃恢复验收。
+具体运行、失败记录、日志和源文件哈希见 [manifest](../../docs/reviews/verification-records.md#20260906-durable-sign-out-marker)。现有真实认证终止 UI 验收只验证本次改动没有破坏登录恢复、远端撤销后的退出及冷启动，不等同于显式退出全部步骤的崩溃恢复验收。

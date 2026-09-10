@@ -100,7 +100,10 @@ housekeeping 分批删除。控制投影的稳定
 
 ## 文档使用方式
 
+- 想找某个主题当前生效的合同：查看 [合同索引](reviews/README.md)。
 - 想了解设计决定：查看 [ADR register](../IMV2/docs/ADR-REGISTER.md)。
 - 想判断能力和证据等级：查看 [implementation status](../IMV2/docs/implementation-status.md)。
+- 想知道 47 项问题哪些还开着：查看 [问题状态表](reviews/status.md)；整改过程的逐批记录在
+  [历史时间线](reviews/archive/2026-09-05-remediation-timeline.md)，不代表当前状态。
 - 想运行本机账户栈：查看 [IMApp README](../IMApp/README.md) 或 [IMV2Server README](../IMV2Server/README.md)。
 - 想处理 paused durable work、观察指标或迁移用户分片：从 [V2 文档入口](../IMV2/docs/README.md) 进入对应 runbook。

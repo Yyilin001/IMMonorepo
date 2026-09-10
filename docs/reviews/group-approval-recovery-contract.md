@@ -60,4 +60,4 @@ Swift 与 SQL readiness 同时检查列类型/空值约束、PK/FK、精确 CHEC
 - 实际 20→21 迁移保留旧申请，重复迁移失败；同名弱 CHECK、被替换的不可变函数和缺失索引都被 readiness 拒绝。
 - 审批原子性、证据清理保留、配额、通用清理预算、Push、群策略及 forward 单/双库回归；7 条历史迁移链已接至 schema 21。
 
-证据：[manifest](evidence/20260906-group-approval-recovery/manifest.json)。本批次未部署，未声称完成真实进程 kill/HTTPS ACK drop 或 owner 在线迁移演练；这部分仍由 B26/B27/D08/E 项继续覆盖。
+证据：[manifest](../../docs/reviews/verification-records.md#20260906-group-approval-recovery)。本批次未部署，未声称完成真实进程 kill/HTTPS ACK drop 或 owner 在线迁移演练；这部分仍由 B26/B27/D08/E 项继续覆盖。

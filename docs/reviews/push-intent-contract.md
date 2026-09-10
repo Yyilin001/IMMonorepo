@@ -28,4 +28,4 @@ Swift 和 SQL readiness 同时校验表列类型、空值条件、主键、epoch
 
 本批测试覆盖真实 PostgreSQL 迁移保留端点、拒绝重复迁移、各关键约束缺失导致启动拒绝，以及禁用先到、旧 enable、同版本重放/冲突、claim 丢响应重试、新会话拒绝旧请求、39 个并发版本最高者生效、重建 store、token 轮换、旧 410 和端点/版本原子回滚。Core 验证数值边界。
 
-测试结果与源码摘要见 [证据](evidence/20260906-push-intent-storage/manifest.json)。重建 store 只验证服务端持久状态，不等于 iOS 杀进程或账号切换验收。后续仍须完成 HTTP 真实请求、客户端持久 desired/claim/revision、单一 reconciler、取消与重试、App 生命周期以及 A→B→A、离线开关/退出和重启的组合验证。
+测试结果与源码摘要见 [证据](../../docs/reviews/verification-records.md#20260906-push-intent-storage)。重建 store 只验证服务端持久状态，不等于 iOS 杀进程或账号切换验收。后续仍须完成 HTTP 真实请求、客户端持久 desired/claim/revision、单一 reconciler、取消与重试、App 生命周期以及 A→B→A、离线开关/退出和重启的组合验证。

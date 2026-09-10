@@ -18,7 +18,7 @@
 
 - 修复前：1 项测试、6 个参数场景失败，22 个断言证明旧 owner 上确实提交了消息变更/操作回执及序号。
 - 首轮修复后：4 项测试 / 2 套件通过，包含三类命令 × 普通群/大群、旧缓存的新操作和重放、十次并发仅提交一次、错误物理库、未知 shard，以及重放等待 room 锁期间 epoch 变化后拒绝。
-- 最终 **87 项测试 / 7 套件**通过，见[证据清单](evidence/20260906-message-mutation-owner/manifest.json)，覆盖网关错误映射、已有消息业务语义、普通成员栅栏、邀请/审批/恢复和历史迁移链。
+- 最终 **87 项测试 / 7 套件**通过，见[证据清单](../../docs/reviews/verification-records.md#20260906-message-mutation-owner)，覆盖网关错误映射、已有消息业务语义、普通成员栅栏、邀请/审批/恢复和历史迁移链。
 
 验证使用专用 PostgreSQL 16.13、本地 Swift 6.3.3；双库测试中 owner profile 表为空，编辑使用 control 身份。Gateway 已编译；不是实际 TLS 客户端或部署验收。PostgreSQL 25、protocol 25、SQLite 173/5 不变。
 

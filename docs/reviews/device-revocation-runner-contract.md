@@ -31,4 +31,4 @@
 - 本批不证明后台 OS 调度、真机锁屏、任意指令处强杀或旧 Push 请求忽略取消时的物理网络退出上界。未新跑完整 UI/Gateway/headless 在线套件。
 - 持久暂停的用户可见状态与显式恢复入口、App 前后台往返和换号期间网络 flight 的完整交互验收，以及注册响应迟到等 B08 剩余边界仍开放。本批不关闭 B08。
 
-PostgreSQL 28、protocol 27、SQLite 173/5 不变；47 项仍为 16 已验证、31 开放。失败和最终日志、资源清理与源码哈希见[证据](evidence/20260907-revocation-runner/manifest.json)。
+PostgreSQL 28、protocol 27、SQLite 173/5 不变；47 项仍为 16 已验证、31 开放。失败和最终日志、资源清理与源码哈希见[证据](../../docs/reviews/verification-records.md#20260907-revocation-runner)。

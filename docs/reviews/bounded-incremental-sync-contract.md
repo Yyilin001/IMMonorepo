@@ -34,7 +34,7 @@ Push handler 调用后台 runner 并映射结果，不再启动完整 runtime �
 
 ## 验证边界与剩余工作
 
-测试覆盖 4+2 页续传、reset 延后、空页、迟到取消、排队取消、后台超时关闭并排空、超时不取消前台 owner、停止后重启、两种事件流共用 4 页，以及真实 SQLite 精确提交计数。完整客户端与 App 单元回归和既有真实认证/冷启动 UI 回归用于检查集成后的回归风险，精确日志与源文件哈希见 [manifest](evidence/20260906-bounded-incremental-sync/manifest.json)。
+测试覆盖 4+2 页续传、reset 延后、空页、迟到取消、排队取消、后台超时关闭并排空、超时不取消前台 owner、停止后重启、两种事件流共用 4 页，以及真实 SQLite 精确提交计数。完整客户端与 App 单元回归和既有真实认证/冷启动 UI 回归用于检查集成后的回归风险，精确日志与源文件哈希见 [manifest](../../docs/reviews/verification-records.md#20260906-bounded-incremental-sync)。
 
 25 秒是工作截止，当前收尾依赖受拥有连接的取消和任务排空；尚未证明在真机所有情形下都能于额外 5 秒内结束。真实 APNs、系统挂起/首次解锁前、实际网络悬挂与长事务、前后台交错下的 completion 时间仍需测量。现有真实认证 UI 用例没有注入 Push，不能充当这些验收。无可见 scene 的会话恢复仍按 D02 跟踪。
 
@@ -42,6 +42,6 @@ Push handler 调用后台 runner 并映射结果，不再启动完整 runtime �
 
 真实 `NWConnection` 回环测试分别挂起 TLS 协商、Hello、认证、SyncPull 和 SyncAck，使用 1 秒工作预算，断言返回总耗时小于 5 秒、对端连接已关闭且凭据仍保留。TLS 场景使用生产 TLS 配置，TCP 对端接收 ClientHello 后不回应；它不验证证书成功握手。其余四个阶段用 TCP 隔离协议阶段，经过生产字节适配器、协调器、protobuf 传输及真实 SQLite。恢复服务端响应后重新连接并完成同步；ACK 超时保留 applied=1、acknowledged=0，重连后 acknowledged=1，精确重放不报告新增。
 
-此轮定向 1 项参数化测试 / 5 个场景通过（1.104 秒）；客户端完整回归报告 406 项 / 63 套件（4.501 秒），其中实际执行 402 项、4 项在线测试按既有条件跳过。本轮只新增测试，未改生产实现，也未重新运行 App 单元或真实 App UI；此前 App 结果只作为历史证据。日志、运行脚本与源码哈希见[网络期限证据](evidence/20260906-background-network-deadlines/manifest.json)。
+此轮定向 1 项参数化测试 / 5 个场景通过（1.104 秒）；客户端完整回归报告 406 项 / 63 套件（4.501 秒），其中实际执行 402 项、4 项在线测试按既有条件跳过。本轮只新增测试，未改生产实现，也未重新运行 App 单元或真实 App UI；此前 App 结果只作为历史证据。日志、运行脚本与源码哈希见[网络期限证据](../../docs/reviews/verification-records.md#20260906-background-network-deadlines)。
 
 以上补齐本机网络挂起的验证；实际 Push、真机锁屏、首次解锁、长事务和前后台交错时的系统回调仍未验收。D03 保持实施中。

@@ -24,6 +24,6 @@
 
 ## 验证边界
 
-ClientKit 最终 339 项 / 53 套件通过。覆盖两种跨流顺序、不同消息独立排序、重启、非法字段/房间 envelope、日志清理后重复、源序号补齐、普通/hybrid 快照、来源重用拒绝、快照元数据保留与移除、两种 staging 阶段迁移及本人退群清理。App 在 iPhone 17 / iOS 26.2 Debug、仅 IMAppTests、关闭签名下 **176 项 / 17 套件**通过。七份失败/成功日志与七份最终源码哈希见[置顶效果证据](evidence/20260906-pin-effects/manifest.json)。diff、协议文档及 schema relation coverage 检查通过，所有测试会话终态已确认；本批未启动 PostgreSQL。
+ClientKit 最终 339 项 / 53 套件通过。覆盖两种跨流顺序、不同消息独立排序、重启、非法字段/房间 envelope、日志清理后重复、源序号补齐、普通/hybrid 快照、来源重用拒绝、快照元数据保留与移除、两种 staging 阶段迁移及本人退群清理。App 在 iPhone 17 / iOS 26.2 Debug、仅 IMAppTests、关闭签名下 **176 项 / 17 套件**通过。七份失败/成功日志与七份最终源码哈希见[置顶效果证据](../../docs/reviews/verification-records.md#20260906-pin-effects)。diff、协议文档及 schema relation coverage 检查通过，所有测试会话终态已确认；本批未启动 PostgreSQL。
 
 protocol 25 与 PostgreSQL 18 未改。服务端置顶快照证据见[上一批合同](pin-snapshot-contract.md)。仍未完成置顶权威基线与丢失历史修复、writer/worker 一致切换、完整 receipts 保留/GC、成员角色及广义授权代次组合；没有部署或真实 App–TLS、Linux、负载、无障碍人工验收。B06 继续实施中。

@@ -35,6 +35,6 @@ python3 scripts/verify_v2_live_account_authorization.py --output /private/tmp/im
 
 ## 当前结果与未覆盖范围
 
-最终四项真实 HTTPS 测试通过（2.704 秒）；普通 ClientKit 运行报告 388 项 / 60 套件，其中四项真实网络测试显式跳过，实际执行 384 项离线回归通过（4.284 秒）。服务端设备/凭据/撤销事件读回及 HTTP 次数通过，临时服务、数据库和密钥均已清理。见[原始证据](evidence/20260906-live-account-https/manifest.json)。
+最终四项真实 HTTPS 测试通过（2.704 秒）；普通 ClientKit 运行报告 388 项 / 60 套件，其中四项真实网络测试显式跳过，实际执行 384 项离线回归通过（4.284 秒）。服务端设备/凭据/撤销事件读回及 HTTP 次数通过，临时服务、数据库和密钥均已清理。见[原始证据](../../docs/reviews/verification-records.md#20260906-live-account-https)。
 
 这条链路止于真实认证 actor 发布的状态，没有运行 App 界面、Keychain 或实时 protobuf TLS Gateway；前一批 App 状态观察者组合测试仍使用受控 HTTP。此处的 TLS 是 URLSession 到本地账号 HTTPS 入口，不代表 Caddy 部署、生产证书、实时 Gateway、完整退出/换号界面或外部 E 项验收。B09 保留“已实现待验证”；下一步应把真实认证终止接入 App 生命周期验收，并检查实时重连不会继续使用已删除凭据。

@@ -22,7 +22,7 @@ GRDB ValueObservation 观察当前账号/安装/device/owner 的待办时间，�
 
 ## 验证边界
 
-[证据](evidence/20260906-push-intent-reconciler/manifest.json)覆盖真实 SQLite、实际自动观察及一秒退避定时器、长 Retry-After、token 更新、旧注册等待期间关闭、共享 flush 与单个等待者取消、claim 提交后丢响应及重开数据库、stale 暂停/显式重启、退出后旧 token、非配合 HTTP 取消后的迟到成功和 owner 替换。
+[证据](../../docs/reviews/verification-records.md#20260906-push-intent-reconciler)覆盖真实 SQLite、实际自动观察及一秒退避定时器、长 Retry-After、token 更新、旧注册等待期间关闭、共享 flush 与单个等待者取消、claim 提交后丢响应及重开数据库、stale 暂停/显式重启、退出后旧 token、非配合 HTTP 取消后的迟到成功和 owner 替换。
 
 测试远端是受控传输替身；它用于记录调用、控制 ACK 丢失和等待顺序。服务端条件写的真实 PostgreSQL/HTTP 验证见此前证据，本批未重新运行服务器或将执行器直接连接到真实 Account 进程。App 单元测试只验证兼容，不能证明开关已经采用执行器。
 

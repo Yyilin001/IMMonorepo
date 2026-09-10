@@ -38,7 +38,7 @@ Swift 与 SQL readiness 除完整旧合同外，还拒绝 invite/request 对 pro
 
 ## 验证及剩余范围
 
-见[路由证据](evidence/20260906-routed-invitation/manifest.json)：最终 29 项测试 / 3 套件通过，22→23 数据保留迁移及完整 readiness 负例通过。三库测试将 control 与两个 room owner 分开，control 没有 rooms/memberships/requests，两个 owner 的 public_user_profiles 均为空；同时覆盖 standard fanout 和 large-group hybrid。正常流程、创建 finalize 中断、控制资料更新、停用目标/审核人、原决策重放、未知或错误物理 owner、真实持久 epoch 不一致、缓存 stale 及 Vapor 状态边界均纳入测试。
+见[路由证据](../../docs/reviews/verification-records.md#20260906-routed-invitation)：最终 29 项测试 / 3 套件通过，22→23 数据保留迁移及完整 readiness 负例通过。三库测试将 control 与两个 room owner 分开，control 没有 rooms/memberships/requests，两个 owner 的 public_user_profiles 均为空；同时覆盖 standard fanout 和 large-group hybrid。正常流程、创建 finalize 中断、控制资料更新、停用目标/审核人、原决策重放、未知或错误物理 owner、真实持久 epoch 不一致、缓存 stale 及 Vapor 状态边界均纳入测试。
 
 Vapor 测试使用确定的测试 authenticator，**不是**真实 TLS/账号登录端到端验证。测试中的 epoch 改变也**不是**完整房间在线迁移。启用跨物理迁移前仍须转移完整成员历史区间、D05 不可变审计/旧 operation 阻断、邀请/申请/成员回执及相关事件与 outbox，并验证旧 owner 的迟到操作无法重新落地。历史覆盖不足时不得依靠缺失记录释放 legacy approving。
 

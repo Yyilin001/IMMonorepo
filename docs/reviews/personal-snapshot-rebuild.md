@@ -23,7 +23,7 @@ SyncEngine 有本地 pending reset 时先继续其导入/ACK。否则，存在�
 
 ## 验证和未覆盖范围
 
-[验证证据](evidence/20260906-personal-snapshot-rebuild/manifest.json)保存失败与成功日志及最终源码 SHA-256。ClientKit **305 项 / 52 套件**全通过；iPhone 17 / iOS 26.2 App **170 项 / 17 套件**全通过；专用 PostgreSQL 双库上的服务端定向回归 **56 项 / 6 套件**通过。
+[验证证据](../../docs/reviews/verification-records.md#20260906-personal-snapshot-rebuild)保存失败与成功日志及最终源码 SHA-256。ClientKit **305 项 / 52 套件**全通过；iPhone 17 / iOS 26.2 App **170 项 / 17 套件**全通过；专用 PostgreSQL 双库上的服务端定向回归 **56 项 / 6 套件**通过。
 
 客户端覆盖旧库迁移、重启、响应丢失、重复请求、跨代恢复、取消后重试、快照激活和 outbox 保留；wire 与 gateway 测试覆盖标志和认证身份传递。真实 PostgreSQL 覆盖 ACK 仍在保留窗口内时强制重建、空账户、待处理请求复用、快照发布、幂等 ACK 和设备撤销；同时回归策略快照、权限 GC 和选定跨 owner 转发路径。协议生成物、协议文档、schema relation coverage 与 diff 检查通过。
 

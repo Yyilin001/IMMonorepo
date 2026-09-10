@@ -16,7 +16,7 @@
 
 ## 验证边界
 
-本批证据位于 [evidence/20260907-proof-bound-issuance](evidence/20260907-proof-bound-issuance/manifest.json)。
+本批证据位于 [evidence/20260907-proof-bound-issuance](../../docs/reviews/verification-records.md#20260907-proof-bound-issuance)。
 
 离线测试覆盖缺失/非法/不匹配证明、签发回执确认、保存失败、过期旋转、旧格式迁移和迟到完成。压测脚本使用替换 curl 的离线测试覆盖确认成功、缺少确认和响应丢失，不声称脚本本身已跑真实负载。
 

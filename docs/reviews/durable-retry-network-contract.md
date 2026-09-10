@@ -24,6 +24,6 @@
 
 ## 证据与剩余验收
 
-精确测试数量、日志与源文件哈希见 [manifest](evidence/20260906-durable-retry-network/manifest.json)。相关套件可用 `client-run.sh --filter 'V2NetworkCommandRetryTests|V2CommandRetrySchedulerTests|V2FairDurableCommandSchedulerTests|V2TLSFrameConnectionLifecycleTests|V2ClientRuntimeTests'` 复现。
+精确测试数量、日志与源文件哈希见 [manifest](../../docs/reviews/verification-records.md#20260906-durable-retry-network)。相关套件可用 `client-run.sh --filter 'V2NetworkCommandRetryTests|V2CommandRetrySchedulerTests|V2FairDurableCommandSchedulerTests|V2TLSFrameConnectionLifecycleTests|V2ClientRuntimeTests'` 复现。
 
 下一步需在真实 App 生命周期下，保留待重试命令进入后台并恢复，确认调度重建、多个实际注册 lane 的最终状态与离线无忙等。当前 App 单元回归只作为依赖构建和行为回归，不能替代该验收。

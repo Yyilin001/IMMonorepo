@@ -24,6 +24,6 @@
 
 对新基线仍授权的混合群，按每个角色比较 live 与 shadow 的 revision，保留较新状态，并保留房间全局命令 revision。这样保留房间日志游标时不会把权限状态退回旧版本；不为已撤销房间复制独立房间日志状态。效果表属于内部元数据，不触发全量 UI 刷新。
 
-测试覆盖个人/预览两种先后、持久房间流、乱序、空集合、独立角色、重启、身份/版本冲突、数值与房间边界、普通和混合快照、两种 staging 阶段的旧库迁移及 outbox 保留。最终日志和源码绑定见[验证证据](evidence/20260906-role-policy-effects/manifest.json)。
+测试覆盖个人/预览两种先后、持久房间流、乱序、空集合、独立角色、重启、身份/版本冲突、数值与房间边界、普通和混合快照、两种 staging 阶段的旧库迁移及 outbox 保留。最终日志和源码绑定见[验证证据](../../docs/reviews/verification-records.md#20260906-role-policy-effects)。
 
 本批未接入持久基线恢复 worker、账号/设备与 membership 栅栏、旧库缺失策略的主动获取，也未完成置顶、成员角色或完整 receipts 保留/清理合同。protocol 25 和 PostgreSQL 18 未变；没有部署。

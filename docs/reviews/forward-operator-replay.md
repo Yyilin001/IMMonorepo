@@ -44,4 +44,4 @@ Operator 的 `IM_V2_ROOM_SHARD_STORES_JSON` 显式登记可操作 owner，格式
 
 ## 验证
 
-测试与结果以 `2026-09-05-system-remediation-progress.md` 的本轮记录为准。覆盖包括双库源/目标恢复、审计回滚、相同操作 16 次并发、owner 冲突、旧 lease、摘要/目标 UUID 保留、真实双附件从暂停恢复至源回执完成、HTTP 认证/路由/错误和 schema 15→16 迁移。最终 104 tests / 11 suites 通过，日志与源码绑定见 [持久验证证据](evidence/20260906-forward-operator/manifest.json)。未把这些组件验证称为真实生产 operator 部署或设备端到端验收。
+测试与结果以 `archive/2026-09-05-system-remediation-progress.md` 的本轮记录为准。覆盖包括双库源/目标恢复、审计回滚、相同操作 16 次并发、owner 冲突、旧 lease、摘要/目标 UUID 保留、真实双附件从暂停恢复至源回执完成、HTTP 认证/路由/错误和 schema 15→16 迁移。最终 104 tests / 11 suites 通过，日志与源码绑定见 [持久验证证据](../../docs/reviews/verification-records.md#20260906-forward-operator)。未把这些组件验证称为真实生产 operator 部署或设备端到端验收。

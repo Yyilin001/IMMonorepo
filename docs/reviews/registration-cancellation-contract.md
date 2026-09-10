@@ -32,7 +32,7 @@ PostgreSQL 当前合同升级至 im-v2-current-29，新增 device_registration_c
 
 后续必须让账号 HTTP 签发强制接收证明并经过可信账号验证，增加受 trusted-edge、限流与严格 body 合同保护的取消入口；ClientKit/App 在请求前保存证明，退出及冷启动把未接管操作送入独立持久取消队列。还需明确旧注册记录迁移、证明保存失败、截止后重新登录、正在被其他尝试接管的操作、客户端取消请求先到和实际线路丢包。不能只接上 HTTP 就关闭 B08。
 
-本批验证结果与源文件散列记录于[证据清单](evidence/20260907-registration-cancellation/manifest.json)。protocol 27、SQLite 173/5 未改；47 项仍为 16 项已验证、31 项开放。
+本批验证结果与源文件散列记录于[证据清单](../../docs/reviews/verification-records.md#20260907-registration-cancellation)。protocol 27、SQLite 173/5 未改；47 项仍为 16 项已验证、31 项开放。
 
 验证结果：Core 95 项/31 套件（0.006 秒）；原有 HTTP 单元 10 项/2 套件（0.009 秒）；真实 PostgreSQL 21 项/1 套件（28.843 秒），包括新增 4 项测试的 7 个参数场景、原有凭据/Push 及七条历史迁移链。独立 28→29 迁移保留种子访问凭据、拒绝重复迁移，并验证缺失唯一绑定索引和弱化绑定约束均无法通过启动检查。首次编译过滤器未匹配测试，只计编译成功。
 

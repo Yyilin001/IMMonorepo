@@ -26,7 +26,7 @@
 4. 显式空集合现已保存为独立版本行；各角色版本用于 reducer 比较，房间全局 revision 继续用于命令的 expectedRevision。基线现已使用单独的观察点下限，不伪造历史事件 revision。
 5. 覆盖个人流、前台预览、独立房间流、快照、旧库缺历史、退群重入和恢复过程中的网络失败；不能因基线恢复扩大历史消息可见范围。
 
-基础读取批保持 protocol 24、PostgreSQL schema 18 与 SQLite 167/5；后续 wire 批升至 protocol 25，数据库结构未变。尚未部署，客户端与网关须配套升级，不宣称支持混合协议运行。基础读取验证和源码绑定记录在[权限基线证据](evidence/20260906-policy-baseline/manifest.json)。
+基础读取批保持 protocol 24、PostgreSQL schema 18 与 SQLite 167/5；后续 wire 批升至 protocol 25，数据库结构未变。尚未部署，客户端与网关须配套升级，不宣称支持混合协议运行。基础读取验证和源码绑定记录在[权限基线证据](../../docs/reviews/verification-records.md#20260906-policy-baseline)。
 
 最终 Core **82 项 / 25 套件**、服务端定向回归 **29 项 / 6 套件**通过。真实 PostgreSQL 覆盖普通/混合群模式、默认和显式空策略、回执清理、迁移、32 次读取与四次策略提交并发、退群重入，以及读取后控制库 epoch 变化。首轮发现合法零 membership revision 被模型拒绝；后续并发测试触发夹具准入额度不足，两者均已修正并保留失败日志。基线本身尚未做实际跨物理 owner 切换或网络协议验收，未重跑 App/ClientKit 全套。
 
@@ -38,4 +38,4 @@
 
 当前成员已撤销映射为 FORBIDDEN；房间不存在为 NOT_FOUND；owner epoch 变化为可重试 ROOM_OWNER_CHANGED；持久化或 owner 配置错误为可重试 UNAVAILABLE。非法 room UUID 在调用存储前返回 INVALID_ARGUMENT。仅 fetch 不写 SQLite，不会清除恢复意图、更新权限或触碰待发命令。
 
-认证前及设备撤销后的请求拒绝、身份转发、空策略、错误映射和读准入均有回归。失败/成功日志与源码绑定见[协议接线证据](evidence/20260906-policy-wire/manifest.json)。测试包括编解码与会话、领域、真实 SQL 分层验证，未把它称为真实 TLS 网络的完整端到端验收。
+认证前及设备撤销后的请求拒绝、身份转发、空策略、错误映射和读准入均有回归。失败/成功日志与源码绑定见[协议接线证据](../../docs/reviews/verification-records.md#20260906-policy-wire)。测试包括编解码与会话、领域、真实 SQL 分层验证，未把它称为真实 TLS 网络的完整端到端验收。

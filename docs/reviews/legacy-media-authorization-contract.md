@@ -26,4 +26,4 @@
 
 最终扩展回归 **307 项服务端测试 / 28 套件**通过，耗时 276.806 秒。包含 30 个旧媒体真实数据库场景、6 个领取/供应商/完成边界场景以及既有 HTTP、头像、按消息定位媒体、历史授权和跨 owner 回归。
 
-最终日志、脚本和源码哈希见[本批证据](evidence/20260906-legacy-media-authorization/manifest.json)。本批未修改 ClientKit/App，未重新运行其测试；服务端分层回归不替代真实 App 到 TLS、生产对象存储、设备、Linux 或完整多 owner 迁移验收。B03/B04 保持实施中。
+最终日志、脚本和源码哈希见[本批证据](../../docs/reviews/verification-records.md#20260906-legacy-media-authorization)。本批未修改 ClientKit/App，未重新运行其测试；服务端分层回归不替代真实 App 到 TLS、生产对象存储、设备、Linux 或完整多 owner 迁移验收。B03/B04 保持实施中。

@@ -26,4 +26,4 @@ ClientKit 的 group capability 快照键与正文改为比较 UUID 身份。仅�
 
 最终服务端定向回归 **19 项 / 4 套件**、ClientKit **331 项 / 53 套件**、App **176 项 / 17 套件**通过。服务端实际执行源提交、逆序 fanout、日志清理后重复、当前投影版本数量、缺序号负事实、快照 build/manifest/page/ACK、同版本冲突回滚和数据库更早拒绝来源变更。客户端验证四类群管理键的 UUID 拼写兼容，以及房间/消息/角色错配、错误前缀、缺段和多余段拒绝。
 
-六份失败/成功日志与六份最终源码哈希见[置顶快照证据](evidence/20260906-pin-snapshots/manifest.json)。没有新增 Core 测试、完整服务端套件、真实 TLS、Linux、负载、无障碍人工或历史迁移验收。protocol 25、PostgreSQL 18、SQLite 171/5 未变，未部署。
+六份失败/成功日志与六份最终源码哈希见[置顶快照证据](../../docs/reviews/verification-records.md#20260906-pin-snapshots)。没有新增 Core 测试、完整服务端套件、真实 TLS、Linux、负载、无障碍人工或历史迁移验收。protocol 25、PostgreSQL 18、SQLite 171/5 未变，未部署。

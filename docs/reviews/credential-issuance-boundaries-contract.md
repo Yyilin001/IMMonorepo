@@ -26,4 +26,4 @@ V2HTTPAccountAssertionDeviceCredentialProvider 在设备身份读取、账号因
 
 完全丢失响应时，原注册记录只有 deviceID/operationID；当前撤销接口需要尚未收到的能力证明。不能借用新账号凭据清理旧请求，也不能持久保存账号密码来伪造独立恢复。后续需明确注册请求、返回结果、凭据接管与废弃的持久归属，并验证服务器已提交而客户端没有响应的路径。以上是开放设计要求，不是本批实现或验证结论。
 
-schema 28、protocol 27、SQLite 173/5 不变。47 项保持 16 已验证、31 开放；[本批证据](evidence/20260907-issuance-boundaries/manifest.json)。
+schema 28、protocol 27、SQLite 173/5 不变。47 项保持 16 已验证、31 开放；[本批证据](../../docs/reviews/verification-records.md#20260907-issuance-boundaries)。

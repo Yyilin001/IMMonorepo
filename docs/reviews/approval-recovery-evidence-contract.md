@@ -21,7 +21,7 @@
 3. 最终 12 tests / 1 suite 通过，覆盖上述清理、审批故障回滚及并发、申请配额、清理预算/同步重置、Push 条件意图、群策略回执清理，以及 forward export/delivery/operator/audience/ABA 的真实单库和双库回归。
 4. 同时补齐 7 条旧版本迁移测试链至 schema 20。模拟旧 schema 时先移除当前决策唯一约束，执行实际 `20260906_atomic_group_approval.sql`，最终通过 Swift 和 SQL readiness；未用改 marker 冒充迁移。
 
-[证据清单](evidence/20260906-approval-recovery-evidence/manifest.json)。初始失败日志中的旧打印文字只是测试说明；以实际 `purged=3`、缺失回执和失败断言为准，最终日志已打印真实保留布尔值。
+[证据清单](../../docs/reviews/verification-records.md#20260906-approval-recovery-evidence)。初始失败日志中的旧打印文字只是测试说明；以实际 `purged=3`、缺失回执和失败断言为准，最终日志已打印真实保留布尔值。
 
 ## 下一步恢复约束
 

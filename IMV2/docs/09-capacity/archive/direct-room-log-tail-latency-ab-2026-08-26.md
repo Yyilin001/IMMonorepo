@@ -1,5 +1,7 @@
 # Direct room-log tail-latency A/B — 2026-08-26
 
+> **历史归档。** 该尾延迟 A/B 已被次日的 [R29 梯度记录](../direct-room-log-50000-gradient-r29-2026-08-27.md)
+> 与 [R34 共享帧 A/B](../direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md) 取代。
 ## Scope
 
 This run validates the process-local finalization and fast-append cache changes

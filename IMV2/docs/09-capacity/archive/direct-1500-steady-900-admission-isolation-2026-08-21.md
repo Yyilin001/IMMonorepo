@@ -1,5 +1,8 @@
 # Direct 1,500 steady 900 admission-isolation benchmark (2026-08-21)
 
+> **历史归档。** 1,500 在线 admission 隔离实验，已被 50,000 在线梯度与配置隔离报告取代。
+> 当前容量证据见 [R29 梯度记录](../direct-room-log-50000-gradient-r29-2026-08-27.md) 与
+> [implementation-status](../../implementation-status.md)。
 This is a disposable single-host experiment, not a production capacity
 commitment. It uses public TLS from a Mac load generator to one 8-vCPU / 16
 GiB ARM64 Gateway/PostgreSQL host, with `fsync=on` and
@@ -8,7 +11,7 @@ GiB ARM64 Gateway/PostgreSQL host, with `fsync=on` and
 ## Workload and safety boundary
 
 The scenario is
-[`direct-1500-steady-900.json`](../../load-scenarios/direct-1500-steady-900.json).
+[`direct-1500-steady-900.json`](../../../load-scenarios/direct-1500-steady-900.json).
 It authenticates 1,500 fresh disposable users, opens three symmetric direct
 rooms per user, waits for all 4,500 open operations to succeed, then runs 60
 seconds at 900 sends/s and 900 room-log pulls/s. This separation matters:
@@ -47,7 +50,7 @@ recover the rate: it increased end-to-end queueing and reduced completed ACKs.
 Keep the bound at one for the representative workload.
 
 The separate
-[`direct-1500-steady-900-server-saturation.json`](../../load-scenarios/direct-1500-steady-900-server-saturation.json)
+[`direct-1500-steady-900-server-saturation.json`](../../../load-scenarios/direct-1500-steady-900-server-saturation.json)
 uses the same personas and rates but opts into `bounded_client_queue`, with a
 hard 32-message queue per simulated device. It is a server-saturation probe,
 not a replacement for the representative result. Its report makes all of the
@@ -59,7 +62,7 @@ end-of-phase queue; ACK count alone is insufficient.
 ## Isolated durable-append calibration
 
 On the same public TLS path and 1,500 online devices, the new
-[`direct-1500-message-only-900-server-saturation.json`](../../load-scenarios/direct-1500-message-only-900-server-saturation.json)
+[`direct-1500-message-only-900-server-saturation.json`](../../../load-scenarios/direct-1500-message-only-900-server-saturation.json)
 removes room-log reads and retains the same weighted sender mix. It isolates
 the durable direct-message path from the separately bounded interactive-read
 lane.

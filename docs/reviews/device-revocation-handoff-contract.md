@@ -31,4 +31,4 @@ Keychain account 为 `device-revocation-outbox-v1`，版本为 1，最多 256 �
 
 本批尚未实现独立联网执行器、自动退避驱动、暂停后的用户恢复入口或 App 后台调度。App 显式退出仍先执行旧的 Push 端点网络清理，断网退出仍可能受阻；后续需替换为本地交接与独立撤销执行。不可把当前入队成功表述为服务端已撤销。
 
-协议 27、PostgreSQL 28、SQLite 173/5 和 47 项问题状态统计均保持不变。验证日志和最终源码哈希见 [本批证据](evidence/20260907-revocation-handoff/manifest.json)。
+协议 27、PostgreSQL 28、SQLite 173/5 和 47 项问题状态统计均保持不变。验证日志和最终源码哈希见 [本批证据](../../docs/reviews/verification-records.md#20260907-revocation-handoff)。

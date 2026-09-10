@@ -32,4 +32,4 @@ readiness 的 Swift 与 SQL 两个入口同时检查列类型/非空、三个非
 
 ## 验证边界
 
-验证见[证据 manifest](evidence/20260906-invite-directory/manifest.json)：最终 17 项测试 / 2 套件通过，覆盖新目录恢复及七条既有迁移链；真实 21→22 回填、重复迁移拒绝和完整 readiness 负例通过。测试使用两个独立的专用 PostgreSQL 数据库，control 没有目标群成员关系；owner 仍使用现有本地身份校验，因此这不等同于 B27 的最终无 profile 副本验收。尚未完成 Account HTTP、未知 owner、旧缓存 epoch、在线迁移及全局申请配额组合测试。
+验证见[证据 manifest](../../docs/reviews/verification-records.md#20260906-invite-directory)：最终 17 项测试 / 2 套件通过，覆盖新目录恢复及七条既有迁移链；真实 21→22 回填、重复迁移拒绝和完整 readiness 负例通过。测试使用两个独立的专用 PostgreSQL 数据库，control 没有目标群成员关系；owner 仍使用现有本地身份校验，因此这不等同于 B27 的最终无 profile 副本验收。尚未完成 Account HTTP、未知 owner、旧缓存 epoch、在线迁移及全局申请配额组合测试。

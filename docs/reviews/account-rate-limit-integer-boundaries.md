@@ -34,4 +34,4 @@
 
 测试结束后确认专用数据库没有残留 im_v2 schema，并停止本次启动的专用 PostgreSQL cluster。没有修改协议、schema、依赖版本或部署配置。没有新跑 ClientKit/App、实际 TLS、生产 Linux 或多副本部署验收；这里的并发实例共享同一本地 PostgreSQL。
 
-原始失败与成功日志、执行脚本、依赖检查及源码摘要见[本批证据](evidence/20260906-account-rate-limit-boundaries/manifest.json)。B01 继续实施中，仍需审计其他恢复 DTO、worker 计数和日期绑定。47 项总表仍为 15 项已验证、32 项开放；原始日志的干净 checkout 分发仍按 E08 跟踪。
+原始失败与成功日志、执行脚本、依赖检查及源码摘要见[本批证据](../../docs/reviews/verification-records.md#20260906-account-rate-limit-boundaries)。B01 继续实施中，仍需审计其他恢复 DTO、worker 计数和日期绑定。47 项总表仍为 15 项已验证、32 项开放；原始日志的干净 checkout 分发仍按 E08 跟踪。

@@ -28,4 +28,4 @@ Core 负例证明构造/JSON 解码会接受两个超界值。独立 PostgreSQL 
 
 最终服务端扩展回归 **316 项 / 30 套件**通过（335.174 秒）；Core **87 项 / 27 套件**、ClientKit **374 项 / 58 套件**与 App **182 项 / 17 套件**全部通过。服务端覆盖本批边界及既有媒体、受众、owner、分发、转发和快照恢复回归，不代表完整服务端全套。
 
-最终原始日志、脚本、源码哈希见[本批证据](evidence/20260906-profile-projection-boundaries/manifest.json)。B01 仍需对其他恢复 DTO、worker 计数/递增和时间转换完成逐入口审计；本批证据不支持关闭整个 B01。其他 46 个问题范围保持不变。模拟器/macOS Debug 回归不替代生产 Linux、真机、完整 TLS 与发布验收。
+最终原始日志、脚本、源码哈希见[本批证据](../../docs/reviews/verification-records.md#20260906-profile-projection-boundaries)。B01 仍需对其他恢复 DTO、worker 计数/递增和时间转换完成逐入口审计；本批证据不支持关闭整个 B01。其他 46 个问题范围保持不变。模拟器/macOS Debug 回归不替代生产 Linux、真机、完整 TLS 与发布验收。

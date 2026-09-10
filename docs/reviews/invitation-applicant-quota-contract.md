@@ -12,7 +12,7 @@
 
 ## 验证
 
-[证据](evidence/20260906-invitation-applicant-quota/manifest.json)使用真实 PostgreSQL 16.13 和专用数据库 56440。测试在 INSERT 前安装数据库锁屏障，并观察两个真实事务进入等待，再释放屏障。
+[证据](../../docs/reviews/verification-records.md#20260906-invitation-applicant-quota)使用真实 PostgreSQL 16.13 和专用数据库 56440。测试在 INSERT 前安装数据库锁屏障，并观察两个真实事务进入等待，再释放屏障。
 
 旧实现下，两种初始状态（19 条 pending；18 条 pending 加 1 条 approving）最终均提交为 **21 条**，回归失败。修复版两种状态均保持 **20 条**，其中一条新申请成功、另一条被限额拒绝；另验证 10 个并发原 operation 重试、同邀请新 operation、相同 operation 输入冲突、拒绝后的名额重用。
 

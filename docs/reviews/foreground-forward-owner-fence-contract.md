@@ -36,4 +36,4 @@
 
 旧实现真实双库反例在来源/目标 epoch 两个场景中产生 6 个失败断言：均错误接受转发并创建操作记录。新增测试覆盖旧缓存、新命令与重放、错误 shard/数据库、实际等锁期间 epoch 更新，以及读取后/接受后两端 owner 变化的四种组合。恢复检查稳定 client ID、八次并发重试及源版本变化后的结果读取；既有反向转发新增显式 owner 模式。
 
-最终 **184 项测试 / 14 套件**通过、退出 0。首次修复构建发现局部查询函数缺少 @Sendable，补齐后进行最终回归；失败编译日志保留。最终运行和源码哈希见[证据清单](evidence/20260906-local-forward-owner/manifest.json)。PostgreSQL 25、protocol 25、SQLite 173/5 未改变。真实 TLS/App、多 Gateway 负载、Linux 和完整迁移仍待验收。
+最终 **184 项测试 / 14 套件**通过、退出 0。首次修复构建发现局部查询函数缺少 @Sendable，补齐后进行最终回归；失败编译日志保留。最终运行和源码哈希见[证据清单](../../docs/reviews/verification-records.md#20260906-local-forward-owner)。PostgreSQL 25、protocol 25、SQLite 173/5 未改变。真实 TLS/App、多 Gateway 负载、Linux 和完整迁移仍待验收。

@@ -20,4 +20,4 @@
 
 集成用例包含默认权限可发送、明确清空权限后拒绝、真实回执 GC 后继续拒绝，以及已有权限缓存/批量路径的再检查。迁移用例覆盖回执已清理但源历史仍保留、缺口时回滚、完整回填、重复迁移拒绝和缺少角色约束时两种启动门禁拒绝。
 
-最终 20 项服务端测试、3 个套件通过；源码指纹、失败/成功日志及完整 filter 见 [验证记录](evidence/20260906-group-policy-retention/manifest.json)。该修复不等于完成 B06：客户端群管理效果去重、按对象版本排序、snapshot 负状态、旧 payload 与 staging 迁移仍需完成。wire protocol 23 与 SQLite 结构在本批没有变化。
+最终 20 项服务端测试、3 个套件通过；源码指纹、失败/成功日志及完整 filter 见 [验证记录](../../docs/reviews/verification-records.md#20260906-group-policy-retention)。该修复不等于完成 B06：客户端群管理效果去重、按对象版本排序、snapshot 负状态、旧 payload 与 staging 迁移仍需完成。wire protocol 23 与 SQLite 结构在本批没有变化。

@@ -37,4 +37,4 @@
 - 4 项真实 PostgreSQL 回归包含实际 Vapor middleware/route/service pipeline：403、400、401、503 全部回滚、204 重放及持久限流 429，随后新设备仍可认证；并保留此前会话隔离/并发/期限验证。
 - 本批使用 Vapor 内存 HTTP pipeline，没有把它称为真实 HTTPS socket 或 App 到服务器验收；未重新运行 App/TLS live harness。
 
-见 [证据](evidence/20260907-revocation-capability-http/manifest.json)。schema 27、protocol 27、SQLite 173/5 未改。完整签发与客户端持久生命周期仍待实现，47 项目标保持开放。
+见 [证据](../../docs/reviews/verification-records.md#20260907-revocation-capability-http)。schema 27、protocol 27、SQLite 173/5 未改。完整签发与客户端持久生命周期仍待实现，47 项目标保持开放。

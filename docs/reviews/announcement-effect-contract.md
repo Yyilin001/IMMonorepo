@@ -25,6 +25,6 @@ SQLite `orderAnnouncementEffects` 是追加迁移，主库 schema contract 从 1
 
 ## 验证与限制
 
-失败与成功日志及最终源码 SHA-256 见[持久验证证据](evidence/20260906-announcement-effects/manifest.json)。ClientKit 新测试覆盖两种跨流顺序、乱序、重启、同版本/同身份冲突、NULL 源序号补齐、UUID/数值/长度校验、空公告快照、旧库和两种暂存阶段迁移、待发命令保留，以及不恢复已清除公告；原混合房间快照测试增加公告与 receipt 的保留断言。
+失败与成功日志及最终源码 SHA-256 见[持久验证证据](../../docs/reviews/verification-records.md#20260906-announcement-effects)。ClientKit 新测试覆盖两种跨流顺序、乱序、重启、同版本/同身份冲突、NULL 源序号补齐、UUID/数值/长度校验、空公告快照、旧库和两种暂存阶段迁移、待发命令保留，以及不恢复已清除公告；原混合房间快照测试增加公告与 receipt 的保留断言。
 
 协议保持 **24**，PostgreSQL schema 保持 **18**，此次未修改服务端。客户端各角色空权限与独立 revision、置顶负状态、成员离开/重入、完整 receipt 保留窗口和代次恢复仍未关闭。此次迁移不凭空重建已丢失的历史身份，也不替代 B03 缺失依赖恢复或独立房间日志授权基线。

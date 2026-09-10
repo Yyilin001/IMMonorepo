@@ -26,7 +26,7 @@
 - ClientKit 报告 392 项 / 61 套件（4.201 秒）；四项 opt-in 真实服务测试跳过，实际执行 388 项离线回归全部通过。
 - iPhone 17 / iOS 26.2 App 单元回归 183 项 / 17 套件通过（4.816 秒）；服务端 Gateway 领域路由与会话 49 项 / 2 套件通过（0.019 秒）。本批没有新跑 UI 或真实 Gateway 端到端测试。
 
-成功用例关闭并移除自己的临时 SQLite 目录。负向进程因 fatal error 无法执行 defer，已单独移除其确切目录中的主库、搜索库及 WAL/SHM；未清理其他数据库。脚本、原始日志与源码摘要见[本批证据](evidence/20260906-client-timestamp-boundaries/manifest.json)。
+成功用例关闭并移除自己的临时 SQLite 目录。负向进程因 fatal error 无法执行 defer，已单独移除其确切目录中的主库、搜索库及 WAL/SHM；未清理其他数据库。脚本、原始日志与源码摘要见[本批证据](../../docs/reviews/verification-records.md#20260906-client-timestamp-boundaries)。
 
 ## 审计排除项与剩余范围
 

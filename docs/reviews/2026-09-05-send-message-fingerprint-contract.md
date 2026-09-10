@@ -1,6 +1,6 @@
 # SendMessage 请求指纹实施合同
 
-这是 B11/D07 的当前实施记录，配合 [47 项修复进度](2026-09-05-system-remediation-progress.md) 阅读。Core 编码、纯 reducer、9 处消息 INSERT 的原子完成记录、PostgreSQL 重放读取和无正文 ACK 已接入。协议为 22，schema 为 9；GC、owner 迁移与性能证据仍待完成，B11 保持实施中。
+这是 B11/D07 的当前实施记录，配合 [47 项修复进度](archive/2026-09-05-system-remediation-progress.md) 阅读。Core 编码、纯 reducer、9 处消息 INSERT 的原子完成记录、PostgreSQL 重放读取和无正文 ACK 已接入。协议为 22，schema 为 9；GC、owner 迁移与性能证据仍待完成，B11 保持实施中。
 
 ## 编码版本与兼容边界
 

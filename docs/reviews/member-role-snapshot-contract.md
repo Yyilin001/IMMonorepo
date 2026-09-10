@@ -20,6 +20,6 @@
 
 最终服务端定向回归 **22 项 / 4 套件**通过。真实 PostgreSQL 覆盖两名成员的角色提交与逆序 fanout、按目标保留版本、迟到旧角色、旧大小写键、快照 build/manifest/page/ACK，以及同版本不同来源冲突后的 checkpoint 回滚；类型测试覆盖 membership revision 选择、目标身份、owner/非法角色、缺失/溢出/非法版本和源序号/时间边界。原置顶、公告、权限保留、reaction、schema 和快照合同也通过本次定向回归。
 
-运行日志和四份源码哈希见[成员角色快照证据](evidence/20260906-member-role-snapshots/manifest.json)。没有新跑 Core、ClientKit 或 App，也不是服务端全套。diff、协议文档、schema relation coverage 通过；测试会话终态已确认，两临时库清理后 PostgreSQL 已停止。本批没有失败测试运行。成员资格组合、TLS、Linux、负载及生产切换仍未验收。
+运行日志和四份源码哈希见[成员角色快照证据](../../docs/reviews/verification-records.md#20260906-member-role-snapshots)。没有新跑 Core、ClientKit 或 App，也不是服务端全套。diff、协议文档、schema relation coverage 通过；测试会话终态已确认，两临时库清理后 PostgreSQL 已停止。本批没有失败测试运行。成员资格组合、TLS、Linux、负载及生产切换仍未验收。
 
 Protocol 25、PostgreSQL 18、SQLite 172/5 未改，B06 仍实施中。

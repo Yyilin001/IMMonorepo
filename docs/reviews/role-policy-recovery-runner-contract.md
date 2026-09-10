@@ -26,6 +26,6 @@
 
 ## 证据与限制
 
-ClientKit **327 项 / 53 套件**、App **171 项 / 17 套件**通过。测试覆盖跨房间失败隔离、重试后重启、服务端延迟、暂停/显式重试、FORBIDDEN、取消和成员变化后的迟到结果、无额外提示的发现、旧请求表迁移、runtime stop 拥有恢复任务，以及 App 新旧权限读取交错。失败/成功日志与源码绑定见[执行器证据](evidence/20260906-policy-runner/manifest.json)。
+ClientKit **327 项 / 53 套件**、App **171 项 / 17 套件**通过。测试覆盖跨房间失败隔离、重试后重启、服务端延迟、暂停/显式重试、FORBIDDEN、取消和成员变化后的迟到结果、无额外提示的发现、旧请求表迁移、runtime stop 拥有恢复任务，以及 App 新旧权限读取交错。失败/成功日志与源码绑定见[执行器证据](../../docs/reviews/verification-records.md#20260906-policy-runner)。
 
 本批未新跑 Core/server/PostgreSQL、真实网络、Linux、负载或无障碍人工验收，也未执行权限弹层的点击端到端测试。未部署，protocol 25 与 PostgreSQL 18 未变。暂停交互、置顶/成员角色、完整 receipts 保留/清理及组合验收仍开放，B06 不关闭。

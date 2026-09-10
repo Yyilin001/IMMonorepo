@@ -18,7 +18,7 @@
 
 ## 验收范围
 
-[证据清单](evidence/20260906-timeline-location/manifest.json)保存分层回归、首次测试编译失败和滚动负向实验。验证包括：
+[证据清单](../../docs/reviews/verification-records.md#20260906-timeline-location)保存分层回归、首次测试编译失败和滚动负向实验。验证包括：
 
 - 1,000/100,000 条真实 SQLite 历史的首、中、尾定位，窗口和双向边界正确，刷新结果一致。
 - 同样规模的置顶负记录下，实际生产查询约 1,700/3,400/1,700 个 SQLite VM 步骤；历史扩大 100 倍时保持相同。计数通过测试连接的 SQLite progress handler 获取，误差粒度 100 步，不以墙钟时间作性能断言。

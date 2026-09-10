@@ -1,5 +1,8 @@
 # Direct room-log shard-credit batch benchmark (2026-08-20)
 
+> **历史归档。** 该批次实验已由
+> [hot direct room credit 灰度记录](../hot-direct-room-credit-rollout-2026-08-22.md)
+> 取代，后者是 [command-credit runbook](../../10-operations/direct-room-log-command-credit-runbook.md) 引用的当前依据。
 This is a controlled, disposable-environment experiment. It validates the
 admission-credit safety and SQL reduction of the direct room-log path; it is
 not a production capacity promise.

@@ -32,7 +32,7 @@
 - 邀请单库申请配额（pending 与 legacy approving）、分页锚点、耗尽链接额度、普通成员 add/remove 及服务策略回归通过。
 - 19→20 迁移遇重复决策时保留旧 schema 与两条记录；修正测试夹具后迁移保留记录并满足物理合同；数据库拒绝跨申请复用；重复迁移在变更前失败。
 
-证据：[manifest](evidence/20260906-atomic-group-approval/manifest.json)。故障 trigger 证明事务错误回滚，并不等同于真实进程崩溃或 HTTPS ACK 丢失演练；重复调用证明 durable replay，不宣称已完成网络故障注入。
+证据：[manifest](../../docs/reviews/verification-records.md#20260906-atomic-group-approval)。故障 trigger 证明事务错误回滚，并不等同于真实进程崩溃或 HTTPS ACK 丢失演练；重复调用证明 durable replay，不宣称已完成网络故障注入。
 
 ## 仍需闭环
 

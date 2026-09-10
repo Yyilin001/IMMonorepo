@@ -6,6 +6,12 @@
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
 生产发布批准；需要真实凭据、设备、供应商、容量或运维环境的项目单列为外部风险。
 
+> 本文件回答"现在有哪些能力、证据到什么等级"。**哪个文件是当前合同**见
+> [V2 文档索引](../../docs/reviews/README.md)；**哪些问题还没关闭**见
+> [问题状态表](../../docs/reviews/status.md)；整改期的逐批记录已移入
+> [历史时间线](../../docs/reviews/archive/2026-09-05-remediation-timeline.md)，
+> 不要再把过程记录追加回本文件。
+
 ## 证据等级
 
 | 状态 | 含义 |
@@ -111,37 +117,3 @@ bash IMV2/scripts/test_v2_local_environment_contract.sh
 
 开放风险及关闭条件以
 [`residual-risk-register.md`](10-operations/residual-risk-register.md) 为准。
-
-B18 本地历史定位已完成 1k/100k 数据量、同键活动、取消/刷新及真实 SwiftUI 滚动验收，见[定位合同](../../docs/reviews/timeline-location-contract.md)。此结果不扩大上文服务端容量结论。
-
-邀请申请的单库申请人配额已增加事务互斥并通过真实并发回归；跨 owner 全局 reservation 与终态释放仍开放，见[配额合同](../../docs/reviews/invitation-applicant-quota-contract.md)。
-
-已补[签发取消与活动旧凭据替换](../../docs/reviews/credential-issuance-boundaries-contract.md)及[已收到结果的持久交接](../../docs/reviews/received-credential-recovery-contract.md)：返回前保存撤销能力，冷启动识别正常接管并恢复废弃结果，转交不重置已有任务。完全丢失签发响应及真机系统中断验收仍开放。
-
-最新补充（B08 注册取消仲裁）：新增请求前可持有的独立取消证明、服务端取消记录，以及与签发共用事务的绑定；取消先到阻止签发，签发先到则原子撤销。锁后期限检查、证明四字段隔离、两侧回滚和旧迁移链共 21 项真实 PostgreSQL 测试通过，Core 95 项、原有 HTTP 单元 10 项通过。PostgreSQL 升至 29，见[合同](../../docs/reviews/registration-cancellation-contract.md)。HTTP/App 尚未切换到新证明，完全丢失响应的端到端恢复仍开放，B08 及全部 47 项状态不变。
-
-最新补充（B08 取消 HTTP）：账号服务已挂载受 trusted-edge 和地址限流保护的注册取消路由，ClientKit 增加不依赖登录凭据的传输。ClientKit 453 项实际执行（5 跳过）、HTTP 单元 13 项、真实 PostgreSQL 22 项通过；真实 HTTPS 5 项验证取消提交后丢弃客户端结果、原证明重放仍只有一条取消记录。见[HTTP 合同](../../docs/reviews/registration-cancellation-http-contract.md)及[证据](../../docs/reviews/evidence/20260907-registration-cancellation-http/manifest.json)。HTTP 签发强制证明与 App 请求前持久化/独立取消队列仍开放，16 项已验证、31 项开放不变。
-
-
-最新补充（2026-09-07，B08 签发证明绑定）：[请求前持久化与强制 HTTP 绑定](../../docs/reviews/proof-bound-issuance-contract.md)已实现，注册 ledger 升为 format 2；缺少或不匹配确认会先交接收到的撤销能力再拒绝登录，旧记录保留档案，过期尝试保留证明并换用新身份。客户端 **462 项报告 / 457 项实际执行**、接口 **14 项**、真实 PostgreSQL **22 项**、App **197 项报告 / 196 项实际执行**通过；最终真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过。数据库设备/撤销/残留访问/残留刷新/事件为 **16|7|0|0|7**，取消记录总数/绑定/取消为 **17|16|2**；独立补偿允许多个操作指向同一已撤销设备，事件仍不重复。脚本调用同步补齐证明，Compose 栈脚本只做语法及共用工具离线检查。初始解码错误、旧 UI 夹具和旧统计假设的失败均留档；最终专用资源已移除。见[证据](../../docs/reviews/evidence/20260907-proof-bound-issuance/manifest.json)。自动取消执行器、冷启动请求前证明归属、旧会话清理和真机系统中断仍开放；47 项仍为 **16 已验证、31 开放**，B08 不关闭。
-
-
-最新补充（2026-09-07，B08 遗弃注册自动取消）：[执行器与冷启动归属](../../docs/reviews/registration-cancellation-runner-contract.md)已接入 App。format 3 原子迁移旧证明并保存尝试次数、退避和暂停，冷启动只把未被当前持久凭据接管的 pending 入队；前台观察自动执行，后台取消并等待实际请求结束，清理反馈和手动重试覆盖两类队列。客户端 **472 项报告 / 467 项实际执行**、签名 App **199 项报告 / 198 项实际执行**通过；真实 Keychain 验证归属及暂停反馈。真实 HTTPS **5 项**、App UI **2 项**、独立后台入口 **1 项**通过，验证签发和取消响应相继丢失后仍使用原证明重试。数据库 **16|7|0|0|7**，取消记录 **17|16|2**，取消 HTTP 204 四次但记录不重复；专用资源已清理。见[证据](../../docs/reviews/evidence/20260907-registration-cancellation-runner/manifest.json)。旧会话/legacy 档案清理、真实强杀/锁屏/系统后台和记录 GC 仍开放；B08 保持实施中，全部 47 项仍 **16 已验证、31 开放**。
-
-
-最新补充（2026-09-07，B08 实际进程中断）：[真实 App 两次终止后恢复](../../docs/reviews/registration-process-interruption-contract.md)已通过。HTTPS 代理在服务端签发/取消分别提交后保留响应，受控终止专用模拟器里的 App；第二次重启从真实 Keychain 使用原证明重放，并完成新设备登录。原设备单独核对 **2|1|1|1|0|0**（账号设备数/原设备撤销/证明取消记录/事件/有效 access/有效 refresh）；没有重复事件。同期修复命令行证明将 DeviceID 误编码为字符串的问题，真实凭据准备脚本的签发、鉴权和取消通过。最终 **5 项原生 HTTPS、3 项 App UI、1 项独立后台入口**通过，全库 **19|9|0|0|9**、取消记录 **20|19|4**。见[证据](../../docs/reviews/evidence/20260907-registration-process-interruption/manifest.json)。这是 simctl 受控进程终止，不等同于 SIGKILL/OS jetsam/真机锁屏；legacy 清理及其他检查点仍开放。47 项仍 **16 已验证、31 开放**。
-
-
-2026-09-07，B08 旧注册档案：新增[服务端取消仲裁](../../docs/reviews/legacy-registration-arbitration-contract.md)，以重新验证的账号权限限定清理范围；账号/注册锁内持久取消、原子撤销并拒绝同账号迟到签发。每账号上限 256 条，29→30 保留既有凭据且不推断历史取消。启用前必须停止全部旧签发进程。HTTP、ClientKit 与 App 的 legacy 清理尚未接线，记录 GC 及完整系统生命周期验收仍开放。
-
-
-2026-09-07，B08 已接通[旧注册清理 HTTP](../../docs/reviews/legacy-registration-http-contract.md)：生产账号入口校验新设备绑定的短期账号证明，加入可信边缘和持久地址限流。18 项接口、26 项 PostgreSQL、5 项真实 HTTPS 基线与新增真实密码/清理扩展通过；ClientKit/App 旧档案恢复仍待接线。
-
-
-2026-09-07，B08 [客户端旧档案恢复](../../docs/reviews/legacy-registration-client-recovery-contract.md)已加入 App 登录：复用一次账号因子完成旧注册清理及新凭据签发。原注册尝试和完整档案 CAS 防止迟到确认覆盖，错误与容量反馈保留记录；最多一个额外位置供满额旧档案恢复。真实 Keychain 与 ClientKit/HTTPS 分层验收通过，实际 App legacy 交互/进程中断与真机边界仍开放。
-
-
-2026-09-07，B08 [实际 App 旧档案跨进程恢复](../../docs/reviews/legacy-registration-app-process-contract.md)已通过：真实 Keychain、清理响应前受控终止、新证明重放、新登录及再次冷恢复，服务端目标无有效凭据残留或重复事件。DEBUG 种子及清理只作用于隔离测试域，拒绝覆盖已有档案。真机、其他检查点和永久冲突/GC 仍开放。
-
-
-最新补充（2026-09-07，B01 服务端时钟）：[账号证明与 Gateway 时钟边界](../../docs/reviews/server-clock-integer-boundaries.md)已补检查；独立进程复现 NaN 转 Int64 fatal error 后，新增非有限值、有效期相加越界和不可用编码截止的拒绝。Hello 在状态变更前检查，心跳覆盖异步准入后再次失效并释放请求关联；凭据接口将时钟故障返回为空正文、不缓存的 503，修复前错误 401 的三条失败断言留档。最终服务端 **57 项 / 7 套件（6.387 秒）**、真实 HTTPS **5 项 / 2 套件（2.734 秒）**、App UI **2 项（64.268 秒）**、独立后台入口 **1 项（1.298 秒）**通过。数据库 **16|7|0|0|7**、注册取消记录 **17|16|2**，专用数据库根与模拟器已独立核实移除。见[证据](../../docs/reviews/evidence/20260907-server-clock-boundaries/manifest.json)。这不是远端可控时间戳攻击的证明；其余恢复 DTO、计数和时间消费者继续审计，B01 仍实施中，全部47项保持 **16 已验证、31 开放**。

@@ -23,7 +23,7 @@ Swift 启动检查和 SQL 合同检查同时要求期限字段和有效的有限
 - **迁移验证**：独立 schema 25 中准备近期和过期设备，实际迁移后核对创建时间锚定、有效凭据上界、过期凭据与 Push 失效及撤销事件；完整 SQL schema 合同通过，重复迁移被拒绝。
 - **真实 App 组合回归**：2 项 UI 分别通过 Gateway/HTTP 撤销、冷启动及同账号重新登录（38.076、31.633 秒）；5 项 HTTPS 测试通过（2.710 秒）；独立 delegate/store 后台入口 1 项通过（1.286 秒）。这组正常流回归没有等待真实的 30 天到期，也不代表 APNs 或系统无 scene 冷启动验收。
 
-真实组合最终数据库计数 `15|5|0|0|5`，UI 和后台测试清理后 Gateway 均为 0。临时数据库、私有证书和专用模拟器已清除。首轮 PostgreSQL 回归的一个历史迁移链版本失败也保留在[证据](evidence/20260907-session-absolute-expiry/manifest.json)，未隐藏或计作通过。
+真实组合最终数据库计数 `15|5|0|0|5`，UI 和后台测试清理后 Gateway 均为 0。临时数据库、私有证书和专用模拟器已清除。首轮 PostgreSQL 回归的一个历史迁移链版本失败也保留在[证据](../../docs/reviews/verification-records.md#20260907-session-absolute-expiry)，未隐藏或计作通过。
 
 ## 剩余工作
 

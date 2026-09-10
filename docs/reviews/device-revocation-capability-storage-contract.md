@@ -36,4 +36,4 @@
 4. A→B→A、断网、锁屏、杀进程、迟到响应与新账号登录的真实组合验证；失败不依赖新账号凭据。
 5. 保留与清理策略不能让未到期 capability 对应的设备标识被复用。
 
-本批执行证据见 [manifest](evidence/20260907-revocation-capability-storage/manifest.json)。
+本批执行证据见 [manifest](../../docs/reviews/verification-records.md#20260907-revocation-capability-storage)。

@@ -30,7 +30,7 @@
 
 ## 验证与剩余工作
 
-修复前 1 项测试 / 6 场景失败，10 issues。首轮修复后 7 项测试 / 3 套件通过，包含旧缓存新写/回执/读取、十次并发幂等、错误/未知 owner、无 owner profile、等待共享锁期间 epoch 改变和新 epoch 重放。扩展回归 8 项测试 / 3 套件通过，最终 **126 项测试 / 11 套件**通过。混合批次、单条与批量竞争、control 隐私过滤、多房间消息并发及日志见[证据清单](evidence/20260906-read-receipt-owner/manifest.json)。
+修复前 1 项测试 / 6 场景失败，10 issues。首轮修复后 7 项测试 / 3 套件通过，包含旧缓存新写/回执/读取、十次并发幂等、错误/未知 owner、无 owner profile、等待共享锁期间 epoch 改变和新 epoch 重放。扩展回归 8 项测试 / 3 套件通过，最终 **126 项测试 / 11 套件**通过。混合批次、单条与批量竞争、control 隐私过滤、多房间消息并发及日志见[证据清单](../../docs/reviews/verification-records.md#20260906-read-receipt-owner)。
 
 PostgreSQL 25、protocol 25、SQLite 173/5 不变。通用发送/批量/fast append、其他读取与后台工作仍需统一 owner 检查；完整历史、回执、私聊投影、审核任务、D05 阻断与审计、转发/媒体、outbox 的复制、核验、切换及失败恢复仍待完成。
 

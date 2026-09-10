@@ -144,7 +144,7 @@ Gateway 使用每个 owner 原配置的 `PostgresV2RoomWriteStore`，通过值�
 
 真实双库测试通过实际持久 room directory、router、源服务、目标端点和 runtime 验证普通群/大群：运行中入队；停止期间源任务积压而目标不写入；重启后完成；重复请求、源后来撤回仍恢复原结果；更换源版本得到幂等冲突。Gateway handler 另验证 protobuf 错误映射。此处未启动 TLS Gateway/App 进程，不能称为完整设备端到端验收。最终日志与源码绑定见修复进度记录。
 
-持久暂停也必须跨进程恢复：目标扫描耗尽提交 paused 后可能丢失响应，新 media worker 无可领取任务时读取该 export 的 paused 状态，继续返回 paused，源 worker 保持暂停。不能把不可领取的 paused 永远当成普通 idle。最终 **95 tests / 8 suites** 与 **37 配置测试 / 2 suites** 的完整日志及源码绑定见 [本轮持久证据](evidence/20260906-forward-runtime/manifest.json)；其中 17 种投递场景包含暂停响应丢失，29 种启动门禁故障均通过。
+持久暂停也必须跨进程恢复：目标扫描耗尽提交 paused 后可能丢失响应，新 media worker 无可领取任务时读取该 export 的 paused 状态，继续返回 paused，源 worker 保持暂停。不能把不可领取的 paused 永远当成普通 idle。最终 **95 tests / 8 suites** 与 **37 配置测试 / 2 suites** 的完整日志及源码绑定见 [本轮持久证据](../../docs/reviews/verification-records.md#20260906-forward-runtime)；其中 17 种投递场景包含暂停响应丢失，29 种启动门禁故障均通过。
 
 
 ## Schema 16：独立 operator 审计恢复
@@ -155,7 +155,7 @@ Gateway 使用每个 owner 原配置的 `PostgresV2RoomWriteStore`，通过值�
 
 HTTP、真实双库恢复及迁移/门禁验证以本轮修复记录为准。具体配置、请求、先目标媒体再源投递的恢复次序和错误处理见 [暂停恢复操作合同](forward-operator-replay.md)。跨库媒体 HTTP owner 路由、owner 迁移及终态 envelope 清理仍开放；本轮没有部署 operator 或操作用户数据库。
 
-Schema 16 最终 **104 tests / 11 suites** 通过，含 18 种投递场景与 34 种 schema gate 故障；同操作 16 次并发、不同操作 8 次并发、实际附件恢复和恢复后禁言均覆盖。完整失败/成功日志、差异原因与最终源码绑定见 [operator 恢复证据](evidence/20260906-forward-operator/manifest.json)。
+Schema 16 最终 **104 tests / 11 suites** 通过，含 18 种投递场景与 34 种 schema gate 故障；同操作 16 次并发、不同操作 8 次并发、实际附件恢复和恢复后禁言均覆盖。完整失败/成功日志、差异原因与最终源码绑定见 [operator 恢复证据](../../docs/reviews/verification-records.md#20260906-forward-operator)。
 
 
 ## 2026-09-06：按消息位置路由媒体下载（schema 17）
@@ -172,7 +172,7 @@ Account 从明确的 room/user registry 装配，连接预算覆盖去重后的�
 
 升级时先在所有配置的存储上执行 16→17 迁移，再使用匹配的服务端二进制和 Account room/user registry；旧 schema 会被启动门禁拒绝。新版 App 会话始终传消息位置，部署不能省略 room registry 后依赖旧控制库路径兜底。此轮没有执行生产迁移。
 
-最终验证：Test run with 113 tests in 13 suites passed after 81.899 seconds.；ClientKit 294、Core 80、App 模拟器 170 项测试通过。完整初次失败与最终成功日志及源码绑定见 [schema 17 媒体路由证据](evidence/20260906-scoped-media/manifest.json)。
+最终验证：Test run with 113 tests in 13 suites passed after 81.899 seconds.；ClientKit 294、Core 80、App 模拟器 170 项测试通过。完整初次失败与最终成功日志及源码绑定见 [schema 17 媒体路由证据](../../docs/reviews/verification-records.md#20260906-scoped-media)。
 
 ## 前台同库 owner 补充（2026-09-06）
 

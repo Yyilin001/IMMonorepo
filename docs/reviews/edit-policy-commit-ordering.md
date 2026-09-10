@@ -35,6 +35,6 @@
 
 修正降级夹具的初始 membership revision 后，24 个确定提交顺序场景全部通过；初轮使用 revision 0，角色命令在进入数据库前被拒绝，造成 4 个 gate 超时，原始日志单独保留，不作为生产并发缺陷。最终相关服务端回归 **91 项 / 6 套件**通过（47.676 秒），包含顺序授权拒绝、合法原操作重放、编辑/撤回竞争、owner 事务栅栏、成员/群策略和发送 credit 准入。
 
-本批新增测试与合同记录，没有修改生产授权算法、接口或 schema，也未重跑未修改的 Core/ClientKit/App。源码、原始失败/最终日志和执行脚本见[本批证据](evidence/20260906-edit-policy-commit-ordering/manifest.json)。
+本批新增测试与合同记录，没有修改生产授权算法、接口或 schema，也未重跑未修改的 Core/ClientKit/App。源码、原始失败/最终日志和执行脚本见[本批证据](../../docs/reviews/verification-records.md#20260906-edit-policy-commit-ordering)。
 
 B02 的原始缺陷、共享策略、确定并发顺序及幂等重放要求已有当前证据，可标为已验证；47 项仍有 33 项未达到完整关闭条件。此关闭结论不扩大到上述其他问题或生产就绪。

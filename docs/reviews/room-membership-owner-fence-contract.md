@@ -34,7 +34,7 @@
 
 修复前 1 项测试 / 2 个参数场景均失败，共 8 个断言发现旧 owner 已发生业务写入。修复后首轮 8 项测试 / 3 套件通过；最终 78 项测试 / 7 套件通过。包括普通群/大群、十次并发幂等、旧缓存的新操作及重放、当前身份、错误/未知 owner、请求等待期间 epoch 变化及新 epoch 重试；另覆盖 Gateway 命令错误映射、远端群创建、既有成员冻结受众、三库邀请、原子审批、D05 旧操作阻断和七条历史迁移链。Gateway 组装已编译，未部署真实网关。
 
-本批 PostgreSQL schema 25、protocol 25、SQLite 173/5 均不变。验证记录见[本批证据](evidence/20260906-membership-owner-fence/manifest.json)。真实网络客户端、完整房间跨物理复制、进程崩溃和生产迁移尚未执行。
+本批 PostgreSQL schema 25、protocol 25、SQLite 173/5 均不变。验证记录见[本批证据](../../docs/reviews/verification-records.md#20260906-membership-owner-fence)。真实网络客户端、完整房间跨物理复制、进程崩溃和生产迁移尚未执行。
 
 后续补充：群已读回执及读者候选分页已接入[共享 owner 栅栏](read-receipt-owner-fence-contract.md)。私聊后续 control 投影、其他路径与完整迁移仍以该合同的剩余范围为准。
 

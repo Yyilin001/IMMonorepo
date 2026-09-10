@@ -16,6 +16,6 @@
 
 既有快照与已经丢掉的旧负状态不会在此批凭空回填。新版处理需要统一切换 projection worker，不能让旧 worker 继续无条件覆盖版本。PostgreSQL schema 18、protocol 23、SQLite 结构不变，未部署。
 
-最终 24 项服务端测试、4 个套件通过；失败/成功日志、完整 filter 和十份源码指纹见 [验证记录](evidence/20260906-group-policy-snapshots/manifest.json)。测试数据库已清理并停止。
+最终 24 项服务端测试、4 个套件通过；失败/成功日志、完整 filter 和十份源码指纹见 [验证记录](../../docs/reviews/verification-records.md#20260906-group-policy-snapshots)。测试数据库已清理并停止。
 
 仍待完成：客户端各持久流的统一效果事务、旧库与 staging 恢复、取消置顶的历史源版本、成员离开和角色更新的版本/授权组合，以及全局保留窗口与代次栅栏。

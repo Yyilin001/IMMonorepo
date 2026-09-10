@@ -16,7 +16,7 @@ V2AppStore 在认证 attempt/session epoch 检查之间获取账号、安装、�
 
 ## 验证
 
-本批 [证据清单](evidence/20260906-push-intent-app/manifest.json)保存 ClientKit **355 项 / 56 套件**、App 最终 **176 项 / 17 套件**通过的日志，也保留 isolated deinit 和测试 fixture actor 隔离的两次编译失败及修正后日志。最后一次测试的会话句柄在上下文恢复时不可用，以 xcodebuild 的 TEST SUCCEEDED 和进程已结束作为终态证据，不推断未观察到的退出码。
+本批 [证据清单](../../docs/reviews/verification-records.md#20260906-push-intent-app)保存 ClientKit **355 项 / 56 套件**、App 最终 **176 项 / 17 套件**通过的日志，也保留 isolated deinit 和测试 fixture actor 隔离的两次编译失败及修正后日志。最后一次测试的会话句柄在上下文恢复时不可用，以 xcodebuild 的 TEST SUCCEEDED 和进程已结束作为终态证据，不推断未观察到的退出码。
 
 9 项 App 设置测试使用真实 SQLite 和真实执行器，覆盖注册期间关闭、自动退避、重建 owner 保留关闭、系统失败/重试、退出 ACK 和失败、迟到 token、非配合取消请求及两个 stop 等待者。远端为可控制传输替身。这些测试不等于真实 App→HTTPS→Account→PostgreSQL 组合验证，也不证明 V2AppStore 的 A→B→A、进程被杀、终态 HTTP 和退出重入全部正确。
 

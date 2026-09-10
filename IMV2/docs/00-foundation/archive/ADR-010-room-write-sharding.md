@@ -1,5 +1,9 @@
 # ADR-010：Room 写入路由与消息存储拆分
 
+> **历史归档（编号冲突）。** 本文与
+> [09-capacity/ADR-010 容量与灾备](../../09-capacity/ADR-010-capacity-and-disaster-recovery.md)
+> 共用 ADR-010 编号，且未登记在 [ADR 登记册](../../ADR-REGISTER.md)。房间/用户分片路由的当前决定见
+> [ADR-006 路由与迁移](../ADR-006-routing-and-migration.md)，容量与灾备见 ADR-010 的容量版。
 状态：阶段 1 已实施；阶段 2 等待容量目标与运维存储拓扑批准
 日期：2026-08-21  
 所有者：V2 存储/网关

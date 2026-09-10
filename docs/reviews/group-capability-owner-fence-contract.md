@@ -20,7 +20,7 @@ V2RoutedGroupCapabilitiesStore 原来在选择 store 后丢弃 route epoch，共
 
 ## 验证与剩余工作
 
-修复前 1 项测试 / 8 场景失败，32 issues。首轮修复后 **5 项测试 / 3 套件**通过。修复后覆盖旧缓存新命令与回执、同库多 shard、十次并发只提交一次、错误 shard/数据库、未知 registry、self-role 提前返回，以及重放等待 room 锁时 epoch 变化后拒绝。最终 **93 项测试 / 7 套件**通过，日志见[证据清单](evidence/20260906-group-capability-owner/manifest.json)。
+修复前 1 项测试 / 8 场景失败，32 issues。首轮修复后 **5 项测试 / 3 套件**通过。修复后覆盖旧缓存新命令与回执、同库多 shard、十次并发只提交一次、错误 shard/数据库、未知 registry、self-role 提前返回，以及重放等待 room 锁时 epoch 变化后拒绝。最终 **93 项测试 / 7 套件**通过，日志见[证据清单](../../docs/reviews/verification-records.md#20260906-group-capability-owner)。
 
 PostgreSQL 25、protocol 25、SQLite 173/5 不变；无 schema 迁移。测试使用专用 loopback PostgreSQL，本批最终回归包含独立 control 与两个 owner。生产入口已编译，网关命令测试不等同实际 TLS/App 或生产部署。
 
