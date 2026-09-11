@@ -8,7 +8,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-30"
+    public static let currentSchemaID = "im-v2-current-33"
     private static let requiredTables = [
         "schema_contract", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_revocation_capabilities", "device_registration_cancellations", "legacy_device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_invite_directory_import_audit", "group_join_requests", "group_join_approval_recovery_audit", "room_membership_operation_fences", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
@@ -71,6 +71,59 @@ public enum V2SchemaReadiness {
             throw V2SchemaReadinessError.unavailableTable(
                 "\(schema).schema_contract[\(currentSchemaID)]"
             )
+        }
+        // 会话排序依据必须由结构保证：列存在、索引可用于按活动倒序分页，
+        // 且刷新触发器处于启用状态。缺少触发器会让新写入路径悄悄停止刷新。
+        guard let roomActivityContract = try await sql.raw("""
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = \(bind: schema) AND table_name = 'rooms'
+                      AND column_name = 'last_event_at' AND udt_name = 'timestamptz'
+                      AND is_nullable = 'NO'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM pg_class AS index_record
+                    JOIN pg_namespace AS namespace ON namespace.oid = index_record.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_record.relname = 'rooms_last_event_at_idx'
+                      AND index_record.relkind = 'i'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM pg_trigger AS trigger_record
+                    JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
+                    JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND relation.relname = 'rooms'
+                      AND trigger_record.tgname = 'rooms_touch_last_event_at'
+                      AND trigger_record.tgenabled = 'O'
+                      AND NOT trigger_record.tgisinternal
+                )
+                AND EXISTS (
+                    SELECT 1 FROM pg_class AS index_record
+                    JOIN pg_namespace AS namespace ON namespace.oid = index_record.relnamespace
+                    WHERE namespace.nspname = \(bind: schema)
+                      AND index_record.relname = 'messages_room_sender_sequence_idx'
+                      AND index_record.relkind = 'i'
+                )
+                -- 房间的权威副本形态必须由结构保证：缺失或拼错会让标准群静默退回
+                -- 逐用户投递，客户端也就不会按游标拉取。
+                AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = \(bind: schema) AND table_name = 'rooms'
+                      AND column_name = 'delivery_authority' AND udt_name = 'text'
+                      AND is_nullable = 'NO'
+                )
+                -- 保留裁剪的下界也必须存在：缺了它，客户端无法判断历史是否被裁剪过，
+                -- 也就无法避免"静默少几条"。
+                AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = \(bind: schema) AND table_name = 'rooms'
+                      AND column_name = 'log_trimmed_through_room_sequence' AND udt_name = 'int8'
+                      AND is_nullable = 'NO'
+                ) AS exists
+            """).first(decoding: ExistsRow.self), roomActivityContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable("\(schema).rooms[activity-contract]")
         }
         guard let legacyCancellationContract = try await sql.raw("""
             SELECT ((SELECT count(*) = 4 AND bool_and(is_nullable = 'NO') FROM information_schema.columns

@@ -36,14 +36,30 @@ struct V2MediaScanWorkerTests {
         #expect(await store.completed().isEmpty)
     }
 
-    @Test("retry exhaustion pauses the scan job for audited replay")
-    func exhaustedScanPausesLease() async throws {
+    @Test("an exhausted scan attempt keeps retrying instead of pausing")
+    func exhaustedScanRetriesLease() async throws {
         let lease = try V2MediaScanLease(mediaID: .init("media"), claimToken: UUID(), attempt: 2)
         let store = RecordingMediaScanStore(leases: [lease])
         let worker = try V2MediaScanWorker(
             store: store,
             provider: FailingMediaScanner(),
             retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0)
+        )
+
+        // A scanner outage is transient: the attempt budget must not turn it
+        // into work that only an operator can release.
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 1))
+        #expect(await store.retries().map(\.disposition) != [.pause])
+    }
+
+    @Test("a scan invariant violation pauses the job on its first attempt")
+    func invariantScanFailurePausesLease() async throws {
+        let lease = try V2MediaScanLease(mediaID: .init("media"), claimToken: UUID(), attempt: 1)
+        let store = RecordingMediaScanStore(leases: [lease])
+        let worker = try V2MediaScanWorker(
+            store: store,
+            provider: InvariantFailingMediaScanner(),
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 10, jitterFraction: 0)
         )
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 0, pausedCount: 1))
@@ -79,3 +95,8 @@ private actor RecordingMediaScanStore: V2MediaScanStore {
 
 private struct PassingMediaScanner: V2MediaScanProvider { func scan(mediaID _: MediaID) -> V2MediaScanResult { .passed } }
 private struct FailingMediaScanner: V2MediaScanProvider { func scan(mediaID _: MediaID) throws -> V2MediaScanResult { throw ScanFailure.failed }; private enum ScanFailure: Error { case failed } }
+
+/// 抛出确定性失败：扫描器已返回与持久状态不一致的结果，重试不会改变结论。
+private struct InvariantFailingMediaScanner: V2MediaScanProvider {
+    func scan(mediaID _: MediaID) throws -> V2MediaScanResult { throw V2RoomWriteStoreError.corruptPersistenceState }
+}

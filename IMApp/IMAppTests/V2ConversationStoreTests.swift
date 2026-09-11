@@ -1140,6 +1140,103 @@ struct V2ConversationStoreTests {
         #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 9)])
     }
 
+    @Test func roomEntryAdvancesTheReadLineToTheKnownHeadBeyondTheLastMessage() async {
+        // 房间尾部是非消息事件（编辑、reaction、置顶…）：房间头已经前进到 11，
+        // 而最后一条可见消息仍停在 10。只上报消息序号会让未读永久停在 1。
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [
+            .init(id: "message-a", roomSequence: 10, revision: 1, text: "最新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        ])
+        await source.setReadCheckpoint(.init(knownHead: 11, appliedRoomSequence: 11))
+        let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+
+        await store.refresh()
+
+        #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 11)])
+    }
+
+    @Test func roomEntryOnlyAdvancesToWhatTheDeviceAlreadyApplied() async {
+        // 本地还落后于房间头（还有没收到的事件）：只上报真实已应用位置，不虚报。
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [
+            .init(id: "message-a", roomSequence: 10, revision: 1, text: "最新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        ])
+        await source.setReadCheckpoint(.init(knownHead: 14, appliedRoomSequence: 12))
+        let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+
+        await store.refresh()
+
+        #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 12)])
+    }
+
+    @Test func unknownRoomHeadLeavesTheReadLineAtTheAppliedSequence() async {
+        // 未读目录还没轮转到这个房间：房间头未知，但本地已应用位置是已知事实。
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        await source.setReadCheckpoint(.init(knownHead: nil, appliedRoomSequence: 6))
+        let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+
+        await store.refresh()
+
+        #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 6)])
+    }
+
+    @Test func roomEntryWithoutAnyLocalEvidenceNeverInventsAReadPosition() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [
+            .init(id: "message-a", roomSequence: 10, revision: 1, text: "最新消息", createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        ])
+        await source.setReadCheckpoint(.init(knownHead: 11, appliedRoomSequence: nil))
+        let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+
+        await store.refresh()
+
+        #expect(await reporter.requests().isEmpty)
+    }
+
+    @Test func browsingHistoricalTimelineDoesNotAdvanceTheReadLine() async {
+        // 跳到历史位置时把已读线推到最新端会谎报"已经读完"。
+        let history = (1...45).map { sequence in
+            V2ConversationMessageItem(
+                id: "message-\(sequence)",
+                roomSequence: UInt64(sequence),
+                revision: 1,
+                text: "消息 \(sequence)",
+                createdAt: .now,
+                isOutgoing: false,
+                isWithdrawn: false
+            )
+        }
+        let source = V2ConversationDataSourceFake(summaries: [], messages: history)
+        await source.setReadCheckpoint(.init(knownHead: 45, appliedRoomSequence: 45))
+        let reporter = V2ConversationReadReporterFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, readReceiptReporter: reporter, userID: "current-user", roomID: "room-a")
+
+        await store.loadTimeline(containing: "message-1")
+        await store.refresh()
+
+        #expect(store.isBrowsingHistoricalTimeline)
+        #expect(await reporter.requests().isEmpty)
+    }
+
+    @Test func visibleRoomPollSubscribesForADirectConversation() async {
+        // 私聊默认已是读模型房间：按会话类型过滤会让私聊打开时不补齐未读尾部。
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let synchronizer = V2ActiveHybridGroupSynchronizerFake(outcomes: [.notHybridRoom])
+        let store = makeConversationDetailStore(
+            dataSource: source,
+            sender: nil,
+            userID: "current-user",
+            roomID: "room-direct",
+            kind: .direct(accountKind: .regular),
+            activeHybridGroupSynchronizer: synchronizer
+        )
+
+        await store.pollVisibleHybridGroupEvents()
+
+        #expect(await synchronizer.subscriptionRequests() == ["room-direct"])
+    }
+
     @Test func directConversationTrimsInputAndReturnsOpenedRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")
@@ -2337,6 +2434,7 @@ struct V2ConversationStoreTests {
                 "action": "remove",
                 "membership_revision": 2,
                 "delivery_mode": "standard_fanout",
+                "delivery_authority": "fanout",
                 "created_at_ms": 1_750_000_000_000,
                 "server_created_at_ms": 1_750_000_001_000,
             ])
@@ -2395,6 +2493,7 @@ struct V2ConversationStoreTests {
                 "action": "add",
                 "membership_revision": 2,
                 "delivery_mode": "large_group_hybrid",
+                "delivery_authority": "room_log",
                 "created_at_ms": 1_750_000_000_000,
                 "server_created_at_ms": 1_750_000_001_000,
             ])
@@ -2749,6 +2848,7 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
 private actor V2ConversationDataSourceFake: V2ConversationDataSource {
     private var summaries: [V2ConversationListItem]
     private let messages: [V2ConversationMessageItem]
+    private var readCheckpoint: V2ConversationRoomReadCheckpoint = .unknown
     private var requestedMessageCount = 0
     private var pausesSummaryRead = false
     private var pausedSummaryReadCount = 0
@@ -2762,10 +2862,15 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
     }
     func resumeSummaryRead(_ index: Int = 0) { summaryReads.removeValue(forKey: index)?.resume() }
     func removeSummary(id: String) { summaries.removeAll { $0.id == id } }
+    func setReadCheckpoint(_ checkpoint: V2ConversationRoomReadCheckpoint) { readCheckpoint = checkpoint }
 
     init(summaries: [V2ConversationListItem], messages: [V2ConversationMessageItem]) {
         self.summaries = summaries
         self.messages = messages
+    }
+
+    func roomReadCheckpoint(roomID _: String) async throws -> V2ConversationRoomReadCheckpoint {
+        readCheckpoint
     }
 
     func conversationSummaryPage(

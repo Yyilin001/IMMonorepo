@@ -19,7 +19,11 @@ accepted-event identity，不再要求独立 `room_events` 行；其他 room-log
 正确性审计应检查每条 canonical message 在两种 storage 形态中恰有一个 logical event ID，并确认
 没有上述 fanout 工件。容量认证必须启用 room-log pull，让客户端按 cursor 验证恢复；只测实时
 availability hint 的报告必须明确标为写入/提示容量证据，不能宣称完整恢复链路容量。
-编辑、撤回、reaction 和 moderation mutation 尚未改走 room log，仍需按原 fanout 指标观察。
+编辑、撤回和 reaction 只写房间事件日志（不创建 `room_outbox`、fanout plan 或 delivery
+行），因此它们与 `message.accepted` 一样按 room-log 指标观察：客户端靠房间游标恢复，
+实时提示只是加速。moderation mutation 仍会创建 fanout plan 与 `room_outbox`，继续按
+原有 fanout 指标观察；该 lane 的失败分类与"最老未完成年龄"告警见
+[durable-work operator replay runbook](durable-work-operator-replay.md)。
 
 ## 启用前门槛
 

@@ -1,3 +1,4 @@
+import Crypto
 import Fluent
 import Foundation
 import IMV2Core
@@ -37,12 +38,27 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
         operatorPrincipal: String,
         now: Date
     ) async throws -> V2DurableWorkReplayResult {
-        let sourceEventID = try replayUUID(command.target.sourceEventID)
-        let targetUserID = try command.target.targetUserID.map(replayUUID)
-        return try await database.transaction { transaction in
+        try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2DurableWorkReplayStoreError.corruptPersistenceState
             }
+            return try await v2ReplayDurableWork(command, operatorPrincipal: operatorPrincipal, now: now, sql: sql)
+        }
+    }
+
+    /// 在调用方事务内执行一次单目标重放。
+    ///
+    /// 单目标与批量共用同一段代码：批量只会为每个精确目标派生一个稳定的行级操作标识，
+    /// 然后逐个走这条路径，因此审计形状、幂等语义与"不会把工作标成终态"的约束完全一致。
+    private func v2ReplayDurableWork(
+        _ command: V2DurableWorkReplayCommand,
+        operatorPrincipal: String,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws -> V2DurableWorkReplayResult {
+        let sourceEventID = try replayUUID(command.target.sourceEventID)
+        let targetUserID = try command.target.targetUserID.map(replayUUID)
+        do {
 
             func priorResult() async throws -> V2DurableWorkReplayResult? {
                 guard let prior = try await sql.raw("""
@@ -186,6 +202,118 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
             return .init(operationID: command.operationID, outcome: outcome, wasIdempotent: false)
         }
     }
+
+    /// 按来源事件批量重放该事件下的暂停行。
+    ///
+    /// 选择面是精确的：只有这一个事件，没有扫描或自由筛选；行级审计由
+    /// `v2BatchReplayOperationID` 从批量标识稳定派生，因此重复调用不会重复重放。
+    ///
+    /// - Parameters:
+    ///   - command: 批量重放命令。
+    ///   - operatorPrincipal: 已认证的运维主体标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 本次批量重放结论。
+    /// - Throws: 类型不支持批量、行数越界或持久化失败时抛出。
+    public func replayEvent(
+        _ command: V2DurableWorkEventReplayCommand,
+        operatorPrincipal: String,
+        now: Date
+    ) async throws -> V2DurableWorkEventReplayResult {
+        let sourceEventID = try replayUUID(command.sourceEventID)
+        guard v2PostgresTimestampCanEncode(now) else { throw V2DurableWorkReplayStoreError.corruptPersistenceState }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2DurableWorkReplayStoreError.corruptPersistenceState
+            }
+            let targets = try await self.batchReplayTargets(kind: command.kind, sourceEventID: sourceEventID, limit: command.limit, sql: sql)
+            var requeued = 0
+            var notPaused = 0
+            for target in targets.prefix(command.limit) {
+                let rowCommand = try V2DurableWorkReplayCommand(
+                    operationID: v2BatchReplayOperationID(
+                        batchOperationID: command.operationID,
+                        kind: command.kind,
+                        sourceEventID: sourceEventID,
+                        targetUserID: target.targetUserID,
+                        projectionKind: target.projectionKind
+                    ),
+                    target: try V2DurableWorkReplayTarget(
+                        kind: command.kind,
+                        sourceEventID: command.sourceEventID,
+                        targetUserID: target.targetUserID.map { .init(uuid: $0) },
+                        projectionKind: target.projectionKind
+                    ),
+                    reason: command.reason
+                )
+                let result = try await self.v2ReplayDurableWork(rowCommand, operatorPrincipal: operatorPrincipal, now: now, sql: sql)
+                switch result.outcome {
+                case .requeued: requeued += 1
+                case .notPaused: notPaused += 1
+                }
+            }
+            return .init(
+                operationID: command.operationID,
+                requeued: requeued,
+                notPaused: notPaused,
+                hasMore: targets.count > command.limit
+            )
+        }
+    }
+
+    /// 列出某个来源事件下仍然暂停、且可以被本批重放的目标。
+    ///
+    /// - Parameters:
+    ///   - kind: 目标工作类型。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - limit: 本批上限；实现会多取一行用于判断是否还有剩余。
+    ///   - sql: 已处于调用方事务中的数据库句柄。
+    /// - Returns: 至多 `limit + 1` 个目标，按稳定顺序排列。
+    /// - Throws: 标识非法或查询失败时抛出。
+    private func batchReplayTargets(
+        kind: V2DurableWorkReplayTargetKind,
+        sourceEventID: UUID,
+        limit: Int,
+        sql: any SQLDatabase
+    ) async throws -> [V2DurableWorkReplayBatchTarget] {
+        switch kind {
+        case .fanoutDelivery:
+            return try await sql.raw("""
+                SELECT target_user_id, projection_kind
+                FROM im_v2.fanout_deliveries
+                WHERE source_event_id = \(bind: sourceEventID) AND state = 'paused'
+                ORDER BY target_user_id, projection_kind
+                LIMIT \(bind: limit + 1)
+                """).all(decoding: DurableWorkReplayBatchTargetRow.self).map(\.target)
+        case .roomOutbox:
+            return try await batchReplaySingleRow(table: "room_outbox", keyColumn: "source_event_id", key: sourceEventID, sql: sql)
+        case .contentReview:
+            return try await batchReplaySingleRow(table: "content_review_jobs", keyColumn: "message_id", key: sourceEventID, sql: sql)
+        case .mediaScan:
+            return try await batchReplaySingleRow(table: "media_scan_outbox", keyColumn: "media_id", key: sourceEventID, sql: sql)
+        case .mediaPurge:
+            return try await batchReplaySingleRow(table: "media_purge_outbox", keyColumn: "media_id", key: sourceEventID, sql: sql)
+        case .readReceiptPreferencePropagation, .userProjection:
+            throw V2DurableWorkReplayValidationError.invalidTargetShape
+        }
+    }
+
+    /// 检查按事件定位的表里是否有暂停行。
+    ///
+    /// 这些类型的一条事件最多只有一行工作，因此"批量"退化为 0 或 1 个目标。
+    private func batchReplaySingleRow(
+        table: String,
+        keyColumn: String,
+        key: UUID,
+        sql: any SQLDatabase
+    ) async throws -> [V2DurableWorkReplayBatchTarget] {
+        let exists = try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1 FROM im_v2.\(unsafeRaw: table)
+                WHERE \(unsafeRaw: keyColumn) = \(bind: key) AND state = 'paused'
+            ) AS value
+            """).first(decoding: ReplayExistsRow.self)?.value ?? false
+        return exists ? [.init(targetUserID: nil, projectionKind: nil)] : []
+    }
 }
 
 private struct ReplayInsertRow: Decodable {
@@ -196,6 +324,66 @@ private struct ReplayInsertRow: Decodable {
 private struct ReplayTargetRow: Decodable {
     let sourceEventID: UUID
     enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id" }
+}
+
+/// 批量重放命中的一个精确目标。
+private struct V2DurableWorkReplayBatchTarget {
+    let targetUserID: UUID?
+    let projectionKind: String?
+}
+
+private struct DurableWorkReplayBatchTargetRow: Decodable {
+    let targetUserID: UUID
+    let projectionKind: String
+    enum CodingKeys: String, CodingKey {
+        case targetUserID = "target_user_id", projectionKind = "projection_kind"
+    }
+
+    var target: V2DurableWorkReplayBatchTarget {
+        .init(targetUserID: targetUserID, projectionKind: projectionKind)
+    }
+}
+
+private struct ReplayExistsRow: Decodable { let value: Bool }
+
+/// 由批量操作标识稳定派生行级操作标识。
+///
+/// 这样一次批量调用里的每一行都拥有与单目标重放完全相同的审计与幂等语义：重复调用会
+/// 命中同一批行级审计，而不会重复重放。派生使用 SHA-256、应用自定义 UUID 版本，且包含
+/// 目标身份，因此不同目标不会碰撞。
+///
+/// - Parameters:
+///   - batchOperationID: 批量调用的幂等操作标识。
+///   - kind: 目标工作类型。
+///   - sourceEventID: 来源事件标识。
+///   - targetUserID: 目标用户；按事件定位的类型为空。
+///   - projectionKind: 投影类型；仅扇出投递给出。
+/// - Returns: 稳定的行级操作标识。
+func v2BatchReplayOperationID(
+    batchOperationID: UUID,
+    kind: V2DurableWorkReplayTargetKind,
+    sourceEventID: UUID,
+    targetUserID: UUID?,
+    projectionKind: String?
+) -> UUID {
+    var input = Data("im-v2-durable-work-batch-replay-v1".utf8)
+    var batch = batchOperationID.uuid
+    withUnsafeBytes(of: &batch) { input.append(contentsOf: $0) }
+    var event = sourceEventID.uuid
+    withUnsafeBytes(of: &event) { input.append(contentsOf: $0) }
+    input.append(contentsOf: Data(kind.rawValue.utf8))
+    if let targetUserID {
+        var user = targetUserID.uuid
+        withUnsafeBytes(of: &user) { input.append(contentsOf: $0) }
+    }
+    if let projectionKind { input.append(contentsOf: Data(projectionKind.utf8)) }
+    var bytes = Array(SHA256.hash(data: input).prefix(16))
+    bytes[6] = (bytes[6] & 0x0f) | 0x80
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    return UUID(uuid: (
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    ))
 }
 
 private struct DurableWorkReplayAuditRow: Decodable {

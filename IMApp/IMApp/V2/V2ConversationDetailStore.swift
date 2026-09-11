@@ -67,6 +67,10 @@ final class V2ConversationDetailStore {
     private(set) var timeline: [V2ConversationTimelineItem] = []
     private(set) var timelineRevision: UInt64 = 0
     private(set) var canLoadOlderTimeline = false
+    /// 该房间的历史是否已被服务端保留裁剪掉一段。
+    ///
+    /// 缺口永久存在，界面据此在时间线顶部明确告知"更早的消息已不可用"。
+    private(set) var isHistoryIncomplete = false
     private(set) var isLoadingOlderTimeline = false
     private(set) var isBrowsingHistoricalTimeline = false
     private(set) var isReturningToLatestTimeline = false
@@ -195,6 +199,9 @@ final class V2ConversationDetailStore {
             )
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            let refreshedHistoryIncomplete = (try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             let refreshedTimeline = page.items
             let refreshedMessages = Self.messages(in: refreshedTimeline)
             let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
@@ -225,6 +232,8 @@ final class V2ConversationDetailStore {
             timeline = refreshedTimeline
             timelineRevision &+= 1
             canLoadOlderTimeline = page.olderCursor != nil
+            // 标记只增不减：一旦确认缺过历史，就不因一次读失败或旧快照而"变完整"。
+            isHistoryIncomplete = isHistoryIncomplete || refreshedHistoryIncomplete
             isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
             canSendInDirectConversation = refreshedCanSend
             groupAnnouncement = refreshedAnnouncement
@@ -235,6 +244,7 @@ final class V2ConversationDetailStore {
                 .map(\.mediaID))
             mediaDownloadStates = mediaDownloadStates.filter { visibleMediaIDs.contains($0.key) }
             state = .loaded
+            await advanceReadLineWhenAtLatestEnd()
         } catch is CancellationError {
             return
         } catch {
@@ -390,13 +400,16 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// 轮询可见的混合大群事件。
+    /// 轮询当前可见房间的持久化事件（合同 §3：按房间游标恢复）。
     ///
     /// 该任务由详情视图的 `.task` 修饰符持有，因此用户离开会话或场景销毁时会自动停止。
     /// 生产房间在既有 TLS 连接上等待服务端唤醒；30 秒一次的游标拉取仅作为丢消息后的恢复手段。
+    ///
+    /// 这里**不按会话类型过滤**：私聊与群聊默认都是按服务端宣告的 `delivery_authority`
+    /// 决定的读模型房间，按类型过滤会让私聊打开时不补齐未读尾部。房间是否是日志权威形态
+    /// 由同步实现自己按服务端宣告判断，不是日志房间会直接返回 `.notHybridRoom`。
     func pollVisibleHybridGroupEvents() async {
-        guard isGroupConversation,
-              let activeHybridGroupSynchronizer
+        guard let activeHybridGroupSynchronizer
         else { return }
         if let roomSubscriptions, let parsedRoom = try? RoomID(roomID) {
             let scoped = V2ScopedActiveRoomSynchronizer(roomID: parsedRoom, owner: roomSubscriptions, base: activeHybridGroupSynchronizer)
@@ -614,6 +627,48 @@ final class V2ConversationDetailStore {
         } catch {
             // Reading local history must remain available even if the durable
             // receipt queue cannot currently accept an update.
+        }
+    }
+
+    /// 处于最新端时按合同 §5.4 推进已读线。
+    ///
+    /// 只上报最后一条**可见消息**的序号是不够的：服务端未读是
+    /// `head − max(已读线, 自己最新消息序号)`，而房间头还包含编辑、撤回、reaction、
+    /// 置顶、公告、角色变更这些非消息事件。房间尾部一旦是非消息事件，未读就会永久停在
+    /// 1 —— 用户打开房间、看完全部内容也无法清零。
+    ///
+    /// 因此这里推进到**本设备已应用到的房间序号**（它包含非消息事件），并只在确认已经
+    /// 追平服务端房间头时直接推进到 head。本地落后于 head（还有未收到的事件）时只上报
+    /// 真实已应用位置，既不虚报未读，也不假装已经读完没看到的内容。
+    ///
+    /// - Note: 可靠房间日志（私聊与混合大群）由本地游标精确回答；标准扇出群没有持久化
+    ///   游标，只按投影自带的来源序号尽力逼近，尾部非消息事件仍需按 §9 第 3 步切到
+    ///   读模型后才会完全消失。
+    private func advanceReadLineWhenAtLatestEnd() async {
+        guard newerTimelineBoundary == nil, let readReceiptReporter else { return }
+        guard let checkpoint = try? await dataSource.roomReadCheckpoint(roomID: roomID) else { return }
+        let applied = checkpoint.appliedRoomSequence
+        let target: UInt64?
+        switch (checkpoint.knownHead, applied) {
+        case let (head?, applied?):
+            // 已应用序号 ≥ 房间头：进入即推进到 head，无需任何往返；本地落后：只上报
+            // 真实已应用位置。
+            target = applied >= head ? head : applied
+        case (_, let applied?):
+            // 房间头未知（目录还没轮转到该房间）：只推进到本设备真实应用到的位置。
+            target = applied
+        case (_?, nil), (nil, nil):
+            // 不知道本地应用到哪：保持现状，宁可不推进也不虚报。
+            target = nil
+        }
+        // 零不是合法的已读线：没有任何本地证据时保持现状，服务端也会拒绝。
+        guard let target, target > 0 else { return }
+        do {
+            _ = try await readReceiptReporter.recordReadThrough(roomID: roomID, roomSequence: target)
+        } catch is CancellationError {
+            return
+        } catch {
+            // 进入房间的本地效果必须保留：已读回执队列接不下时，下一次刷新会再试。
         }
     }
 

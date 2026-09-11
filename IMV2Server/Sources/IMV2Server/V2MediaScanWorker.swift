@@ -172,7 +172,8 @@ public struct V2MediaScanWorker: Sendable {
                             let disposition = self.retryPolicy.disposition(
                                 attempt: lease.attempt,
                                 claimToken: lease.claimToken,
-                                now: failureTime
+                                now: failureTime,
+                                kind: v2DurableWorkFailureKind(for: error)
                             )
                             if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
                                 throw V2RoomWriteStoreError.corruptPersistenceState

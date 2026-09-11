@@ -102,7 +102,7 @@ struct V2ContentReviewWorkerTests {
         #expect(await reviewStore.resolvedVerdicts() == [try V2ContentReviewVerdict.violation(.init(category: "configured_policy", severity: 4, confidence: 1))])
     }
 
-    @Test("owner fence failure retains review work for retry or explicit recovery", arguments: [1, 2])
+    @Test("owner fence failure keeps the review retryable beyond the attempt budget", arguments: [1, 2])
     func ownerFenceFailureDoesNotResolveReview(_ attempt: Int) async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let input = V2ContentReviewInput(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), contentRevision: 1, text: "blocked", mediaCount: 0)
@@ -116,7 +116,10 @@ struct V2ContentReviewWorkerTests {
         #expect(await moderationStore.command()?.operationID.rawValue == input.messageID.rawValue)
         #expect(await reviewStore.resolvedVerdicts().isEmpty)
         #expect(await reviewStore.stagedFindings().count == 1)
-        #expect(await reviewStore.retryDispositions() == [attempt == 1 ? .retry(at: now.addingTimeInterval(1)) : .pause])
+        // An owner-epoch change is a routing fact, not a data conflict: the
+        // work must stay retryable so the current owner can pick it up. The
+        // attempt budget no longer turns it into operator-only work.
+        #expect(await reviewStore.retryDispositions() == [.retry(at: now.addingTimeInterval(1))])
     }
 
     @Test("a stale content revision is superseded without calling moderation")
@@ -298,6 +301,30 @@ struct V2ContentReviewWorkerTests {
         )
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 0, redactedCount: 0, releasedCount: 1))
+        #expect(await reviewStore.retryDispositions() != [.pause])
+    }
+
+    @Test("a review invariant violation pauses the job on its first attempt")
+    func invariantReviewFailurePausesJob() async throws {
+        let input = V2ContentReviewInput(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), contentRevision: 1, text: "blocked", mediaCount: 0)
+        let reviewStore = RecordingContentReviewStore(leases: [
+            .init(input: input, claimToken: UUID(), attempt: 1)
+        ])
+        let moderation = V2TrustedSafetyModerationService(
+            store: RecordingTrustedModerationStore(),
+            safetyActorUserID: try .init("00000000-0000-0000-0000-000000000844"),
+            capacityProfile: try reviewTestProfile()
+        )
+        let worker = try V2ContentReviewWorker(
+            store: reviewStore,
+            reviewer: InvariantFailingContentReviewer(),
+            moderation: moderation,
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 10, jitterFraction: 0)
+        )
+
+        // This worker reports every bounded release as releasedCount; the pause
+        // is observable through the disposition the store received.
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, resolvedCount: 0, redactedCount: 0, releasedCount: 1))
         #expect(await reviewStore.retryDispositions() == [.pause])
     }
 
@@ -358,6 +385,13 @@ private actor RecordingContentReviewStore: V2ContentReviewStore {
 private struct FailingContentReviewer: V2ContentReviewing {
     func review(_: V2ContentReviewInput) async throws -> V2ContentReviewVerdict {
         throw V2ContentReviewWorkerError.dispositionNotApplied
+    }
+}
+
+/// 抛出确定性失败：审核输入与持久状态不一致，重试不会改变结论。
+private struct InvariantFailingContentReviewer: V2ContentReviewing {
+    func review(_: V2ContentReviewInput) async throws -> V2ContentReviewVerdict {
+        throw V2RoomWriteStoreError.corruptPersistenceState
     }
 }
 

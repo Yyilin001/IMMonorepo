@@ -162,12 +162,31 @@ struct V2FanoutDeliveryWorkerTests {
         #expect(await store.releaseCount() == 1)
     }
 
-    @Test("retry exhaustion pauses a failing delivery without claiming it terminal")
-    func retryExhaustionPausesDelivery() async throws {
+    @Test("transient failures keep retrying past the attempt budget instead of pausing")
+    func transientFailuresNeverPause() async throws {
         let store = DeliveryStore(lease: try fixtureLease(attempt: 2), failure: true)
         let worker = V2FanoutDeliveryWorker(
             store: store,
             retryPolicy: .init(initialDelay: 1, maximumDelay: 10, maximumAttempts: 2, jitterFraction: 0),
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+
+        // The attempt count already equals the budget. A dependency failure must
+        // still be rescheduled: pausing here would turn a self-healing outage
+        // into work that only an operator can release.
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, committedCount: 0, staleCount: 0, releasedCount: 1))
+        #expect(await store.scheduledDispositions().count == 1)
+        #expect(await store.scheduledDispositions().first != .pause)
+    }
+
+    @Test("an invariant violation pauses the delivery on its first failure")
+    func deterministicFailurePausesDelivery() async throws {
+        let store = DeliveryStore(
+            lease: try fixtureLease(attempt: 1), failure: true, failureMode: .invariantViolation
+        )
+        let worker = V2FanoutDeliveryWorker(
+            store: store,
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 10, maximumAttempts: 10, jitterFraction: 0),
             now: { Date(timeIntervalSince1970: 1_750_000_000) }
         )
 
@@ -477,16 +496,29 @@ private actor DeliveryStore: V2FanoutDeliveryStore {
     private let lease: V2FanoutDeliveryLease
     private let outcome: V2FanoutDeliveryCommit?
     private let shouldFail: Bool
+    private let failureMode: FailureMode
     private var claimed = false
     private var releases = 0
     private var scheduled: [V2DurableRetryDisposition] = []
     private var routed: [V2UserShardRoute] = []
     private var bucket: String?
 
-    init(lease: V2FanoutDeliveryLease, commit: V2FanoutDeliveryCommit? = nil, failure: Bool = false) {
+    /// 注入的失败类型，用于区分瞬时依赖故障与不变量冲突。
+    enum FailureMode: Sendable {
+        case generic
+        case invariantViolation
+    }
+
+    init(
+        lease: V2FanoutDeliveryLease,
+        commit: V2FanoutDeliveryCommit? = nil,
+        failure: Bool = false,
+        failureMode: FailureMode = .generic
+    ) {
         self.lease = lease
         outcome = commit
         shouldFail = failure
+        self.failureMode = failureMode
     }
 
     func claimPending(bucket: String?, lane _: V2FanoutDeliveryClaimLane, now _: Date, leaseDuration _: TimeInterval, limit _: Int) -> [V2FanoutDeliveryLease] {
@@ -497,7 +529,12 @@ private actor DeliveryStore: V2FanoutDeliveryStore {
     }
 
     func commit(_: V2FanoutDeliveryLease, now _: Date) throws -> V2FanoutDeliveryCommit {
-        if shouldFail { throw DeliveryFailure.failed }
+        if shouldFail {
+            switch failureMode {
+            case .generic: throw DeliveryFailure.failed
+            case .invariantViolation: throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+        }
         return outcome ?? .staleLease
     }
 

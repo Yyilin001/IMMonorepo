@@ -134,7 +134,7 @@ public struct PostgresV2RoomMembershipStore:
         let fencedRoom: MembershipRoomRow?
         if let ownerRoute {
             guard let value = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, delivery_mode
+                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, delivery_mode, delivery_authority
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: MembershipRoomRow.self),
                   value.roomShardID == ownerRoute.shardID, value.ownerEpoch == ownerRoute.epoch
@@ -170,7 +170,7 @@ public struct PostgresV2RoomMembershipStore:
         if let fencedRoom { room = fencedRoom }
         else {
             guard let value = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, delivery_mode
+                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, delivery_mode, delivery_authority
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: MembershipRoomRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
             room = value
@@ -313,6 +313,13 @@ public struct PostgresV2RoomMembershipStore:
         switch command.action {
         case .add:
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: roomID), \(bind: targetID), 'member', \(bind: nextRevision))").run()
+            // Content committed before this join is not visible to the new
+            // member, so it must not count as unread; the initial watermark
+            // also keeps the room-log retention floor from being pinned at
+            // zero by a member who has never opened the room.
+            try await v2InitializeJoinedMemberReadWatermark(
+                roomID: roomID, userID: targetID, now: now, sql: sql
+            )
         case .remove:
             try await sql.raw("""
                 UPDATE im_v2.room_memberships SET left_revision = \(bind: nextRevision)
@@ -334,6 +341,7 @@ public struct PostgresV2RoomMembershipStore:
                         'owner_user_id', \(bind: group.ownerUserID.uuidString),
                         'title', \(bind: group.title),
                         'delivery_mode', \(bind: room.deliveryMode.rawValue),
+                        'delivery_authority', \(bind: v2EffectiveRoomDeliveryAuthority(room.deliveryMode, stored: room.deliveryAuthority).rawValue),
                         'created_at_ms', \(bind: groupCreatedAtMilliseconds),
                         'server_created_at_ms', \(bind: createdAtMilliseconds)
                     ), \(bind: nextRevision), \(bind: now))
@@ -394,7 +402,7 @@ private struct MembershipCommittedTimestampRow: Decodable {
     enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
 }
 
-private struct MembershipRoomRow: Decodable { let roomShardID: String; let ownerEpoch: Int64; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode" } }
+private struct MembershipRoomRow: Decodable { let roomShardID: String; let ownerEpoch: Int64; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let deliveryMode: V2GroupDeliveryMode; let deliveryAuthority: V2RoomDeliveryAuthority; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode", deliveryAuthority = "delivery_authority" } }
 private struct MembershipGroupRow: Decodable { let ownerUserID: UUID; let title: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id", title, createdAt = "created_at" } }
 private struct MembershipTargetRow: Decodable { let userID: UUID; let role: String; enum CodingKeys: String, CodingKey { case userID = "user_id", role } }
 private struct MembershipBooleanRow: Decodable { let value: Bool }

@@ -154,6 +154,92 @@ public enum V2DurableWorkReplayStoreError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
+/// 一次"按来源事件"的批量运维重放命令。
+///
+/// 这是把"修好根因之后还要逐行重放"的运维负担降下来的一步：同一个来源事件可能对应
+/// 多条暂停行（典型是扇出投递的一条事件、多个目标），按事件重放一次即可推进有界的一批。
+/// 选择面仍然是**精确且可枚举**的：只有这一个事件，没有扫描、没有自由筛选、没有自由文本。
+public struct V2DurableWorkEventReplayCommand: Equatable, Sendable {
+    /// 单次批量允许重放的最大行数。
+    public static let maximumTargets = 500
+
+    /// 本次批量重放的幂等操作标识。
+    public let operationID: UUID
+    /// 目标工作类型；仅支持按事件定位工作的类型。
+    public let kind: V2DurableWorkReplayTargetKind
+    /// 来源事件标识。
+    public let sourceEventID: EventID
+    /// 重放原因。
+    public let reason: V2DurableWorkReplayReason
+    /// 本批最多重放的行数。
+    public let limit: Int
+
+    /// 校验并保存批量重放命令。
+    ///
+    /// 只接受按事件定位工作的类型：房间发件箱、扇出投递、内容审核、媒体扫描与媒体清理。
+    /// 回执偏好传播与用户投影是按用户定位的，批量语义不明确，必须继续逐目标重放。
+    ///
+    /// - Parameters:
+    ///   - operationID: 幂等操作标识。
+    ///   - kind: 目标工作类型。
+    ///   - sourceEventID: 来源事件标识。
+    ///   - reason: 重放原因。
+    ///   - limit: 本批最多重放的行数，需落在 1...``maximumTargets``。
+    /// - Throws: 类型不支持批量或行数越界时抛出
+    ///   ``V2DurableWorkReplayValidationError/invalidTargetShape``。
+    public init(
+        operationID: UUID,
+        kind: V2DurableWorkReplayTargetKind,
+        sourceEventID: EventID,
+        reason: V2DurableWorkReplayReason,
+        limit: Int
+    ) throws {
+        switch kind {
+        case .roomOutbox, .fanoutDelivery, .contentReview, .mediaScan, .mediaPurge:
+            break
+        case .readReceiptPreferencePropagation, .userProjection:
+            throw V2DurableWorkReplayValidationError.invalidTargetShape
+        }
+        guard (1 ... Self.maximumTargets).contains(limit) else {
+            throw V2DurableWorkReplayValidationError.invalidTargetShape
+        }
+        self.operationID = operationID
+        self.kind = kind
+        self.sourceEventID = sourceEventID
+        self.reason = reason
+        self.limit = limit
+    }
+}
+
+/// 一次批量重放的结论。
+///
+/// 逐行的审计与幂等由派生的行级操作标识保证；本结果是**当下状态**的汇总：重复调用不会
+/// 重复重放（已经回到 `pending` 的行不再是暂停行），因此返回的是"这次实际推进了多少"。
+public struct V2DurableWorkEventReplayResult: Equatable, Sendable {
+    /// 本次批量重放的操作标识。
+    public let operationID: UUID
+    /// 实际被重新排队的行数。
+    public let requeued: Int
+    /// 命中的行中有多少已经不处于暂停状态。
+    public let notPaused: Int
+    /// 该事件是否还有超出本批上限的暂停行。
+    public let hasMore: Bool
+
+    /// 保存批量重放结论。
+    ///
+    /// - Parameters:
+    ///   - operationID: 批量重放的操作标识。
+    ///   - requeued: 实际重新排队的行数。
+    ///   - notPaused: 命中但不处于暂停状态的行数。
+    ///   - hasMore: 是否还有超出上限的暂停行。
+    public init(operationID: UUID, requeued: Int, notPaused: Int, hasMore: Bool) {
+        self.operationID = operationID
+        self.requeued = requeued
+        self.notPaused = notPaused
+        self.hasMore = hasMore
+    }
+}
+
 /// 运维重放的持久化能力。
 ///
 /// 实现必须原子地记录运维操作并执行重放，因此审计记录不会成为「并未真正提交的重放」的证据，
@@ -172,6 +258,20 @@ public protocol V2DurableWorkReplayStore: Sendable {
         operatorPrincipal: String,
         now: Date
     ) async throws -> V2DurableWorkReplayResult
+
+    /// 执行一次按来源事件的批量重放。
+    ///
+    /// - Parameters:
+    ///   - command: 批量重放命令。
+    ///   - operatorPrincipal: 已认证的运维主体标识。
+    ///   - now: 服务端统一授时时刻。
+    /// - Returns: 本次批量重放结论。
+    /// - Throws: 类型不支持批量、行数越界或持久化失败时抛出。
+    func replayEvent(
+        _ command: V2DurableWorkEventReplayCommand,
+        operatorPrincipal: String,
+        now: Date
+    ) async throws -> V2DurableWorkEventReplayResult
 }
 
 /// 运维重放服务，固定运维主体后转交存储。
@@ -206,6 +306,15 @@ public struct V2DurableWorkOperatorReplayService: Sendable {
     /// - Throws: 存储实现抛出的错误。
     public func replay(_ command: V2DurableWorkReplayCommand) async throws -> V2DurableWorkReplayResult {
         try await store.replay(command, operatorPrincipal: operatorPrincipal, now: now())
+    }
+
+    /// 执行一次按来源事件的批量重放。
+    ///
+    /// - Parameter command: 批量重放命令。
+    /// - Returns: 本次批量重放结论。
+    /// - Throws: 存储实现抛出的错误。
+    public func replayEvent(_ command: V2DurableWorkEventReplayCommand) async throws -> V2DurableWorkEventReplayResult {
+        try await store.replayEvent(command, operatorPrincipal: operatorPrincipal, now: now())
     }
 
     /// 校验运维主体格式。

@@ -26,6 +26,9 @@
 - wire contract 为 protobuf protocol 27；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
   房间 continuation 表示已认证扫描到的序号，可越过不可见尾部；旧客户端严格相等校验不兼容，见[读取与游标合同](../../docs/reviews/message-mutation-read-contract.md)。
+  单聊默认以房间事件日志为权威副本（`IM_V2_DIRECT_FANOUT_MODE` 未配置即为 `room_log`），
+  客户端把私聊房间纳入按游标恢复的集合；需要兼容基线的环境必须显式选择，见
+  [房间读模型合同](../../docs/reviews/room-read-model-contract.md)。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
   `im-v2-current-30`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
@@ -50,6 +53,25 @@
   角色权限已迁移为独立版本和显式空集合，恢复请求、完整观察点及本地栅栏已持久化；自动 runner 和 App 生命周期已接通，暂停反馈及显式重试入口已接通，真实链路及人工交互验收仍待完成，详见[状态与重试合同](../../docs/reviews/role-policy-recovery-ui-contract.md)、[执行器合同](../../docs/reviews/role-policy-recovery-runner-contract.md)、[恢复存储合同](../../docs/reviews/role-policy-recovery-store-contract.md)、[角色效果合同](../../docs/reviews/role-policy-effect-contract.md)、[个人基线恢复合同](../../docs/reviews/personal-snapshot-rebuild.md)及[权限基线合同](../../docs/reviews/group-policy-baseline-contract.md)。
 - 服务端置顶快照已按已知源序号排序并保留取消状态；客户端快照键已兼容等价 UUID 拼写。客户端置顶四路 reducer、持久摘要与受控迁移已实现，缺序号旧历史权威恢复和统一发布切换仍待完成，见[置顶快照合同](../../docs/reviews/pin-snapshot-contract.md)及[客户端效果合同](../../docs/reviews/pin-effect-contract.md)。
 - 服务端成员角色快照已按目标成员版本比较并通过真实逆序分发/快照回归；逐成员离开/重入的持久状态和客户端统一消费仍待完成，见[成员角色快照合同](../../docs/reviews/member-role-snapshot-contract.md)。
+- 会话列表读模型已经接线：服务端按房间事件日志聚合未读数与最新可见消息预览，单聊与群聊
+  共用同一条命令（`RoomSummaryList`／`RoomSummaryPage`，帧命令 109/110，wire 兼容新增，
+  不改变 protocol 27 的协商范围），客户端传输层已实现并校验未读不超过房间头；App 侧
+  未读目录按有界轮转把服务端未读写进本地并按房间显示角标，进入房间后按本设备已应用到的
+  房间序号推进已读线（追平房间头时直接推进到 head），因此房间尾部是非消息事件时未读
+  同样会清零；标准扇出群没有持久化游标，"尾部恰好只有一条编辑/撤回"仍要等切到读模型后
+  才完全消失，见房间读模型合同 §5.4；
+  会话列表本身仍是**本地优先**的混合形态：房间身份、标题、置顶、免打扰与预览来自本地投影，
+  服务端只提供未读与房间头（理由见房间读模型合同 §4）；把列表源整体切到服务端摘要留给
+  将来的产品决定，协议侧已经就绪；
+  房间是否按游标恢复改由服务端宣告的 `delivery_authority` 决定（不再从不可变的投递模式
+  推断），因此标准群切读模型不需要客户端发版。
+  标准群推广读模型已实施并成为部署默认：房间新增 `delivery_authority`（schema 32），
+  混合大群恒为房间日志，标准群取创建时的 `IM_V2_GROUP_DELIVERY_AUTHORITY_MODE`，
+  不配置即为 `room_log`（兼容基线必须显式选 `fanout`）；切到 `room_log` 的房间不再
+  产生逐用户投递行，也因此不再受上面那条扇出群未读边界影响，见
+  [房间读模型合同](../../docs/reviews/room-read-model-contract.md)。
+  房间日志房间里的显式 `@` 已从逐用户可靠投递改为推送通知：内容仍靠房间游标恢复，
+  通知未配置时不发但不影响消息，见[推送通知运维手册](10-operations/push-wake-notifications-runbook.md)。
 - 本地 `.env.local` 必须是脚本生成的当前 12 键私有文件；缺键、多键、旧键、弱值或陈旧
   PostgreSQL volume 都会失败并要求显式重建，不会静默修补。
 

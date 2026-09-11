@@ -287,6 +287,8 @@ public enum V2ServerProtobufFrameCodec {
         case .messagesForwarded?: return .messagesForwarded
         case .getGroupRolePolicyBaseline?: return .getGroupRolePolicyBaseline
         case .groupRolePolicyBaseline?: return .groupRolePolicyBaseline
+        case .roomSummaryList?: return .roomSummaryList
+        case .roomSummaryPage?: return .roomSummaryPage
         case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged
         case .changeUserBlock?: return .changeUserBlock

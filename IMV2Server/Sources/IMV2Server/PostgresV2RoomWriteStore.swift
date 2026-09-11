@@ -33,6 +33,26 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
     private let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
 
+    /// 组合数据库与写入策略。
+    ///
+    /// - Important: `directFanoutMode` 的构造默认值是兼容基线 `planner`，只服务于显式
+    ///   构造的嵌入方与测试夹具。部署默认值是 `room_log`，并由
+    ///   ``V2GatewayRuntimeConfiguration/directFanoutMode`` 决定；生产装配始终传入该值，
+    ///   因此"没配置"在部署里等于目标架构，而在直接构造存储时等于兼容基线。
+    ///
+    /// - Parameters:
+    ///   - database: 存放房间、事件与投递的数据库。
+    ///   - strangerMessagePolicy: 陌生人消息策略。
+    ///   - shadowForwarder: 可选的投影影子转发器。
+    ///   - contentReviewMode: 内容审核模式。
+    ///   - directFanoutMode: 单聊权威副本形态。
+    ///   - directRoomLogAdmissionMode: room-log 模式下的准入围栏。
+    ///   - payloadWriteMode: 扇出载荷写入形态。
+    ///   - directSendPolicyCache: 可选的私聊发送策略缓存。
+    ///   - directRoomLogFastAppendCache: 可选的私聊日志快速追加缓存。
+    ///   - shardAdmissionCommandCreditPool: 可选的分片准入信用池。
+    ///   - roomAdmissionCommandCreditPool: 可选的房间准入信用池。
+    ///   - appendStageMetrics: 可选的追加阶段指标。
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
@@ -2250,11 +2270,14 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             // room-log mode its canonical event is the durable delivery
             // record; per-user Delivery/Inbox rows would only duplicate that
             // fact. This is deployment policy, not client input.
+            // 单聊的权威副本形态由部署开关决定（因此开关就是回滚手段）；群聊以房间自己
+            // 宣告的 delivery_authority 为准，这样标准群也能在不重建房间的前提下切到读模型。
             let usesDirectRoomLog = room.kind == "direct" && directFanoutMode == .roomLog
             let usesDirectRoomLogShardAdmission = usesDirectRoomLog
                 && directRoomLogAdmissionMode == .shardOnly
-            let usesRoomEventLog = usesDirectRoomLog
-                || (room.kind == "group" && room.deliveryMode == .largeGroupHybrid)
+            let usesGroupRoomLog = room.kind == "group"
+                && v2EffectiveRoomDeliveryAuthority(room.deliveryMode, stored: room.deliveryAuthority) == .roomLog
+            let usesRoomEventLog = usesDirectRoomLog || usesGroupRoomLog
 
             // An accepted inbox is still live work until its terminal marker.
             // Fence it before message replay can resume post-commit effects.
@@ -2380,9 +2403,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             }
             try await assertReplyTarget(command.replyTo, roomID: roomID, actorID: senderID, sql: sql)
             // Hybrid delivery never expands @everyone. Explicit user mentions
-            // are bounded by the command limit and receive a finite reliable
-            // projection; everyone else observes the canonical room event.
-            let hybridReliableTargets = room.deliveryMode == .largeGroupHybrid
+            // are bounded by the command limit and become a push notification:
+            // the canonical room event already carries the content, so a
+            // mention must not leave a durable per-user delivery obligation.
+            let hybridMentionTargets = room.deliveryMode == .largeGroupHybrid
                 ? hybridMentionTargetIDs(command.mentions, excluding: senderID)
                 : []
             let roomState = try room.commandState(roomID: command.roomID, admission: admission)
@@ -2418,9 +2442,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                         now: now
                     )
                 }
+            } else if usesGroupRoomLog {
+                // 房间日志是权威副本：不预留任何逐用户投递成本，被 @ 的成员只收到通知。
+                result = try roomLogReduction(
+                    command: command,
+                    roomState: roomState,
+                    shardState: shardStateForReduction,
+                    profile: capacityProfile.limits,
+                    identifiers: identifiers,
+                    reliableTargetCount: 0,
+                    now: now
+                )
             } else {
-                switch room.deliveryMode {
-                case .standardFanout:
                 result = try V2SendMessageReducer.reduce(
                     command: command,
                     roomState: roomState,
@@ -2429,17 +2462,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     identifiers: identifiers,
                     now: now
                 )
-                case .largeGroupHybrid:
-                result = try hybridReduction(
-                    command: command,
-                    roomState: roomState,
-                    shardState: shardStateForReduction,
-                    profile: capacityProfile.limits,
-                    identifiers: identifiers,
-                    reliableTargetCount: hybridReliableTargets.count,
-                    now: now
-                )
-                }
             }
             guard case .accepted(let writeSet) = result else {
                 return .init(
@@ -3324,7 +3346,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                        input.uses_room_admission_credits, room.room_kind,
                        room.room_shard_id, room.room_sequence,
                        room.timeline_sequence, room.membership_revision,
-                       room.capacity_profile_id, room.delivery_mode,
+                       room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
                        room.frozen_at, room.room_id
                 FROM input
                 JOIN im_v2.rooms AS room ON room.room_id = input.room_id
@@ -3558,7 +3580,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             SELECT room.ordinal, room.room_kind, room.room_shard_id,
                    room.room_sequence, room.timeline_sequence,
                    room.membership_revision, room.capacity_profile_id,
-                   room.delivery_mode, room.frozen_at,
+                   room.delivery_mode, room.delivery_authority, room.frozen_at,
                    admission.room_eligible_member_count,
                    admission.room_command_window_limit,
                    admission.room_command_window_used,
@@ -3629,7 +3651,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb) AS value
             )
             SELECT room.room_id, room.room_kind, room.room_shard_id,
-                   room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                   room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
+                   room.frozen_at,
                    admission.shard_lease_id AS room_shard_lease_id,
                    admission.shard_lease_generation AS room_shard_lease_generation,
                    shard.lease_id, shard.generation, shard.valid_until,
@@ -3730,7 +3753,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                        input.now_postgres_microseconds, room.room_kind,
                        room.room_shard_id, room.room_sequence,
                        room.timeline_sequence, room.membership_revision,
-                       room.capacity_profile_id, room.delivery_mode,
+                       room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
                        room.frozen_at, room.room_id
                 FROM input
                 JOIN im_v2.rooms AS room ON room.room_id = input.room_id
@@ -3831,7 +3854,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             SELECT room.ordinal, room.room_kind, room.room_shard_id,
                    room.room_sequence, room.timeline_sequence,
                    room.membership_revision, room.capacity_profile_id,
-                   room.delivery_mode, room.frozen_at,
+                   room.delivery_mode, room.delivery_authority, room.frozen_at,
                    EXISTS (
                        SELECT 1 FROM prior_operation AS prior
                        WHERE prior.ordinal = room.ordinal
@@ -3907,7 +3930,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             WITH locked_room AS MATERIALIZED (
                 SELECT room.room_kind, room.room_shard_id, room.room_sequence,
                        room.timeline_sequence, room.membership_revision,
-                       room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                       room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
+                       room.frozen_at,
                        room.room_id
                 FROM im_v2.rooms AS room
                 WHERE room.room_id = \(bind: roomID)
@@ -4124,7 +4148,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             )
             SELECT room.room_kind, room.room_shard_id, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
-                   room.capacity_profile_id, room.delivery_mode, room.frozen_at,
+                   room.capacity_profile_id, room.delivery_mode, room.delivery_authority, room.frozen_at,
                    count.prior_operation_count,
                    prior.prior_outcome_kind, prior.prior_message_id,
                    prior.prior_room_id, prior.prior_room_sequence,
@@ -4892,7 +4916,12 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             return
         }
 
-        if room.deliveryMode == .standardFanout {
+        // 逐用户投递路径只服务"权威副本不是房间日志"的房间：单聊在 planner 模式下属于
+        // 这一类，群聊则由房间自己的权威副本形态决定。
+        let roomUsesFanoutAuthority = room.kind == "direct"
+            ? directFanoutMode != .roomLog
+            : v2EffectiveRoomDeliveryAuthority(room.deliveryMode, stored: room.deliveryAuthority) == .fanout
+        if roomUsesFanoutAuthority {
             try await persistStandardFanout(
                 writeSet,
                 command: command,
@@ -4927,7 +4956,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence), timeline_sequence = \(bind: timelineSequence)
             WHERE room_id = \(bind: roomID)
             """).run()
-        let hybridReliableTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
+        let mentionTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
         try await sql.raw("""
             UPDATE im_v2.room_admission
             SET command_window_used = \(bind: roomAdmission.commandWindow.used),
@@ -5006,43 +5035,33 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                  \(bind: room.membershipRevision), \(bind: message.createdAt))
             """).run()
         switch room.deliveryMode {
-        case .standardFanout:
+        case .standardFanout
+            where v2EffectiveRoomDeliveryAuthority(room.deliveryMode, stored: room.deliveryAuthority) == .fanout:
             preconditionFailure("standard fan-out returns through the set-based persistence path")
-        case .largeGroupHybrid:
-            guard writeSet.fanoutPlan.reservation.cost.targetCount == hybridReliableTargets.count else {
+        case .standardFanout, .largeGroupHybrid:
+            // 房间日志是权威副本：不存在逐用户投递，预留成本必须为零。
+            guard writeSet.fanoutPlan.reservation.cost.targetCount == 0 else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            if hybridReliableTargets.isEmpty {
-                // Retain a terminal plan row so every operation result has
-                // the same audit shape, while making global fan-out
-                // structurally impossible for an ordinary large-group event.
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plans
-                        (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                         target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at, terminal_at)
-                    VALUES
-                        (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
-                         '{"kind":"hybrid_room_log"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                         0, 0, 'terminal', \(bind: message.createdAt), \(bind: message.createdAt))
-                    """).run()
-            } else {
-                let targetsJSON = String(data: try JSONSerialization.data(withJSONObject: hybridReliableTargets.map(\.uuidString)), encoding: .utf8)!
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plans
-                        (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
-                         target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at)
-                    VALUES
-                        (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
-                         '{"kind":"hybrid_mention_targets"}'::jsonb, jsonb_build_object('after_user_id', NULL),
-                         \(bind: hybridReliableTargets.count), \(bind: hybridReliableTargets.count), 'planning', \(bind: message.createdAt))
-                    """).run()
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
-                    SELECT \(bind: eventID), value::uuid
-                    FROM jsonb_array_elements_text(\(bind: targetsJSON)::jsonb) AS value
-                    """).run()
-                try await sql.raw("INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at) VALUES (\(bind: eventID), \(bind: planID), 'pending', \(bind: message.createdAt))").run()
-            }
+            // Retain a terminal plan row so every operation result has the
+            // same audit shape, while making global fan-out structurally
+            // impossible for a room-log event.
+            try await sql.raw("""
+                INSERT INTO im_v2.fanout_plans
+                    (plan_id, source_event_id, room_id, source_room_sequence, committed_membership_revision,
+                     target_rule, enumeration_checkpoint, target_count, reserved_fanout_cost, state, created_at, terminal_at)
+                VALUES
+                    (\(bind: planID), \(bind: eventID), \(bind: roomID), \(bind: roomSequence), \(bind: room.membershipRevision),
+                     '{"kind":"hybrid_room_log"}'::jsonb, jsonb_build_object('after_user_id', NULL),
+                     0, 0, 'terminal', \(bind: message.createdAt), \(bind: message.createdAt))
+                """).run()
+            // 被 @ 的成员只收到通知：内容已在房间日志里，靠房间游标恢复。
+            try await v2EnqueueMentionPushWakes(
+                sourceEventID: eventID,
+                mentionedUserIDs: mentionTargets,
+                now: message.createdAt,
+                sql: sql
+            )
         }
         try await PostgresV2MessageProjectionStateRepository().persist(
             messageProjectionState,
@@ -6743,8 +6762,10 @@ private struct RoomRow: Decodable {
     let membershipRevision: Int64
     let capacityProfileID: String
     let deliveryMode: V2GroupDeliveryMode
+    /// 权威副本形态。群聊以它为准；单聊由部署开关决定，忽略本列。
+    let deliveryAuthority: V2RoomDeliveryAuthority
     let frozenAt: Date?
-    enum CodingKeys: String, CodingKey { case kind = "room_kind", roomShardID = "room_shard_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode", frozenAt = "frozen_at" }
+    enum CodingKeys: String, CodingKey { case kind = "room_kind", roomShardID = "room_shard_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", deliveryMode = "delivery_mode", deliveryAuthority = "delivery_authority", frozenAt = "frozen_at" }
 
     func commandState(roomID: RoomID, admission: AdmissionRow) throws -> V2RoomCommandState {
         try .init(
@@ -6777,6 +6798,7 @@ private struct RoomRow: Decodable {
             membershipRevision: membershipRevision,
             capacityProfileID: capacityProfileID,
             deliveryMode: deliveryMode,
+            deliveryAuthority: deliveryAuthority,
             frozenAt: frozenAt
         )
     }
@@ -7060,6 +7082,7 @@ private struct MessageAcceptanceContextRow: Decodable {
     let membershipRevision: Int64
     let capacityProfileID: String
     let deliveryMode: V2GroupDeliveryMode
+    let deliveryAuthority: V2RoomDeliveryAuthority
     let frozenAt: Date?
     let priorOperationCount: Int
     let priorOutcomeKind: String?
@@ -7130,6 +7153,7 @@ private struct MessageAcceptanceContextRow: Decodable {
         case membershipRevision = "membership_revision"
         case capacityProfileID = "capacity_profile_id"
         case deliveryMode = "delivery_mode"
+        case deliveryAuthority = "delivery_authority"
         case frozenAt = "frozen_at"
         case priorOperationCount = "prior_operation_count"
         case priorOutcomeKind = "prior_outcome_kind"
@@ -7202,6 +7226,7 @@ private struct MessageAcceptanceContextRow: Decodable {
             membershipRevision: membershipRevision,
             capacityProfileID: capacityProfileID,
             deliveryMode: deliveryMode,
+            deliveryAuthority: deliveryAuthority,
             frozenAt: frozenAt
         )
     }
@@ -7618,6 +7643,7 @@ private struct PlainHybridGroupShardCreditSnapshotRow: Decodable {
         case roomShardID = "room_shard_id"
         case capacityProfileID = "capacity_profile_id"
         case deliveryMode = "delivery_mode"
+        case deliveryAuthority = "delivery_authority"
         case frozenAt = "frozen_at"
         case roomShardLeaseID = "room_shard_lease_id"
         case roomShardLeaseGeneration = "room_shard_lease_generation"
@@ -7792,7 +7818,7 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
             FROM input
         ), locked_room AS MATERIALIZED (
             SELECT room.room_id, room.room_kind, room.room_shard_id,
-                   room.capacity_profile_id, room.delivery_mode,
+                   room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
                    room.frozen_at, room.room_sequence,
                    room.timeline_sequence, room.membership_revision
             FROM requested_rooms AS requested
@@ -7809,7 +7835,7 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
             -- deadlock only by serializing otherwise independent operations.
             FOR NO KEY UPDATE OF room
         ), fresh_input AS MATERIALIZED (
-            SELECT input.*, room.room_kind, room.delivery_mode,
+            SELECT input.*, room.room_kind, room.delivery_mode, room.delivery_authority,
                    room.frozen_at, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
                    room.room_shard_id AS actual_room_shard_id,
@@ -8061,7 +8087,7 @@ private struct PlainHybridGroupBatchPreflightStatement: PostgresPreparedStatemen
                    input.now_postgres_microseconds, room.room_kind,
                    room.room_shard_id, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
-                   room.capacity_profile_id, room.delivery_mode,
+                   room.capacity_profile_id, room.delivery_mode, room.delivery_authority,
                    room.frozen_at, room.room_id
             FROM input
             JOIN im_v2.rooms AS room ON room.room_id = input.room_id
@@ -8162,7 +8188,7 @@ private struct PlainHybridGroupBatchPreflightStatement: PostgresPreparedStatemen
         SELECT room.ordinal, room.room_kind, room.room_shard_id,
                room.room_sequence, room.timeline_sequence,
                room.membership_revision, room.capacity_profile_id,
-               room.delivery_mode, room.frozen_at,
+               room.delivery_mode, room.delivery_authority, room.frozen_at,
                EXISTS (
                    SELECT 1 FROM prior_operation AS prior
                    WHERE prior.ordinal = room.ordinal
@@ -8254,6 +8280,7 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
     let membershipRevision: Int64
     let capacityProfileID: String
     let deliveryMode: V2GroupDeliveryMode
+    let deliveryAuthority: V2RoomDeliveryAuthority
     let frozenAt: Date?
     let hasPriorOperation: Bool
     let roomEligibleMemberCount: Int?
@@ -8297,6 +8324,11 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         self.deliveryMode = deliveryMode
+        let deliveryAuthorityValue: String = try row.decode()
+        guard let deliveryAuthority = V2RoomDeliveryAuthority(rawValue: deliveryAuthorityValue) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        self.deliveryAuthority = deliveryAuthority
         frozenAt = try row.decode()
         hasPriorOperation = try row.decode()
         roomEligibleMemberCount = try row.decode()
@@ -8343,6 +8375,7 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
         membershipRevision = try row.decode(column: "membership_revision")
         capacityProfileID = try row.decode(column: "capacity_profile_id")
         deliveryMode = try row.decode(column: "delivery_mode")
+        deliveryAuthority = try row.decode(column: "delivery_authority")
         frozenAt = try row.decode(column: "frozen_at", as: Date?.self)
         hasPriorOperation = try row.decode(column: "has_prior_operation")
         roomEligibleMemberCount = try row.decode(
@@ -8403,6 +8436,7 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
         case membershipRevision = "membership_revision"
         case capacityProfileID = "capacity_profile_id"
         case deliveryMode = "delivery_mode"
+        case deliveryAuthority = "delivery_authority"
         case frozenAt = "frozen_at"
         case hasPriorOperation = "has_prior_operation"
         case roomEligibleMemberCount = "room_eligible_member_count"
@@ -8442,6 +8476,7 @@ private struct PlainHybridGroupBatchPreflightRow: Decodable {
             membershipRevision: membershipRevision,
             capacityProfileID: capacityProfileID,
             deliveryMode: deliveryMode,
+            deliveryAuthority: deliveryAuthority,
             frozenAt: frozenAt
         )
     }
@@ -8803,6 +8838,7 @@ private struct PlainDirectRoomLogBatchPreflightRow {
     let membershipRevision: Int64
     let capacityProfileID: String
     let deliveryMode: V2GroupDeliveryMode
+    let deliveryAuthority: V2RoomDeliveryAuthority
     let frozenAt: Date?
     let roomEligibleMemberCount: Int?
     let roomCommandWindowLimit: Int?
@@ -8863,6 +8899,7 @@ private struct PlainDirectRoomLogBatchPreflightRow {
         membershipRevision = try row.decode(column: "membership_revision")
         capacityProfileID = try row.decode(column: "capacity_profile_id")
         deliveryMode = try row.decode(column: "delivery_mode")
+        deliveryAuthority = try row.decode(column: "delivery_authority")
         frozenAt = try row.decode(column: "frozen_at", as: Date?.self)
         roomEligibleMemberCount = try row.decode(column: "room_eligible_member_count", as: Int?.self)
         roomCommandWindowLimit = try row.decode(column: "room_command_window_limit", as: Int?.self)
@@ -8918,6 +8955,7 @@ private struct PlainDirectRoomLogBatchPreflightRow {
             membershipRevision: membershipRevision,
             capacityProfileID: capacityProfileID,
             deliveryMode: deliveryMode,
+            deliveryAuthority: deliveryAuthority,
             frozenAt: frozenAt
         )
     }

@@ -43,6 +43,31 @@ groups:
           summary: IM V2 fan-out delivery work is paused pending operator replay
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
+      # Transient failures no longer pause, so a row that keeps failing stays
+      # pending instead of appearing in the paused gauges. Surface the oldest
+      # unfinished row so stuck work is still detected.
+      - alert: IMV2StalledRoomOutbox
+        expr: max(im_v2_room_outbox_oldest_unfinished_age_seconds) > 1800
+        for: 15m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 room-outbox work has not reached a terminal state for over 30 minutes
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
+      - alert: IMV2StalledFanoutDelivery
+        expr: max(im_v2_fanout_delivery_oldest_unfinished_age_seconds) > 1800
+        for: 15m
+        labels:
+          severity: critical
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 fan-out delivery work has not reached a terminal state for over 30 minutes
+          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
+
       - alert: IMV2PausedContentReview
         expr: max(im_v2_content_review_backlog{state="paused"}) > 0
         for: 2m

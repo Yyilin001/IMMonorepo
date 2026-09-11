@@ -106,6 +106,7 @@ private actor OperatorReplayRouteStore: V2DurableWorkReplayStore {
     }
 
     private var received: [Recorded] = []
+    private var batchCommands: [V2DurableWorkEventReplayCommand] = []
 
     func replay(_ command: V2DurableWorkReplayCommand, operatorPrincipal: String, now _: Date) -> V2DurableWorkReplayResult {
         received.append(.init(command: command, principal: operatorPrincipal))
@@ -113,4 +114,11 @@ private actor OperatorReplayRouteStore: V2DurableWorkReplayStore {
     }
 
     func commands() -> [Recorded] { received }
+
+    func replayEvent(_ command: V2DurableWorkEventReplayCommand, operatorPrincipal _: String, now _: Date) -> V2DurableWorkEventReplayResult {
+        batchCommands.append(command)
+        return .init(operationID: command.operationID, requeued: 1, notPaused: 0, hasMore: false)
+    }
+
+    func events() -> [V2DurableWorkEventReplayCommand] { batchCommands }
 }

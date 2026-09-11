@@ -7,6 +7,10 @@
 形成了精确对应的 7,943 个 terminal fanout plan；185,760 条标准群 delivery
 全部 terminal，没有遗留 outstanding plan、delivery 或 admission unit。
 
+> 复现说明：本轮标准群测的是**逐用户投递**形态，因此复现时必须显式设置
+> `IM_V2_GROUP_DELIVERY_AUTHORITY_MODE=fanout`（负载画像已固定该值）。标准群的部署
+> 默认此后改为 `room_log`，读模型下的容量数字需要另跑一轮，不能与本轮直接比较。
+
 但是，这一档不能作为稳定容量：15 秒稳定段计划发送 8,039 条消息，客户端
 有界队列溢出 96 条；阶段结束时仍有 487 条在本地队列、4,255 条已发送但尚未
 收到 ACK，最长需要 23.952 秒才能排空。PostgreSQL 在 61 秒活跃窗口内峰值

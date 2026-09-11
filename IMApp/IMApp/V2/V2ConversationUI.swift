@@ -48,8 +48,12 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
     let isPinned: Bool
     let isArchived: Bool
     let muteUntil: Date?
+    /// 展示用未读数；服务端未读经本地已读水位收窄后的结果。
+    ///
+    /// 轮转还没覆盖到的房间为 0：界面不显示角标，也不用本地推算冒充服务端值。
+    let unreadCount: UInt64
 
-    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil) {
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil, unreadCount: UInt64 = 0) {
         self.id = id
         self.title = title
         self.preview = preview
@@ -59,6 +63,7 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.isArchived = isArchived
         self.muteUntil = muteUntil
+        self.unreadCount = unreadCount
     }
 }
 
@@ -253,8 +258,30 @@ protocol V2ConversationWindowReading: Sendable {
     func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow
 }
 
+/// 进入房间推进已读线所需的本地事实。
+///
+/// 合同 §5.4 要推进到的是**房间头**，而不是最后一条可见消息的序号：房间头包含编辑、
+/// 撤回、reaction、置顶、公告、角色变更这些非消息事件，只按可见消息上报会让未读永久
+/// 停在 1。两个字段都是"知道多少说多少"：本地已应用序号缺失时不推进，房间头缺失时
+/// 只推进到本地已应用位置，绝不凭空推进。
+struct V2ConversationRoomReadCheckpoint: Equatable, Sendable {
+    /// 服务端摘要给出的房间头；目录还没覆盖到该房间时为空。
+    let knownHead: UInt64?
+    /// 本设备已应用到本地的房间序号（含非消息事件）；没有本地证据时为空。
+    let appliedRoomSequence: UInt64?
+
+    /// 两件事都不知道：界面不推进已读线。
+    static let unknown = Self(knownHead: nil, appliedRoomSequence: nil)
+}
+
 protocol V2ConversationDataSource: Sendable {
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation
+    /// 该房间是否已被服务端保留裁剪掉一段历史（缺口永久存在）。
+    func roomLogHistoryIsIncomplete(roomID: String) async throws -> Bool
+    /// 读取进入房间推进已读线所需的本地事实。
+    func roomReadCheckpoint(roomID: String) async throws -> V2ConversationRoomReadCheckpoint
+    /// 推进一次有界的未读轮转；未读不是列表渲染的前提，因此不抛错。
+    func refreshConversationUnread(pageBudget: Int) async
     func conversationSummaryPage(
         for userID: String,
         isArchived: Bool,
@@ -267,6 +294,15 @@ protocol V2ConversationDataSource: Sendable {
         before cursor: V2ConversationTimelineCursor?,
         limit: Int
     ) async throws -> V2ConversationTimelinePage
+}
+
+extension V2ConversationDataSource {
+    /// 不支持未读目录的数据源保持列表可用。
+    func refreshConversationUnread(pageBudget _: Int) async {}
+    /// 不支持本地投影的数据源按"历史完整"处理。
+    func roomLogHistoryIsIncomplete(roomID _: String) async throws -> Bool { false }
+    /// 不支持本地投影的数据源无法回答"已经应用到哪"，因此不推进已读线。
+    func roomReadCheckpoint(roomID _: String) async throws -> V2ConversationRoomReadCheckpoint { .unknown }
 }
 
 protocol V2ConversationSendingCapabilityReading: Sendable {
@@ -591,6 +627,8 @@ final class V2ConversationListStore {
         if resetWindow { items = []; conversationNextCursor = nil; hasEarlierConversations = false; viewport.reset() }
         if items.isEmpty { state = .loading }
         let archived = isShowingArchived
+        // 每次刷新先走一页未读轮转：最活跃的房间最先拿到服务端未读，之后才读本地列表。
+        await dataSource.refreshConversationUnread(pageBudget: 1)
         do {
             while true {
                 let capturedAnchorID = viewport.anchorID
@@ -1006,6 +1044,18 @@ struct V2ConversationListView: View {
                                     if item.isPinned { Image(systemName: "pin.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     if item.muteUntil.map({ $0 > Date() }) == true { Image(systemName: "bell.slash.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     Spacer()
+                                    // 未读来自服务端摘要；静音只影响提醒，不影响这里的计数。
+                                    if item.unreadCount > 0 {
+                                        Text(item.unreadCount > 99 ? "99+" : "\(item.unreadCount)")
+                                            .font(.caption2.weight(.semibold))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(.red))
+                                            .accessibilityLabel("\(item.unreadCount) 条未读")
+                                            .accessibilityIdentifier("v2.conversation.unread.\(item.id)")
+                                    }
                                     Text(item.lastActivity, format: .dateTime.hour().minute())
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -1612,6 +1662,17 @@ struct V2ConversationDetailView: View {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 10) {
+                                    // 服务端按保留窗口裁剪过这个房间：缺口是永久的，
+                                    // 必须显式告知，不能让用户以为往上滚就能看到全部历史。
+                                    if store.isHistoryIncomplete {
+                                        Label("更早的消息已不可用", systemImage: "clock.badge.exclamationmark")
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 4)
+                                            .accessibilityLabel("更早的消息已不可用")
+                                            .accessibilityIdentifier("v2.message.history-incomplete")
+                                    }
                                     if store.canLoadOlderTimeline {
                                         Button {
                                             Task { await store.loadOlderTimeline() }

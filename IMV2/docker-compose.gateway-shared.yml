@@ -6,4 +6,7 @@ services:
       IM_V2_MESSAGE_PROJECTION_WRITE_MODE: shared
       IM_V2_MESSAGE_PROJECTION_READ_MODE: shared
       IM_V2_DIRECT_FANOUT_MODE: preplanned
+      # 该叠加层验证的是投影共享，不是投递模型：把两个权威副本形态都固定在切换前的
+      # 取值，避免默认值变化混进它自己的验证目标。
+      IM_V2_GROUP_DELIVERY_AUTHORITY_MODE: fanout
       IM_V2_FANOUT_PAYLOAD_WRITE_MODE: reference

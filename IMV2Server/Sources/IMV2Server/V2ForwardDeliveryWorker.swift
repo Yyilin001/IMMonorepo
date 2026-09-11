@@ -175,8 +175,16 @@ public struct V2ForwardDeliveryWorker: Sendable {
             throw CancellationError()
         } catch {
             let time = now()
+            // mediaPaused is an explicit policy decision and must stay a pause;
+            // every other failure is classified so transient dependency errors
+            // keep retrying instead of waiting for an operator.
             let disposition: V2DurableRetryDisposition = error as? V2ForwardDeliveryError == .mediaPaused
-                ? .pause : retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: time)
+                ? .pause : retryPolicy.disposition(
+                    attempt: lease.attempt,
+                    claimToken: lease.claimToken,
+                    now: time,
+                    kind: v2DurableWorkFailureKind(for: error)
+                )
             if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(time, retryAt) {
                 throw V2ForwardExportError.corruptPersistenceState
             }

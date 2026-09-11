@@ -247,6 +247,18 @@ CREATE FUNCTION im_v2.reject_room_event_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    -- 保留窗口是唯一允许删除历史事件的路径：删除必须同时满足
+    -- (a) 语句显式声明这是保留裁剪，(b) 该事件序号已经低于房间的裁剪下界。
+    -- 任何普通写入路径都不可能凑齐这两个条件，因此"事件只追加"对它们仍然成立。
+    IF TG_OP = 'DELETE' AND current_setting('im_v2.retention_trim', TRUE) = 'on' THEN
+        IF EXISTS (
+            SELECT 1 FROM im_v2.rooms AS room
+            WHERE room.room_id = OLD.room_id
+              AND OLD.room_sequence < room.log_trimmed_through_room_sequence
+        ) THEN
+            RETURN OLD;
+        END IF;
+    END IF;
     RAISE EXCEPTION 'room events are append-only';
 END;
 $$;
@@ -1541,6 +1553,10 @@ CREATE TABLE im_v2.messages (
     CONSTRAINT messages_timeline_sequence_positive CHECK ((timeline_sequence > 0))
 );
 
+-- 支持"未读排除自己发的消息"：每个房间按发送者取最新序号时只走索引，不扫消息表。
+CREATE INDEX messages_room_sender_sequence_idx
+    ON im_v2.messages (room_id, sender_user_id, room_sequence DESC);
+
 -- A send's result outlives its editable/deletable content. Deliberately no
 -- message/room foreign key or cascading delete: content retention must not
 -- make an acknowledged operation eligible for acceptance a second time.
@@ -1987,6 +2003,17 @@ CREATE TABLE im_v2.room_timeline_activities (
     CONSTRAINT room_timeline_activities_timeline_sequence_check CHECK ((timeline_sequence > 0))
 );
 
+CREATE FUNCTION im_v2.touch_room_last_event_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.room_sequence IS DISTINCT FROM OLD.room_sequence THEN
+        NEW.last_event_at := CURRENT_TIMESTAMP;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TABLE im_v2.rooms (
     room_id uuid NOT NULL,
     owner_epoch bigint DEFAULT 0 NOT NULL CHECK (owner_epoch >= 0),
@@ -1999,17 +2026,37 @@ CREATE TABLE im_v2.rooms (
     frozen_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     delivery_mode text DEFAULT 'standard_fanout'::text NOT NULL,
+    -- 权威副本形态。与投递模式刻意分开：投递模式描述用哪种扇出规划器且在房间创建后
+    -- 不可变，"哪一份是权威副本"要能按房间推进。单聊由部署开关决定、忽略本列；
+    -- 群聊以本列为准（混合大群固定 room_log，标准群由创建时的部署策略决定）。
+    delivery_authority text DEFAULT 'fanout'::text NOT NULL,
     group_permission_revision bigint DEFAULT 1 NOT NULL,
     timeline_sequence bigint DEFAULT 0 NOT NULL,
+    -- 房间序列最后一次前进的时刻。由 rooms_touch_last_event_at 维护，
+    -- 因此会话排序不依赖事件最终落在 room_events 还是 message_row。
+    last_event_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- 已裁剪的历史下界：该序号之前的事件已按保留窗口删除，客户端游标低于它时
+    -- 必须被显式告知"历史不完整"，而不是静默少几条。单调只增。
+    log_trimmed_through_room_sequence bigint DEFAULT 0 NOT NULL,
     CONSTRAINT rooms_check CHECK ((((frozen_at IS NULL) AND (frozen_by_user_id IS NULL)) OR ((frozen_at IS NOT NULL) AND (frozen_by_user_id IS NOT NULL)))),
     CONSTRAINT rooms_delivery_mode_check CHECK ((delivery_mode = ANY (ARRAY['standard_fanout'::text, 'large_group_hybrid'::text]))),
     CONSTRAINT rooms_direct_delivery_mode_check CHECK (((room_kind = 'group'::text) OR (delivery_mode = 'standard_fanout'::text))),
+    CONSTRAINT rooms_delivery_authority_check CHECK ((delivery_authority = ANY (ARRAY['fanout'::text, 'room_log'::text]))),
     CONSTRAINT rooms_group_permission_revision_check CHECK ((group_permission_revision > 0)),
     CONSTRAINT rooms_membership_revision_check CHECK ((membership_revision >= 0)),
     CONSTRAINT rooms_room_kind_check CHECK ((room_kind = ANY (ARRAY['group'::text, 'direct'::text]))),
+    CONSTRAINT rooms_log_trimmed_through_check CHECK ((log_trimmed_through_room_sequence >= 0)),
     CONSTRAINT rooms_room_sequence_check CHECK ((room_sequence >= 0)),
     CONSTRAINT rooms_timeline_sequence_check CHECK ((timeline_sequence >= 0))
 );
+
+-- 会话排序依据：任何推进房间序列的写入都会刷新该列。用触发器而不是逐写入点维护，
+-- 是为了让新增写入路径无法忘记刷新。
+CREATE TRIGGER rooms_touch_last_event_at BEFORE UPDATE ON im_v2.rooms
+    FOR EACH ROW EXECUTE FUNCTION im_v2.touch_room_last_event_at();
+
+CREATE INDEX rooms_last_event_at_idx
+    ON im_v2.rooms (last_event_at DESC, room_id);
 
 -- Physical room-store routing is control-plane metadata. The canonical room,
 -- membership and message rows live only in the selected owner store; these
@@ -2110,14 +2157,14 @@ CREATE UNIQUE INDEX group_room_creation_intent_pages_final_key
     WHERE is_final;
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-30'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-30'::text))
+    schema_id text DEFAULT 'im-v2-current-33'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-33'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-30');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-33');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,

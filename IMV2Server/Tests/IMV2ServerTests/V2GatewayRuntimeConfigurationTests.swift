@@ -194,8 +194,16 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.messageProjectionWriteMode == .dual)
         #expect(defaults.messageProjectionReadMode == .preferShared)
         #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
-        #expect(defaults.directFanoutMode == .planner)
+        // 目标架构把单聊的权威副本放在房间事件日志上，因此未配置时的默认是 room_log；
+        // 兼容基线仍可显式选择，见下面的 planner/preplanned 用例。
+        #expect(defaults.directFanoutMode == .roomLog)
+        // 标准群同样默认走读模型：只有这样才能让"尾部是非消息事件时未读停在 1"这个
+        // 扇出群边界彻底消失（见房间读模型合同 §5.4 与 §9 第 3 步）。
+        #expect(defaults.groupDeliveryAuthority == .roomLog)
         #expect(defaults.directRoomLogAdmissionMode == .room)
+        // 保留窗口默认是"永久"=不裁剪历史，与既有行为一致；窗口模式必须显式选择。
+        #expect(defaults.roomLogRetentionMode == .permanent)
+        #expect(defaults.roomLogRetentionWindowSeconds == V2GatewayRuntimeConfiguration.defaultRoomLogRetentionWindowSeconds)
         #expect(defaults.directRoomLogShardAdmissionCreditBatchSize == 0)
         #expect(defaults.directRoomLogRoomAdmissionCreditBatchSize == 0)
         #expect(defaults.directRoomLogAppendBatchSize == 0)
@@ -240,6 +248,12 @@ struct V2GatewayRuntimeConfigurationTests {
             environment: V2DictionaryRuntimeEnvironment(roomLog)
         ).directFanoutMode == .roomLog)
 
+        var fanoutGroups = runtimeValues
+        fanoutGroups["IM_V2_GROUP_DELIVERY_AUTHORITY_MODE"] = "fanout"
+        #expect(try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(fanoutGroups)
+        ).groupDeliveryAuthority == .fanout)
+
         var shardOnlyAdmission = roomLog
         shardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
         #expect(try V2GatewayRuntimeConfiguration(
@@ -247,6 +261,9 @@ struct V2GatewayRuntimeConfigurationTests {
         ).directRoomLogAdmissionMode == .shardOnly)
 
         var shardOnlyAdmissionOutsideRoomLog = runtimeValues
+        // shard_only 只允许出现在 room_log 模式；默认现在就是 room_log，
+        // 所以要显式选择兼容基线才能触发这条校验。
+        shardOnlyAdmissionOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
         shardOnlyAdmissionOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
             "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
@@ -506,6 +523,9 @@ struct V2GatewayRuntimeConfigurationTests {
         }
 
         var eventCacheOutsideRoomLog = runtimeValues
+        // 默认部署模式现在是 room_log；这里要验证的是"该选项只在 room_log 之外非法"，
+        // 因此必须显式选择兼容基线，而不是依赖默认值。
+        eventCacheOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
         eventCacheOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"] = "4096"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
             "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"
@@ -641,6 +661,8 @@ struct V2GatewayRuntimeConfigurationTests {
         }
 
         var creditsOutsideRoomLog = runtimeValues
+        // 同上：显式选择兼容基线，避免"默认就是 room_log"掩盖这条校验。
+        creditsOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
         creditsOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
             "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
@@ -667,10 +689,38 @@ struct V2GatewayRuntimeConfigurationTests {
         ).fanoutPayloadWriteMode == .reference)
 
         var invalidDirectFanout = runtimeValues
+        var windowedRetention = runtimeValues
+        windowedRetention["IM_V2_ROOM_LOG_RETENTION_MODE"] = "window"
+        windowedRetention["IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS"] = "86400"
+        let windowed = try V2GatewayRuntimeConfiguration(
+            environment: V2DictionaryRuntimeEnvironment(windowedRetention)
+        )
+        #expect(windowed.roomLogRetentionMode == .window)
+        #expect(windowed.roomLogRetentionWindowSeconds == 86_400)
+
+        var invalidRetention = runtimeValues
+        invalidRetention["IM_V2_ROOM_LOG_RETENTION_MODE"] = "forever"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_LOG_RETENTION_MODE")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidRetention))
+        }
+        var invalidRetentionWindow = runtimeValues
+        invalidRetentionWindow["IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS"] = "0"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidRetentionWindow))
+        }
+
         invalidDirectFanout["IM_V2_DIRECT_FANOUT_MODE"] = "client_selected"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(invalidDirectFanout)
+            )
+        }
+
+        var invalidGroupAuthority = runtimeValues
+        invalidGroupAuthority["IM_V2_GROUP_DELIVERY_AUTHORITY_MODE"] = "client_selected"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_DELIVERY_AUTHORITY_MODE")) {
+            _ = try V2GatewayRuntimeConfiguration(
+                environment: V2DictionaryRuntimeEnvironment(invalidGroupAuthority)
             )
         }
 

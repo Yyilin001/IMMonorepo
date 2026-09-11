@@ -16,10 +16,10 @@ struct V2LocalSchemaContractTests {
         let primary = try DatabasePool(path: url.path)
         let search = try DatabasePool(path: url.deletingPathExtension().appendingPathExtension("search.sqlite").path)
 
-        #expect(try migrationIdentifiers(in: primary) == ["addForwardChunkCompletionDigest", "bindForwardSourceReferences", "createCurrentV2Schema", "orderAnnouncementEffects", "orderPinnedMessageEffects", "orderReactionEffects", "orderRolePolicyEffects", "recordPushIntent", "recordRolePolicyRecovery", "recordSharedMessageEffects", "recordSnapshotRebuildIntent", "scheduleRolePolicyRecovery", "useUUIDForwardChunkIdentities"])
+        #expect(try migrationIdentifiers(in: primary) == ["addForwardChunkCompletionDigest", "bindForwardSourceReferences", "createCurrentV2Schema", "orderAnnouncementEffects", "orderPinnedMessageEffects", "orderReactionEffects", "orderRolePolicyEffects", "recordConversationUnreadDirectory", "recordPushIntent", "recordRolePolicyRecovery", "recordRoomDeliveryAuthority", "recordRoomLogTrimWatermark", "recordSharedMessageEffects", "recordSnapshotRebuildIntent", "scheduleRolePolicyRecovery", "useUUIDForwardChunkIdentities"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
-        #expect(try schemaObjectCount(in: primary) == 173)
-        #expect(try schemaFingerprint(in: primary) == 0xd39d3ac5c9ce1b60)
+        #expect(try schemaObjectCount(in: primary) == 176)
+        #expect(try schemaFingerprint(in: primary) == 0x5cfe5b9b17df5ba9)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

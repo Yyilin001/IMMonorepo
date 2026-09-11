@@ -1005,6 +1005,7 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000269",
                 "membership_revision": 1,
                 "delivery_mode": "standard_fanout",
+                "delivery_authority": "fanout",
                 "created_at_ms": 1_750_000_000_000,
             ])
         )
@@ -1030,6 +1031,7 @@ struct V2SyncEngineTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000273",
                 "action": "add", "membership_revision": 2,
                 "delivery_mode": "standard_fanout",
+                "delivery_authority": "fanout",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1073,6 +1075,182 @@ struct V2SyncEngineTests {
         }
     }
 
+    @Test("a trimmed room is durably marked as having incomplete history")
+    func trimmedRoomIsMarkedIncomplete() async throws {
+        // 服务端按保留窗口裁剪之后，客户端必须能判断"这个房间的历史缺了一段"，
+        // 而不是把最近窗口当成完整历史展示。
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let room = try RoomID("00000000-0000-0000-0000-0000000002b0")
+
+        _ = try await store.applyGroupEventPage(try V2ClientGroupEventPage(
+            roomID: room,
+            events: [],
+            nextRoomSequence: 12,
+            hasMore: false
+        ))
+        #expect(try await store.roomLogTrimmedThroughSequence(roomID: room) == 0)
+        #expect(try await store.roomLogHistoryIsIncomplete(roomID: room) == false)
+
+        // 服务端报告"12 之前的历史已裁剪"，而本地只应用到这里，缺口必须被记录。
+        _ = try await store.applyGroupEventPage(try V2ClientGroupEventPage(
+            roomID: room,
+            events: [],
+            nextRoomSequence: 40,
+            hasMore: false,
+            logTrimmedThroughRoomSequence: 30
+        ))
+        #expect(try await store.roomLogTrimmedThroughSequence(roomID: room) == 30)
+        #expect(try await store.roomLogHistoryIsIncomplete(roomID: room))
+
+        // 下界只增不减：一次较旧的响应不能让历史重新"变完整"。
+        _ = try await store.applyGroupEventPage(try V2ClientGroupEventPage(
+            roomID: room,
+            events: [],
+            nextRoomSequence: 41,
+            hasMore: false
+        ))
+        #expect(try await store.roomLogTrimmedThroughSequence(roomID: room) == 30)
+
+        // 缺口是永久的：本地继续前进、甚至追平下界之后，标记仍然保留——
+        // 那段历史已经被服务端删除，不可能再补齐。
+        _ = try await store.applyGroupEventPage(try V2ClientGroupEventPage(
+            roomID: room,
+            events: [],
+            nextRoomSequence: 45,
+            hasMore: false,
+            logTrimmedThroughRoomSequence: 30
+        ))
+        #expect(try await store.roomLogHistoryIsIncomplete(roomID: room))
+    }
+
+    @Test("a known direct room is recovered from the room log, not the personal stream")
+    func directRoomEnrollsInCursorSynchronization() async throws {
+        // 单聊切到 room_log 后，消息不再进入个人同步流；客户端必须按房间游标恢复，
+        // 否则对端在切换后收不到任何新消息。这里固定住"私聊房间属于游标同步集合"。
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        let room = try RoomID("00000000-0000-0000-0000-000000000278")
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.isKnownRoomLogRoom(roomID: room) == false)
+
+        try await store.cacheDirectRoomIdentity(
+            roomID: room,
+            publicIdentity: .init(
+                userID: .init("00000000-0000-0000-0000-000000000279"),
+                handle: .init("peer_1"),
+                displayName: "对端",
+                accountKind: .regular
+            )
+        )
+
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [room])
+        #expect(try await store.isKnownRoomLogRoom(roomID: room))
+        #expect(try await store.groupEventAccess(roomID: room) == .init(delivery: .durableRoomLog, isAuthorized: true))
+
+        // 撤销事件授权后必须立刻停止拉取：游标同步不能成为历史授权的旁路。
+        try await store.markRoomEventUnauthorized(roomID: room)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.isKnownRoomLogRoom(roomID: room) == false)
+        #expect(try await store.groupEventAccess(roomID: room) == .init(delivery: .durableRoomLog, isAuthorized: false))
+    }
+
+    @Test("cursor enrollment follows the server-declared authority, not the delivery mode")
+    func enrollmentFollowsDeclaredAuthority() async throws {
+        // 标准群将来会以 room_log 出现而不改投递模式（该字段在房间创建后不可变）。客户端
+        // 必须按服务端宣告的权威副本形态纳管，否则推广时要么漏拉、要么需要客户端发版。
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        let standardRoom = "00000000-0000-0000-0000-000000000280"
+        let logRoom = "00000000-0000-0000-0000-000000000281"
+
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [try roomProjection(roomID: standardRoom, mode: "standard_fanout", authority: "fanout", revision: 1, sequence: 1)],
+            nextSyncToken: .init("standard-token"),
+            receipt: .init("standard-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.groupEventAccess(roomID: .init(standardRoom)) == .init(
+            delivery: .foregroundPreview, isAuthorized: true
+        ))
+
+        // 同样的标准投递模式，但服务端宣告日志是权威副本：必须纳入游标同步。
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [try roomProjection(roomID: logRoom, mode: "standard_fanout", authority: "room_log", revision: 1, sequence: 2)],
+            nextSyncToken: .init("log-token"),
+            receipt: .init("log-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(logRoom)])
+        #expect(try await store.isKnownRoomLogRoom(roomID: .init(logRoom)))
+        #expect(try await store.groupEventAccess(roomID: .init(logRoom)) == .init(
+            delivery: .durableRoomLog, isAuthorized: true
+        ))
+    }
+
+    @Test("a projection without the declared authority is rejected")
+    func enrollmentRejectsMissingAuthority() async throws {
+        // 项目未上线：不保留"缺字段就推断"的静默回退。服务端必须宣告权威副本形态，
+        // 缺失即视为不可解码的投影，而不是猜一个。
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        let hybridRoom = "00000000-0000-0000-0000-000000000282"
+
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await store.apply(.init(
+                generation: 1,
+                records: [try roomProjection(roomID: hybridRoom, mode: "large_group_hybrid", authority: nil, revision: 1, sequence: 1)],
+                nextSyncToken: .init("legacy-token"),
+                receipt: .init("legacy-receipt"),
+                hasMore: false,
+                capabilityProfile: "base"
+            ))
+        }
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+    }
+
+    @Test("the declared authority only advances towards the room log")
+    func authorityNeverDowngrades() async throws {
+        // 少拉一次会让客户端收不到只写日志的房间内容；多拉一次只是幂等重复。
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        let room = "00000000-0000-0000-0000-000000000283"
+
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [
+                try roomProjection(roomID: room, mode: "standard_fanout", authority: "room_log", revision: 1, sequence: 1)
+            ],
+            nextSyncToken: .init("advance-token"),
+            receipt: .init("advance-receipt"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await store.isKnownRoomLogRoom(roomID: .init(room)))
+
+        // 后续成员事件带回较弱的形态：不得把已经按日志恢复的房间退回个人流。
+        _ = try await store.apply(.init(
+            generation: 1,
+            records: [
+                try V2ClientSyncRecord(
+                    sequence: 2,
+                    sourceEventID: .init("00000000-0000-0000-0000-000000000284"),
+                    projectionKind: "membership",
+                    payload: try roomProjectionPayload(roomID: room, mode: "standard_fanout", authority: "fanout", revision: 2)
+                )
+            ],
+            nextSyncToken: .init("advance-token-2"),
+            receipt: .init("advance-receipt-2"),
+            hasMore: false,
+            capabilityProfile: "base"
+        ))
+        #expect(try await store.isKnownRoomLogRoom(roomID: .init(room)))
+    }
+
     @Test("a hybrid membership projection enrolls the room in cursor synchronization")
     func hybridMembershipProjectionRegistersRoomLog() async throws {
         let databaseURL = temporaryDatabaseURL()
@@ -1088,6 +1266,7 @@ struct V2SyncEngineTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000277",
                 "action": "add", "membership_revision": 2,
                 "delivery_mode": "large_group_hybrid",
+                "delivery_authority": "room_log",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1119,6 +1298,7 @@ struct V2SyncEngineTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000277",
                 "action": "add", "membership_revision": 3,
                 "delivery_mode": "large_group_hybrid",
+                "delivery_authority": "room_log",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_002_000,
             ])
         )
@@ -1172,6 +1352,7 @@ struct V2SyncEngineTests {
             "action": "add",
             "membership_revision": 2,
             "delivery_mode": "large_group_hybrid",
+            "delivery_authority": "room_log",
             "created_at_ms": 1_750_000_000_000,
             "server_created_at_ms": 1_750_000_001_000,
         ])
@@ -1293,6 +1474,7 @@ struct V2SyncEngineTests {
                 "target_user_id": "00000000-0000-0000-0000-00000000028d",
                 "action": "add", "membership_revision": 2,
                 "delivery_mode": "standard_fanout",
+                "delivery_authority": "fanout",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1342,6 +1524,7 @@ struct V2SyncEngineTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000281",
                 "action": "remove", "membership_revision": 3,
                 "delivery_mode": "large_group_hybrid",
+                "delivery_authority": "room_log",
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1445,6 +1628,7 @@ struct V2SyncEngineTests {
                     "owner_user_id": "00000000-0000-0000-0000-000000000406",
                     "membership_revision": 1,
                     "delivery_mode": "standard_fanout",
+                    "delivery_authority": "fanout",
                     "created_at_ms": 1_750_000_001_500,
                 ])
             ),
@@ -3786,7 +3970,7 @@ private func policyRecoveryBaseline(revision: UInt64, membership: UInt64 = 2, ad
 private func policyRecoveryMembership(sequence: UInt64, revision: Int, action: String = "add", lowercased: Bool = false) throws -> V2ClientSyncRecord {
     let room = lowercased ? announcementRoom.rawValue.lowercased() : announcementRoom.rawValue
     let user = lowercased ? policyRecoveryUser.rawValue.lowercased() : policyRecoveryUser.rawValue
-    return try .init(sequence: sequence, sourceEventID: .init("policy-membership-\(revision)"), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: ["event_type": "membership_changed", "room_id": room, "title": "Policy recovery", "owner_user_id": policyRecoveryUser.rawValue, "target_user_id": user, "action": action, "membership_revision": revision, "delivery_mode": "standard_fanout", "created_at_ms": 1_000, "server_created_at_ms": revision * 1_000]))
+    return try .init(sequence: sequence, sourceEventID: .init("policy-membership-\(revision)"), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: ["event_type": "membership_changed", "room_id": room, "title": "Policy recovery", "owner_user_id": policyRecoveryUser.rawValue, "target_user_id": user, "action": action, "membership_revision": revision, "delivery_mode": "standard_fanout", "delivery_authority": "fanout", "created_at_ms": 1_000, "server_created_at_ms": revision * 1_000]))
 }
 
 extension V2SyncEngineTests {
@@ -4333,6 +4517,7 @@ extension V2SyncEngineTests {
             let membership = try policyRecoveryMembership(sequence: 9, revision: 2)
             var value = try #require(JSONSerialization.jsonObject(with: membership.payload) as? [String: Any])
             value["delivery_mode"] = V2GroupDeliveryMode.largeGroupHybrid.rawValue
+            value["delivery_authority"] = V2ClientRoomDeliveryAuthority.roomLog.rawValue
             items.append(try .init(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 9, payload: JSONSerialization.data(withJSONObject: value)))
         }
         let reset = try V2ClientResetRequired(snapshotID: .init("pin-snapshot"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
@@ -4533,4 +4718,42 @@ private actor BoundedSyncConnection: V2RealtimeSessionConnecting {
         return .init(userID: try .init("bounded-user"), deviceID: try .init("bounded-device"), protocolVersion: UInt8(IMV2ProtocolVersion.current), capabilityProfile: "base", connectionID: UUID())
     }
     func disconnect() async { disconnects += 1; await onDisconnect() }
+}
+
+/// 构造一条成员变更投影记录，用于验证纳管是否跟随服务端宣告的权威副本形态。
+private func roomProjection(
+    roomID: String,
+    mode: String,
+    authority: String?,
+    revision: Int,
+    sequence: Int64
+) throws -> V2ClientSyncRecord {
+    try V2ClientSyncRecord(
+        sequence: UInt64(sequence),
+        sourceEventID: .init(uuid: UUID()),
+        projectionKind: "membership",
+        payload: try roomProjectionPayload(roomID: roomID, mode: mode, authority: authority, revision: revision)
+    )
+}
+
+private func roomProjectionPayload(
+    roomID: String,
+    mode: String,
+    authority: String?,
+    revision: Int
+) throws -> Data {
+    var payload: [String: Any] = [
+        "event_type": "membership_changed",
+        "room_id": roomID,
+        "title": "推广房间",
+        "owner_user_id": "00000000-0000-0000-0000-0000000002a0",
+        "action": "add",
+        "target_user_id": "00000000-0000-0000-0000-0000000002a1",
+        "membership_revision": revision,
+        "delivery_mode": mode,
+        "created_at_ms": 1_750_000_000_000,
+        "server_created_at_ms": 1_750_000_001_000,
+    ]
+    if let authority { payload["delivery_authority"] = authority }
+    return try JSONSerialization.data(withJSONObject: payload)
 }

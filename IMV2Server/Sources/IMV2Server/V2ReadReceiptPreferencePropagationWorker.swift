@@ -149,7 +149,8 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
                 let disposition = retryPolicy.disposition(
                     attempt: lease.attempt,
                     claimToken: lease.claimToken,
-                    now: failureTime
+                    now: failureTime,
+                    kind: v2DurableWorkFailureKind(for: error)
                 )
                 try await scheduleRetry(lease: lease, disposition: disposition, at: failureTime)
                 if case .pause = disposition { paused += 1 } else { released += 1 }

@@ -202,7 +202,12 @@ public struct V2OutboxRelay: Sendable {
                 // A successful broker publish followed by a process crash is
                 // intentionally retried. Consumers must deduplicate by event.
                 let failureTime = now()
-                let disposition = retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: failureTime)
+                let disposition = retryPolicy.disposition(
+                    attempt: lease.attempt,
+                    claimToken: lease.claimToken,
+                    now: failureTime,
+                    kind: v2DurableWorkFailureKind(for: error)
+                )
                 if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
@@ -251,7 +256,8 @@ public struct V2OutboxRelay: Sendable {
                 let disposition = retryPolicy.disposition(
                     attempt: lease.attempt,
                     claimToken: lease.claimToken,
-                    now: failureTime
+                    now: failureTime,
+                    kind: v2DurableWorkFailureKind(for: error)
                 )
                 if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
                     throw V2RoomWriteStoreError.corruptPersistenceState

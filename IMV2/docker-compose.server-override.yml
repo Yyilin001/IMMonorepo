@@ -106,6 +106,11 @@ services:
     stop_grace_period: 30s
     environment:
       IM_V2_SHUTDOWN_GRACE_MS: 20000
+      # 本地/自托管叠加层显式固定兼容基线：把单聊切到 room_log 是需要单独验证的
+      # 变更（客户端按房间游标恢复、运维指标口径都会变），不能靠默认值偷偷生效。
+      IM_V2_DIRECT_FANOUT_MODE: planner
+      # 标准群的权威副本形态同样固定为历史行为，理由相同。
+      IM_V2_GROUP_DELIVERY_AUTHORITY_MODE: fanout
       # A delivery pass holds one PostgreSQL connection while it leases rows,
       # then performs commit-sized projection transactions. The generic 100k
       # profile permits much larger claims, but that burst can monopolize this

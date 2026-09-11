@@ -62,7 +62,9 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                 roomID: roomUUID,
                 actorUserID: actorUUID,
                 sql: sql
-            ) {
+            ), // 被保留裁剪过的房间不再走进程内缓存：缓存里可能仍留有已经删除的历史，
+               // 而且只有持久查询能回报"历史不完整"的下界。
+               access.trimmedThroughRoomSequence == 0 {
                 if let cached = await directRoomLogEventCache.page(
                     candidate: candidate,
                     actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
@@ -83,6 +85,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         let rows = try await sql.raw("""
             WITH room AS MATERIALIZED (
                 SELECT rooms.room_sequence, rooms.room_kind,
+                       rooms.log_trimmed_through_room_sequence,
                        EXISTS (
                            SELECT 1 FROM im_v2.room_memberships AS membership
                            WHERE membership.room_id = rooms.room_id
@@ -160,6 +163,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             )
             SELECT room.room_kind, room.actor_is_active_member,
                    room.room_sequence AS scanned_through_room_sequence,
+                   room.log_trimmed_through_room_sequence AS trimmed_through_room_sequence,
                    event.event_id, event.room_sequence, event.event_type,
                    CASE
                        WHEN event.is_message_row
@@ -265,10 +269,17 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         // An exhausted snapshot has checked the complete tail, including
         // authorized sequence gaps. Never advertise that tail as consumed
         // while another visible (or incomplete-authority) row remains.
+        let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
         let next = hasMore
             ? (entries.last?.roomSequence ?? afterRoomSequence)
             : max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
-        return try V2GroupEventLogPage(roomID: roomID, events: entries, nextRoomSequence: next, hasMore: hasMore)
+        return try V2GroupEventLogPage(
+            roomID: roomID,
+            events: entries,
+            nextRoomSequence: next,
+            hasMore: hasMore,
+            logTrimmedThroughRoomSequence: trimmedThrough
+        )
     }
 
     func pullPrepared(
@@ -420,7 +431,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
     ) async throws -> DirectRoomCacheAccessRow? {
         try await sql.raw("""
             SELECT room.room_sequence, membership.joined_revision,
-                   membership.left_revision
+                   membership.left_revision, room.log_trimmed_through_room_sequence
             FROM im_v2.rooms AS room
             JOIN im_v2.room_memberships AS membership
               ON membership.room_id = room.room_id
@@ -451,16 +462,19 @@ private struct DirectRoomCacheAccessRow: Decodable {
     let roomSequence: Int64
     let actorJoinedRevision: Int64
     let actorLeftRevision: Int64?
+    let trimmedThroughRoomSequence: Int64
 
     enum CodingKeys: String, CodingKey {
         case roomSequence = "room_sequence"
         case actorJoinedRevision = "joined_revision"
         case actorLeftRevision = "left_revision"
+        case trimmedThroughRoomSequence = "log_trimmed_through_room_sequence"
     }
 }
 
 private struct GroupEventLogRow: Decodable {
     let scannedThroughRoomSequence: Int64
+    let trimmedThroughRoomSequence: Int64
     let roomKind: String
     let actorIsActiveMember: Bool
     let eventID: UUID?
@@ -470,6 +484,7 @@ private struct GroupEventLogRow: Decodable {
     let payloadIsComplete: Bool
     enum CodingKeys: String, CodingKey {
         case scannedThroughRoomSequence = "scanned_through_room_sequence"
+        case trimmedThroughRoomSequence = "trimmed_through_room_sequence"
         case roomKind = "room_kind"
         case actorIsActiveMember = "actor_is_active_member"
         case eventID = "event_id"

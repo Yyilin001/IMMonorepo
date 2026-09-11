@@ -571,7 +571,9 @@ public struct V2FanoutDeliveryWorker: Sendable {
                         // A handoff is a per-lease durable update. Keep the
                         // other leases on the already acquired route snapshot
                         // and retry only this fenced row on a later claim.
-                        let outcome = try await scheduleRetry(for: [lease])
+                        let outcome = try await scheduleRetry(
+                            for: [lease], kind: v2DurableWorkFailureKind(for: error)
+                        )
                         released += outcome.released
                         paused += outcome.paused
                     }
@@ -582,7 +584,9 @@ public struct V2FanoutDeliveryWorker: Sendable {
                 // A failed route lookup yields no trustworthy snapshot, so
                 // retry the complete bounded claim instead of using a mixed
                 // generation of routing facts.
-                let outcome = try await scheduleRetry(for: leases)
+                let outcome = try await scheduleRetry(
+                    for: leases, kind: v2DurableWorkFailureKind(for: error)
+                )
                 released += outcome.released
                 paused += outcome.paused
             }
@@ -599,14 +603,20 @@ public struct V2FanoutDeliveryWorker: Sendable {
                         do {
                             let commits = try await self.store.commitBatch(batch, now: self.now())
                             guard commits.count == batch.count else {
-                                return .init(index: index, commits: nil)
+                                // The store reported success without one result per
+                                // lease. Retrying cannot repair a violated batch
+                                // contract.
+                                return .init(index: index, commits: nil, failure: .deterministic)
                             }
-                            return .init(index: index, commits: commits)
+                            return .init(index: index, commits: commits, failure: nil)
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
                             try Task.checkCancellation()
-                            return .init(index: index, commits: nil)
+                            return .init(
+                                index: index, commits: nil,
+                                failure: v2DurableWorkFailureKind(for: error)
+                            )
                         }
                     }
                 }
@@ -624,7 +634,9 @@ public struct V2FanoutDeliveryWorker: Sendable {
                         let resolutions = try await splitOrFail(batch)
                         for resolution in resolutions {
                             guard let isolatedCommits = resolution.commits else {
-                                let outcome = try await scheduleRetry(for: resolution.leases)
+                                let outcome = try await scheduleRetry(
+                                    for: resolution.leases, kind: attempt.failure ?? .transient
+                                )
                                 released += outcome.released
                                 paused += outcome.paused
                                 continue
@@ -650,7 +662,9 @@ public struct V2FanoutDeliveryWorker: Sendable {
                         // failure; the inbox uniqueness key remains the final
                         // idempotency fence for a cross-store fallback that
                         // may already have projected a target.
-                        let outcome = try await scheduleRetry(for: batch)
+                        let outcome = try await scheduleRetry(
+                            for: batch, kind: attempt.failure ?? .transient
+                        )
                         released += outcome.released
                         paused += outcome.paused
                     }
@@ -672,14 +686,22 @@ public struct V2FanoutDeliveryWorker: Sendable {
         return .init(claimedCount: leases.count, committedCount: committed, staleCount: stale, staleRouteCount: staleRoute, releasedCount: released, pausedCount: paused)
     }
 
-    private func scheduleRetry(for leases: [V2FanoutDeliveryLease]) async throws -> (released: Int, paused: Int) {
+    private func scheduleRetry(
+        for leases: [V2FanoutDeliveryLease],
+        kind: V2DurableWorkFailureKind
+    ) async throws -> (released: Int, paused: Int) {
         try Task.checkCancellation()
         var released = 0
         var paused = 0
         let failureTime = now()
         for lease in leases {
             try Task.checkCancellation()
-            let disposition = retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: failureTime)
+            let disposition = retryPolicy.disposition(
+                attempt: lease.attempt,
+                claimToken: lease.claimToken,
+                now: failureTime,
+                kind: kind
+            )
             if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -741,6 +763,9 @@ public struct V2FanoutDeliveryWorker: Sendable {
 private struct V2FanoutBatchCommitAttempt: Sendable {
     let index: Int
     let commits: [V2FanoutDeliveryCommit]?
+    /// 失败类别；成功提交时为 nil。批次内的错误在任务组内被折叠成该值，
+    /// 使暂停判定不必跨并发边界传递任意错误。
+    let failure: V2DurableWorkFailureKind?
 }
 
 private struct V2FanoutBatchCommitResolution: Sendable {

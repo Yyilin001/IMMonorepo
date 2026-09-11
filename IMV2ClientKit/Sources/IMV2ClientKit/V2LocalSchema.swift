@@ -149,6 +149,32 @@ extension GRDBV2LocalSyncStore {
                 recorded_at REAL NOT NULL
             );
 
+        CREATE TABLE v2_room_read_watermarks (
+                room_id TEXT PRIMARY KEY,
+                read_through_room_sequence INTEGER NOT NULL CHECK (read_through_room_sequence > 0),
+                recorded_at REAL NOT NULL
+            );
+
+        -- 服务端会话摘要的本地副本。会话列表是本地优先的，所以未读数必须先落在这里，
+        -- 界面才能按房间标识取到它；未读数的权威仍在服务端。
+        CREATE TABLE v2_room_unread_directory (
+                room_id TEXT PRIMARY KEY,
+                head INTEGER NOT NULL CHECK (head >= 0),
+                unread_count INTEGER NOT NULL CHECK (unread_count >= 0),
+                last_event_at REAL NOT NULL,
+                cycle INTEGER NOT NULL CHECK (cycle >= 0),
+                recorded_at REAL NOT NULL
+            );
+
+        -- 全房间轮转游标。游标为空表示下一轮从最新活动重新开始；cycle 用于在一轮结束后
+        -- 淘汰本轮没再出现的房间，避免离开的房间永久留在目录里。
+        CREATE TABLE v2_room_unread_rotation (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                cursor TEXT,
+                cycle INTEGER NOT NULL CHECK (cycle >= 0),
+                updated_at REAL NOT NULL
+            );
+
         CREATE TABLE v2_direct_room_identities (
             room_id TEXT PRIMARY KEY,
             target_user_id TEXT NOT NULL,
@@ -205,7 +231,14 @@ extension GRDBV2LocalSyncStore {
 
         CREATE TABLE v2_group_event_cursors (
                 room_id TEXT PRIMARY KEY,
-                applied_room_sequence INTEGER NOT NULL CHECK (applied_room_sequence >= 0)
+                applied_room_sequence INTEGER NOT NULL CHECK (applied_room_sequence >= 0),
+                -- 服务端已裁剪的历史下界：本地游标低于它时该房间的历史不完整，
+                -- 界面必须显式告知，而不是静默地少几条。零表示从未裁剪。
+                log_trimmed_through_room_sequence INTEGER NOT NULL DEFAULT 0
+                    CHECK (log_trimmed_through_room_sequence >= 0),
+                -- 该房间是否已确认缺过历史。缺口是永久的（服务端已经删了那段），
+                -- 因此标记一旦置位就保持置位，界面据此明确告知而不是假装完整。
+                history_incomplete INTEGER NOT NULL DEFAULT 0 CHECK (history_incomplete IN (0, 1))
             );
 
         -- A rejected cursor pull must be remembered for direct rooms too.
@@ -632,6 +665,10 @@ extension GRDBV2LocalSyncStore {
                 owner_user_id TEXT NOT NULL,
                 membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0),
                 delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+                -- 服务端宣告的权威副本形态；决定客户端是否按房间游标恢复该房间。
+                -- 默认取 room_log 是刻意的失败方向：多拉一次只是重复（消息投影幂等），
+                -- 少拉一次则是客户端收不到只写日志的房间内容。
+                delivery_authority TEXT NOT NULL DEFAULT 'room_log' CHECK (delivery_authority IN ('fanout', 'room_log')),
                 is_group_event_authorized INTEGER NOT NULL DEFAULT 1 CHECK (is_group_event_authorized IN (0, 1)),
                 created_at REAL NOT NULL
             );

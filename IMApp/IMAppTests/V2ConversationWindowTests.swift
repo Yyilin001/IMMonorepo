@@ -240,7 +240,8 @@ struct V2ConversationWindowTests {
                 try V2ClientSyncRecord(sequence: UInt64(value), sourceEventID: .init(UUID().uuidString), projectionKind: "room", payload: JSONSerialization.data(withJSONObject: [
                     "event_type": "room.created", "room_id": Self.identifier(value), "title": "Room \(value)",
                     "owner_user_id": Self.identifier(99_999), "membership_revision": 1,
-                    "delivery_mode": "standard_fanout", "created_at_ms": 1_750_000_000_000 + value * 1_000
+                    "delivery_mode": "standard_fanout", "delivery_authority": "fanout",
+                    "created_at_ms": 1_750_000_000_000 + value * 1_000
                 ]))
             }
             _ = try await store.apply(.init(generation: 1, records: records, nextSyncToken: .init("seed-\(end)"), receipt: .init("seed-receipt-\(end)"), hasMore: false, capabilityProfile: "base"))

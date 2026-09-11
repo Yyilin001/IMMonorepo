@@ -199,6 +199,10 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let getGroupRolePolicyBaseline = Self(rawValue: 107)
     /// 群角色权限基线响应。
     public static let groupRolePolicyBaseline = Self(rawValue: 108)
+    /// 会话摘要请求。
+    public static let roomSummaryList = Self(rawValue: 109)
+    /// 会话摘要分页响应。
+    public static let roomSummaryPage = Self(rawValue: 110)
 }
 
 /// 帧头标志集合；构造保留位值，上层负责验证协商与适用命令。

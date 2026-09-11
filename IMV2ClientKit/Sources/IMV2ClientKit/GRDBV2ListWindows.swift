@@ -218,7 +218,7 @@ extension GRDBV2LocalSyncStore {
         })
         let profiles = try Dictionary(uniqueKeysWithValues: Row.fetchAll(
             db,
-            sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))",
+            sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, delivery_authority, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))",
             arguments: roomArguments
         ).map { row -> (RoomID, V2ClientRoomProfileProjection) in
             let profile = try Self.decodeRoomProfileProjection(row)

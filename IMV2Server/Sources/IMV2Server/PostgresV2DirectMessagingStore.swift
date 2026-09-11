@@ -103,6 +103,12 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 """).run()
             try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions (user_id) VALUES (\(bind: actorID)), (\(bind: targetID)) ON CONFLICT (user_id) DO NOTHING").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
+            // A direct room starts at room_sequence 0, so this is a no-op until
+            // the first event exists. Keeping the call here means both members
+            // share the same watermark rule as every other join path.
+            try await v2InitializeNewRoomReadWatermarks(
+                roomID: createdRoomID, now: now, sql: sql
+            )
             try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             let persisted = try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, sql: sql)
             try await appendDirectRoomProfileProjection(recipientID: actorID, roomID: createdRoomID, profile: targetProfile, sourceEventID: operationID, createdAt: now, sql: sql)

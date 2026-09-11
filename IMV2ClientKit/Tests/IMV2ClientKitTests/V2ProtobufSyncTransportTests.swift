@@ -261,6 +261,51 @@ struct V2ProtobufSyncTransportTests {
         #expect(await wire.requestedPageSize() == 100)
     }
 
+    @Test("room summary round-trips unread and preview without owning the count")
+    func roomSummaryRoundTrips() async throws {
+        let wire = RoomSummaryWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000350")
+        let messageID = try MessageID("00000000-0000-0000-0000-000000000351")
+
+        let page = try await transport.roomSummaries(cursor: nil, pageSize: 100)
+
+        #expect(page.rooms.count == 1)
+        #expect(page.rooms[0].roomID == roomID)
+        #expect(page.rooms[0].roomKind == .direct)
+        #expect(page.rooms[0].head == 12)
+        #expect(page.rooms[0].unreadCount == 3)
+        #expect(page.rooms[0].lastEventAt == Date(timeIntervalSince1970: 1_750_006_000.25))
+        #expect(page.rooms[0].latestMessage?.messageID == messageID)
+        #expect(page.rooms[0].latestMessage?.text == "预览")
+        #expect(page.rooms[0].latestMessage?.mediaCount == 1)
+        #expect(page.rooms[0].latestMessage?.isWithdrawn == false)
+        #expect(page.nextCursor == "00000000-0000-0000-0000-000000000352")
+        #expect(await wire.requestedPageSize() == 100)
+    }
+
+    @Test("room summary rejects an unread count that exceeds the room head")
+    func roomSummaryRejectsImpossibleUnread() async throws {
+        let transport = V2ProtobufSyncTransport(
+            wire: RoomSummaryWire(unreadCount: 13),
+            protocolVersion: 1
+        )
+        await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+            try await transport.roomSummaries(cursor: nil, pageSize: 100)
+        }
+    }
+
+    @Test("room summary rejects a cursor over the transport budget")
+    func roomSummaryRejectsOversizedCursor() async throws {
+        let transport = V2ProtobufSyncTransport(wire: RoomSummaryWire(), protocolVersion: 1)
+        await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+            try await transport.roomSummaries(
+                cursor: String(repeating: "A", count: 513),
+                pageSize: 100
+            )
+        }
+    }
+
     @Test("member directory rejects a row without its current public identity")
     func membershipDirectoryRejectsMissingIdentity() async throws {
         let transport = V2ProtobufSyncTransport(
@@ -345,6 +390,51 @@ private actor GroupEventSubscriptionWire: V2AuthenticatedFrameTransport {
 
     func commands() -> [V2FrameCommand] { receivedCommands }
     func afterRoomSequence() -> UInt64 { receivedAfterRoomSequence }
+}
+
+/// 会话摘要线替身：按构造时给定的未读数回答一页摘要。
+///
+/// 默认给出 3 条未读与 12 的房间头，因此"未读不超过房间头"成立；测试可以通过构造
+/// 参数制造越界响应，验证客户端不会接受自相矛盾的计数。
+private actor RoomSummaryWire: V2AuthenticatedFrameTransport {
+    private var pageSize: UInt32 = 0
+    private let unreadCount: UInt64
+
+    init(unreadCount: UInt64 = 3) {
+        self.unreadCount = unreadCount
+    }
+
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .roomSummaryList(let command)? = request.body else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        pageSize = command.pageSize
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = request.protocolVersion
+        response.roomSummaryPage = .init()
+        var room = IMV2RoomSummary()
+        room.roomID = "00000000-0000-0000-0000-000000000350"
+        room.roomKind = "direct"
+        room.head = 12
+        room.lastEventAtMs = 1_750_006_000_250
+        room.unreadCount = unreadCount
+        var latest = IMV2RoomSummaryMessage()
+        latest.messageID = "00000000-0000-0000-0000-000000000351"
+        latest.senderUserID = "00000000-0000-0000-0000-000000000353"
+        latest.roomSequence = 12
+        latest.text = "预览"
+        latest.isWithdrawn = false
+        latest.mediaCount = 1
+        latest.serverCreatedAtMs = 1_750_006_000_000
+        room.latestMessage = latest
+        response.roomSummaryPage.rooms = [room]
+        response.roomSummaryPage.nextCursor = "00000000-0000-0000-0000-000000000352"
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+    }
+
+    func requestedPageSize() -> UInt32 { pageSize }
 }
 
 private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {

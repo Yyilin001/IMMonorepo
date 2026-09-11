@@ -111,6 +111,8 @@ message Envelope {
     MessagesForwarded messages_forwarded = 106;
     GetGroupRolePolicyBaseline get_group_role_policy_baseline = 107;
     GroupRolePolicyBaseline group_role_policy_baseline = 108;
+    RoomSummaryList room_summary_list = 109;
+    RoomSummaryPage room_summary_page = 110;
   }
 }
 
@@ -607,6 +609,50 @@ message RoomMembersPage {
   RoomMembershipRole actor_role = 5;
 }
 
+// 会话列表的读模型：服务端聚合、有界分页，单聊与群聊返回同一种结构。
+//
+// 它是列表视图的唯一数据来源，也是"已发送不等于已送达"的落地方式：推送只是加速，
+// 客户端重新连上后靠这里的未读数与房间游标恢复。页内每一行的未读数是精确值，
+// 跨全部房间的总角标才允许滞后。
+//
+// 客户端只把 `cursor` 当作不透明字符串回传；它编码排序键
+// (last_event_at, room_id)，与房间序号、个人时间线序号都无关。
+message RoomSummaryList {
+  string cursor = 1;
+  uint32 page_size = 2;
+}
+
+message RoomSummaryMessage {
+  string message_id = 1;
+  string sender_user_id = 2;
+  // 该消息在房间日志中的序号，也是继续拉取这条消息之后的起点。
+  uint64 room_sequence = 3;
+  // 当前正文；已撤回的消息仍保留撤回前的正文，由 is_withdrawn 决定展示方式。
+  string text = 4;
+  bool is_withdrawn = 5;
+  // 未被撤销的媒体引用数量；为 0 时正文可能是唯一内容。
+  uint32 media_count = 6;
+  int64 server_created_at_ms = 7;
+}
+
+message RoomSummary {
+  string room_id = 1;
+  // "group" 或 "direct"；客户端不得据此推断授权，只用于展示。
+  string room_kind = 2;
+  // 房间日志头，未读出超过它。
+  uint64 head = 3;
+  int64 last_event_at_ms = 4;
+  uint64 unread_count = 5;
+  // 房间还没有可见消息时为空；此时列表仍必须保留该房间。
+  RoomSummaryMessage latest_message = 6;
+}
+
+message RoomSummaryPage {
+  repeated RoomSummary rooms = 1;
+  // 为空表示没有更多房间。
+  string next_cursor = 2;
+}
+
 // Groups retain one ordered room log. The caller must be an active member now
 // and must also have been eligible at each event's committed membership
 // revision; leaving a room therefore revokes future reads without exposing
@@ -638,6 +684,10 @@ message GroupEventPage {
   // If has_more is true, this boundary must advance beyond the request cursor.
   uint64 next_room_sequence = 3;
   bool has_more = 4;
+  // 已裁剪的历史下界：该序号之前的事件已按保留窗口移除，不再可恢复。
+  // 客户端游标低于它时必须把该房间标记为"历史不完整"，并从这个下界继续拉取；
+  // 0 表示该房间从未裁剪。静默少几条是明确禁止的行为。
+  uint64 log_trimmed_through_room_sequence = 5;
 }
 
 // A foreground client subscribes only while a group detail view is visible.

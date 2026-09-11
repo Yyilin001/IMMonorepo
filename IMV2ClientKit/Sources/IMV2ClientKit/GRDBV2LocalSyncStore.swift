@@ -248,6 +248,40 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    /// 该房间在服务端被裁剪掉的历史下界。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 已裁剪的历史下界；零表示从未裁剪。
+    /// - Throws: 本地读取失败时抛出。
+    public func roomLogTrimmedThroughSequence(roomID: RoomID) throws -> UInt64 {
+        try databasePool.read { db in
+            let sequence: Int64 = try Row.fetchOne(
+                db,
+                sql: "SELECT log_trimmed_through_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            )?["log_trimmed_through_room_sequence"] ?? 0
+            return try Self.storageUnsigned(sequence)
+        }
+    }
+
+    /// 本地是否已确认该房间缺失历史。
+    ///
+    /// 标记在"本页之前本地序号低于服务端裁剪下界"的那一刻置位并永久保留：那段历史已经
+    /// 被服务端删除，不可能再补齐，界面必须显式告知用户，而不是假装历史完整。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 缺失历史时为 `true`。
+    /// - Throws: 本地读取失败时抛出。
+    public func roomLogHistoryIsIncomplete(roomID: RoomID) throws -> Bool {
+        try databasePool.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: "SELECT history_incomplete FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [roomID.rawValue]
+            ) ?? false
+        }
+    }
+
     public func knownRoomLogRoomIDs(after roomID: RoomID?, limit: Int) throws -> [RoomID] {
         try roomLogRoomIDs(after: roomID, limit: limit, descending: false)
     }
@@ -265,7 +299,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     WITH room_log_rooms AS (
                         SELECT room_id
                         FROM v2_room_profile_projections
-                        WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                        WHERE delivery_authority = ? AND is_group_event_authorized = 1
                         UNION
                         SELECT direct.room_id
                         FROM (
@@ -283,7 +317,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     ORDER BY room_id \(descending ? "DESC" : "ASC")
                     LIMIT ?
                     """,
-                arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID?.rawValue, roomID?.rawValue, limit]
+                arguments: [V2ClientRoomDeliveryAuthority.roomLog.rawValue, roomID?.rawValue, roomID?.rawValue, limit]
             )
             return try rawRoomIDs.map(RoomID.init)
         }
@@ -319,7 +353,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 sql: """
                     SELECT EXISTS (
                         SELECT 1 FROM v2_room_profile_projections
-                        WHERE room_id = ? AND delivery_mode = ? AND is_group_event_authorized = 1
+                        WHERE room_id = ? AND delivery_authority = ? AND is_group_event_authorized = 1
                         UNION ALL
                         SELECT 1
                         FROM (
@@ -332,7 +366,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                         WHERE direct.room_id = ? AND COALESCE(authorization.is_authorized, 1) = 1
                     )
                     """,
-                arguments: [roomID.rawValue, V2GroupDeliveryMode.largeGroupHybrid.rawValue, roomID.rawValue]
+                arguments: [roomID.rawValue, V2ClientRoomDeliveryAuthority.roomLog.rawValue, roomID.rawValue]
             ) ?? false
         }
     }
@@ -341,14 +375,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             if let row = try Row.fetchOne(
                 db,
-                sql: "SELECT delivery_mode, is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?",
+                sql: "SELECT delivery_authority, is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?",
                 arguments: [roomID.rawValue]
             ) {
-                guard let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String) else {
+                guard let authority = V2ClientRoomDeliveryAuthority(rawValue: row["delivery_authority"] as String) else {
                     throw V2ClientProjectionError.invalidMessagePayload
                 }
                 return .init(
-                    delivery: deliveryMode == .largeGroupHybrid ? .durableRoomLog : .foregroundPreview,
+                    delivery: authority == .roomLog ? .durableRoomLog : .foregroundPreview,
                     isAuthorized: row["is_group_event_authorized"] as Bool
                 )
             }
@@ -374,6 +408,52 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 sql: "SELECT COALESCE(MAX(room_sequence), 0) AS room_sequence FROM v2_message_projections WHERE room_id = ?",
                 arguments: [roomID.rawValue]
             )?["room_sequence"] ?? 0
+            return try Self.storageUnsigned(sequence)
+        }
+    }
+
+    /// 读取本设备在该房间**本地已应用**到的房间序号。
+    ///
+    /// 房间头由服务端给出，并且包含编辑、撤回、reaction、置顶、公告、角色变更这些
+    /// **非消息事件**。只按可见消息序号上报已读线，会在房间尾部是非消息事件时把未读
+    /// 永久钉在 1；要按合同 §5.4 推进到已知 head，就必须先知道"本地已经应用到哪里"。
+    ///
+    /// 可靠房间日志（私聊与混合大群）由 `v2_group_event_cursors.applied_room_sequence`
+    /// 与只追加的 `v2_group_events` 精确回答；标准扇出群没有持久化游标，退化为各投影
+    /// 自带的来源序号取较大值，因此只覆盖那些确实带序号落到本地的投影。
+    ///
+    /// 结果只会随本地应用前进而单调变大：所有来源表在快照替换与授权清除时一起删除。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 已应用到的房间序号；本地没有任何该房间的事件证据时为 `0`。
+    /// - Throws: 本地数据库读取失败。
+    public func roomAppliedRoomSequence(roomID: RoomID) throws -> UInt64 {
+        try databasePool.read { db in
+            let sequence: Int64? = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT MAX(value) AS value FROM (
+                        SELECT applied_room_sequence AS value
+                        FROM v2_group_event_cursors WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_events WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_message_projections WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_reaction_versions WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_pinned_messages WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_announcements WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_role_policies WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_member_roles WHERE room_id = ?
+                    )
+                    """,
+                arguments: StatementArguments(Array(repeating: roomID.rawValue, count: 8))
+            )?["value"]
+            guard let sequence else { return 0 }
             return try Self.storageUnsigned(sequence)
         }
     }
@@ -445,9 +525,40 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 )
                 insertedEvents += 1
             }
+            // 缺口判定必须在推进游标之前完成：本页之前本地只应用到 priorApplied，
+            // 而服务端声明 priorApplied 之前（trimmed 之前）的历史已经不存在，
+            // 两者之间的那段就是永久缺口。
+            let priorApplied: Int64 = try Row.fetchOne(
+                db,
+                sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [page.roomID.rawValue]
+            )?["applied_room_sequence"] ?? 0
+            let trimmedThrough = try Self.storageInteger(page.logTrimmedThroughRoomSequence)
+            let hasGap = page.logTrimmedThroughRoomSequence > UInt64(priorApplied)
             try db.execute(
-                sql: "INSERT INTO v2_group_event_cursors (room_id, applied_room_sequence) VALUES (?, ?) ON CONFLICT(room_id) DO UPDATE SET applied_room_sequence = excluded.applied_room_sequence",
-                arguments: [page.roomID.rawValue, try Self.storageInteger(page.nextRoomSequence)]
+                sql: """
+                    INSERT INTO v2_group_event_cursors
+                        (room_id, applied_room_sequence, log_trimmed_through_room_sequence, history_incomplete)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(room_id) DO UPDATE SET
+                        applied_room_sequence = excluded.applied_room_sequence,
+                        -- 下界只增不减：服务端裁剪过的历史不会因为一次旧响应而"变完整"。
+                        log_trimmed_through_room_sequence = MAX(
+                            v2_group_event_cursors.log_trimmed_through_room_sequence,
+                            excluded.log_trimmed_through_room_sequence
+                        ),
+                        -- 缺口是永久的：标记一旦置位就保持置位。
+                        history_incomplete = MAX(
+                            v2_group_event_cursors.history_incomplete,
+                            excluded.history_incomplete
+                        )
+                    """,
+                arguments: [
+                    page.roomID.rawValue,
+                    try Self.storageInteger(page.nextRoomSequence),
+                    trimmedThrough,
+                    hasGap ? 1 : 0
+                ]
             )
             return try .init(appliedThrough: page.nextRoomSequence, insertedEventCount: insertedEvents)
         }
@@ -518,6 +629,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.applyUserAddPermission(record, db: db)
                 } else if record.projectionKind == "direct_read_receipt" {
                     try Self.applyDirectReadReceipt(record, db: db)
+                } else if record.projectionKind == "own_read_watermark" {
+                    try Self.applyOwnReadWatermark(record, db: db)
                 } else if record.projectionKind == "read_receipt_preferences" {
                     try Self.applyReadReceiptPreference(record, db: db)
                 } else if record.projectionKind == "conversation_state" {
@@ -1028,6 +1141,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_room_profile_projections",
         "v2_direct_room_profile_projections",
         "v2_direct_read_receipt_projections",
+        "v2_room_read_watermarks",
         "v2_read_receipt_preference",
         "v2_profile_views",
         "v2_profile_invalidations",
@@ -1088,14 +1202,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let shadowRolePolicies = snapshotShadowTable(for: "v2_group_role_policies")
         let shadowMemberRoles = snapshotShadowTable(for: "v2_group_member_roles")
         let shadowPermissionRevisions = snapshotShadowTable(for: "v2_group_permission_revisions")
-        let hybridMode = V2GroupDeliveryMode.largeGroupHybrid.rawValue
+        // 快照导入必须按服务端宣告的权威副本形态复制房间日志相关行，而不是按投递模式：
+        // 标准群将来也可能以 room_log 出现。
+        let roomLogAuthority = V2ClientRoomDeliveryAuthority.roomLog.rawValue
 
         func copyRoomRows(table: String, shadow: String) throws {
             try db.execute(sql: """
                 WITH room_log_rooms AS (
                     SELECT room_id
                     FROM \(shadowRooms)
-                    WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                    WHERE delivery_authority = ? AND is_group_event_authorized = 1
                     UNION
                     SELECT direct.room_id
                     FROM (
@@ -1112,7 +1228,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 FROM \(table) AS live
                 JOIN room_log_rooms AS room ON room.room_id = live.room_id
                 ON CONFLICT DO NOTHING
-                """, arguments: [hybridMode])
+                """, arguments: [roomLogAuthority])
         }
 
         try copyRoomRows(table: "v2_message_projections", shadow: shadowMessages)
@@ -1192,7 +1308,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             WITH room_log_rooms AS (
                 SELECT room_id
                 FROM \(shadowRooms)
-                WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                WHERE delivery_authority = ? AND is_group_event_authorized = 1
                 UNION
                 SELECT direct.room_id
                 FROM (
@@ -1208,12 +1324,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             SELECT event.*
             FROM v2_group_events AS event
             JOIN room_log_rooms AS room ON room.room_id = event.room_id
-            """, arguments: [hybridMode])
+            """, arguments: [roomLogAuthority])
         try db.execute(sql: """
             WITH room_log_rooms AS (
                 SELECT room_id
                 FROM \(shadowRooms)
-                WHERE delivery_mode = ? AND is_group_event_authorized = 1
+                WHERE delivery_authority = ? AND is_group_event_authorized = 1
                 UNION
                 SELECT direct.room_id
                 FROM (
@@ -1229,7 +1345,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             SELECT cursor.*
             FROM v2_group_event_cursors AS cursor
             JOIN room_log_rooms AS room ON room.room_id = cursor.room_id
-            """, arguments: [hybridMode])
+            """, arguments: [roomLogAuthority])
     }
 
     private static func preserveMessageEffectsInSnapshot(db: Database) throws {
@@ -1489,6 +1605,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         case "stranger_message_permission": try applyStrangerMessagePermission(record, target: .snapshotShadow, db: db)
         case "user_add_permission": try applyUserAddPermission(record, target: .snapshotShadow, db: db)
         case "direct_read_receipt": try applyDirectReadReceipt(record, target: .snapshotShadow, db: db)
+        case "own_read_watermark": try applyOwnReadWatermark(record, target: .snapshotShadow, db: db)
         case "read_receipt_preferences": try applyReadReceiptPreference(record, target: .snapshotShadow, db: db)
         case "conversation_state": try persist(V2ClientConversationState(record: record), target: .snapshotShadow, db: db)
         case "message_favorite": try persist(V2ClientMessageFavorite(record: record), target: .snapshotShadow, db: db)
@@ -2539,14 +2656,73 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func roomProfile(roomID: RoomID) throws -> V2ClientRoomProfileProjection? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, delivery_authority, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
             return try Self.decodeRoomProfileProjection(row)
         }
     }
 
     func roomProfiles() throws -> [V2ClientRoomProfileProjection] {
         try databasePool.read { db in
-            try Row.fetchAll(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, membership_revision, created_at FROM v2_room_profile_projections ORDER BY created_at DESC, room_id").map(Self.decodeRoomProfileProjection)
+            try Row.fetchAll(db, sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, delivery_authority, membership_revision, created_at FROM v2_room_profile_projections ORDER BY created_at DESC, room_id").map(Self.decodeRoomProfileProjection)
+        }
+    }
+
+    /// 读取本账号在某房间的已读水位。
+    ///
+    /// 该值是**有效水位**：同一账号其他设备的已读回执投影，与本设备已经入队（等待发送）
+    /// 或已被服务端确认的回执，两者取较大值。进入房间时本地推进无需等待网络往返即可把
+    /// 未读清零，重试期间也不会退化。
+    ///
+    /// 未读数本身由服务端摘要给出；本访问器只回答"我已经读到哪个房间序号"。
+    ///
+    /// - Parameter roomID: 目标房间。
+    /// - Returns: 已读水位；该房间尚无记录时为 nil。
+    /// - Throws: 本地数据库读取失败。
+    public func roomReadWatermark(roomID: RoomID) throws -> UInt64? {
+        try roomReadWatermarks(roomIDs: [roomID])[roomID]
+    }
+
+    /// 批量读取若干房间的有效已读水位。
+    ///
+    /// 一次会话列表刷新只查一次：投影表按主键点查，本设备待发送与已确认的回执按房间取
+    /// 较大值。被拒绝的回执不计入，否则一次越界的上报就会永久压低未读。
+    ///
+    /// - Parameter roomIDs: 目标房间，调用方需传入有界集合。
+    /// - Returns: 有水位记录的房间到水位的映射；没有记录的房间不出现。
+    /// - Throws: 本地数据库读取失败。
+    public func roomReadWatermarks(roomIDs: [RoomID]) throws -> [RoomID: UInt64] {
+        guard !roomIDs.isEmpty else { return [:] }
+        let identifiers = roomIDs.map(\.rawValue)
+        let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ", ")
+        return try databasePool.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT room_id, MAX(value) AS value FROM (
+                        SELECT room_id, read_through_room_sequence AS value
+                        FROM v2_room_read_watermarks
+                        WHERE room_id IN (\(placeholders))
+                        UNION ALL
+                        SELECT room_id,
+                               CASE WHEN state = 'acknowledged'
+                                    THEN resulting_room_sequence
+                                    ELSE read_through_room_sequence
+                               END AS value
+                        FROM v2_pending_read_receipts
+                        WHERE room_id IN (\(placeholders)) AND state IN ('pending', 'acknowledged')
+                    )
+                    GROUP BY room_id
+                    """,
+                arguments: StatementArguments(identifiers + identifiers)
+            )
+            var watermarks: [RoomID: UInt64] = [:]
+            for row in rows {
+                let stored: String = row["room_id"]
+                let value: Int64 = row["value"]
+                guard let roomID = try? RoomID(stored) else { continue }
+                watermarks[roomID] = try Self.storageUnsigned(value)
+            }
+            return watermarks
         }
     }
 
@@ -3174,8 +3350,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let rows = try Row.fetchCursor(db, sql: """
             SELECT live.* FROM v2_group_pinned_messages AS live
             JOIN \(rooms) AS room ON room.room_id = live.room_id
-            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
-            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+            WHERE room.delivery_authority = ? AND room.is_group_event_authorized = 1
+            """, arguments: [V2ClientRoomDeliveryAuthority.roomLog.rawValue])
         while let live = try rows.next() {
             let room: String = live["room_id"], message: String = live["message_id"]
             if let current = try Row.fetchOne(db, sql: "SELECT * FROM \(pins) WHERE room_id = ? AND message_id = ?", arguments: [room, message]) {
@@ -3314,8 +3490,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         let revisions = snapshotShadowTable(for: "v2_group_permission_revisions")
         let rows = try Row.fetchAll(db, sql: """
             SELECT live.* FROM v2_group_role_policies AS live JOIN \(rooms) AS room ON room.room_id = live.room_id
-            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
-            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+            WHERE room.delivery_authority = ? AND room.is_group_event_authorized = 1
+            """, arguments: [V2ClientRoomDeliveryAuthority.roomLog.rawValue])
         for live in rows {
             let room: String = live["room_id"]
             let role: String = live["role"]
@@ -3351,9 +3527,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             INSERT INTO \(revisions) (room_id, revision)
             SELECT live.room_id, live.revision FROM v2_group_permission_revisions AS live
             JOIN \(rooms) AS room ON room.room_id = live.room_id
-            WHERE room.delivery_mode = ? AND room.is_group_event_authorized = 1
+            WHERE room.delivery_authority = ? AND room.is_group_event_authorized = 1
             ON CONFLICT(room_id) DO UPDATE SET revision = MAX(\(revisions).revision, excluded.revision)
-            """, arguments: [V2GroupDeliveryMode.largeGroupHybrid.rawValue])
+            """, arguments: [V2ClientRoomDeliveryAuthority.roomLog.rawValue])
     }
 
     private static func applyRolePolicy(
@@ -3530,6 +3706,48 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try db.execute(sql: "DELETE FROM \(table) WHERE room_id = ? AND reader_user_id = ?", arguments: [roomID.rawValue, readerID.rawValue])
         }
     }
+
+    /// 应用读者自己的已读水位投影。
+    ///
+    /// 该投影来自本账号的其他设备，表示“我已经读到这个房间的这个序号”。它不携带内容，
+    /// 也不改变消息投影；唯一效果是把本地的已读水位单调推进，使未读计数无需等待服务端
+    /// 摘要刷新即可归零。乱序或重复投影不得让水位回退。
+    private static func applyOwnReadWatermark(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
+        struct Payload: Decodable {
+            let roomID: String
+            let readThroughRoomSequence: UInt64
+            let recordedAtMilliseconds: Int64
+            enum CodingKeys: String, CodingKey {
+                case roomID = "room_id"
+                case readThroughRoomSequence = "read_through_room_sequence"
+                case recordedAtMilliseconds = "recorded_at_ms"
+            }
+        }
+        guard let payload = try? JSONDecoder().decode(Payload.self, from: record.payload),
+              payload.readThroughRoomSequence > 0,
+              payload.readThroughRoomSequence <= UInt64(Int64.max),
+              payload.recordedAtMilliseconds >= 0
+        else { throw V2ClientSocialProjectionError.invalidPayload }
+        let roomID: RoomID
+        do { roomID = try .init(payload.roomID) } catch { throw V2ClientSocialProjectionError.invalidPayload }
+        let table = target.table("v2_room_read_watermarks")
+        try db.execute(sql: """
+            INSERT INTO \(table) (room_id, read_through_room_sequence, recorded_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET
+                read_through_room_sequence = MAX(\(table).read_through_room_sequence, excluded.read_through_room_sequence),
+                recorded_at = CASE
+                    WHEN excluded.read_through_room_sequence >= \(table).read_through_room_sequence
+                    THEN excluded.recorded_at
+                    ELSE \(table).recorded_at
+                END
+            """, arguments: [
+                roomID.rawValue,
+                try Self.storageInteger(payload.readThroughRoomSequence),
+                Double(payload.recordedAtMilliseconds) / 1_000
+            ])
+    }
+
     private static func applyReadReceiptPreference(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
         struct Payload: Decodable { let allowsDirect: Bool; let allowsGroup: Bool; let updatedAt: Int64; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts", allowsGroup = "allows_group_read_receipts", updatedAt = "updated_at_ms" } }
         guard let payload = try? JSONDecoder().decode(Payload.self, from: record.payload), payload.updatedAt >= 0 else { throw V2ClientSocialProjectionError.invalidPayload }
@@ -3716,12 +3934,26 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             guard membershipRevision <= incomingRevision else { throw V2ClientProjectionError.invalidMessagePayload }
             if membershipRevision == incomingRevision {
                 guard sourceEventID == projection.sourceEventID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
-                return
             }
-            try db.execute(sql: "UPDATE \(table) SET source_event_id = ?, membership_revision = ?, is_group_event_authorized = 1 WHERE room_id = ?", arguments: [projection.sourceEventID.rawValue, incomingRevision, projection.roomID.rawValue])
+            // 权威副本形态只向"按日志恢复"前进，不因后续事件回退：少拉一次会让客户端
+            // 收不到只写日志的内容，多拉一次只是幂等重复。
+            try db.execute(
+                sql: """
+                    UPDATE \(table)
+                    SET source_event_id = ?,
+                        membership_revision = ?,
+                        is_group_event_authorized = 1,
+                        delivery_authority = CASE
+                            WHEN delivery_authority = 'room_log' THEN 'room_log'
+                            ELSE ?
+                        END
+                    WHERE room_id = ?
+                    """,
+                arguments: [projection.sourceEventID.rawValue, incomingRevision, projection.deliveryAuthority.rawValue, projection.roomID.rawValue]
+            )
             return
         }
-        try db.execute(sql: "INSERT INTO \(table) (room_id, source_event_id, title, owner_user_id, delivery_mode, membership_revision, is_group_event_authorized, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.title, projection.ownerUserID.rawValue, projection.deliveryMode.rawValue, try storageInteger(projection.membershipRevision), projection.createdAt.timeIntervalSince1970])
+        try db.execute(sql: "INSERT INTO \(table) (room_id, source_event_id, title, owner_user_id, delivery_mode, delivery_authority, membership_revision, is_group_event_authorized, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)", arguments: [projection.roomID.rawValue, projection.sourceEventID.rawValue, projection.title, projection.ownerUserID.rawValue, projection.deliveryMode.rawValue, projection.deliveryAuthority.rawValue, try storageInteger(projection.membershipRevision), projection.createdAt.timeIntervalSince1970])
     }
 
     private static func persist(_ projection: V2ClientDirectRoomProfileProjection, target: ProjectionTableTarget = .live, db: Database) throws {
@@ -4326,12 +4558,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard let deliveryMode = V2GroupDeliveryMode(rawValue: row["delivery_mode"] as String) else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
+        // 未知的权威副本形态是硬错误：静默回退成扇出会让只写日志的房间在客户端收不到内容。
+        guard let deliveryAuthority = V2ClientRoomDeliveryAuthority(rawValue: row["delivery_authority"] as String) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
         return try .init(
             sourceEventID: .init(row["source_event_id"] as String),
             roomID: .init(row["room_id"] as String),
             title: row["title"],
             ownerUserID: .init(row["owner_user_id"] as String),
             deliveryMode: deliveryMode,
+            deliveryAuthority: deliveryAuthority,
             membershipRevision: storageUnsigned(row["membership_revision"] as Int64),
             createdAt: Date(timeIntervalSince1970: row["created_at"] as Double)
         )
@@ -4630,6 +4867,64 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
         migrator.registerMigration("recordPushIntent") { db in
             if try !db.tableExists("v2_push_intent") { try db.execute(sql: pushIntentSchemaSQL) }
+        }
+        // 既有安装没有未读目录：补建即可，不需要回填，因为下一轮摘要刷新会重新写入，
+        // 而在此之前界面拿不到某房间的未读时只显示服务端值（不显示本地推算）。
+        // 房间权威副本形态改为服务端宣告：既有行按旧推断规则回填（混合大群 = 房间日志），
+        // 因此升级前后纳入游标同步的房间集合完全一致。
+        // 服务端保留裁剪的下界要落进本地游标行：客户端据此判断"历史不完整"，
+        // 既有安装回填 0（从未裁剪），升级前后行为一致。
+        migrator.registerMigration("recordRoomLogTrimWatermark") { db in
+            if try !db.columns(in: "v2_group_event_cursors").contains(where: { $0.name == "log_trimmed_through_room_sequence" }) {
+                try db.execute(sql: """
+                    ALTER TABLE v2_group_event_cursors
+                        ADD COLUMN log_trimmed_through_room_sequence INTEGER NOT NULL DEFAULT 0
+                        CHECK (log_trimmed_through_room_sequence >= 0)
+                    """)
+            }
+            if try !db.columns(in: "v2_group_event_cursors").contains(where: { $0.name == "history_incomplete" }) {
+                try db.execute(sql: """
+                    ALTER TABLE v2_group_event_cursors
+                        ADD COLUMN history_incomplete INTEGER NOT NULL DEFAULT 0
+                        CHECK (history_incomplete IN (0, 1))
+                    """)
+            }
+        }
+        migrator.registerMigration("recordRoomDeliveryAuthority") { db in
+            if try !db.columns(in: "v2_room_profile_projections").contains(where: { $0.name == "delivery_authority" }) {
+                try db.execute(sql: """
+                    ALTER TABLE v2_room_profile_projections
+                        ADD COLUMN delivery_authority TEXT NOT NULL DEFAULT 'room_log'
+                        CHECK (delivery_authority IN ('fanout', 'room_log'))
+                    """)
+                try db.execute(sql: """
+                    UPDATE v2_room_profile_projections
+                    SET delivery_authority = CASE
+                        WHEN delivery_mode = 'large_group_hybrid' THEN 'room_log'
+                        ELSE 'fanout'
+                    END
+                    """)
+            }
+        }
+        migrator.registerMigration("recordConversationUnreadDirectory") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS v2_room_unread_directory (
+                    room_id TEXT PRIMARY KEY,
+                    head INTEGER NOT NULL CHECK (head >= 0),
+                    unread_count INTEGER NOT NULL CHECK (unread_count >= 0),
+                    last_event_at REAL NOT NULL,
+                    cycle INTEGER NOT NULL CHECK (cycle >= 0),
+                    recorded_at REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS v2_room_unread_rotation (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    cursor TEXT,
+                    cycle INTEGER NOT NULL CHECK (cycle >= 0),
+                    updated_at REAL NOT NULL
+                )
+                """)
         }
         return migrator
     }()

@@ -1761,6 +1761,69 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await store.actor() == fixture.userID)
     }
 
+    @Test("room summary list takes its requester only from the authenticated session")
+    func roomSummaryUsesAuthenticatedActor() async throws {
+        let fixture = try GatewayDomainFixture()
+        let base = Date(timeIntervalSince1970: 1_750_005_000)
+        let room = try RoomID("00000000-0000-0000-0000-00000000e001")
+        let store = GatewayRoomSummaryStore(watermark: .init(
+            roomID: room, roomKind: .group, head: 9,
+            lastEventAtMicroseconds: 1_750_005_000_123_456, unreadCount: 4
+        ), message: .init(
+            roomID: room, messageID: try MessageID("00000000-0000-0000-0000-00000000e101"),
+            senderUserID: fixture.userID, roomSequence: 9, text: "hello",
+            isWithdrawn: false, mediaCount: 2, serverCreatedAt: base
+        ))
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            roomSummaries: .init(store: store),
+            sync: fixture.syncService()
+        )
+        var request = IMV2Envelope(); request.roomSummaryList = .init()
+        request.roomSummaryList.pageSize = 10
+
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+
+        #expect(response.roomSummaryPage.rooms.count == 1)
+        #expect(response.roomSummaryPage.rooms[0].roomID == room.rawValue)
+        #expect(response.roomSummaryPage.rooms[0].roomKind == "group")
+        #expect(response.roomSummaryPage.rooms[0].head == 9)
+        #expect(response.roomSummaryPage.rooms[0].unreadCount == 4)
+        // 微秒精度的事件时间在毫秒线上字段里向下取整，不改变排序键。
+        #expect(response.roomSummaryPage.rooms[0].lastEventAtMs == 1_750_005_000_123)
+        #expect(response.roomSummaryPage.rooms[0].latestMessage.text == "hello")
+        #expect(response.roomSummaryPage.rooms[0].latestMessage.mediaCount == 2)
+        #expect(!response.roomSummaryPage.nextCursor.isEmpty)
+        #expect(await store.actor() == fixture.userID)
+
+        // 游标必须原样往返：服务端解码后得到与上一行完全相同的排序键。
+        var next = IMV2Envelope(); next.roomSummaryList = .init()
+        next.roomSummaryList.cursor = response.roomSummaryPage.nextCursor
+        next.roomSummaryList.pageSize = 10
+        _ = try await handler.handle(envelope: next, identity: fixture.identity)
+        #expect(await store.cursor() == V2RoomSummaryCursor(
+            lastEventAtMicroseconds: 1_750_005_000_123_456, roomID: room
+        ))
+    }
+
+    @Test("room summary list rejects unparseable cursors and out-of-range page sizes")
+    func roomSummaryRejectsInvalidRequests() async throws {
+        let fixture = try GatewayDomainFixture()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            roomSummaries: .init(store: GatewayRoomSummaryStore()),
+            sync: fixture.syncService()
+        )
+        for (cursor, pageSize) in [("not-a-cursor", UInt32(10)), ("", UInt32(0)), ("", UInt32(1_000))] {
+            var request = IMV2Envelope(); request.roomSummaryList = .init()
+            request.roomSummaryList.cursor = cursor
+            request.roomSummaryList.pageSize = pageSize
+            let response = try await handler.handle(envelope: request, identity: fixture.identity)
+            #expect(response.error.code == "INVALID_ARGUMENT")
+            #expect(!response.error.retryable)
+        }
+    }
+
     @Test("relationship and block commands use only the authenticated actor")
     func socialCommandsUseAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
@@ -2182,6 +2245,43 @@ private actor GatewayMembershipStore: V2RoomMembershipStore {
     }
 
     func actor() -> UserID? { capturedActor }
+}
+
+/// 会话摘要假存储：记录调用者与游标，按构造时给定的单行摘要回答。
+///
+/// 只要给出水位就返回 `hasMore`，用于验证网关确实把下一页游标发了出去。
+private actor GatewayRoomSummaryStore: V2RoomSummaryStore {
+    private let watermark: V2RoomActivityWatermark?
+    private let message: V2RoomSummaryMessage?
+    private var capturedActor: UserID?
+    private var capturedCursor: V2RoomSummaryCursor?
+    private var capturedLimit: Int?
+
+    init(watermark: V2RoomActivityWatermark? = nil, message: V2RoomSummaryMessage? = nil) {
+        self.watermark = watermark
+        self.message = message
+    }
+
+    func roomActivityWatermarks(
+        after cursor: V2RoomSummaryCursor?,
+        actorUserID: UserID,
+        limit: Int
+    ) async throws -> V2RoomActivityPage {
+        capturedActor = actorUserID
+        capturedCursor = cursor
+        capturedLimit = limit
+        guard let watermark else { return .init(rooms: [], hasMore: false) }
+        return .init(rooms: [watermark], hasMore: true)
+    }
+
+    func visibleMessages(roomIDs: [RoomID], actorUserID _: UserID) async throws -> [V2RoomSummaryMessage] {
+        guard let message, roomIDs.contains(message.roomID) else { return [] }
+        return [message]
+    }
+
+    func actor() -> UserID? { capturedActor }
+    func cursor() -> V2RoomSummaryCursor? { capturedCursor }
+    func pageSize() -> Int? { capturedLimit }
 }
 
 private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {

@@ -16,8 +16,19 @@ public struct PostgresV2GroupMessagingStore:
 {
     private let database: any Database
 
-    public init(database: any Database) {
+    private let groupDeliveryAuthority: V2RoomDeliveryAuthority
+
+    /// 组合数据库与新建群聊的权威副本形态策略。
+    ///
+    /// 混合大群固定以房间日志为权威副本；标准群取这里的部署策略，默认与部署默认一致
+    /// （`room_log`），兼容基线必须显式传 `fanout`。单聊不使用该参数，它由部署开关决定。
+    ///
+    /// - Parameters:
+    ///   - database: 存放房间、事件与投递的数据库。
+    ///   - groupDeliveryAuthority: 新建标准群的权威副本形态。
+    public init(database: any Database, groupDeliveryAuthority: V2RoomDeliveryAuthority = .roomLog) {
         self.database = database
+        self.groupDeliveryAuthority = groupDeliveryAuthority
     }
 
     public func create(
@@ -387,9 +398,11 @@ public struct PostgresV2GroupMessagingStore:
             guard let timestamp = try await sql.raw("""
                 INSERT INTO im_v2.rooms
                     (room_id, room_kind, room_shard_id, room_sequence, membership_revision,
-                     capacity_profile_id, delivery_mode, created_at)
+                     capacity_profile_id, delivery_mode, delivery_authority, created_at)
                 VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1,
-                        \(bind: capacityProfile.id), \(bind: input.deliveryMode.rawValue), \(bind: now))
+                        \(bind: capacityProfile.id), \(bind: input.deliveryMode.rawValue),
+                        \(bind: v2RoomDeliveryAuthority(input.deliveryMode, configured: groupDeliveryAuthority).rawValue),
+                        \(bind: now))
                 RETURNING created_at
                 """).first(decoding: GroupCommittedTimestampRow.self) else {
                 throw V2GroupMessagingStoreError.corruptPersistenceState
@@ -430,9 +443,18 @@ public struct PostgresV2GroupMessagingStore:
                     FROM im_v2.group_room_creation_intent_members AS member
                     WHERE member.actor_user_id = \(bind: input.actorID)
                       AND member.operation_id = \(bind: input.operationID)
-                      AND member.user_id <> \(bind: input.actorID)
+                    AND member.user_id <> \(bind: input.actorID)
                     """).run()
             }
+
+            // Every active member of a room created in this transaction is a
+            // first-time member, so the room head (including the room.created
+            // event) is their common read watermark. Without it each initial
+            // member would start with one unread event, and the retention
+            // floor would be pinned at zero.
+            try await v2InitializeNewRoomReadWatermarks(
+                roomID: createdRoomID, now: now, sql: sql
+            )
 
             try await sql.raw("""
                 INSERT INTO im_v2.room_events
@@ -442,6 +464,7 @@ public struct PostgresV2GroupMessagingStore:
                         jsonb_build_object('event_type', 'room.created', 'room_id', \(bind: createdRoomID.uuidString),
                                            'owner_user_id', \(bind: input.actorID.uuidString), 'title', \(bind: input.title),
                                            'delivery_mode', \(bind: input.deliveryMode.rawValue),
+                                           'delivery_authority', \(bind: v2RoomDeliveryAuthority(input.deliveryMode, configured: groupDeliveryAuthority).rawValue),
                                            'membership_revision', 1,
                                            'created_at_ms', \(bind: createdAtMilliseconds)),
                         1, \(bind: now))

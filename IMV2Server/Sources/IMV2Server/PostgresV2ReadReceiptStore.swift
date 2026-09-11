@@ -24,7 +24,11 @@ public struct PostgresV2ReadReceiptStore:
     }
     public func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-        let result: (outcome: V2ReadReceiptOutcome, projectionRecipient: UserID?) = try await database.transaction { transaction in
+        let result: (
+            outcome: V2ReadReceiptOutcome,
+            projectionRecipient: UserID?,
+            advancedWatermark: (sequence: Int64, recordedAt: Date)?
+        ) = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
             let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: userID.uuidString + ":" + operationID.uuidString), 0))").run()
@@ -38,6 +42,17 @@ public struct PostgresV2ReadReceiptStore:
                 now: now,
                 sql: sql
             ) {
+                if let advanced = groupResult.advancedWatermark {
+                    try await appendOwnReadWatermarkProjection(
+                        recipientID: userID,
+                        roomID: roomID,
+                        sequence: advanced.sequence,
+                        recordedAt: advanced.recordedAt,
+                        sourceEventID: operationID,
+                        now: now,
+                        sql: sql
+                    )
+                }
                 return groupResult
             }
             // Match the operation write's timestamp precision even when the read cursor does not advance.
@@ -58,14 +73,37 @@ public struct PostgresV2ReadReceiptStore:
                     roomID: roomID, readerID: userID, command: command, receipt: receipt, sourceEventID: operationID, now: now, sql: sql
                 )
                 : nil
+            // 读者自己的其他设备必须立刻知道已读到哪，才能在不拉取内容的
+            // 情况下清零未读。这是用户级状态，与对端可见性和已读回执偏好
+            // 无关，因此只要水位前进就写，不依赖上面是否产生对端投影。
+            let advancedWatermark: (sequence: Int64, recordedAt: Date)? =
+                resulting > current ? (resulting, room.recordedAt) : nil
+            if let advanced = advancedWatermark {
+                try await appendOwnReadWatermarkProjection(
+                    recipientID: userID,
+                    roomID: roomID,
+                    sequence: advanced.sequence,
+                    recordedAt: advanced.recordedAt,
+                    sourceEventID: operationID,
+                    now: now,
+                    sql: sql
+                )
+            }
             try await sql.raw("INSERT INTO im_v2.read_receipt_operations (user_id, operation_id, room_id, requested_room_sequence, resulting_room_sequence, recorded_at, projection_recipient_user_id) VALUES (\(bind: userID), \(bind: operationID), \(bind: roomID), \(bind: requested), \(bind: resulting), \(bind: now), \(bind: recipient.flatMap { UUID(uuidString: $0.rawValue) }))").run()
-            return (.recorded(receipt), recipient)
+            return (.recorded(receipt), recipient, advancedWatermark)
         }
         if let recipient = result.projectionRecipient {
             _ = try await shadowForwarder.shadowIfForwarding(
                 userID: recipient,
                 sourceEventID: try .init(command.operationID.rawValue),
                 projectionKinds: ["direct_read_receipt"]
+            )
+        }
+        if result.advancedWatermark != nil {
+            _ = try await shadowForwarder.shadowIfForwarding(
+                userID: command.actorUserID,
+                sourceEventID: try .init(command.operationID.rawValue),
+                projectionKinds: ["own_read_watermark"]
             )
         }
         return result.outcome
@@ -105,6 +143,19 @@ public struct PostgresV2ReadReceiptStore:
                 sql: sql,
                 allowDirectReplay: false
             ) {
+                // 群路径同样需要把读者自己的水位变化传给本账号其他设备；
+                // 只有真正前进的写入才产生投影。
+                if let advanced = result.advancedWatermark {
+                    try await appendOwnReadWatermarkProjection(
+                        recipientID: userID,
+                        roomID: roomID,
+                        sequence: advanced.sequence,
+                        recordedAt: advanced.recordedAt,
+                        sourceEventID: operationID,
+                        now: now,
+                        sql: sql
+                    )
+                }
                 return .handled(result.outcome)
             }
 
@@ -339,7 +390,11 @@ public struct PostgresV2ReadReceiptStore:
         now: Date,
         sql: any SQLDatabase,
         allowDirectReplay: Bool = true
-    ) async throws -> (outcome: V2ReadReceiptOutcome, projectionRecipient: UserID?)? {
+    ) async throws -> (
+        outcome: V2ReadReceiptOutcome,
+        projectionRecipient: UserID?,
+        advancedWatermark: (sequence: Int64, recordedAt: Date)?
+    )? {
         guard let row = try await sql.raw("""
             WITH prior AS MATERIALIZED (
                 SELECT room_id,
@@ -361,7 +416,16 @@ public struct PostgresV2ReadReceiptStore:
                   )
             ),
             eligible AS MATERIALIZED (
-                SELECT room.room_id
+                SELECT room.room_id,
+                       COALESCE(
+                           (
+                               SELECT receipt.read_through_room_sequence
+                               FROM im_v2.room_read_receipts AS receipt
+                               WHERE receipt.room_id = room.room_id
+                                 AND receipt.user_id = \(bind: userID)
+                           ),
+                           0
+                       ) AS prior_room_sequence
                 FROM im_v2.rooms AS room
                 WHERE room.room_id = \(bind: roomID)
                   AND room.room_kind = 'group'
@@ -417,16 +481,18 @@ public struct PostgresV2ReadReceiptStore:
                    requested_room_sequence,
                    resulting_room_sequence,
                    recorded_at,
-                   projection_recipient_user_id
+                   projection_recipient_user_id,
+                   NULL::bigint AS prior_room_sequence
             FROM prior
             UNION ALL
             SELECT 'recorded' AS source,
-                   room_id,
-                   requested_room_sequence,
-                   resulting_room_sequence,
-                   recorded_at,
-                   projection_recipient_user_id
-            FROM recorded
+                   recorded.room_id,
+                   recorded.requested_room_sequence,
+                   recorded.resulting_room_sequence,
+                   recorded.recorded_at,
+                   recorded.projection_recipient_user_id,
+                   eligible.prior_room_sequence
+            FROM recorded, eligible
             LIMIT 1
             """).first(decoding: ReceiptGroupRecordRow.self) else { return nil }
 
@@ -434,7 +500,7 @@ public struct PostgresV2ReadReceiptStore:
             try UserID($0.uuidString)
         }
         guard row.roomID == roomID, row.requestedSequence == requested else {
-            return (.idempotencyConflict, nil)
+            return (.idempotencyConflict, nil, nil)
         }
         guard v2PostgresTimestampCanEncode(row.recordedAt) else {
             throw V2ReadReceiptStoreError.corruptPersistenceState
@@ -446,8 +512,16 @@ public struct PostgresV2ReadReceiptStore:
             recordedAt: row.recordedAt
         )
         switch row.source {
-        case "prior": return (.idempotent(receipt), projectionRecipient)
-        case "recorded": return (.recorded(receipt), projectionRecipient)
+        // 只有真正前进的水位才产生自投影：重复上报同一序号不得向读者自己的同步流
+        // 追加无意义的水位事件。
+        case "prior": return (.idempotent(receipt), projectionRecipient, nil)
+        case "recorded":
+            let advanced = row.resultingSequence > (row.priorRoomSequence ?? 0)
+            return (
+                .recorded(receipt),
+                projectionRecipient,
+                advanced ? (row.resultingSequence, row.recordedAt) : nil
+            )
         default: throw V2ReadReceiptStoreError.corruptPersistenceState
         }
     }
@@ -964,6 +1038,44 @@ public struct PostgresV2ReadReceiptStore:
         try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_read_receipt', jsonb_build_object('room_id', \(bind: projection.roomID.rawValue), 'reader_user_id', \(bind: projection.readerUserID.rawValue), 'read_through_room_sequence', \(bind: try receiptSigned(projection.readThroughRoomSequence)), 'recorded_at_ms', \(bind: try v2GatewayMilliseconds(projection.recordedAt)), 'is_visible', \(bind: projection.isVisible)), \(bind: now))").run()
     }
 
+    /// 把读者自己的已读水位投影给该账号的全部设备。
+    ///
+    /// 这是用户级状态：内容不需要重新拉取，其他设备收到该水位即可清零对应房间的未读。
+    /// 与对端可见性和已读回执偏好无关——读者始终有权知道自己的阅读进度。
+    ///
+    /// - Parameters:
+    ///   - recipientID: 读者账号。
+    ///   - roomID: 房间。
+    ///   - sequence: 推进后的已读水位。
+    ///   - recordedAt: 回执记录时刻。
+    ///   - sourceEventID: 幂等来源事件，由调用方的操作标识提供。
+    ///   - now: 服务端统一授时时刻。
+    ///   - sql: 已持有房间行与回执行的数据库句柄。
+    /// - Throws: 序号无法分配或持久化失败。
+    private func appendOwnReadWatermarkProjection(
+        recipientID: UUID,
+        roomID: UUID,
+        sequence: Int64,
+        recordedAt: Date,
+        sourceEventID: UUID,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        guard let nextSequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: ReceiptSyncSequenceRow.self) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
+        try await sql.raw("""
+            INSERT INTO im_v2.user_sync_log
+                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
+            VALUES (\(bind: recipientID), \(bind: nextSequence.nextSequence), \(bind: sourceEventID),
+                    'own_read_watermark',
+                    jsonb_build_object(
+                        'room_id', \(bind: roomID.uuidString),
+                        'read_through_room_sequence', \(bind: sequence),
+                        'recorded_at_ms', \(bind: try v2GatewayMilliseconds(recordedAt))
+                    ),
+                    \(bind: now))
+            """).run()
+    }
+
     private func appendPreferenceProjection(recipientID: UUID, sourceEventID: UUID, preferences: V2ReadReceiptPreferences, now: Date, sql: any SQLDatabase) async throws {
         guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: ReceiptSyncSequenceRow.self) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
         try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'read_receipt_preferences', jsonb_build_object('allows_direct_read_receipts', \(bind: preferences.allowsDirectReadReceipts), 'allows_group_read_receipts', \(bind: preferences.allowsGroupReadReceipts), 'updated_at_ms', \(bind: Int64(preferences.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run()
@@ -1291,12 +1403,15 @@ private struct ReceiptGroupRecordRow: Decodable {
     let resultingSequence: Int64
     let recordedAt: Date
     let projectionRecipientUserID: UUID?
+    /// 本次写入前的已读水位；重放分支为 nil，因为该分支不代表一次新的推进。
+    let priorRoomSequence: Int64?
     enum CodingKeys: String, CodingKey {
         case source
         case roomID = "room_id"
         case requestedSequence = "requested_room_sequence"
         case resultingSequence = "resulting_room_sequence"
         case recordedAt = "recorded_at"
+        case priorRoomSequence = "prior_room_sequence"
         case projectionRecipientUserID = "projection_recipient_user_id"
     }
 }

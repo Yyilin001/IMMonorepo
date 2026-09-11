@@ -741,7 +741,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
             credentials: accountHTTP, transport: accountHTTP
         )
-        let conversationDataSource = V2GRDBConversationDataSource(localStore: localStore)
+        let conversationDataSource = V2GRDBConversationDataSource(
+            localStore: localStore,
+            unreadDirectory: realtime.conversationUnreadDirectory
+        )
         let contactsDataSource = V2GRDBContactsDataSource(
             localStore: localStore,
             profiles: realtime.profileRepository,

@@ -416,7 +416,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-30''::text'
+       AND column_default = '''im-v2-current-33''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -426,7 +426,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-30%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-33%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -469,5 +469,46 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND pg_get_indexdef(i.indexrelid, 2, false) = 'lower((payload ->> ''message_id''::text))'
        AND pg_get_indexdef(i.indexrelid, 3, false) = '((payload ->> ''message_revision''::text))'
        AND pg_get_expr(i.indpred, i.indrelid) = '(event_type = ''message.edited''::text)'
+   )
+   AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'im_v2' AND table_name = 'rooms'
+         AND column_name = 'last_event_at' AND udt_name = 'timestamptz'
+         AND is_nullable = 'NO'
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_class AS index_record
+       JOIN pg_namespace AS namespace ON namespace.oid = index_record.relnamespace
+       WHERE namespace.nspname = 'im_v2'
+         AND index_record.relname = 'rooms_last_event_at_idx'
+         AND index_record.relkind = 'i'
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_trigger AS trigger_record
+       JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
+       JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'im_v2' AND relation.relname = 'rooms'
+         AND trigger_record.tgname = 'rooms_touch_last_event_at'
+         AND trigger_record.tgenabled = 'O'
+         AND NOT trigger_record.tgisinternal
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_class AS index_record
+       JOIN pg_namespace AS namespace ON namespace.oid = index_record.relnamespace
+       WHERE namespace.nspname = 'im_v2'
+         AND index_record.relname = 'messages_room_sender_sequence_idx'
+         AND index_record.relkind = 'i'
+   )
+   AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'im_v2' AND table_name = 'rooms'
+         AND column_name = 'delivery_authority' AND udt_name = 'text'
+         AND is_nullable = 'NO'
+   )
+   AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'im_v2' AND table_name = 'rooms'
+         AND column_name = 'log_trimmed_through_room_sequence' AND udt_name = 'int8'
+         AND is_nullable = 'NO'
    )
    AND to_regclass('im_v2.local_schema_migrations') IS NULL)))));

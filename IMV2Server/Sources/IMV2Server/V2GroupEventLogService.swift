@@ -41,6 +41,11 @@ public struct V2GroupEventLogPage: Equatable, Sendable {
     public let nextRoomSequence: UInt64
     /// 是否还有后续事件。
     public let hasMore: Bool
+    /// 已裁剪的历史下界：该序号之前的事件已按保留窗口移除，不再可恢复。
+    ///
+    /// 客户端游标低于它时必须把该房间标记为"历史不完整"并从这个下界继续拉取；
+    /// 零表示该房间从未裁剪。静默少几条是明确禁止的行为。
+    public let logTrimmedThroughRoomSequence: UInt64
 
     /// 校验并保存事件分页。
     ///
@@ -51,12 +56,21 @@ public struct V2GroupEventLogPage: Equatable, Sendable {
     ///   - hasMore: 是否还有后续事件。
     /// - Throws: 下一页序号无法表示为合法游标时抛出
     ///   ``V2GroupEventLogError/corruptPersistenceState``。
-    public init(roomID: RoomID, events: [V2GroupEventLogEntry], nextRoomSequence: UInt64, hasMore: Bool) throws {
-        guard (try? V2RoomCursor(nextRoomSequence)) != nil else { throw V2GroupEventLogError.corruptPersistenceState }
+    public init(
+        roomID: RoomID,
+        events: [V2GroupEventLogEntry],
+        nextRoomSequence: UInt64,
+        hasMore: Bool,
+        logTrimmedThroughRoomSequence: UInt64 = 0
+    ) throws {
+        guard (try? V2RoomCursor(nextRoomSequence)) != nil,
+              logTrimmedThroughRoomSequence <= UInt64(Int64.max)
+        else { throw V2GroupEventLogError.corruptPersistenceState }
         self.roomID = roomID
         self.events = events
         self.nextRoomSequence = nextRoomSequence
         self.hasMore = hasMore
+        self.logTrimmedThroughRoomSequence = logTrimmedThroughRoomSequence
     }
 }
 

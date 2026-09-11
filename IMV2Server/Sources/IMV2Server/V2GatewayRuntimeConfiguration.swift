@@ -238,6 +238,11 @@ public struct V2APNSRuntimeConfiguration: Sendable {
 /// 对凭据、帧/队列上限或容量策略刻意不提供开发默认值：
 /// 一个不完整的部署必须在打开公开端口之前失败。
 public struct V2GatewayRuntimeConfiguration: Sendable {
+    /// 窗口模式下读者不再钉住日志下界的默认宽限秒数（30 天）。
+    ///
+    /// 只在部署显式选择 `window` 模式时生效；默认的 `permanent` 模式不裁剪任何历史。
+    public static let defaultRoomLogRetentionWindowSeconds: TimeInterval = 30 * 24 * 60 * 60
+
     public let databaseURL: String
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
@@ -396,6 +401,13 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let messageProjectionWriteMode: V2MessageProjectionWriteMode
     public let messageProjectionReadMode: V2MessageProjectionReadMode
     public let directFanoutMode: V2DirectFanoutMode
+    /// 新建标准群的权威副本形态；混合大群始终以房间日志为权威副本。
+    public let groupDeliveryAuthority: V2RoomDeliveryAuthority
+    /// 房间日志的保留模式。默认 `permanent`：计入全部历史读者，与既有行为一致，
+    /// 也就是不裁剪任何历史。
+    public let roomLogRetentionMode: V2RoomLogRetentionMode
+    /// 窗口模式下读者不再钉住日志下界的宽限秒数；永久模式不使用该值。
+    public let roomLogRetentionWindowSeconds: TimeInterval
     /// 仅用于 direct-room-log 部署的一道围栏。
     ///
     /// 默认值保留与旧版完全一致的房间准入语义。
@@ -870,13 +882,43 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         }
         messageProjectionWriteMode = projectionWriteMode
         messageProjectionReadMode = projectionReadMode
+        // 目标架构里单聊的权威副本就是房间事件日志：不配置时按 room_log 运行，
+        // 让"每个收件人一份"的投递副本不再是默认路径。需要兼容基线的环境必须显式
+        // 设置 IM_V2_DIRECT_FANOUT_MODE=planner（本地 E2E 与灰度 profile 就是这么做的）。
         let rawDirectFanoutMode = Self.optional(
             "IM_V2_DIRECT_FANOUT_MODE", environment: environment
-        )?.lowercased() ?? V2DirectFanoutMode.planner.rawValue
+        )?.lowercased() ?? V2DirectFanoutMode.roomLog.rawValue
         guard let parsedDirectFanoutMode = V2DirectFanoutMode(rawValue: rawDirectFanoutMode) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")
         }
         directFanoutMode = parsedDirectFanoutMode
+        // 目标架构里标准群的权威副本同样是房间事件日志：不配置时按 room_log 运行，
+        // 让"每个收件人一份"的投递副本不再是默认路径。需要兼容基线的环境必须显式
+        // 设置 IM_V2_GROUP_DELIVERY_AUTHORITY_MODE=fanout（负载与基线画像就是这么固定的）。
+        // 混合大群始终是 room_log，不受本项影响。
+        let rawGroupDeliveryAuthority = Self.optional(
+            "IM_V2_GROUP_DELIVERY_AUTHORITY_MODE", environment: environment
+        )?.lowercased() ?? V2RoomDeliveryAuthority.roomLog.rawValue
+        guard let parsedGroupDeliveryAuthority = V2RoomDeliveryAuthority(rawValue: rawGroupDeliveryAuthority) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_DELIVERY_AUTHORITY_MODE")
+        }
+        groupDeliveryAuthority = parsedGroupDeliveryAuthority
+        // 房间日志保留窗口。默认永久 = 不裁剪，保持既有行为；切到 window 需要同时给出
+        // 宽限秒数（默认 30 天），并明确知晓"超出窗口的读者返回时会看到历史不完整"。
+        let rawRoomLogRetention = Self.optional(
+            "IM_V2_ROOM_LOG_RETENTION_MODE", environment: environment
+        )?.lowercased() ?? V2RoomLogRetentionMode.permanent.rawValue
+        guard let parsedRoomLogRetention = V2RoomLogRetentionMode(rawValue: rawRoomLogRetention) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_LOG_RETENTION_MODE")
+        }
+        roomLogRetentionMode = parsedRoomLogRetention
+        let rawRetentionWindow = Self.optional(
+            "IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS", environment: environment
+        ) ?? "\(Int(V2GatewayRuntimeConfiguration.defaultRoomLogRetentionWindowSeconds))"
+        guard let retentionWindow = TimeInterval(rawRetentionWindow), retentionWindow > 0 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS")
+        }
+        roomLogRetentionWindowSeconds = retentionWindow
         let rawDirectRoomLogAdmissionMode = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE", environment: environment
         )?.lowercased() ?? V2DirectRoomLogAdmissionMode.room.rawValue

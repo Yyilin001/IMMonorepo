@@ -71,6 +71,7 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     V2GatewayGroupAudienceImportHandling,
     V2GatewayGroupEventLogHandling,
     V2GatewayRoomMembershipDirectoryHandling,
+    V2GatewayRoomSummaryHandling,
     V2GatewaySocialRelationshipHandling,
     V2GatewayModerationHandling,
     V2GatewayConversationCapabilitiesHandling,
@@ -99,6 +100,7 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     func pull(roomID _: RoomID, actorUserID _: UserID, afterRoomSequence _: UInt64, pageSize _: Int) async throws -> V2GroupEventLogPage { throw self }
     func subscribe(roomID _: RoomID, actorUserID _: UserID) async throws -> V2GroupEventSubscription { throw self }
     func list(_: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage { throw self }
+    func summaries(_: V2RoomSummaryRequest) async throws -> V2RoomSummaryPage { throw self }
     func changeRelationship(actorUserID _: UserID, operationID _: RelationshipOperationID, targetUserID _: UserID, action _: V2RelationshipAction) async throws -> V2RelationshipOutcome { throw self }
     func changeUserBlock(actorUserID _: UserID, operationID _: UserBlockOperationID, targetUserID _: UserID, action _: V2UserBlockAction) async throws -> V2UserBlockOutcome { throw self }
     func apply(_: V2AuthenticatedModeration) async throws -> V2ModerationOutcome { throw self }
@@ -125,6 +127,7 @@ func makeGatewayDomainCommandHandler(
     groupEventLog: V2GroupEventLogService? = nil,
     foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting = V2DiscardingForegroundGroupEventHintPublisher(),
     membershipDirectory: V2RoomMembershipDirectoryService? = nil,
+    roomSummaries: V2RoomSummaryService? = nil,
     socialRelationships: V2SocialRelationshipService? = nil,
     moderation: V2ModerationService? = nil,
     conversationCapabilities: V2ConversationCapabilitiesService? = nil,
@@ -152,6 +155,7 @@ func makeGatewayDomainCommandHandler(
         groupEventLogHandler: groupEventLog.map { $0 as any V2GatewayGroupEventLogHandling } ?? unsupported,
         foregroundGroupEventHints: foregroundGroupEventHints,
         membershipDirectoryHandler: membershipDirectory.map { $0 as any V2GatewayRoomMembershipDirectoryHandling } ?? unsupported,
+        roomSummaryHandler: roomSummaries.map { $0 as any V2GatewayRoomSummaryHandling } ?? unsupported,
         socialRelationshipHandler: socialRelationships.map { $0 as any V2GatewaySocialRelationshipHandling } ?? unsupported,
         moderationHandler: moderation.map { $0 as any V2GatewayModerationHandling } ?? unsupported,
         conversationCapabilitiesHandler: conversationCapabilities.map { $0 as any V2GatewayConversationCapabilitiesHandling } ?? unsupported,

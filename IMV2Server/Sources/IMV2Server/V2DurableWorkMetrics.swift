@@ -33,6 +33,11 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let scheduledRoomOutboxRows: Int
     /// 已暂停的房间发件箱行数。
     public let pausedRoomOutboxRows: Int
+    /// 仍未完成的房间发件箱行中最长的存在秒数。
+    ///
+    /// 瞬时失败不再进入暂停，因此"暂停行数为零"不能证明投递正在推进；持续重试但永不
+    /// 成功的工作只能由该年龄发现。
+    public let oldestUnfinishedRoomOutboxAgeSeconds: Int
     /// 待处理的私聊资料更新数量。
     public let readyDirectProfileUpdates: Int
     /// 已被认领的私聊资料更新数量。
@@ -55,6 +60,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let scheduledFanoutDeliveries: Int
     /// 已暂停的扇出投递数量。
     public let pausedFanoutDeliveries: Int
+    /// 仍未完成的扇出投递行中最长的存在秒数。
+    public let oldestUnfinishedFanoutDeliveryAgeSeconds: Int
     /// 投影阶段已完成、仍在等待独立释放工作器回收容量的扇出完成单元数量。
     public let terminalFanoutCompletionUnits: Int
     /// 上述完成单元中最长的滞留秒数。
@@ -155,6 +162,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         leasedRoomOutboxRows: Int = 0,
         scheduledRoomOutboxRows: Int = 0,
         pausedRoomOutboxRows: Int = 0,
+        oldestUnfinishedRoomOutboxAgeSeconds: Int = 0,
         readyDirectProfileUpdates: Int = 0,
         leasedDirectProfileUpdates: Int = 0,
         readyReadReceiptPreferencePropagations: Int = 0,
@@ -166,6 +174,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         leasedFanoutDeliveries: Int = 0,
         scheduledFanoutDeliveries: Int = 0,
         pausedFanoutDeliveries: Int = 0,
+        oldestUnfinishedFanoutDeliveryAgeSeconds: Int = 0,
         terminalFanoutCompletionUnits: Int = 0,
         oldestTerminalFanoutCompletionAgeSeconds: Int = 0,
         readyContentReviews: Int = 0,
@@ -225,6 +234,12 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.leasedFanoutDeliveries = max(0, leasedFanoutDeliveries)
         self.scheduledFanoutDeliveries = max(0, scheduledFanoutDeliveries)
         self.pausedFanoutDeliveries = max(0, pausedFanoutDeliveries)
+        self.oldestUnfinishedRoomOutboxAgeSeconds = max(
+            0, oldestUnfinishedRoomOutboxAgeSeconds
+        )
+        self.oldestUnfinishedFanoutDeliveryAgeSeconds = max(
+            0, oldestUnfinishedFanoutDeliveryAgeSeconds
+        )
         self.terminalFanoutCompletionUnits = max(0, terminalFanoutCompletionUnits)
         self.oldestTerminalFanoutCompletionAgeSeconds = max(
             0, oldestTerminalFanoutCompletionAgeSeconds
@@ -549,7 +564,11 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                             WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
                               AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
                         ) AS scheduled_room_outbox_rows,
-                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_room_outbox_rows
+                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_room_outbox_rows,
+                        COALESCE(
+                            EXTRACT(EPOCH FROM (MAX(snapshot_now.value) - MIN(created_at)))::bigint,
+                            0
+                        ) AS oldest_unfinished_room_outbox_age_seconds
                     FROM im_v2.room_outbox, snapshot_now
                     WHERE state <> 'terminal'
                 ),
@@ -590,21 +609,32 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                 fanout_delivery_metrics AS (
                     SELECT
                         COUNT(*) FILTER (
-                            WHERE state = 'pending'
-                              AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
-                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                            WHERE delivery.state = 'pending'
+                              AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= snapshot_now.value)
+                              AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at <= snapshot_now.value)
                         ) AS ready_fanout_deliveries,
                         COUNT(*) FILTER (
-                            WHERE state = 'pending' AND lease_expires_at > snapshot_now.value
+                            WHERE delivery.state = 'pending' AND delivery.lease_expires_at > snapshot_now.value
                         ) AS leased_fanout_deliveries,
                         COUNT(*) FILTER (
-                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
-                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
+                            WHERE delivery.state = 'pending' AND delivery.next_attempt_at > snapshot_now.value
+                              AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at <= snapshot_now.value)
                         ) AS scheduled_fanout_deliveries,
-                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_fanout_deliveries
-                    FROM im_v2.fanout_deliveries, snapshot_now
-                    WHERE state <> 'terminal'
-                      AND (\(bind: includesAllDeliveryBuckets) OR target_shard_bucket = \(bind: scopedDeliveryBucket))
+                        COUNT(*) FILTER (WHERE delivery.state = 'paused') AS paused_fanout_deliveries,
+                        -- 投递行本身没有创建时间。它承载的来源事件才是这条工作被提交的
+                        -- 时刻，因此用事件创建时间衡量"这条投递等了多久"。
+                        COALESCE(
+                            EXTRACT(EPOCH FROM (
+                                MAX(snapshot_now.value) - MIN(event.created_at)
+                            ))::bigint,
+                            0
+                        ) AS oldest_unfinished_fanout_delivery_age_seconds
+                    FROM im_v2.fanout_deliveries AS delivery
+                    LEFT JOIN im_v2.room_events AS event
+                      ON event.event_id = delivery.source_event_id,
+                         snapshot_now
+                    WHERE delivery.state <> 'terminal'
+                      AND (\(bind: includesAllDeliveryBuckets) OR delivery.target_shard_bucket = \(bind: scopedDeliveryBucket))
                 ),
                 fanout_completion_release_metrics AS (
                     SELECT
@@ -808,6 +838,9 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             leasedRoomOutboxRows: v2MetricCount(row.leasedRoomOutboxRows),
             scheduledRoomOutboxRows: v2MetricCount(row.scheduledRoomOutboxRows),
             pausedRoomOutboxRows: v2MetricCount(row.pausedRoomOutboxRows),
+            oldestUnfinishedRoomOutboxAgeSeconds: v2MetricCount(
+                row.oldestUnfinishedRoomOutboxAgeSeconds
+            ),
             readyDirectProfileUpdates: v2MetricCount(row.readyDirectProfileUpdates),
             leasedDirectProfileUpdates: v2MetricCount(row.leasedDirectProfileUpdates),
             readyReadReceiptPreferencePropagations: v2MetricCount(row.readyReadReceiptPreferencePropagations),
@@ -819,6 +852,9 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
             leasedFanoutDeliveries: v2MetricCount(row.leasedFanoutDeliveries),
             scheduledFanoutDeliveries: v2MetricCount(row.scheduledFanoutDeliveries),
             pausedFanoutDeliveries: v2MetricCount(row.pausedFanoutDeliveries),
+            oldestUnfinishedFanoutDeliveryAgeSeconds: v2MetricCount(
+                row.oldestUnfinishedFanoutDeliveryAgeSeconds
+            ),
             terminalFanoutCompletionUnits: v2MetricCount(row.terminalFanoutCompletionUnits),
             oldestTerminalFanoutCompletionAgeSeconds: v2MetricCount(row.oldestTerminalFanoutCompletionAgeSeconds),
             readyContentReviews: v2MetricCount(row.readyContentReviews),
@@ -1075,6 +1111,7 @@ private func v2AggregateDurableWorkMetrics(
         leasedRoomOutboxRows: sum(\.leasedRoomOutboxRows),
         scheduledRoomOutboxRows: sum(\.scheduledRoomOutboxRows),
         pausedRoomOutboxRows: sum(\.pausedRoomOutboxRows),
+        oldestUnfinishedRoomOutboxAgeSeconds: maximum(\.oldestUnfinishedRoomOutboxAgeSeconds),
         readyDirectProfileUpdates: sum(\.readyDirectProfileUpdates),
         leasedDirectProfileUpdates: sum(\.leasedDirectProfileUpdates),
         readyReadReceiptPreferencePropagations: sum(\.readyReadReceiptPreferencePropagations),
@@ -1086,6 +1123,7 @@ private func v2AggregateDurableWorkMetrics(
         leasedFanoutDeliveries: sum(\.leasedFanoutDeliveries),
         scheduledFanoutDeliveries: sum(\.scheduledFanoutDeliveries),
         pausedFanoutDeliveries: sum(\.pausedFanoutDeliveries),
+        oldestUnfinishedFanoutDeliveryAgeSeconds: maximum(\.oldestUnfinishedFanoutDeliveryAgeSeconds),
         terminalFanoutCompletionUnits: sum(\.terminalFanoutCompletionUnits),
         oldestTerminalFanoutCompletionAgeSeconds: maximum(\.oldestTerminalFanoutCompletionAgeSeconds),
         readyContentReviews: sum(\.readyContentReviews),
@@ -1155,6 +1193,9 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_room_outbox_backlog{state=\"leased\"} \(snapshot.leasedRoomOutboxRows)",
         "im_v2_room_outbox_backlog{state=\"scheduled\"} \(snapshot.scheduledRoomOutboxRows)",
         "im_v2_room_outbox_backlog{state=\"paused\"} \(snapshot.pausedRoomOutboxRows)",
+        "# HELP im_v2_room_outbox_oldest_unfinished_age_seconds Age of the oldest room outbox row that has not reached a terminal state.",
+        "# TYPE im_v2_room_outbox_oldest_unfinished_age_seconds gauge",
+        "im_v2_room_outbox_oldest_unfinished_age_seconds \(snapshot.oldestUnfinishedRoomOutboxAgeSeconds)",
         "# HELP im_v2_direct_profile_update_backlog Durable direct-profile update sources awaiting or held by propagation.",
         "# TYPE im_v2_direct_profile_update_backlog gauge",
         "im_v2_direct_profile_update_backlog{state=\"ready\"} \(snapshot.readyDirectProfileUpdates)",
@@ -1174,6 +1215,9 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_fanout_delivery_backlog{state=\"leased\"} \(snapshot.leasedFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"scheduled\"} \(snapshot.scheduledFanoutDeliveries)",
         "im_v2_fanout_delivery_backlog{state=\"paused\"} \(snapshot.pausedFanoutDeliveries)",
+        "# HELP im_v2_fanout_delivery_oldest_unfinished_age_seconds Age of the oldest fan-out delivery row that has not reached a terminal state.",
+        "# TYPE im_v2_fanout_delivery_oldest_unfinished_age_seconds gauge",
+        "im_v2_fanout_delivery_oldest_unfinished_age_seconds \(snapshot.oldestUnfinishedFanoutDeliveryAgeSeconds)",
         "# HELP im_v2_fanout_completion_release_backlog Terminal completion units awaiting admission-capacity release.",
         "# TYPE im_v2_fanout_completion_release_backlog gauge",
         "im_v2_fanout_completion_release_backlog \(snapshot.terminalFanoutCompletionUnits)",
@@ -1285,6 +1329,8 @@ private struct DurableWorkMetricsRow: Decodable {
     let leasedFanoutDeliveries: Int64
     let scheduledFanoutDeliveries: Int64
     let pausedFanoutDeliveries: Int64
+    let oldestUnfinishedRoomOutboxAgeSeconds: Int64
+    let oldestUnfinishedFanoutDeliveryAgeSeconds: Int64
     let terminalFanoutCompletionUnits: Int64
     let oldestTerminalFanoutCompletionAgeSeconds: Int64
     let readyContentReviews: Int64
@@ -1336,6 +1382,8 @@ private struct DurableWorkMetricsRow: Decodable {
         case leasedFanoutDeliveries = "leased_fanout_deliveries"
         case scheduledFanoutDeliveries = "scheduled_fanout_deliveries"
         case pausedFanoutDeliveries = "paused_fanout_deliveries"
+        case oldestUnfinishedRoomOutboxAgeSeconds = "oldest_unfinished_room_outbox_age_seconds"
+        case oldestUnfinishedFanoutDeliveryAgeSeconds = "oldest_unfinished_fanout_delivery_age_seconds"
         case terminalFanoutCompletionUnits = "terminal_fanout_completion_units"
         case oldestTerminalFanoutCompletionAgeSeconds = "oldest_terminal_fanout_completion_age_seconds"
         case readyContentReviews = "ready_content_reviews"

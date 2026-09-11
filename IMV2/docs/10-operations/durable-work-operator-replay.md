@@ -16,12 +16,45 @@
 它不是用户 access token、refresh credential 或 gateway HMAC key。使用模板
 [`operator-replay.env.example`](../../../IMV2Server/operator-replay.env.example) 配置。
 
-唯一的操作是 `POST /internal/v2/durable-work/replay`。一次请求最多重放一条已
-暂停 durable row，且必须带新的 UUID `operation_id`、封闭的原因码和精确目标。
-它不提供批量 replay、SQL、自由文本、按 room/user 扫描或查询任意消息的能力。
+两个操作：`POST /internal/v2/durable-work/replay`（单目标）与
+`POST /internal/v2/durable-work/replay-event`（按来源事件的批量）。单目标一次请求最多
+重放一条已暂停 durable row，且必须带新的 UUID `operation_id`、封闭的原因码和精确目标；
+批量只回放**指定的那一个事件**下的暂停行，并且强制行数上限。两者都不提供 SQL、自由文本、
+按 room/user 扫描或查询任意消息的能力。
 服务在同一 PostgreSQL 事务中写入 audit 记录、将 `paused` 行重置为 `pending`、
 清理 lease/退避字段并将 retry budget 归零。若行并未暂停，则返回
 `not_paused` 并同样记录结果；它绝不会把工作标为 terminal/skipped。
+
+## 按来源事件批量重放
+
+同一个事件可能对应多条暂停行（典型是扇出投递：一条事件、多个目标）。逐行重放会让
+"修好根因"之后的收尾变成大量人工调用，因此提供按事件的有界批量：
+
+```json
+{
+  "operationID": "new-uuid-per-drain-step",
+  "targetKind": "fanout_delivery",
+  "sourceEventID": "source-event-uuid",
+  "reason": "dependency_recovered",
+  "limit": 64
+}
+```
+
+响应是 `{ operationID, requeued, notPaused, hasMore }`。
+
+- **选择面精确**：只有这一个事件；顺序稳定（扇出按目标用户、投影类型排序），没有扫描、
+  筛选、正则或自由文本。`limit` 落在 `1...500`。
+- **排空语义**：`hasMore=true` 表示该事件还有超出本批上限的暂停行，用**同一个**
+  `operationID` 继续调用即可推进；已经重放过的行由派生的行级审计挡住，不会重复重放。
+  直到 `hasMore=false` 且 `requeued=0` 即为取尽。
+- **逐行审计**：每一行都有自己的审计记录（操作标识由批量标识与目标身份稳定派生），
+  形状与单目标重放完全一致，因此 `source_event_id` + `requested_at` + `operator_principal`
+  即可把一次事故对应的重放全部找回来。
+- **类型限制**：只接受按事件定位工作的类型（`room_outbox`、`fanout_delivery`、
+  `content_review`、`media_scan`、`media_purge`）。`read_receipt_preference_propagation`
+  与 `user_projection` 是按用户定位的，批量语义不明确，必须继续走单目标接口。
+- **同样的边界**：批量不会跳过损坏数据、不会把工作标为终态，也不绕过 admission。
+  它只是把"同一个事件下的多行"一次推进有界的一批。
 
 ## 触发条件与处置
 
@@ -37,6 +70,12 @@
    `im_v2_user_projection_backlog{state="paused"}` 大于零）持续两分钟时创建 incident。
    规则和 role owner 见
    [`observability.md`](observability.md)；不能静默、snooze 后忘记或以容量理由提高该零阈值。
+
+   `IMV2StalledRoomOutbox` 与 `IMV2StalledFanoutDelivery` 覆盖另一种停滞：瞬时失败
+   现在无限重试而不再进入暂停，因此一条持续失败的行不会出现在暂停计数里。这两个
+   告警基于 `im_v2_room_outbox_oldest_unfinished_age_seconds` 与
+   `im_v2_fanout_delivery_oldest_unfinished_age_seconds`，超过 30 分钟仍未达到终态
+   即创建 incident。处置方式相同：先修复根因，再用本 runbook 重放确实无法自愈的行。
 2. 先修复根因（PostgreSQL、broker、路由或依赖服务），并确认没有正持续失败；
    replay 不是跳过损坏数据或绕开 admission 的工具。
 3. 从受控数据库调查或既有 incident evidence 获取**精确**的 source event，及

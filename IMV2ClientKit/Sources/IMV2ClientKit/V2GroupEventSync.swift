@@ -44,6 +44,11 @@ public struct V2ClientGroupEventPage: Equatable, Sendable {
     public var nextRoomSequence: UInt64 { nextRoomSequenceValue.rawValue }
     /// 服务端是否声明仍有后续日志。
     public let hasMore: Bool
+    /// 已裁剪的历史下界：该序号之前的事件已被服务端按保留窗口移除。
+    ///
+    /// 本地游标低于它时，该房间必须被标记为"历史不完整"，而不是静默地少几条。
+    /// 零表示服务端从未裁剪该房间。
+    public let logTrimmedThroughRoomSequence: UInt64
 
     /// 创建对应的房间事件状态值。
     ///
@@ -52,13 +57,23 @@ public struct V2ClientGroupEventPage: Equatable, Sendable {
     ///   - events: 待应用的事件序列。
     ///   - nextRoomSequence: 后续拉取水位，允许零。
     ///   - hasMore: 服务端是否声明仍有后续日志。
+    ///   - logTrimmedThroughRoomSequence: 已裁剪的历史下界，允许零。
     /// - Throws: 继续水位超出可持久化范围时抛出错误；不校验事件列表。
-    public init(roomID: RoomID, events: [V2ClientGroupEvent], nextRoomSequence: UInt64, hasMore: Bool) throws {
-        guard let cursor = try? V2RoomCursor(nextRoomSequence) else { throw V2ClientSyncError.storageRangeExceeded }
+    public init(
+        roomID: RoomID,
+        events: [V2ClientGroupEvent],
+        nextRoomSequence: UInt64,
+        hasMore: Bool,
+        logTrimmedThroughRoomSequence: UInt64 = 0
+    ) throws {
+        guard let cursor = try? V2RoomCursor(nextRoomSequence),
+              logTrimmedThroughRoomSequence <= UInt64(Int64.max)
+        else { throw V2ClientSyncError.storageRangeExceeded }
         self.roomID = roomID
         self.events = events
         self.nextRoomSequenceValue = cursor
         self.hasMore = hasMore
+        self.logTrimmedThroughRoomSequence = logTrimmedThroughRoomSequence
     }
 }
 

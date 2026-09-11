@@ -28,6 +28,643 @@ private struct RevocationClockDateRow: Decodable {
 
 @Suite("V2 PostgreSQL room write", .serialized)
 struct PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("room activity time tracks sequence advances and ignores unrelated updates")
+    func roomActivityTimestampTracksSequenceAdvances() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            try await installSchema(on: sql)
+            let room = UUID()
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms
+                    (room_id, room_kind, room_shard_id, room_sequence,
+                     membership_revision, capacity_profile_id, created_at, last_event_at)
+                VALUES (\(bind: room), 'group', 'room-a', 0, 1, 'standard', \(bind: base), \(bind: base))
+                """).run()
+            // Membership-only changes must not make a room look recently active;
+            // conversation ordering depends on this remaining precise.
+            try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 2 WHERE room_id = \(bind: room)").run()
+            #expect(try await sql.raw("""
+                SELECT (last_event_at = \(bind: base)) AS exists
+                FROM im_v2.rooms WHERE room_id = \(bind: room)
+                """).first(decoding: ExistsRow.self)?.exists == true)
+            // Advancing the room sequence is the single activity signal, no
+            // matter which physical table carries the event.
+            try await sql.raw("UPDATE im_v2.rooms SET room_sequence = 1 WHERE room_id = \(bind: room)").run()
+            #expect(try await sql.raw("""
+                SELECT (last_event_at > \(bind: base)) AS exists
+                FROM im_v2.rooms WHERE room_id = \(bind: room)
+                """).first(decoding: ExistsRow.self)?.exists == true)
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase {
+                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
+            }
+            try? await app.asyncShutdown(); throw error
+        }
+    }
+
+    @Test("media authorization refuses content from a membership gap even with a stale projection")
+    func mediaAuthorizationFollowsTheMembershipGap() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? SQLDatabase)
+            try await installSchema(on: sql)
+            let requester = UUID()
+            let peer = UUID()
+            let device = UUID()
+            let room = UUID(uuidString: "00000000-0000-0000-0000-00000000f001")!
+            let base = Date(timeIntervalSince1970: 1_750_030_000)
+
+            // 成员区间：第 2 个修订加入、第 5 个修订离开、第 9 个修订重新加入。
+            // 两个区间之间的内容对请求者从未可见。
+            try await insertSummaryFixtureRoom(on: sql, room: room, kind: "group", sequence: 4,
+                                               revision: 9, lastEventAt: base, createdAt: base)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: requester, joined: 2, left: 5)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: requester, joined: 9, left: nil)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: peer, joined: 1, left: nil)
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, visibility_revision, created_at, updated_at)
+                VALUES (\(bind: requester), 'gap_requester', '区间请求者', 1, 1, \(bind: base), \(bind: base))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at)
+                VALUES (\(bind: requester), \(bind: device), \(bind: base), \(bind: base))
+                """).run()
+
+            // 一条可见消息（接受于第 2 个修订）与一条空档期消息（接受于第 6 个修订），
+            // 两条都带可用媒体。
+            let visibleMessage = UUID()
+            let gapMessage = UUID()
+            try await insertSummaryFixtureRoomEvent(on: sql, room: room, sequence: 2, revision: 2,
+                                                    message: visibleMessage, createdAt: base)
+            try await insertSummaryFixtureRoomEvent(on: sql, room: room, sequence: 3, revision: 6,
+                                                    message: gapMessage, createdAt: base.addingTimeInterval(1))
+            var clientMessageIDByMessage: [UUID: UUID] = [:]
+            for (message, sequence) in [(visibleMessage, Int64(2)), (gapMessage, Int64(3))] {
+                clientMessageIDByMessage[message] = try await insertSummaryFixtureMessage(
+                    on: sql, room: room, message: message, sender: peer,
+                    roomSequence: sequence, timelineSequence: sequence,
+                    text: "text-\(sequence)", createdAt: base,
+                    storage: .roomEvent, revision: nil
+                )
+            }
+            // 接受事实是历史可见性的权威：区间内消息在修订 2 被接受，空档期消息在修订 6 被接受。
+            for (message, sequence, revision) in [(visibleMessage, Int64(2), Int64(2)), (gapMessage, Int64(3), Int64(6))] {
+                let clientMessageID = try #require(clientMessageIDByMessage[message])
+                try await sql.raw("""
+                    INSERT INTO im_v2.message_send_completions
+                        (room_id, sender_user_id, client_message_id, fingerprint_version, request_fingerprint,
+                         message_id, event_id, room_sequence, timeline_sequence, accepted_membership_revision,
+                         delivery_authority, group_delivery_mode, created_at)
+                    VALUES (\(bind: room), \(bind: peer), \(bind: clientMessageID), 2, \(bind: Data(repeating: 7, count: 32)),
+                            \(bind: message), \(bind: UUID()), \(bind: sequence), \(bind: sequence), \(bind: revision),
+                            'personal', 'standard_fanout', \(bind: base))
+                    """).run()
+            }
+            var mediaByMessage: [UUID: UUID] = [:]
+            for message in [visibleMessage, gapMessage] {
+                let media = UUID()
+                mediaByMessage[message] = media
+                try await insertSummaryFixtureMediaObject(on: sql, media: media, owner: peer, at: base)
+                try await sql.raw("""
+                    INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at)
+                    VALUES (\(bind: message), \(bind: media), 0, \(bind: base))
+                    """).run()
+                // 刻意伪造一条"已投递"投影：媒体授权不得到此为止，必须再检查历史成员区间。
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_projection_versions
+                        (user_id, projection_kind, entity_key, scope_room_id, valid_from_sequence,
+                         source_event_id, payload, created_at)
+                    VALUES (\(bind: requester), 'message', \(bind: message.uuidString), \(bind: room), 1,
+                            \(bind: UUID()),
+                            jsonb_build_object(
+                                'event_type', 'message.accepted',
+                                'message_id', \(bind: message.uuidString),
+                                'room_id', \(bind: room.uuidString),
+                                'is_withdrawn', false,
+                                'media_ids', jsonb_build_array(\(bind: media.uuidString))),
+                            \(bind: base))
+                    """).run()
+            }
+            let visibleMedia = try #require(mediaByMessage[visibleMessage])
+            let gapMedia = try #require(mediaByMessage[gapMessage])
+
+            // 正例：区间内的消息媒体仍可用——证明拒绝不是因为夹具整体不可用。
+            #expect(try await V2PostgresMediaVisibilityAuthorization.isAuthorized(
+                mediaID: visibleMedia, requesterUserID: requester, deviceID: device, on: sql
+            ))
+            // 反例：空档期的消息即便有陈旧投影也必须拒绝。
+            #expect(try await V2PostgresMediaVisibilityAuthorization.isAuthorized(
+                mediaID: gapMedia, requesterUserID: requester, deviceID: device, on: sql
+            ) == false)
+
+            // 同一条可见性结论必须与房间日志读取一致：空档期事件不出现。
+            let log = try await PostgresV2GroupEventLogStore(database: app.db(.psql))
+                .pull(roomID: RoomID(uuid: room), actorUserID: UserID(uuid: requester), afterRoomSequence: 0, pageSize: 10)
+            #expect(log.events.map(\.roomSequence) == [2])
+            // 摘要预览同样不得泄漏空档期内容。
+            let page = try await V2RoomSummaryService(store: PostgresV2RoomSummaryStore(database: app.db(.psql)))
+                .summaries(V2RoomSummaryRequest(actorUserID: UserID(uuid: requester), cursor: nil, pageSize: 10))
+            #expect(page.rooms.first?.latestMessage?.messageID == MessageID(uuid: visibleMessage))
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("summary returns exact unread, previews and bounded pages")
+    func roomSummaryAggregation() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            try await installSchema(on: sql)
+            let user = UUID()
+            let peer = UUID()
+            // 显式选择标识，让"同一事件时间"的排序由 room_id 降序稳定决定。
+            let groupRoom = UUID(uuidString: "00000000-0000-0000-0000-00000000c001")!
+            let directRoom = UUID(uuidString: "00000000-0000-0000-0000-00000000c002")!
+            let quietRoom = UUID(uuidString: "00000000-0000-0000-0000-00000000c003")!
+            let sameMillisecondRoom = UUID(uuidString: "00000000-0000-0000-0000-00000000c004")!
+            let newest = Date(timeIntervalSince1970: 1_750_010_000)
+            let oldest = newest.addingTimeInterval(-3_600)
+            // 前两个房间时间戳相同但都不是整毫秒：它们既覆盖"同一时刻按 room_id 稳定
+            // 排序"，也让下一页游标落在毫秒内部。
+            let subMillisecond = newest.addingTimeInterval(0.0004)
+
+            try await insertSummaryFixtureRoom(on: sql, room: groupRoom, kind: "group", sequence: 10,
+                                               revision: 1, lastEventAt: subMillisecond, createdAt: newest)
+            try await insertSummaryFixtureRoom(on: sql, room: directRoom, kind: "direct", sequence: 7,
+                                               revision: 1, lastEventAt: subMillisecond, createdAt: newest)
+            try await insertSummaryFixtureRoom(on: sql, room: quietRoom, kind: "group", sequence: 4,
+                                               revision: 1, lastEventAt: oldest, createdAt: oldest)
+            // 与游标行同一毫秒、但更早 300 微秒：毫秒精度的游标会跳过它。
+            try await insertSummaryFixtureRoom(on: sql, room: sameMillisecondRoom, kind: "group", sequence: 5,
+                                               revision: 1, lastEventAt: newest.addingTimeInterval(0.0001),
+                                               createdAt: newest)
+            for room in [groupRoom, directRoom, quietRoom, sameMillisecondRoom] {
+                try await insertSummaryFixtureMembership(on: sql, room: room, user: user, joined: 1, left: nil)
+                try await insertSummaryFixtureMembership(on: sql, room: room, user: peer, joined: 1, left: nil)
+            }
+
+            // 群聊形态：接受事实留在房间事件里，正文在消息行。
+            let groupMessage = UUID()
+            let longPreview = String(repeating: "长", count: 120)
+            try await insertSummaryFixtureRoomEvent(on: sql, room: groupRoom, sequence: 3, revision: 1,
+                                                    message: groupMessage, createdAt: newest)
+            try await insertSummaryFixtureMessage(on: sql, room: groupRoom, message: groupMessage, sender: peer,
+                                                  roomSequence: 3, timelineSequence: 3, text: longPreview,
+                                                  createdAt: newest, storage: .roomEvent, revision: nil)
+            let media = UUID()
+            try await insertSummaryFixtureMediaObject(on: sql, media: media, owner: peer, at: newest)
+            try await sql.raw("""
+                INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at)
+                VALUES (\(bind: groupMessage), \(bind: media), 0, \(bind: newest))
+                """).run()
+            try await insertSummaryFixtureReadReceipt(on: sql, room: groupRoom, user: user, readThrough: 4, at: newest)
+
+            // 私聊形态：消息行本身就是接受事件；已撤回但仍要给出预览与媒体数量。
+            let directMessage = UUID()
+            try await insertSummaryFixtureMessage(on: sql, room: directRoom, message: directMessage, sender: peer,
+                                                  roomSequence: 7, timelineSequence: 7, text: "direct last",
+                                                  createdAt: newest, storage: .messageRow, revision: 1,
+                                                  withdrawnAt: newest)
+
+            // 自己发的消息不计未读：已读线落后于自己的最新消息时未读仍为零。
+            let ownMessage = UUID()
+            try await insertSummaryFixtureRoomEvent(on: sql, room: quietRoom, sequence: 4, revision: 1,
+                                                    message: ownMessage, createdAt: oldest)
+            try await insertSummaryFixtureMessage(on: sql, room: quietRoom, message: ownMessage, sender: user,
+                                                  roomSequence: 4, timelineSequence: 4, text: "mine",
+                                                  createdAt: oldest, storage: .roomEvent, revision: nil)
+            try await insertSummaryFixtureReadReceipt(on: sql, room: quietRoom, user: user, readThrough: 2, at: oldest)
+
+            let service = V2RoomSummaryService(store: PostgresV2RoomSummaryStore(database: app.db(.psql)))
+            let actor = UserID(uuid: user)
+            let firstPage = try await service.summaries(
+                V2RoomSummaryRequest(actorUserID: actor, cursor: nil, pageSize: 2)
+            )
+
+            // 页边界：先按事件时间倒序，同一时刻再按房间标识倒序。
+            #expect(firstPage.rooms.map(\.roomID.rawValue) == [
+                RoomID(uuid: directRoom).rawValue, RoomID(uuid: groupRoom).rawValue,
+            ])
+            #expect(firstPage.nextCursor != nil)
+            let direct = try #require(firstPage.rooms.first)
+            #expect(direct.unreadCount == 7)
+            #expect(direct.roomKind == .direct)
+            #expect(direct.latestMessage?.text == "direct last")
+            #expect(direct.latestMessage?.isWithdrawn == true)
+            #expect(direct.latestMessage?.messageID == MessageID(uuid: directMessage))
+            let group = try #require(firstPage.rooms.last)
+            // 10 − max(已读线 4, 自己最新消息 0) = 6
+            #expect(group.unreadCount == 6)
+            // 预览按字符截断：超长正文不能把整页推出帧预算，正文以房间游标为准。
+            #expect(group.latestMessage?.text.count == V2RoomSummaryLimits.maximumPreviewCharacters)
+            #expect(group.latestMessage?.text == String(longPreview.prefix(V2RoomSummaryLimits.maximumPreviewCharacters)))
+            #expect(group.latestMessage?.mediaCount == 1)
+
+            let secondPage = try await service.summaries(
+                V2RoomSummaryRequest(actorUserID: actor, cursor: firstPage.nextCursor, pageSize: 2)
+            )
+            // 同一毫秒内更早 200 微秒的房间必须出现在下一页，而不是被游标跳过。
+            #expect(secondPage.rooms.map(\.roomID.rawValue) == [
+                RoomID(uuid: sameMillisecondRoom).rawValue, RoomID(uuid: quietRoom).rawValue,
+            ])
+            #expect(secondPage.nextCursor == nil)
+            #expect(secondPage.rooms.first?.unreadCount == 5)
+            let quiet = try #require(secondPage.rooms.last)
+            #expect(quiet.latestMessage?.messageID == MessageID(uuid: ownMessage))
+            // 自己发的最新消息把基线抬到 4，所以未读为零，而不是 2。
+            #expect(quiet.unreadCount == 0)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("summary hides history the reader was not a member for")
+    func roomSummaryMatchesRoomLogVisibility() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            try await installSchema(on: sql)
+            let user = UUID()
+            let peer = UUID()
+            let room = UUID(uuidString: "00000000-0000-0000-0000-00000000d001")!
+            let base = Date(timeIntervalSince1970: 1_750_020_000)
+
+            // 用户在第 2 个成员修订上加入、第 5 个修订上离开、第 9 个修订上重新加入。
+            try await insertSummaryFixtureRoom(on: sql, room: room, kind: "group", sequence: 4,
+                                               revision: 9, lastEventAt: base, createdAt: base)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: user, joined: 2, left: 5)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: user, joined: 9, left: nil)
+            try await insertSummaryFixtureMembership(on: sql, room: room, user: peer, joined: 1, left: nil)
+            let invisibleEarly = UUID()
+            let visible = UUID()
+            let invisibleAfterLeaving = UUID()
+            let invisibleNewest = UUID()
+            for (index, message) in [invisibleEarly, visible, invisibleAfterLeaving, invisibleNewest].enumerated() {
+                let sequence = Int64(index + 1)
+                let revision: Int64 = [1, 2, 6, 8][index]
+                try await insertSummaryFixtureRoomEvent(on: sql, room: room, sequence: sequence, revision: revision,
+                                                        message: message, createdAt: base.addingTimeInterval(Double(index)))
+                try await insertSummaryFixtureMessage(on: sql, room: room, message: message, sender: peer,
+                                                      roomSequence: sequence, timelineSequence: sequence,
+                                                      text: "message-\(sequence)", createdAt: base.addingTimeInterval(Double(index)),
+                                                      storage: .roomEvent, revision: nil)
+            }
+            try await insertSummaryFixtureReadReceipt(on: sql, room: room, user: user, readThrough: 1, at: base)
+
+            let page = try await V2RoomSummaryService(store: PostgresV2RoomSummaryStore(database: app.db(.psql)))
+                .summaries(V2RoomSummaryRequest(actorUserID: UserID(uuid: user), cursor: nil, pageSize: 10))
+            let summary = try #require(page.rooms.first)
+            // 最新的**可见**消息是序号 2：序号 3、4 发生在离群之后，不能被预览泄漏。
+            #expect(summary.head == 4)
+            #expect(summary.latestMessage?.messageID == MessageID(uuid: visible))
+            #expect(summary.latestMessage?.roomSequence == 2)
+            #expect(summary.unreadCount == 3)
+
+            // 房间日志必须给出同一条可见性结论，否则摘要会成为历史授权的旁路。
+            let log = try await PostgresV2GroupEventLogStore(database: app.db(.psql))
+                .pull(roomID: RoomID(uuid: room), actorUserID: UserID(uuid: user), afterRoomSequence: 0, pageSize: 10)
+            #expect(log.events.map(\.roomSequence) == [2])
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("a standard group can make the room log its delivery authority")
+    func standardGroupCanUseRoomLogAuthority() async throws {
+        try await withForwardOwnerDatabases(mode: .standardFanout) { database, _, sql, _, _ in
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            let service = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: profile,
+                limits: try .init(maxUTF8Bytes: 128),
+                now: { base }
+            )
+            func makeStandardGroup(authority: V2RoomDeliveryAuthority, title: String) async throws -> RoomID {
+                let room = RoomID(uuid: UUID())
+                let outcome = try await PostgresV2GroupMessagingStore(
+                    database: database,
+                    groupDeliveryAuthority: authority
+                ).create(
+                    command: try V2CreateGroupRoomCommand(
+                        actorUserID: senderID,
+                        operationID: GroupRoomOperationID(uuid: UUID()),
+                        title: title,
+                        deliveryMode: .standardFanout,
+                        initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
+                    ),
+                    capacityProfile: profile,
+                    roomShardID: "room-a",
+                    roomID: room,
+                    eventID: EventID(uuid: UUID()),
+                    planID: FanoutPlanID(uuid: UUID()),
+                    now: base
+                )
+                guard case .created(_) = outcome else {
+                    Issue.record("expected \(title) to be created")
+                    throw CancellationError()
+                }
+                return room
+            }
+            func message(_ room: RoomID, clientID: String) throws -> V2AuthenticatedSendMessage {
+                try .init(
+                    roomID: room, actorUserID: senderID,
+                    clientMessageID: try .init(clientID), text: "群消息"
+                )
+            }
+
+            // 显式选择兼容基线：标准群仍然逐用户投递，房间日志不是权威副本。
+            let fanoutRoom = try await makeStandardGroup(authority: .fanout, title: "Fanout group")
+            // 标准扇出在提交时创建计划并入队筹划工作；逐用户目标由筹划器异步展开，
+            // 因此这里观察的是"确实产生了逐用户投递工作"，而不是立即出现的目标行。
+            let fanoutOutboxBefore = try await count("im_v2.room_outbox", on: sql)
+            guard case .accepted(let fanoutMessage) = try await service.send(message(fanoutRoom, clientID: "00000000-0000-0000-0000-00000000d101")) else {
+                Issue.record("expected the fanout message to be accepted")
+                return
+            }
+            #expect(try await count("im_v2.room_outbox", on: sql) > fanoutOutboxBefore)
+            #expect(try await sql.raw("""
+                SELECT delivery_authority AS value FROM im_v2.message_send_completions
+                WHERE room_id = \(bind: fanoutRoom.uuidValue!) AND room_sequence = \(bind: Int64(fanoutMessage.roomSequence))
+                """).first(decoding: StringValueRow.self)?.value == "personal")
+
+            // 部署策略切到读模型：同样是标准投递模式，权威副本变成房间日志，
+            // 消息不再产生任何逐用户投递行，客户端按房间游标恢复。
+            let logRoom = try await makeStandardGroup(authority: .roomLog, title: "Room-log group")
+            #expect(try await sql.raw("""
+                SELECT delivery_authority AS value FROM im_v2.rooms WHERE room_id = \(bind: logRoom.uuidValue!)
+                """).first(decoding: StringValueRow.self)?.value == "room_log")
+            #expect(try await sql.raw("""
+                SELECT payload->>'delivery_authority' AS value FROM im_v2.room_events
+                WHERE room_id = \(bind: logRoom.uuidValue!) AND event_type = 'room.created'
+                """).first(decoding: StringValueRow.self)?.value == "room_log")
+            let logTargetsBefore = try await count("im_v2.fanout_plan_targets", on: sql)
+            let logOutboxBefore = try await count("im_v2.room_outbox", on: sql)
+            guard case .accepted(let logMessage) = try await service.send(message(logRoom, clientID: "00000000-0000-0000-0000-00000000d102")) else {
+                Issue.record("expected the room-log message to be accepted")
+                return
+            }
+            #expect(try await count("im_v2.fanout_plan_targets", on: sql) == logTargetsBefore)
+            #expect(try await count("im_v2.room_outbox", on: sql) == logOutboxBefore)
+            #expect(try await sql.raw("""
+                SELECT delivery_authority AS value FROM im_v2.message_send_completions
+                WHERE room_id = \(bind: logRoom.uuidValue!) AND room_sequence = \(bind: Int64(logMessage.roomSequence))
+                """).first(decoding: StringValueRow.self)?.value == "room_log")
+            // 权威副本确实可恢复：按房间游标拉取能看到这条消息。
+            let page = try await PostgresV2GroupEventLogStore(database: database)
+                .pull(roomID: logRoom, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)
+            #expect(page.events.map(\.roomSequence).contains(logMessage.roomSequence))
+        }
+    }
+
+    @Test("a mention in a room-log room becomes a push notification, not a per-user delivery")
+    func mentionInRoomLogRoomBecomesPushNotification() async throws {
+        try await withForwardOwnerDatabases(mode: .largeGroupHybrid) { database, _, sql, _, _ in
+            // 必须落在夹具预置的分片租约窗口内，否则群创建会被准入拒绝。
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            // 夹具已为该用户提供公开身份；提及授权还要求他是房间成员。
+            let mentioned = memberTwoUUID
+            let secondDevice = UUID()
+            let revokedDevice = UUID()
+            for (device, revokedAt) in [(secondDevice, nil), (revokedDevice, base.addingTimeInterval(-60))] as [(UUID, Date?)] {
+                try await sql.raw("""
+                    INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, revoked_at)
+                    VALUES (\(bind: mentioned), \(bind: device), \(bind: base), \(bind: base), \(bind: revokedAt))
+                    """).run()
+            }
+
+            let payload = try forwardImportTestProfile()
+            // 被 @ 的人必须是房间成员，否则提及授权会先拒绝。
+            let room = RoomID(uuid: UUID())
+            let groupStore = PostgresV2GroupMessagingStore(database: database)
+            let created = try await groupStore.create(
+                command: try V2CreateGroupRoomCommand(
+                    actorUserID: senderID,
+                    operationID: GroupRoomOperationID(uuid: UUID()),
+                    title: "Mention room",
+                    deliveryMode: .largeGroupHybrid,
+                    initialMemberUserIDs: [.init(uuid: mentioned)]
+                ),
+                capacityProfile: payload,
+                roomShardID: "room-a",
+                roomID: room,
+                eventID: EventID(uuid: UUID()),
+                planID: FanoutPlanID(uuid: UUID()),
+                now: base
+            )
+            guard case .created(_) = created else {
+                Issue.record("expected the mention room to be created")
+                return
+            }
+            // 群创建本身会给初始成员建一次投递；这里只关心提及带来的增量。
+            let targetsAfterCreation = try await count("im_v2.fanout_plan_targets", on: sql)
+            let outboxAfterCreation = try await count("im_v2.room_outbox", on: sql)
+            let service = V2SendMessageService(
+                store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: payload,
+                limits: try .init(maxUTF8Bytes: 512),
+                now: { base }
+            )
+            func message(clientID: String) throws -> V2AuthenticatedSendMessage {
+                try .init(
+                    roomID: room, actorUserID: senderID,
+                    clientMessageID: try .init(clientID), text: "@被点名的人",
+                    mentions: [.user(try .init(mentioned.uuidString))]
+                )
+            }
+
+            // 没有启用的推送活动时，提及仍然只是一条普通房间事件：不接受、不失败、不建投递。
+            guard case .accepted = try await service.send(message(clientID: "00000000-0000-0000-0000-00000000c101")) else {
+                Issue.record("expected the mention to be accepted")
+                return
+            }
+            #expect(try await count("im_v2.push_wake_outbox", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_plan_targets", on: sql) == targetsAfterCreation)
+            #expect(try await count("im_v2.room_outbox", on: sql) == outboxAfterCreation)
+
+            // 配置并启用通知活动后，被 @ 成员的**有效**设备各自收到一条唤醒通知；
+            // 已撤销设备不在其中，也不会因此产生任何逐用户投递。
+            try await sql.raw("""
+                INSERT INTO im_v2.push_campaigns (campaign_id, state, updated_at)
+                VALUES ('mention_wake', 'enabled', \(bind: base))
+                """).run()
+            guard case .accepted = try await service.send(message(clientID: "00000000-0000-0000-0000-00000000c102")) else {
+                Issue.record("expected the mention to be accepted")
+                return
+            }
+            let wakes = try await sql.raw("""
+                SELECT target_device_id, target_user_id, campaign_id, state
+                FROM im_v2.push_wake_outbox ORDER BY target_device_id
+                """).all(decoding: MentionWakeAssertionRow.self)
+            #expect(wakes.count == 1)
+            #expect(wakes.first?.targetDeviceID == secondDevice)
+            #expect(wakes.first?.targetUserID == mentioned)
+            #expect(wakes.first?.campaignID == "mention_wake")
+            #expect(wakes.first?.state == "pending")
+            #expect(try await count("im_v2.fanout_plan_targets", on: sql) == targetsAfterCreation)
+            #expect(try await count("im_v2.room_outbox", on: sql) == outboxAfterCreation)
+            // 提及内容仍可按房间游标恢复：权威副本没有因为通知路径而改变。
+            let page = try await PostgresV2GroupEventLogStore(database: database)
+                .pull(roomID: room, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)
+            #expect(page.events.count == 3)
+        }
+    }
+
+    @Test("room projections declare whether the room log is the delivery authority")
+    func roomProjectionsDeclareDeliveryAuthority() async throws {
+        try await withForwardOwnerDatabases(mode: .standardFanout) { database, _, sql, _, _ in
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            // 权威副本形态由服务端宣告，客户端不再从不可变的投递模式推断。今天是
+            // "混合大群与标准群 = 房间日志，兼容基线 = 逐用户投递"：标准群的默认已经
+            // 切到读模型（部署默认 `room_log`），显式选 `fanout` 才会退回逐用户投递。
+            for (configured, mode, expected) in [
+                (V2RoomDeliveryAuthority.roomLog, V2GroupDeliveryMode.standardFanout, V2RoomDeliveryAuthority.roomLog.rawValue),
+                (V2RoomDeliveryAuthority.fanout, V2GroupDeliveryMode.standardFanout, V2RoomDeliveryAuthority.fanout.rawValue),
+                (V2RoomDeliveryAuthority.roomLog, V2GroupDeliveryMode.largeGroupHybrid, V2RoomDeliveryAuthority.roomLog.rawValue),
+                (V2RoomDeliveryAuthority.fanout, V2GroupDeliveryMode.largeGroupHybrid, V2RoomDeliveryAuthority.roomLog.rawValue),
+            ] {
+                let store = PostgresV2GroupMessagingStore(database: database, groupDeliveryAuthority: configured)
+                let newRoom = RoomID(uuid: UUID())
+                let outcome = try await store.create(
+                    command: try V2CreateGroupRoomCommand(
+                        actorUserID: senderID,
+                        operationID: GroupRoomOperationID(uuid: UUID()),
+                        title: "Authority \(expected)-\(mode.rawValue)",
+                        deliveryMode: mode,
+                        initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
+                    ),
+                    capacityProfile: profile,
+                    roomShardID: "room-a",
+                    roomID: newRoom,
+                    eventID: EventID(uuid: UUID()),
+                    planID: FanoutPlanID(uuid: UUID()),
+                    now: base
+                )
+                guard case .created(_) = outcome else {
+                    Issue.record("group creation did not report a created room")
+                    return
+                }
+                let room = try #require(newRoom.uuidValue)
+                #expect(try await sql.raw("""
+                    SELECT payload->>'delivery_mode' AS value FROM im_v2.room_events
+                    WHERE room_id = \(bind: room) AND event_type = 'room.created'
+                    """).first(decoding: StringValueRow.self)?.value == mode.rawValue)
+                #expect(try await sql.raw("""
+                    SELECT payload->>'delivery_authority' AS value FROM im_v2.room_events
+                    WHERE room_id = \(bind: room) AND event_type = 'room.created'
+                    """).first(decoding: StringValueRow.self)?.value == expected)
+            }
+        }
+    }
+
+    @Test("Group creation initializes every initial member's read watermark at the room head")
+    func groupCreationInitializesMemberReadWatermarks() async throws {
+        try await withForwardOwnerDatabases(mode: .standardFanout) { database, _, sql, _, _ in
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            let store = PostgresV2GroupMessagingStore(database: database)
+            let operation = GroupRoomOperationID(uuid: UUID())
+            let newRoom = RoomID(uuid: UUID())
+            let command = try V2CreateGroupRoomCommand(
+                actorUserID: senderID,
+                operationID: operation,
+                title: "Watermark group",
+                deliveryMode: .standardFanout,
+                initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
+            )
+            let outcome = try await store.create(
+                command: command,
+                capacityProfile: profile,
+                roomShardID: "room-a",
+                roomID: newRoom,
+                eventID: EventID(uuid: UUID()),
+                planID: FanoutPlanID(uuid: UUID()),
+                now: base
+            )
+            guard case .created(_) = outcome else {
+                Issue.record("group creation did not report a created room")
+                return
+            }
+            let room = try #require(newRoom.uuidValue)
+            // The room head after creation is the room.created event at
+            // sequence 1. Every initial member must already have read it,
+            // otherwise a brand-new group opens with one unread event.
+            #expect(try await sql.raw("""
+                SELECT COUNT(*) AS value FROM im_v2.room_read_receipts
+                WHERE room_id = \(bind: room) AND read_through_room_sequence = 1
+                """).first(decoding: CountRow.self)?.value == 2)
+        }
+    }
+
+    @Test("Joined-member read watermark follows the room head without ever moving backwards")
+    func joinedMemberReadWatermarkSemantics() async throws {
+        try await withForwardOwnerDatabases(mode: .standardFanout) { _, _, sql, _, _ in
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let joiner = UUID()
+            try await sql.raw("UPDATE im_v2.rooms SET room_sequence = 7 WHERE room_id = \(bind: roomUUID)").run()
+            try await v2InitializeJoinedMemberReadWatermark(
+                roomID: roomUUID, userID: joiner, now: base, sql: sql
+            )
+            #expect(try await sql.raw("""
+                SELECT read_through_room_sequence AS value FROM im_v2.room_read_receipts
+                WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: joiner)
+                """).first(decoding: CountRow.self)?.value == 7)
+            // A later join must never lower a watermark that already advanced
+            // past the current head (for example after a delayed replay).
+            try await sql.raw("UPDATE im_v2.rooms SET room_sequence = 3 WHERE room_id = \(bind: roomUUID)").run()
+            try await v2InitializeJoinedMemberReadWatermark(
+                roomID: roomUUID, userID: joiner, now: base.addingTimeInterval(60), sql: sql
+            )
+            #expect(try await sql.raw("""
+                SELECT read_through_room_sequence AS value FROM im_v2.room_read_receipts
+                WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: joiner)
+                """).first(decoding: CountRow.self)?.value == 7)
+            // An empty room carries no content to mark as read, and a
+            // zero watermark cannot be persisted, so no row may appear.
+            let emptyRoom = UUID(), emptyJoiner = UUID()
+            try await sql.raw("""
+                INSERT INTO im_v2.rooms (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, created_at)
+                VALUES (\(bind: emptyRoom), 'direct', 'room-a', 0, 1, 'standard', \(bind: base))
+                """).run()
+            try await v2InitializeJoinedMemberReadWatermark(
+                roomID: emptyRoom, userID: emptyJoiner, now: base, sql: sql
+            )
+            #expect(try await sql.raw("""
+                SELECT COUNT(*) AS value FROM im_v2.room_read_receipts WHERE room_id = \(bind: emptyRoom)
+                """).first(decoding: CountRow.self)?.value == 0)
+        }
+    }
+
     @Test("An unrepresentable lockout preserves the prior budget and audit, then recovers with a valid duration")
     func passwordLockoutPrecisionRollback() async throws {
         try await withForwardOwnerDatabases(mode: .standardFanout) { database, _, sql, _, _ in
@@ -917,7 +1554,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profileWorker = V2DirectRoomProfilePropagationWorker(database: database, shadowForwarder: shadow, now: { clock.now() })
             let receiptWorker = V2ReadReceiptPreferencePropagationWorker(database: database, shadowForwarder: shadow,
                 retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 10, jitterFraction: 0), now: { clock.now() })
-            let pauses = fails && starting > 1
+            // 瞬时失败不再因预算耗尽而暂停，因此失败路径只释放重试；
+            // 下面的 replay 覆盖改为显式构造暂停行。
+            let pauses = false
             if path == "profile" {
                 if fails {
                     await #expect(throws: V2DirectRoomProfilePropagationError.missingControlProjection) { try await profileWorker.runOnce(limit: 2) }
@@ -946,7 +1585,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(try await profileWorker.runOnce(limit: 2) == .init(claimedUpdateCount: 1, projectedRecipientCount: 1, completedUpdateCount: 1))
                 } else {
                     #expect(try await receiptWorker.runOnce(limit: 2).claimedOperationCount == 0)
-                    if pauses {
+                    if fails {
+                        // 新契约下暂停只来自确定性失败；这里显式构造暂停行，
+                        // 以便仍然覆盖 operator replay 的恢复路径。
+                        try await sql.raw("""
+                            UPDATE im_v2.read_receipt_preference_propagation_outbox
+                            SET state = 'paused', paused_at = \(bind: now), next_attempt_at = NULL,
+                                claim_token = NULL, lease_expires_at = NULL
+                            WHERE operation_id = \(bind: primary)
+                            """).run()
                         let command = V2DurableWorkReplayCommand(operationID: UUID(), target: try .init(kind: .readReceiptPreferencePropagation, sourceEventID: .init(uuid: primary), targetUserID: senderID), reason: .dependencyRecovered)
                         let replay = try await PostgresV2DurableWorkReplayStore(database: database).replay(command, operatorPrincipal: "integration-test", now: now.addingTimeInterval(2))
                         #expect(replay.outcome == .requeued)
@@ -1669,10 +2316,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return (report.claimedCount, report.completedCount, report.releasedCount, report.pausedCount)
             }
             let report = try await run()
-            let paused = fails && starting != 0
+            // 提供商故障是瞬时的：即使重试计数已经饱和（包括 Int64.max），
+            // 工作也只释放重试，不进入需要人工干预的暂停状态。
             #expect(report.claimed == 2 && report.completed == (fails ? 1 : 2))
-            #expect(report.paused == (paused ? 1 : 0) && report.released == (fails && !paused ? 1 : 0))
-            let primaryState = !fails ? "completed" : paused ? "paused" : "pending"
+            #expect(report.paused == 0 && report.released == (fails ? 1 : 0))
+            let primaryState = !fails ? "completed" : "pending"
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE media_id = \(bind: primary.uuidValue!) AND state = \(bind: primaryState) AND retry_count = \(bind: expectedCount) AND claim_token IS NULL AND lease_expires_at IS NULL AND ((state = 'completed' AND completed_at = \(bind: now)) OR (state = 'paused' AND paused_at = \(bind: now)) OR (state = 'pending' AND next_attempt_at > \(bind: now)))").first(decoding: CountRow.self)?.value == 1)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE media_id = \(bind: healthy.uuidValue!) AND state = 'completed' AND retry_count = 1 AND completed_at = \(bind: now) AND claim_token IS NULL AND lease_expires_at IS NULL").first(decoding: CountRow.self)?.value == 1)
             if scan {
@@ -8681,7 +9329,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     let worker = V2ReadReceiptPreferencePropagationWorker(database: database,
                         shadowForwarder: SuccessfulProjectionShadowForwarder(), leaseDuration: 1,
                         retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 10, jitterFraction: 0), now: { date })
-                    #expect(try await worker.runOnce(limit: 1) == .init(claimedOperationCount: 1,
+                    let report = try await worker.runOnce(limit: 1)
+                    #expect(report == .init(claimedOperationCount: 1,
                         projectedRoomCount: fails ? 0 : 1, completedOperationCount: fails ? 0 : 1,
                         releasedOperationCount: fails ? 1 : 0))
                 }
@@ -8954,10 +9603,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             clock.set([resumedAt])
             if path != "complete" {
-                #expect(try await worker(fails: true).runOnce(limit: 1) == .init(claimedOperationCount: 1, projectedRoomCount: 0, completedOperationCount: 0, releasedOperationCount: path == "retry" ? 1 : 0, pausedOperationCount: path == "pause" ? 1 : 0))
+                // 依赖缺失是瞬时失败：两条路径都只安排重试，不再因预算耗尽而暂停。
+                #expect(try await worker(fails: true).runOnce(limit: 1) == .init(claimedOperationCount: 1, projectedRoomCount: 0, completedOperationCount: 0, releasedOperationCount: 1))
                 clock.set([resumedAt.addingTimeInterval(1)])
                 #expect(try await worker().runOnce(limit: 1).claimedOperationCount == 0)
                 if path == "pause" {
+                    // 新契约下暂停只来自确定性失败；这里显式构造暂停行，
+                    // 以继续覆盖 replay 的时钟恢复路径。
+                    try await sql.raw("""
+                        UPDATE im_v2.read_receipt_preference_propagation_outbox
+                        SET state = 'paused', paused_at = \(bind: resumedAt), next_attempt_at = NULL,
+                            claim_token = NULL, lease_expires_at = NULL
+                        WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: operation)
+                        """).run()
                     let result = try await verifyDurableReplayClockRecovery(
                         .init(operationID: UUID(), target: try .init(kind: .readReceiptPreferencePropagation, sourceEventID: .init(uuid: operation), targetUserID: senderID), reason: .dependencyRecovered),
                         store: PostgresV2DurableWorkReplayStore(database: database), sql: sql, operatorPrincipal: "integration-test", now: resumedAt.addingTimeInterval(2))
@@ -18178,7 +18836,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("ALTER TABLE im_v2.schema_contract ADD CONSTRAINT schema_contract_schema_id_check CHECK (schema_id = 'im-v2-current-18')").run()
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             try await removeDeviceExpiryForMigrationFixture(on: sql)
-            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
             let statements = postgresStatements(in: script.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
             func migrate() async throws {
                 try await app.db(.psql).transaction { database in
@@ -18795,8 +19453,17 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 claimedOperationCount: 1,
                 projectedRoomCount: 0,
                 completedOperationCount: 0,
-                pausedOperationCount: 1
+                releasedOperationCount: 1
             ))
+            // 影子转发失败是瞬时故障，不再因预算耗尽而暂停；显式构造暂停行，
+            // 以继续覆盖 operator replay 的恢复路径。
+            try await sql.raw("""
+                UPDATE im_v2.read_receipt_preference_propagation_outbox
+                SET state = 'paused', paused_at = \(bind: now), claim_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = NULL
+                WHERE actor_user_id = \(bind: senderUUID)
+                  AND operation_id = \(bind: UUID(uuidString: retryPreferenceOperationID.rawValue)!)
+                """).run()
             let pausedPropagation = try #require(try await sql.raw("SELECT state, retry_count FROM im_v2.read_receipt_preference_propagation_outbox WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: UUID(uuidString: retryPreferenceOperationID.rawValue)!)").first(decoding: DurableRetryStateRow.self))
             #expect(pausedPropagation.state == "paused")
             #expect(pausedPropagation.retryCount == 1)
@@ -21130,7 +21797,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.rooms SET group_permission_revision = 3 WHERE room_id = \(bind: roomUUID)").run()
             try await migrate()
             try await removeDeviceExpiryForMigrationFixture(on: sql)
-            let pushScript = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+            let pushScript = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
             let pushStatements = postgresStatements(in: pushScript.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
             try await app.db(.psql).transaction { database in
                 let connection = try #require(database as? any SQLDatabase)
@@ -21835,7 +22502,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.read_receipt_operations", on: sql) == 1)
             #expect(try await count("im_v2.room_events", on: sql) == 1)
             #expect(try await count("im_v2.fanout_plans", on: sql) == 1)
-            #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
+            // 已读回执只把读者自己的水位写回该账号的同步流，绝不产生任何投递投影。
+            #expect(try await count("im_v2.user_sync_log WHERE projection_kind <> 'own_read_watermark'", on: sql) == 0)
+            #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'own_read_watermark'", on: sql) == 1)
             guard case .accepted(let secondMessage) = try await send.send(.init(
                 roomID: roomID,
                 actorUserID: senderID,
@@ -21880,7 +22549,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             ).first(decoding: ReceiptStateAssertionRow.self))
             #expect(advancedState.sequence == Int64(secondMessage.roomSequence))
             #expect(try await count("im_v2.read_receipt_operations", on: sql) == 3)
-            #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
+            #expect(try await count("im_v2.user_sync_log WHERE projection_kind <> 'own_read_watermark'", on: sql) == 0)
             // Two timestamps inside the same millisecond exercise the cursor
             // precision boundary that previously truncated through Date-ms.
             try await sql.raw("""
@@ -22776,6 +23445,204 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         } catch {
             if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
             try? await app.asyncShutdown(); throw error
+        }
+    }
+
+    @Test("room log retention follows active readers and marks trimmed history")
+    func roomLogRetentionFollowsActiveReaders() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            try await installSchema(on: sql)
+            let room = UUID(uuidString: "00000000-0000-0000-0000-00000000e101")!
+            let activeReader = UUID()
+            let staleReader = UUID()
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let window: TimeInterval = 7 * 24 * 60 * 60
+
+            try await insertSummaryFixtureRoom(on: sql, room: room, kind: "group", sequence: 10,
+                                               revision: 1, lastEventAt: base, createdAt: base)
+            for sequence in 1 ... 10 {
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_events
+                        (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
+                         committed_membership_revision, created_at)
+                    VALUES (\(bind: UUID()), \(bind: room), \(bind: Int64(sequence)), 'message.accepted',
+                            \(bind: UUID()), jsonb_build_object('event_type', 'message.accepted',
+                                'message_id', \(bind: UUID().uuidString)), 1,
+                            \(bind: base.addingTimeInterval(Double(sequence))))
+                    """).run()
+            }
+            for (reader, readThrough, updatedAt) in [
+                (activeReader, Int64(4), base.addingTimeInterval(60)),
+                (staleReader, Int64(1), base.addingTimeInterval(-2 * window)),
+            ] {
+                try await insertSummaryFixtureMembership(on: sql, room: room, user: reader, joined: 1, left: nil)
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_read_receipts (room_id, user_id, read_through_room_sequence, updated_at)
+                    VALUES (\(bind: room), \(bind: reader), \(bind: readThrough), \(bind: updatedAt))
+                    """).run()
+            }
+
+            let store = PostgresV2RoomLogRetentionStore(database: app.db(.psql))
+            // 永久模式：计入全部历史读者，最慢的那个把下界钉在 1，什么都不删。
+            let permanent = try await store.trimRoomLogs(mode: .permanent, window: window, now: base.addingTimeInterval(120), limit: 8)
+            #expect(permanent.trimmedRooms == 0)
+            #expect(permanent.deletedEvents == 0)
+            #expect(try await count("im_v2.room_events", on: sql) == 10)
+
+            // 窗口模式：窗口外的读者不再钉住下界，下界落到仍在窗口内的读者已读线 4。
+            let windowed = try await store.trimRoomLogs(mode: .window, window: window, now: base.addingTimeInterval(120), limit: 8)
+            #expect(windowed.trimmedRooms == 1)
+            #expect(windowed.deletedEvents == 3)
+            #expect(try await sql.raw("""
+                SELECT log_trimmed_through_room_sequence AS value FROM im_v2.rooms WHERE room_id = \(bind: room)
+                """).first(decoding: CountRow.self)?.value == 4)
+            #expect(try await count("im_v2.room_events", on: sql) == 7)
+
+            // 下界是单调的：再跑一轮不会回退，也不会重复删除。
+            let again = try await store.trimRoomLogs(mode: .window, window: window, now: base.addingTimeInterval(120), limit: 8)
+            #expect(again.trimmedRooms == 0)
+            #expect(try await count("im_v2.room_events", on: sql) == 7)
+
+            // 普通写入路径仍然不能删除房间事件：只有保留裁剪能够放行，而且必须低于下界。
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("DELETE FROM im_v2.room_events WHERE room_id = \(bind: room)").run()
+            }
+            try await sql.raw("SET LOCAL im_v2.retention_trim = 'on'").run()
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("DELETE FROM im_v2.room_events WHERE room_id = \(bind: room) AND room_sequence < 9").run()
+            }
+
+            // 读取方能看到"历史不完整"的下界：游标低于它的客户端必须被显式告知。
+            let page = try await PostgresV2GroupEventLogStore(database: app.db(.psql))
+                .pull(roomID: RoomID(uuid: room), actorUserID: UserID(uuid: activeReader), afterRoomSequence: 0, pageSize: 20)
+            #expect(page.logTrimmedThroughRoomSequence == 4)
+            // 已读线本身仍然保留：裁剪删的是**严格早于**下界的历史。
+            #expect(page.events.first?.roomSequence == 4)
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test("operator batch replay drains one source event in bounded steps")
+    func operatorBatchReplayDrainsSourceEvent() async throws {
+        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
+              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        else { return }
+        let app = try await Application.make(.testing)
+        do {
+            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
+            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            try await installSchema(on: sql)
+            try await seedRoom(on: sql)
+
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3)
+            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: app.db(.psql)), capacityProfile: try .init(id: "standard", limits: profile), limits: try .init(maxUTF8Bytes: 64), now: { now })
+            guard case .accepted = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "batch replay")) else {
+                Issue.record("expected accepted message")
+                return
+            }
+            let trigger = try #require(try await sql.raw("SELECT source_event_id, plan_id FROM im_v2.room_outbox").first(decoding: TriggerRow.self))
+            let sourceEventID = try EventID(trigger.sourceEventID.uuidString)
+            _ = try await V2FanoutPlanner(
+                store: PostgresV2FanoutPlanStore(database: app.db(.psql)),
+                pageSize: 8,
+                now: { now }
+            ).plan(.init(sourceEventID: sourceEventID, planID: try FanoutPlanID(trigger.planID.uuidString)))
+
+            // 让该事件下的全部投递进入暂停：这正是"修好根因之后要成批清掉"的形态。
+            let delivery = PostgresV2FanoutDeliveryStore(database: app.db(.psql))
+            let leases = try await delivery.claimPending(bucket: nil, lane: .fresh, now: now, leaseDuration: 30, limit: 8)
+            let pausedTotal = leases.count
+            #expect(pausedTotal >= 2)
+            for lease in leases {
+                try await delivery.scheduleRetry(lease, disposition: .pause, now: now.addingTimeInterval(1))
+            }
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'paused'", on: sql) == Int64(pausedTotal))
+
+            let service = V2DurableWorkOperatorReplayService(
+                store: PostgresV2DurableWorkReplayStore(database: app.db(.psql)),
+                operatorPrincipal: "oncall-primary",
+                now: { now.addingTimeInterval(2) }
+            )
+            let batchID = UUID(uuidString: "00000000-0000-0000-0000-0000000008f1")!
+
+            // 第一批只走一条：选择面是该事件本身，行数上限把动作切成有界步骤。
+            let first = try await service.replayEvent(try V2DurableWorkEventReplayCommand(
+                operationID: batchID, kind: .fanoutDelivery, sourceEventID: sourceEventID,
+                reason: .dependencyRecovered, limit: 1
+            ))
+            #expect(first == .init(operationID: batchID, requeued: 1, notPaused: 0, hasMore: true))
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'paused'", on: sql) == Int64(pausedTotal - 1))
+
+            // 同一批量标识重复调用：已重放的行由派生审计挡住（不会重复重放），本批推进剩下的。
+            // 这是刻意的"排空"语义：调用方用同一标识反复推进，直到 hasMore 为 false。
+            var remaining = pausedTotal - 1
+            var drained = false
+            while remaining > 0 {
+                let step = try await service.replayEvent(try V2DurableWorkEventReplayCommand(
+                    operationID: batchID, kind: .fanoutDelivery, sourceEventID: sourceEventID,
+                    reason: .dependencyRecovered, limit: 1
+                ))
+                #expect(step.requeued == 1)
+                #expect(step.notPaused == 0)
+                #expect(step.hasMore == (remaining > 1))
+                remaining -= 1
+                drained = !step.hasMore
+            }
+            #expect(drained)
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'paused'", on: sql) == 0)
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'pending'", on: sql) == Int64(pausedTotal))
+
+            // 逐行审计与单目标重放同形：每一行都有自己的操作标识、目标身份与结论。
+            let audit = try await sql.raw("""
+                SELECT target_user_id, projection_kind, outcome
+                FROM im_v2.durable_work_replay_audit
+                WHERE source_event_id = \(bind: trigger.sourceEventID)
+                ORDER BY target_user_id
+                """).all(decoding: BatchReplayAuditRow.self)
+            #expect(audit.count == pausedTotal)
+            #expect(audit.allSatisfy { $0.outcome == "requeued" && $0.projectionKind == "message" && $0.targetUserID != nil })
+
+            // 已经取尽的批次再调用不会重复重放，也不会误报为暂停。
+            let idle = try await service.replayEvent(try V2DurableWorkEventReplayCommand(
+                operationID: batchID, kind: .fanoutDelivery, sourceEventID: sourceEventID,
+                reason: .dependencyRecovered, limit: 4
+            ))
+            #expect(idle == .init(operationID: batchID, requeued: 0, notPaused: 0, hasMore: false))
+            #expect(try await count("im_v2.fanout_deliveries WHERE state = 'pending'", on: sql) == Int64(pausedTotal))
+
+            // 按用户定位的工作类型不接受批量：它的批量语义不明确，必须继续逐目标重放。
+            #expect(throws: V2DurableWorkReplayValidationError.invalidTargetShape) {
+                _ = try V2DurableWorkEventReplayCommand(
+                    operationID: UUID(), kind: .userProjection, sourceEventID: sourceEventID,
+                    reason: .dataRepaired, limit: 4
+                )
+            }
+            #expect(throws: V2DurableWorkReplayValidationError.invalidTargetShape) {
+                _ = try V2DurableWorkEventReplayCommand(
+                    operationID: UUID(), kind: .fanoutDelivery, sourceEventID: sourceEventID,
+                    reason: .dataRepaired, limit: V2DurableWorkEventReplayCommand.maximumTargets + 1
+                )
+            }
+
+            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+            try await app.asyncShutdown()
+        } catch {
+            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
+            try? await app.asyncShutdown()
+            throw error
         }
     }
 
@@ -27693,13 +28560,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(ordinaryPage.events.first?.roomSequence == ordinary.roomSequence)
             #expect(ordinaryPage.events.first?.projectionKind == "message")
             #expect(mentionedMessage.roomSequence == 2)
+            // 房间日志是权威副本：被 @ 的成员只收到通知，因此两条消息都只有一条
+            // 零目标的终端计划，既没有逐用户投递行，也没有 outbox 工作。
             #expect(plans == [
                 .init(roomSequence: 1, state: "terminal", targetCount: 0, reservedFanoutCost: 0),
-                .init(roomSequence: 2, state: "planning", targetCount: 1, reservedFanoutCost: 1),
+                .init(roomSequence: 2, state: "terminal", targetCount: 0, reservedFanoutCost: 0),
             ])
-            #expect(outboxCount == 1)
-            #expect(targetCount == 1)
-            print("V2_LOCAL_HYBRID_100K_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) seed_ms=\(seedElapsed) ordinary_accept_ms=\(ordinaryElapsed) first_pull_ms=\(pullElapsed) mention_accept_ms=\(mentionElapsed) verification_ms=\(max(0, verificationElapsed)) ordinary_fanout_targets=0 mention_fanout_targets=1")
+            #expect(outboxCount == 0)
+            #expect(targetCount == 0)
+            print("V2_LOCAL_HYBRID_100K_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) seed_ms=\(seedElapsed) ordinary_accept_ms=\(ordinaryElapsed) first_pull_ms=\(pullElapsed) mention_accept_ms=\(mentionElapsed) verification_ms=\(max(0, verificationElapsed)) ordinary_fanout_targets=0 mention_fanout_targets=0")
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
@@ -28303,7 +29172,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             try await removeDeviceExpiryForMigrationFixture(on: sql)
-            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
                 .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
             let statements = postgresStatements(in: script).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
             try await database.transaction { transaction in
@@ -29200,7 +30069,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await sourceSQL.raw("ALTER TABLE im_v2.schema_contract ADD CONSTRAINT schema_contract_schema_id_check CHECK (schema_id = 'im-v2-current-14')").run()
                 let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 try await removeDeviceExpiryForMigrationFixture(on: sourceSQL)
-                let migration = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: repo.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+                let migration = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: repo.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
                     .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
                 let statements = postgresStatements(in: migration).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
                 try await sourceDB.transaction { transaction in
@@ -29250,7 +30119,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try await inbox.receive(export, now: now)
                 let firstWorker = try V2ForwardMediaImportWorker(store: .init(database: targetDB),
                     copier: V2LocalFilesystemForwardMediaCopier(sources: ["room-a": sourceProvider], target: targetProvider, now: { now }),
-                    scanner: ForwardMediaFailOnceScanner(scanner: V2LocalEICARMediaScanner(provider: targetProvider)),
+                    scanner: ForwardMediaFailOnceScanner(
+                        scanner: V2LocalEICARMediaScanner(provider: targetProvider),
+                        deterministicFailure: true
+                    ),
                     retryPolicy: .init(maximumAttempts: 1), now: { now })
                 #expect(try await firstWorker.runOnce(exportID: export.intent.exportID) == .paused)
                 #expect(try await mediaWorker.runOnce(exportID: export.intent.exportID) == .paused)
@@ -29308,7 +30180,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             if scenario == "max-attempt" {
                 try await sourceSQL.raw("UPDATE im_v2.message_forward_delivery_jobs SET retry_count = 9223372036854775807").run()
                 let unavailable = ForwardDeliveryTestTarget(target: endpoint, mode: "paused")
-                #expect(try await worker(at: now, target: unavailable).runOnce(sourceShardID: "room-a", limit: 10).paused == 1)
+                // 瞬时失败在计数饱和时同样只释放重试；要保护的不变量是计数不再增长
+                // （不会溢出或回绕），而不是进入暂停。
+                let report = try await worker(at: now, target: unavailable).runOnce(sourceShardID: "room-a", limit: 10)
+                #expect(report.retried == 1)
+                #expect(try await sourceSQL.raw("""
+                    SELECT retry_count AS value FROM im_v2.message_forward_delivery_jobs
+                    WHERE export_id = \(bind: export.intent.exportID)
+                    """).first(decoding: CountRow.self)?.value == Int64.max)
                 #expect(try await receipts.status(exportID: export.intent.exportID) == nil)
                 return
             }
@@ -29390,13 +30269,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     let next = try await worker(at: now.addingTimeInterval(2), target: transport).runOnce(sourceShardID: "room-a", limit: 10)
                     if scenario == "paused" || scenario == "target-owner" {
-                        #expect(next.paused == 1)
-                        let foreground = try V2CrossOwnerForwardService(sources: ["room-a": .init(exports: exporter, receipts: receipts, jobs: jobs)], now: { now })
-                        guard case .pending(let paused) = try await foreground.forward(actor: .init(uuid: memberTwoUUID), operation: operation, source: reference, sourceRoute: .init(shardID: "room-a", epoch: 0), target: targetRoom, targetRoute: .init(shardID: "room-b", epoch: 0)) else { throw V2ForwardInboxError.corruptPersistenceState }
-                        #expect(paused)
+                        // 目标不可用与 owner 变化都是瞬时失败：第二次尝试同样只释放
+                        // 重试，不产生暂停行，也不产生终态回执。暂停边界的覆盖由
+                        // media-paused-* 场景承担——那是唯一被 store 允许写入暂停的路径
+                        // （该表的 immutable 触发器拒绝任何直接 UPDATE）。
+                        #expect(next.retried == 1)
+                        #expect(try await jobs.isPaused(exportID: export.intent.exportID) == false)
                         #expect(try await receipts.status(exportID: export.intent.exportID) == nil)
                         #expect(try await count("im_v2.messages", on: targetSQL) == 0)
-                        #expect(try await worker(at: now.addingTimeInterval(100), target: transport).runOnce(sourceShardID: "room-a", limit: 10).claimed == 0)
                         return
                     }
                     #expect(next.completed == 1)
@@ -29602,7 +30482,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 try await sourceSQL.raw("ALTER TABLE im_v2.schema_contract ADD CONSTRAINT schema_contract_schema_id_check CHECK (schema_id = 'im-v2-current-15')").run()
                 let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 try await removeDeviceExpiryForMigrationFixture(on: sourceSQL)
-                let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: repo.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+                let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: repo.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
                     .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
                 let statements = postgresStatements(in: script).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
                 try await sourceDB.transaction { transaction in
@@ -30056,7 +30936,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             try await sql.raw("ALTER TABLE im_v2.message_forward_operations DROP COLUMN source_room_id").run()
             try await removeDeviceExpiryForMigrationFixture(on: sql)
-            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_message_version_audience.sql", "20260905_forward_source_location.sql", "20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+            let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_message_version_audience.sql", "20260905_forward_source_location.sql", "20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
                 .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
             let statements = postgresStatements(in: script).filter { !$0.isEmpty && $0 != "BEGIN" && $0 != "COMMIT" }
             try await app.db(.psql).transaction { transaction in
@@ -30254,7 +31134,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             if migrateFromSeven {
                 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 try await removeDeviceExpiryForMigrationFixture(on: sql)
-                let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_source_revision.sql", "20260905_message_version_audience.sql", "20260905_forward_source_location.sql", "20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
+                let script = try "DROP TABLE IF EXISTS im_v2.legacy_device_registration_cancellations; DROP TABLE IF EXISTS im_v2.device_registration_cancellations;\n" + ["20260905_forward_source_revision.sql", "20260905_message_version_audience.sql", "20260905_forward_source_location.sql", "20260905_forward_exports.sql", "20260905_forward_inbox.sql", "20260905_forward_media_imports.sql", "20260905_forward_export_receipts.sql", "20260905_forward_delivery_jobs.sql", "20260906_forward_work_replay.sql", "20260906_message_media_download_scope.sql", "20260906_durable_group_role_policies.sql", "20260906_versioned_push_intents.sql", "20260906_atomic_group_approval.sql", "20260906_group_approval_recovery.sql", "20260906_group_invite_directory.sql", "20260906_group_invitation_owner_identity.sql", "20260906_group_invite_creation_recovery.sql", "20260906_group_invite_directory_import.sql", "20260907_device_session_absolute_expiry.sql", "20260907_device_revocation_capabilities.sql", "20260907_atomic_revocation_credential_issue.sql", "20260907_registration_cancellation.sql", "20260907_legacy_registration_cancellation.sql", "20260911_room_last_event_at.sql", "20260912_room_delivery_authority.sql", "20260913_room_log_retention.sql"].map { try String(contentsOf: root.appending(path: "IMV2/sql/migrations/" + $0), encoding: .utf8) }.joined(separator: "\n")
                     .split(separator: "\n", omittingEmptySubsequences: false)
                     .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
                     .split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
@@ -33715,6 +34595,7 @@ private actor ForegroundOwnerTransitionStore: V2OwnerValidatedForwardMessageWrit
         identifiers: V2AcceptanceIdentifiers, now: Date) async throws -> V2SendMessageOutcome {
         try await store.accept(command: command, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
     }
+
 }
 
 private struct BeforeForwardAcceptanceStore: V2OwnerValidatedForwardMessageWriteStore {
@@ -33797,6 +34678,124 @@ private func drainFanoutCompletionReleases(
         if report.releasedCount < batchSize { break }
     }
     return .init(releasedCount: released, closedPlanCount: closedPlans)
+}
+
+/// 会话摘要夹具使用的接受形态。
+enum SummaryFixtureStorage {
+    case roomEvent
+    case messageRow
+}
+
+func insertSummaryFixtureRoom(
+    on sql: any SQLDatabase,
+    room: UUID,
+    kind: String,
+    sequence: Int64,
+    revision: Int64,
+    lastEventAt: Date,
+    createdAt: Date
+) async throws {
+    try await sql.raw("""
+        INSERT INTO im_v2.rooms
+            (room_id, room_kind, room_shard_id, room_sequence, membership_revision,
+             capacity_profile_id, created_at, last_event_at)
+        VALUES (\(bind: room), \(bind: kind), 'room-a', \(bind: sequence), \(bind: revision),
+                'standard', \(bind: createdAt), \(bind: lastEventAt))
+        """).run()
+}
+
+func insertSummaryFixtureMembership(
+    on sql: any SQLDatabase,
+    room: UUID,
+    user: UUID,
+    joined: Int64,
+    left: Int64?
+) async throws {
+    try await sql.raw("""
+        INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision, left_revision)
+        VALUES (\(bind: room), \(bind: user), 'member', \(bind: joined), \(bind: left))
+        """).run()
+}
+
+func insertSummaryFixtureReadReceipt(
+    on sql: any SQLDatabase,
+    room: UUID,
+    user: UUID,
+    readThrough: Int64,
+    at: Date
+) async throws {
+    try await sql.raw("""
+        INSERT INTO im_v2.room_read_receipts (room_id, user_id, read_through_room_sequence, updated_at)
+        VALUES (\(bind: room), \(bind: user), \(bind: readThrough), \(bind: at))
+        """).run()
+}
+
+func insertSummaryFixtureMediaObject(
+    on sql: any SQLDatabase,
+    media: UUID,
+    owner: UUID,
+    at: Date
+) async throws {
+    try await sql.raw("""
+        INSERT INTO im_v2.media_objects
+            (media_id, owner_user_id, content_type, byte_count, state,
+             upload_session_id, expires_at, state_updated_at, created_at)
+        VALUES (\(bind: media), \(bind: owner), 'image/jpeg', 1, 'available',
+                \(bind: UUID()), \(bind: at), \(bind: at), \(bind: at))
+        """).run()
+}
+
+func insertSummaryFixtureRoomEvent(
+    on sql: any SQLDatabase,
+    room: UUID,
+    sequence: Int64,
+    revision: Int64,
+    message: UUID,
+    createdAt: Date
+) async throws {
+    try await sql.raw("""
+        INSERT INTO im_v2.room_events
+            (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
+             committed_membership_revision, created_at)
+        VALUES (\(bind: UUID()), \(bind: room), \(bind: sequence), 'message.accepted', \(bind: UUID()),
+                jsonb_build_object('event_type', 'message.accepted',
+                                   'message_id', \(bind: message.uuidString)),
+                \(bind: revision), \(bind: createdAt))
+        """).run()
+}
+
+/// 插入一条消息行。
+///
+/// - Returns: 该行使用的客户端消息标识；构造接受完成记录时必须复用它，
+///   否则共享的可见性谓词无法把完成事实与实际消息行对上。
+@discardableResult
+func insertSummaryFixtureMessage(
+    on sql: any SQLDatabase,
+    room: UUID,
+    message: UUID,
+    sender: UUID,
+    roomSequence: Int64,
+    timelineSequence: Int64,
+    text: String,
+    createdAt: Date,
+    storage: SummaryFixtureStorage,
+    revision: Int64?,
+    withdrawnAt: Date? = nil
+) async throws -> UUID {
+    let acceptedEventID: UUID? = storage == .messageRow ? UUID() : nil
+    let withdrawnBy: UUID? = withdrawnAt == nil ? nil : sender
+    let clientMessageID = UUID()
+    try await sql.raw("""
+        INSERT INTO im_v2.messages
+            (message_id, room_id, room_sequence, sender_user_id, client_message_id, text_body,
+             created_at, timeline_sequence, accepted_event_id, accepted_event_storage,
+             accepted_membership_revision, withdrawn_at, withdrawn_by_user_id)
+        VALUES (\(bind: message), \(bind: room), \(bind: roomSequence), \(bind: sender), \(bind: clientMessageID),
+                \(bind: text), \(bind: createdAt), \(bind: timelineSequence), \(bind: acceptedEventID),
+                \(bind: storage == .messageRow ? "message_row" : "room_event"), \(bind: revision),
+                \(bind: withdrawnAt), \(bind: withdrawnBy))
+        """).run()
+    return clientMessageID
 }
 
 private func postgresStatements(in source: String) -> [String] {
@@ -34448,6 +35447,26 @@ private struct TransferCursorAssertionRow: Decodable {
     enum CodingKeys: String, CodingKey { case acknowledgedSequence = "acknowledged_sequence" }
 }
 private struct ExistsRow: Decodable { let exists: Bool }
+
+private struct BatchReplayAuditRow: Decodable {
+    let targetUserID: UUID?
+    let projectionKind: String?
+    let outcome: String
+    enum CodingKeys: String, CodingKey {
+        case targetUserID = "target_user_id", projectionKind = "projection_kind", outcome
+    }
+}
+
+private struct MentionWakeAssertionRow: Decodable {
+    let targetDeviceID: UUID
+    let targetUserID: UUID
+    let campaignID: String
+    let state: String
+    enum CodingKeys: String, CodingKey {
+        case targetDeviceID = "target_device_id", targetUserID = "target_user_id"
+        case campaignID = "campaign_id", state
+    }
+}
 private struct DirectRoomLockProbeRow: Decodable {
     let lastValue: Int64
     let isCalled: Bool
@@ -35289,10 +36308,22 @@ private actor ForwardImportControlledShadow: V2UserShardProjectionShadowing {
 private struct ForwardImportDigestAssertion: Decodable { let value: String }
 private actor ForwardMediaFailOnceScanner: V2MediaScanProvider {
     let scanner: V2LocalEICARMediaScanner
+    /// 首次扫描抛出确定性失败，使导入工作进入暂停而不是持续重试。
+    ///
+    /// 瞬时失败在新契约下不再因预算耗尽而暂停，因此需要构造暂停行的场景
+    /// 必须注入一个重试无法改变结论的失败。
+    let deterministicFailure: Bool
     private var fail = true
-    init(scanner: V2LocalEICARMediaScanner) { self.scanner = scanner }
+    init(scanner: V2LocalEICARMediaScanner, deterministicFailure: Bool = false) {
+        self.scanner = scanner
+        self.deterministicFailure = deterministicFailure
+    }
     func scan(mediaID: MediaID) async throws -> V2MediaScanResult {
-        if fail { fail = false; throw V2ForwardMediaCopyError.sourceUnavailable }
+        if fail {
+            fail = false
+            if deterministicFailure { throw V2ForwardInboxError.corruptPersistenceState }
+            throw V2ForwardMediaCopyError.sourceUnavailable
+        }
         return try await scanner.scan(mediaID: mediaID)
     }
 }

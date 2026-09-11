@@ -1053,6 +1053,8 @@ struct V2AppRealtimeRuntime {
     let messageReactionChanger: any V2MessageReactionChanging
     let messageEditor: any V2MessageEditing
     let readReceiptReporter: any V2ConversationReadReporting
+    /// 会话列表未读的本地目录；按有界轮转从服务端摘要补齐。
+    let conversationUnreadDirectory: V2ClientConversationUnreadDirectory
     let conversationStateChanger: any V2ConversationStateChanging
     let messageFavoriter: any V2MessageFavoriting
     let groupMessagePinner: any V2GroupMessagePinning
@@ -1261,6 +1263,9 @@ struct V2AppRealtimeRuntime {
         messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)
         messageEditor = V2OutboxMessageEditor(outbox: editOutbox)
         readReceiptReporter = V2OutboxConversationReadReporter(outbox: readReceiptOutbox)
+        conversationUnreadDirectory = V2ClientConversationUnreadDirectory(
+            transport: transport, store: localStore, watermarks: localStore
+        )
         conversationStateChanger = V2OutboxConversationStateChanger(outbox: conversationCapabilitiesOutbox)
         messageFavoriter = V2OutboxMessageFavoriter(outbox: conversationCapabilitiesOutbox)
         groupMessagePinner = V2OutboxGroupMessagePinner(outbox: groupCapabilitiesOutbox)

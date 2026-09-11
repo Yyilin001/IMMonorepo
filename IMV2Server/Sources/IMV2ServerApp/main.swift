@@ -476,6 +476,7 @@ enum IMV2ServerApp {
             let groupCapabilitiesStore: any V2GroupCapabilitiesStore
             let moderationStore: any V2RoutedModerationOwnerStore
             let readReceiptStore: any V2ReadReceiptBatchStore
+            let roomSummaryStore: any V2RoomSummaryStore
             if singleRoomOwnerIsControlDatabase
                 && configuration.groupRoomShardIDs.count == 1
             {
@@ -551,6 +552,7 @@ enum IMV2ServerApp {
                     controlStore: localReadReceiptStore,
                     physicalStoreKeyByShard: localStores("control")
                 )
+                roomSummaryStore = PostgresV2RoomSummaryStore(database: database)
             } else {
                 var forwardServicesByShard: [String: any V2OwnerValidatedForwardMessagesHandling] = [:]
                 var roomWriteStoresByShard: [String: any V2OwnerValidatedRoomWriteStore] = [:]
@@ -570,6 +572,7 @@ enum IMV2ServerApp {
                     [String: any V2OwnerValidatedModerationStore] = [:]
                 var readReceiptStoresByShard:
                     [String: any V2OwnerValidatedReadReceiptStore] = [:]
+                var summaryStoresByShard: [String: any V2RoomSummaryStore] = [:]
                 var roomStoreKeyByShard: [String: String] = [:]
                 var roomWriteStoresByPhysicalLocation: [String: PostgresV2RoomWriteStore] = [:]
                 var directMessagingStoresByPhysicalLocation: [String: any V2DirectMessagingStore] = [:]
@@ -690,6 +693,8 @@ enum IMV2ServerApp {
                         groupCapabilities
                     moderationStoresByShard[storage.shardID] = moderation
                     readReceiptStoresByShard[storage.shardID] = readReceipt
+                    summaryStoresByShard[storage.shardID] =
+                        PostgresV2RoomSummaryStore(database: ownerDatabase)
                 }
                 let forwardSources = try Dictionary(uniqueKeysWithValues: forwardServicesByShard.keys.map { shardID in
                     guard let source = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -745,6 +750,11 @@ enum IMV2ServerApp {
                     ),
                     physicalStoreKeyByShard: roomStoreKeyByShard
                 )
+                roomSummaryStore = try V2RoutedRoomSummaryStore(
+                    router: roomShardRouter,
+                    stores: summaryStoresByShard,
+                    physicalStoreKeyByShard: roomStoreKeyByShard
+                )
             }
             let groupMessagingStore: any V2GroupMessagingStore
             if singleRoomOwnerIsControlDatabase {
@@ -753,7 +763,8 @@ enum IMV2ServerApp {
                 // because the operation ledger and room route share one
                 // PostgreSQL transaction domain.
                 groupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: database
+                    database: database,
+                    groupDeliveryAuthority: configuration.groupDeliveryAuthority
                 )
             } else {
                 var ownerStoresByShard:
@@ -773,7 +784,8 @@ enum IMV2ServerApp {
                         continue
                     }
                     let store = PostgresV2GroupMessagingStore(
-                        database: ownerDatabase
+                        database: ownerDatabase,
+                        groupDeliveryAuthority: configuration.groupDeliveryAuthority
                     )
                     ownerStoresByPhysicalLocation[physicalLocationKey] = store
                     ownerStoresByShard[storage.shardID] = store
@@ -923,7 +935,8 @@ enum IMV2ServerApp {
                 && configuration.groupRoomShardIDs.count == 1
             {
                 maintenanceGroupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: maintenanceDatabase
+                    database: maintenanceDatabase,
+                    groupDeliveryAuthority: configuration.groupDeliveryAuthority
                 )
             } else {
                 let groupOwnerShardIDs = Set(configuration.groupRoomShardIDs)
@@ -1050,6 +1063,8 @@ enum IMV2ServerApp {
             let membershipDirectory = V2RoomMembershipDirectoryService(
                 store: PostgresV2RoomMembershipDirectoryStore(database: database)
             )
+            // 会话摘要按房间分片扇出；未读与预览都由服务端聚合，客户端只回传游标。
+            let roomSummaries = V2RoomSummaryService(store: roomSummaryStore)
             let socialRelationships = V2SocialRelationshipService(
                 store: PostgresV2SocialRelationshipStore(database: database, shadowForwarder: userShardShadowForwarder)
             )
@@ -1121,6 +1136,7 @@ enum IMV2ServerApp {
                 groupEventLog: groupEventLog,
                 foregroundGroupEventHints: foregroundGroupEventHints,
                 membershipDirectory: membershipDirectory,
+                roomSummaries: roomSummaries,
                 socialRelationships: socialRelationships,
                 moderation: moderation,
                 conversationCapabilities: conversationCapabilities,
@@ -1283,6 +1299,13 @@ enum IMV2ServerApp {
             let mediaRetentionWorker = try V2MediaRetentionWorker(
                 store: PostgresV2MediaRetentionStore(database: maintenanceDatabase),
                 withdrawnRetention: TimeInterval(configuration.mediaWithdrawnRetentionSeconds)
+            )
+            // 房间日志保留：默认 permanent 只做有界检查、不删除任何历史；窗口模式下按
+            // 活跃读者已读线下界裁剪，并由房间列把"历史不完整"告知返回的客户端。
+            let roomLogRetentionWorker = V2RoomLogRetentionWorker(
+                store: PostgresV2RoomLogRetentionStore(database: maintenanceDatabase),
+                mode: configuration.roomLogRetentionMode,
+                window: configuration.roomLogRetentionWindowSeconds
             )
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
                 store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
@@ -2011,6 +2034,13 @@ enum IMV2ServerApp {
                             break
                         } catch {
                             logger.error("IM V2 media retention worker failed; retrying")
+                        }
+                        do {
+                            _ = try await roomLogRetentionWorker.runOnce(limit: configuration.workerBatchSize)
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            logger.error("IM V2 room log retention worker failed; retrying")
                         }
                         for worker in syncHousekeepingWorkers {
                             do {

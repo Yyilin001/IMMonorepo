@@ -278,6 +278,7 @@ struct V2PrometheusTelemetrySinkTests {
             leasedRoomOutboxRows: 2,
             scheduledRoomOutboxRows: 3,
             pausedRoomOutboxRows: 4,
+            oldestUnfinishedRoomOutboxAgeSeconds: 120,
             readyDirectProfileUpdates: 15,
             leasedDirectProfileUpdates: 16,
             readyReadReceiptPreferencePropagations: 29,
@@ -289,6 +290,7 @@ struct V2PrometheusTelemetrySinkTests {
             leasedFanoutDeliveries: 7,
             scheduledFanoutDeliveries: 8,
             pausedFanoutDeliveries: 9,
+            oldestUnfinishedFanoutDeliveryAgeSeconds: 240,
             terminalFanoutCompletionUnits: 10,
             oldestTerminalFanoutCompletionAgeSeconds: 11,
             readyContentReviews: 17,
@@ -335,6 +337,7 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"leased\"} 2"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 3"))
         #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"paused\"} 4"))
+        #expect(rendered.contains("im_v2_room_outbox_oldest_unfinished_age_seconds 120"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 29"))
@@ -346,6 +349,7 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 7"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
         #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
+        #expect(rendered.contains("im_v2_fanout_delivery_oldest_unfinished_age_seconds 240"))
         #expect(rendered.contains("im_v2_fanout_completion_release_backlog 10"))
         #expect(rendered.contains("im_v2_fanout_completion_release_oldest_age_seconds 11"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"ready\"} 17"))

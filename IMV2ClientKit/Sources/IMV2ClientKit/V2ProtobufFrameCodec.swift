@@ -238,6 +238,8 @@ public enum V2ProtobufFrameCodec {
         case .groupRoomCreated?: return .groupRoomCreated
         case .listRoomMembers?: return .listRoomMembers
         case .roomMembersPage?: return .roomMembersPage
+        case .roomSummaryList?: return .roomSummaryList
+        case .roomSummaryPage?: return .roomSummaryPage
         case .groupEventPull?: return .groupEventPull
         case .groupEventPage?: return .groupEventPage
         case .groupEventSubscribe?: return .groupEventSubscribe

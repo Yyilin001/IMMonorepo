@@ -306,7 +306,8 @@ public struct V2ContentReviewWorker: Sendable {
                 let disposition = retryPolicy.disposition(
                     attempt: lease.attempt,
                     claimToken: lease.claimToken,
-                    now: failureTime
+                    now: failureTime,
+                    kind: v2DurableWorkFailureKind(for: error)
                 )
                 do {
                     if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {

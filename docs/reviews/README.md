@@ -55,6 +55,7 @@
 
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
+| 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
 | 发送请求指纹与幂等 | [SendMessage 请求指纹实施合同](2026-09-05-send-message-fingerprint-contract.md) | B11、D07 |
 | 消息发送的 owner 栅栏 | [消息发送 owner 事务栅栏](send-message-owner-fence-contract.md) | B27 |
 | 编辑、撤回、reaction 的分发归属 | [沿用原接受记录的分发归属](message-mutation-delivery-authority-contract.md) | B03 |

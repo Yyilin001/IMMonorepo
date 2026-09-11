@@ -49,14 +49,31 @@ struct V2OutboxRelayTests {
         #expect(await store.publishedTriggers() == [trigger])
     }
 
-    @Test("retry exhaustion pauses source work instead of treating it as published")
-    func retryExhaustionPausesOutbox() async throws {
+    @Test("an exhausted relay attempt keeps retrying instead of treating it as published")
+    func exhaustedRelayRetriesTrigger() async throws {
         let trigger = try makeTrigger(event: "00000000-0000-0000-0000-000000000105", plan: "00000000-0000-0000-0000-000000000106")
         let store = PausingOutboxStore(trigger: trigger, attempt: 2)
         let relay = V2OutboxRelay(
             store: store,
             publisher: FailingPublisher(),
             retryPolicy: .init(initialDelay: 1, maximumDelay: 10, maximumAttempts: 2, jitterFraction: 0),
+            now: { Date(timeIntervalSince1970: 1_750_000_000) }
+        )
+
+        // A publisher outage is transient. Pausing here would leave the plan
+        // unpublished until an operator replays it.
+        #expect(try await relay.runOnce(limit: 1) == .init(claimedCount: 1, publishedCount: 0, releasedCount: 1))
+        #expect(await store.dispositions() != [.pause])
+    }
+
+    @Test("a relay invariant violation pauses the trigger on its first attempt")
+    func invariantRelayFailurePausesTrigger() async throws {
+        let trigger = try makeTrigger(event: "00000000-0000-0000-0000-000000000107", plan: "00000000-0000-0000-0000-000000000108")
+        let store = PausingOutboxStore(trigger: trigger, attempt: 1)
+        let relay = V2OutboxRelay(
+            store: store,
+            publisher: InvariantFailingPublisher(),
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 10, maximumAttempts: 10, jitterFraction: 0),
             now: { Date(timeIntervalSince1970: 1_750_000_000) }
         )
 
@@ -136,6 +153,11 @@ private actor RecordingPublisher: V2FanoutPlanPublisher {
 private struct FailingPublisher: V2FanoutPlanPublisher {
     func publish(_: V2FanoutPlanTrigger) throws { throw RelayError.publishFailed }
     private enum RelayError: Error { case publishFailed }
+}
+
+/// 抛出确定性失败：持久计划与房间状态矛盾，重复发布不会成功。
+private struct InvariantFailingPublisher: V2FanoutPlanPublisher {
+    func publish(_: V2FanoutPlanTrigger) throws { throw V2RoomWriteStoreError.corruptPersistenceState }
 }
 
 private struct FailingHintPublisher: V2FanoutPlanHintPublishing {

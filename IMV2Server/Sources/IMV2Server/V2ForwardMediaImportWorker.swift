@@ -157,7 +157,12 @@ public struct V2ForwardMediaImportWorker: Sendable {
             return try await reject(lease)
         } catch {
             let failedAt = now()
-            let disposition = retryPolicy.disposition(attempt: lease.attempt, claimToken: lease.claimToken, now: failedAt)
+            let disposition = retryPolicy.disposition(
+                attempt: lease.attempt,
+                claimToken: lease.claimToken,
+                now: failedAt,
+                kind: v2DurableWorkFailureKind(for: error)
+            )
             if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failedAt, retryAt) {
                 throw V2ForwardInboxError.corruptPersistenceState
             }

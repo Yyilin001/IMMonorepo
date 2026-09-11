@@ -15,6 +15,11 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     public let ownerUserID: UserID
     /// 房间投递模式。
     public let deliveryMode: V2GroupDeliveryMode
+    /// 服务端宣告的权威副本形态。
+    ///
+    /// 客户端据此决定该房间是否按房间游标恢复，而不是从投递模式推断：投递模式描述用哪种
+    /// 扇出规划器且在房间创建后不可变，权威副本形态可以按房间推进。
+    public let deliveryAuthority: V2ClientRoomDeliveryAuthority
     /// 成员修订。
     public let membershipRevision: UInt64
     /// 房间创建时刻。
@@ -28,11 +33,13 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     ///   - title: 房间标题。
     ///   - ownerUserID: 群主用户。
     ///   - deliveryMode: 投递模式。
+    ///   - deliveryAuthority: 权威副本形态。
     ///   - membershipRevision: 成员修订。
     ///   - createdAt: 房间创建时刻。
     init(
         sourceEventID: EventID, roomID: RoomID, title: String,
         ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode,
+        deliveryAuthority: V2ClientRoomDeliveryAuthority,
         membershipRevision: UInt64, createdAt: Date
     ) {
         self.sourceEventID = sourceEventID
@@ -40,6 +47,7 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
         self.title = title
         self.ownerUserID = ownerUserID
         self.deliveryMode = deliveryMode
+        self.deliveryAuthority = deliveryAuthority
         self.membershipRevision = membershipRevision
         self.createdAt = createdAt
     }
@@ -60,10 +68,14 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             let ownerUserID: String
             let membershipRevision: UInt64
             let deliveryMode: String
+            // 权威副本形态是服务端宣告的必需字段：项目未上线，不保留"缺字段就按投递模式
+            // 推断"的静默回退，缺失或未知值一律按不可解码处理。
+            let deliveryAuthority: String
             let createdAtMilliseconds: Int64
             enum CodingKeys: String, CodingKey {
                 case eventType = "event_type"; case roomID = "room_id"; case title
                 case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case deliveryMode = "delivery_mode"; case createdAtMilliseconds = "created_at_ms"
+                case deliveryAuthority = "delivery_authority"
             }
         }
         let payload: Wire
@@ -87,6 +99,10 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
                 throw V2ClientProjectionError.invalidMessagePayload
             }
             deliveryMode = mode
+            guard let authority = V2ClientRoomDeliveryAuthority(rawValue: payload.deliveryAuthority) else {
+                throw V2ClientProjectionError.invalidMessagePayload
+            }
+            deliveryAuthority = authority
             membershipRevision = payload.membershipRevision
             createdAt = Date(timeIntervalSince1970: TimeInterval(payload.createdAtMilliseconds) / 1_000)
         } catch { throw V2ClientProjectionError.invalidMessagePayload }

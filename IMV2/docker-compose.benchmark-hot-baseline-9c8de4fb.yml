@@ -6,5 +6,9 @@ services:
   gateway:
     image: imv2-server:empty-direct-projection-9c8de4fb
     environment:
+      # 这是已归档基线的复现画像：它测的是兼容基线的写入路径，因此显式固定模式，
+      # 不跟随部署默认值（见 docs/reviews/room-read-model-contract.md §9）。
+      IM_V2_DIRECT_FANOUT_MODE: planner
+      IM_V2_GROUP_DELIVERY_AUTHORITY_MODE: fanout
       IM_V2_CAPACITY_PROFILE_ID: "loadtest-v12"
       IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE: "0"

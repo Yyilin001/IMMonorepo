@@ -168,6 +168,10 @@ protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
     func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage
 }
 
+protocol V2GatewayRoomSummaryHandling: Sendable {
+    func summaries(_ request: V2RoomSummaryRequest) async throws -> V2RoomSummaryPage
+}
+
 protocol V2GatewaySocialRelationshipHandling: Sendable {
     func changeRelationship(actorUserID: UserID, operationID: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) async throws -> V2RelationshipOutcome
     func changeUserBlock(actorUserID: UserID, operationID: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) async throws -> V2UserBlockOutcome
@@ -201,6 +205,7 @@ extension V2DirectMessagingService: V2GatewayDirectMessagingHandling {}
 extension V2GroupAudienceImportService: V2GatewayGroupAudienceImportHandling {}
 extension V2GroupEventLogService: V2GatewayGroupEventLogHandling {}
 extension V2RoomMembershipDirectoryService: V2GatewayRoomMembershipDirectoryHandling {}
+extension V2RoomSummaryService: V2GatewayRoomSummaryHandling {}
 extension V2SocialRelationshipService: V2GatewaySocialRelationshipHandling {}
 extension V2ModerationService: V2GatewayModerationHandling {}
 extension V2ConversationCapabilitiesService: V2GatewayConversationCapabilitiesHandling {}
@@ -222,6 +227,7 @@ public struct V2GatewayDomainCommandHandler:
     private let groupEventLog: any V2GatewayGroupEventLogHandling
     private let foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting
     private let membershipDirectory: any V2GatewayRoomMembershipDirectoryHandling
+    private let roomSummaries: any V2GatewayRoomSummaryHandling
     private let socialRelationships: any V2GatewaySocialRelationshipHandling
     private let moderation: any V2GatewayModerationHandling
     private let conversationCapabilities: any V2GatewayConversationCapabilitiesHandling
@@ -240,7 +246,7 @@ public struct V2GatewayDomainCommandHandler:
     private let now: @Sendable () -> Date
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading, forwardMessages: any V2ForwardMessagesHandling, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, roomSummaries: V2RoomSummaryService, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading, forwardMessages: any V2ForwardMessagesHandling, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
         self.sendMessage = sendMessage
         self.membership = membership
@@ -254,6 +260,7 @@ public struct V2GatewayDomainCommandHandler:
         self.groupEventLog = groupEventLog
         self.foregroundGroupEventHints = foregroundGroupEventHints
         self.membershipDirectory = membershipDirectory
+        self.roomSummaries = roomSummaries
         self.socialRelationships = socialRelationships
         self.moderation = moderation
         self.conversationCapabilities = conversationCapabilities
@@ -282,6 +289,7 @@ public struct V2GatewayDomainCommandHandler:
         groupEventLogHandler: any V2GatewayGroupEventLogHandling,
         foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
         membershipDirectoryHandler: any V2GatewayRoomMembershipDirectoryHandling,
+        roomSummaryHandler: any V2GatewayRoomSummaryHandling,
         socialRelationshipHandler: any V2GatewaySocialRelationshipHandling,
         moderationHandler: any V2GatewayModerationHandling,
         conversationCapabilitiesHandler: any V2GatewayConversationCapabilitiesHandling,
@@ -309,6 +317,7 @@ public struct V2GatewayDomainCommandHandler:
         groupEventLog = groupEventLogHandler
         self.foregroundGroupEventHints = foregroundGroupEventHints
         membershipDirectory = membershipDirectoryHandler
+        roomSummaries = roomSummaryHandler
         socialRelationships = socialRelationshipHandler
         moderation = moderationHandler
         conversationCapabilities = conversationCapabilitiesHandler
@@ -587,6 +596,7 @@ public struct V2GatewayDomainCommandHandler:
             return .foregroundControlWrite
         case .getGroupRolePolicyBaseline,
              .listRoomMembers,
+             .roomSummaryList,
              .groupEventPull,
              .groupEventSubscribe,
              .listReadReceiptReaders,
@@ -644,6 +654,7 @@ public struct V2GatewayDomainCommandHandler:
             case .cancelGroupRoomCreation(let request): return try await handleCancelGroupRoomCreation(request, identity: identity)
             case .getGroupRolePolicyBaseline(let request): return try await handleGroupRolePolicyBaseline(request, identity: identity)
             case .listRoomMembers(let request): return try await handleListRoomMembers(request, identity: identity)
+            case .roomSummaryList(let request): return try await handleRoomSummaryList(request, identity: identity)
             case .groupEventPull(let request): return try await handleGroupEventPull(request, identity: identity)
             case .groupEventSubscribe(let request): return try await handleGroupEventSubscribe(request, identity: identity)
             case .groupEventUnsubscribe(let request):
@@ -698,7 +709,7 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "FORWARD_PAUSED", retryable: true, retryAfter: 30)
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
             return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
-        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
+        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest, V2RoomSummaryError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -746,6 +757,10 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2GroupEventLogError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
+        } catch V2RoomSummaryError.corruptPersistenceState {
+            // 摘要字段缺失或越界说明持久化不变量已被破坏：这是可重试的可用性故障，
+            // 不是客户端参数错误。
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2SocialRelationshipStoreError.actorInactive {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2SocialRelationshipStoreError.corruptPersistenceState {
@@ -1351,6 +1366,49 @@ public struct V2GatewayDomainCommandHandler:
         return response
     }
 
+    /// 读取一页会话摘要。
+    ///
+    /// 未读数与最新可见消息都由服务端聚合，客户端只把游标原样回传。摘要不是内容副本：
+    /// ``V2RoomSummaryMessage/text`` 已按预览预算截断，正文仍要经房间游标拉取。
+    private func handleRoomSummaryList(
+        _ request: IMV2RoomSummaryList,
+        identity: V2AuthenticatedConnection
+    ) async throws -> IMV2Envelope {
+        let cursor = request.cursor.isEmpty
+            ? nil
+            : try V2RoomSummaryCursorCodec.decode(request.cursor)
+        let page = try await roomSummaries.summaries(.init(
+            actorUserID: identity.userID,
+            cursor: cursor,
+            pageSize: Int(request.pageSize)
+        ))
+        var response = IMV2Envelope()
+        response.roomSummaryPage = .init()
+        response.roomSummaryPage.rooms = try page.rooms.map { summary in
+            var room = IMV2RoomSummary()
+            room.roomID = summary.roomID.rawValue
+            room.roomKind = summary.roomKind.rawValue
+            room.head = summary.head
+            room.lastEventAtMs = try v2GatewayMilliseconds(summary.lastEventAt)
+            room.unreadCount = summary.unreadCount
+            if let message = summary.latestMessage {
+                var latest = IMV2RoomSummaryMessage()
+                latest.messageID = message.messageID.rawValue
+                latest.senderUserID = message.senderUserID.rawValue
+                latest.roomSequence = message.roomSequence
+                latest.text = message.text
+                latest.isWithdrawn = message.isWithdrawn
+                latest.mediaCount = UInt32(clamping: message.mediaCount)
+                latest.serverCreatedAtMs = try v2GatewayMilliseconds(message.serverCreatedAt)
+                room.latestMessage = latest
+            }
+            return room
+        }
+        response.roomSummaryPage.nextCursor = try page.nextCursor
+            .map { try V2RoomSummaryCursorCodec.encode($0) } ?? ""
+        return response
+    }
+
     private func handleGroupEventPull(_ request: IMV2GroupEventPull, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         let page = try await groupEventLog.pull(
             roomID: try .init(request.roomID),
@@ -1411,6 +1469,9 @@ public struct V2GatewayDomainCommandHandler:
         response.groupEventPage.events = wireEvents
         response.groupEventPage.nextRoomSequence = nextRoomSequence
         response.groupEventPage.hasMore_p = hasMore
+        // 保留裁剪的下界必须随页返回：客户端据此把房间标记为"历史不完整"，
+        // 而不是静默地少几条。
+        response.groupEventPage.logTrimmedThroughRoomSequence = page.logTrimmedThroughRoomSequence
 
         // The estimator is exact for the current schema and already uses the
         // largest possible request ID. Do not serialize the whole page here:

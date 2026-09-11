@@ -79,7 +79,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: [.contacts, .conversations, .conversationDetails], requiresImmediateRefresh: kind != .insert)
         case "v2_role_policy_recovery_requests":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
-        case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_pending_message_reactions", "v2_pending_read_receipts":
+        case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_pending_message_reactions", "v2_pending_read_receipts":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
         case "v2_pending_message_commands", "v2_pending_forward_messages", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_group_room_creations":
             return .init(scopes: conversation, requiresImmediateRefresh: false)

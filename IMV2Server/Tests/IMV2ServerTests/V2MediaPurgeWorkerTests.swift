@@ -37,7 +37,7 @@ struct V2MediaPurgeWorkerTests {
     }
 
     @Test("retry exhaustion pauses cleanup for audited replay")
-    func exhaustedPurgePausesLease() async throws {
+    func exhaustedPurgeRetriesLease() async throws {
         let lease = try V2MediaPurgeLease(
             mediaID: .init("media"),
             reason: .withdrawnRetentionElapsed,
@@ -49,6 +49,27 @@ struct V2MediaPurgeWorkerTests {
             store: store,
             provider: FailingMediaPurgeProvider(),
             retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0)
+        )
+
+        // A purge-provider outage is transient; the attempt budget must not
+        // convert it into operator-only work.
+        #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 1))
+        #expect(await store.retries().map(\.disposition) != [.pause])
+    }
+
+    @Test("a purge invariant violation pauses the cleanup on its first attempt")
+    func invariantPurgeFailurePausesLease() async throws {
+        let lease = try V2MediaPurgeLease(
+            mediaID: .init("media"),
+            reason: .withdrawnRetentionElapsed,
+            claimToken: UUID(),
+            attempt: 1
+        )
+        let store = RecordingMediaPurgeStore(leases: [lease])
+        let worker = try V2MediaPurgeWorker(
+            store: store,
+            provider: InvariantFailingMediaPurgeProvider(),
+            retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 10, jitterFraction: 0)
         )
 
         #expect(try await worker.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 0, releasedCount: 0, pausedCount: 1))
@@ -93,4 +114,9 @@ private actor RecordingMediaPurgeProvider: V2MediaPurgeProvider {
 private struct FailingMediaPurgeProvider: V2MediaPurgeProvider {
     func purge(mediaID _: MediaID) throws { throw MediaPurgeFailure.failed }
     private enum MediaPurgeFailure: Error { case failed }
+}
+
+/// 抛出确定性失败：提供商返回与持久状态矛盾的结果，重试不会改变结论。
+private struct InvariantFailingMediaPurgeProvider: V2MediaPurgeProvider {
+    func purge(mediaID _: MediaID) throws { throw V2RoomWriteStoreError.corruptPersistenceState }
 }
