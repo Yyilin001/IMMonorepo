@@ -211,7 +211,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
                 SELECT room.room_id FROM im_v2.rooms room
                 JOIN im_v2.direct_room_pairs pair ON pair.room_id = room.room_id
                 WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher)
-                  AND room.migration_fence_id IS NULL
+
                 FOR SHARE OF room
             ), candidate AS MATERIALIZED (
                 SELECT pair.room_id FROM im_v2.direct_room_pairs pair

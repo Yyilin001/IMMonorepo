@@ -83,10 +83,10 @@ public struct PostgresV2ForwardInboxStore: Sendable {
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             if try await matchesExisting(export, sql: sql) { return }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR SHARE
+                SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR SHARE
                 """).first(decoding: ForwardInboxOwnerRow.self)
             else { throw V2ForwardInboxError.targetNotFound }
-            guard room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch, room.migrationFenceID == nil
+            guard room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch
             else { throw V2ForwardInboxError.ownerChanged }
             let pending = try await sql.raw("""
                 SELECT export_id FROM im_v2.message_forward_inbox
@@ -326,9 +326,9 @@ func v2AssertForwardInboxOwner(_ authorization: ForwardInboxAuthorization, sql: 
     // calls after the inbox lock. Retain the owner through the caller's commit,
     // including when a migration changed it while this statement waited.
     guard let room = try await sql.raw("""
-        SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
+        SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
         """).first(decoding: ForwardInboxOwnerRow.self),
-          room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch, room.migrationFenceID == nil
+          room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch
     else { throw V2ForwardInboxError.ownerChanged }
 }
 
@@ -341,8 +341,8 @@ private struct ForwardInboxIDRow: Decodable {
     enum CodingKeys: String, CodingKey { case exportID = "export_id" }
 }
 private struct ForwardInboxOwnerRow: Decodable {
-    let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch"; case migrationFenceID = "migration_fence_id" }
+    let shardID: String; let epoch: Int64
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch" }
 }
 private struct ForwardInboxMediaRow: Decodable {
     let ordinal: Int; let sourceID: UUID; let targetID: UUID?; let digest: Data?; let state: String

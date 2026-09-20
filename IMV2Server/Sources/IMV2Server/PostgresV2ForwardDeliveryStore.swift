@@ -63,7 +63,7 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
                     JOIN im_v2.rooms AS room ON room.room_id = export.source_room_id
                     WHERE export.source_shard_id = \(bind: sourceShardID)
                       AND room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
-                      AND room.migration_fence_id IS NULL
+
                       AND ((job.state = 'pending' AND job.next_attempt_at <= \(bind: now))
                            OR (job.state = 'claimed' AND job.lease_expires_at <= \(bind: now)))
                     ORDER BY job.next_attempt_at NULLS FIRST, job.created_at, job.export_id
@@ -101,7 +101,7 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
                 JOIN im_v2.message_forward_exports AS export ON export.export_id = job.export_id
                 JOIN im_v2.rooms AS room ON room.room_id = export.source_room_id
                 WHERE room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
-                  AND room.migration_fence_id IS NULL AND job.export_id = \(bind: lease.export.intent.exportID) AND job.state = 'claimed'
+                  AND job.export_id = \(bind: lease.export.intent.exportID) AND job.state = 'claimed'
                   AND job.claim_token = \(bind: lease.claimToken) AND job.lease_expires_at > \(bind: now)) AS value
             """).first(decoding: DeliveryBoolRow.self)?.value == true
     }
@@ -177,7 +177,7 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
             JOIN im_v2.message_forward_exports AS export ON export.source_room_id = room.room_id
             WHERE export.export_id = \(bind: exportID)
               AND room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
-              AND room.migration_fence_id IS NULL
+
             FOR SHARE OF room
             """).first(decoding: DeliveryBoolRow.self)?.value == true
     }

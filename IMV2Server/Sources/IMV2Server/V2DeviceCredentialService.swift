@@ -309,9 +309,6 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             // one available to the public gateway.
             guard !(try await isSpecialAccount(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
-            guard try await V2PostgresLegacyDeviceRegistrationCancellationService.permitsIssuance(sql, userID: userUUID, deviceID: deviceUUID) else {
-                return .deviceUnavailable
-            }
 
             let existingDevice = try await sql.raw("SELECT user_id, revoked_at, session_expires_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self)
             // Locks may have waited across a clock correction. Keep this

@@ -115,7 +115,7 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
         )
     }
 
-    /// 在扩展开启的迁移已建立共享状态表但历史行尚未回填时重建当前有效状态。
+    /// 在当前修订尚未物化为共享状态时重建有效状态。
     ///
     /// 权威 `messages` 行提供当前修订与可变正文，已接受事件提供不可变信封数据。
     ///

@@ -3,8 +3,7 @@ import IMV2Core
 
 /// 为每次同步操作解析当前逻辑用户归属的同步存储。
 ///
-/// 这里刻意不提供读回退：目标切换后再返回旧来源游标会破坏已认证设备的单调序号。
-/// 迁移复制与转发会先把目标状态建立完整，路由控制随后才把目标设为归属。
+/// 部署前固定分片配置，所有同步操作使用同一个当前归属。
 public struct V2RoutedSyncStore: V2SyncStore, Sendable {
     private let registry: any V2UserShardStorageResolving
     private let routeFence: any V2UserShardRouteFencing

@@ -179,11 +179,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 SELECT snapshot_id
                 FROM \(unsafeRaw: table("sync_snapshot_artifacts"))
                 WHERE state IN ('building', 'published') AND expires_at <= \(bind: now)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
-                      WHERE checkpoint.user_id = sync_snapshot_artifacts.user_id
-                        AND checkpoint.migration_fence_expires_at > \(bind: now)
-                  )
                 ORDER BY expires_at, snapshot_id
                 LIMIT \(bind: limit)
                 FOR UPDATE SKIP LOCKED
@@ -202,11 +197,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                       ON artifact.snapshot_id = reset.snapshot_id AND artifact.user_id = reset.user_id
                     WHERE reset.state IN ('preparing', 'ready') AND reset.expires_at <= \(bind: now)
                       AND artifact.state IN ('building', 'published') AND artifact.expires_at > \(bind: now)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
-                          WHERE checkpoint.user_id = artifact.user_id
-                            AND checkpoint.migration_fence_expires_at > \(bind: now)
-                      )
                       AND EXISTS (
                           SELECT 1 FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
                           WHERE cursor.user_id = reset.user_id AND cursor.device_id = reset.device_id
@@ -274,11 +264,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 FROM \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact
                 WHERE state IN ('expired', 'failed') AND expires_at <= \(bind: now)
                   AND NOT EXISTS (
-                      SELECT 1 FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
-                      WHERE checkpoint.user_id = artifact.user_id
-                        AND checkpoint.migration_fence_expires_at > \(bind: now)
-                  )
-                  AND NOT EXISTS (
                       SELECT 1 FROM \(unsafeRaw: table("device_snapshot_resets")) AS reset
                       WHERE reset.snapshot_id = artifact.snapshot_id
                         AND reset.state IN ('preparing', 'ready')
@@ -302,9 +287,8 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                     """).run()
             }
             // An effect is removable only after the projector has materialized
-            // it, incremental replay no longer retains the source row, and no
-            // migration fence can still be copying this user's idempotency
-            // state. The current projection version remains authoritative.
+            // it and incremental replay no longer retains the source row.
+            // The current projection version remains authoritative.
             let projectionEffects = try await sql.raw("""
                 WITH candidates AS (
                     SELECT effect.ctid
@@ -313,8 +297,6 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                       ON checkpoint.user_id = effect.user_id
                      AND checkpoint.projected_sequence >= effect.user_sync_sequence
                     WHERE effect.created_at <= \(bind: effectCutoff)
-                      AND (checkpoint.migration_fence_expires_at IS NULL
-                           OR checkpoint.migration_fence_expires_at <= \(bind: now))
                       AND NOT EXISTS (
                           SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) AS log
                           WHERE log.user_id = effect.user_id

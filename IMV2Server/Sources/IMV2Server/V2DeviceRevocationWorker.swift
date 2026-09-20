@@ -215,8 +215,7 @@ public struct V2PostgresRevokedDeviceProjectionStore: V2RevokedDeviceProjectionC
 
 /// 带路由栅栏的组合清理实现。
 ///
-/// 当前归属与保留的读回退桶都会被清理。初始迁移复制可能与本次清理并发，
-/// 但独占的最终切换复制会与该共享路由锁串行，因此最终仍会从已清理的源收敛一致。
+/// 解析当前用户归属并清理该存储中的设备同步状态。
 public struct V2RoutedRevokedDeviceProjectionCleaner: V2RevokedDeviceProjectionCleaning {
     private let routeFence: any V2UserShardRouteFencing
     private let registry: any V2UserShardStorageResolving
@@ -238,7 +237,7 @@ public struct V2RoutedRevokedDeviceProjectionCleaner: V2RevokedDeviceProjectionC
         self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
-    /// 在当前归属与读回退桶中清理设备投影状态。
+    /// 在当前归属中清理设备投影状态。
     ///
     /// - Parameters:
     ///   - userID: 设备归属用户。
@@ -247,20 +246,15 @@ public struct V2RoutedRevokedDeviceProjectionCleaner: V2RevokedDeviceProjectionC
     /// - Throws: 路由解析或底层清理失败时抛出。
     public func clean(userID: UserID, deviceID: DeviceID, revokedAt: Date) async throws {
         try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
-            var buckets = [route.bucket]
-            if let fallback = route.readFallbackBucket {
-                buckets.append(fallback)
-            }
-            for bucket in buckets {
-                let configured = try registry.location(for: bucket)
-                let database = coLocatedControlBuckets.contains(bucket)
-                    ? fencedDatabase
-                    : configured.database
-                try await V2PostgresRevokedDeviceProjectionStore(
-                    database: database,
-                    schema: configured.schema
-                ).clean(userID: userID, deviceID: deviceID, revokedAt: revokedAt)
-            }
+            let bucket = route.bucket
+            let configured = try registry.location(for: bucket)
+            let database = coLocatedControlBuckets.contains(bucket)
+                ? fencedDatabase
+                : configured.database
+            try await V2PostgresRevokedDeviceProjectionStore(
+                database: database,
+                schema: configured.schema
+            ).clean(userID: userID, deviceID: deviceID, revokedAt: revokedAt)
         }
     }
 }

@@ -86,13 +86,13 @@ assert_scalar() {
 # Terminal forward inbox/export compaction adds two bounded-scan indexes.
 # Durable housekeeping adds a singleton cursor and its primary-key index.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '153'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '146'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '360'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '344'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '29'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '25'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '27'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '24'
 
 normalize_schema() {
   awk '
@@ -128,11 +128,6 @@ test "$(current_schema_contract)" = 'f'
 psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_housekeeping_cursor_rotation_check CHECK (rotation >= 0)' >/dev/null
 test "$(current_schema_contract)" = 't'
 
-
-psql -c 'ALTER TABLE im_v2.room_owner_migrations DISABLE TRIGGER room_owner_migrations_identity_guard' >/dev/null
-test "$(current_schema_contract)" = 'f'
-psql -c 'ALTER TABLE im_v2.room_owner_migrations ENABLE TRIGGER room_owner_migrations_identity_guard' >/dev/null
-test "$(current_schema_contract)" = 't'
 
 psql -c 'CREATE INDEX rooms_last_event_at_idx ON im_v2.rooms(last_event_at DESC, room_id)' >/dev/null
 test "$(current_schema_contract)" = 'f'

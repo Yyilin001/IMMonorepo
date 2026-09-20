@@ -321,11 +321,10 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
                 }
                 return
             }
-            guard let room = try await sql.raw("""
-                SELECT migration_fence_id FROM im_v2.rooms
+            guard try await sql.raw("""
+                SELECT room_id FROM im_v2.rooms
                 WHERE room_id = \(bind: roomUUID) FOR SHARE
-                """).first(decoding: SpecialAccountRoomFenceRow.self),
-                room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+                """).first(decoding: SpecialAccountRoomFenceRow.self) != nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard v2PostgresTimestampCanEncode(now) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.special_account_message_operations (account_user_id, operation_id, request_fingerprint, room_id, message_id, created_at) VALUES (\(bind: accountUUID), \(bind: operationUUID), \(bind: request.requestFingerprint), \(bind: roomUUID), \(bind: messageUUID), \(bind: now))").run()
             let supportRoomID: UUID? = account.kind == .customerSupport ? roomUUID : nil
@@ -349,6 +348,6 @@ private struct SpecialAccountOperationRow: Decodable {
 }
 
 private struct SpecialAccountRoomFenceRow: Decodable {
-    let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
 }

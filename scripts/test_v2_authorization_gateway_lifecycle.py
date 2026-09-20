@@ -53,7 +53,7 @@ try:
     created=True
     with (DIR/'schema.log').open('w') as out:
         subprocess.run([str(PG/'psql'),'-X','-v','ON_ERROR_STOP=1','-f',str(ROOT/'IMV2/sql/schema.sql')],env=ENV,stdout=out,stderr=out,check=True)
-    sql(f"INSERT INTO im_v2.rooms(room_id,room_kind,room_shard_id,capacity_profile_id) VALUES('{room}','direct','rooms-primary','standard'); INSERT INTO im_v2.direct_room_pairs(lower_user_id,higher_user_id,room_id,created_at) VALUES('{sender}','{recipient}','{room}',now())")
+    sql(f"INSERT INTO im_v2.rooms(room_id,room_kind,room_shard_id,capacity_profile_id) VALUES('{room}','direct','rooms-primary','standard'); INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES('{room}','rooms-primary',0,now(),now()); INSERT INTO im_v2.direct_room_pairs(lower_user_id,higher_user_id,room_id,created_at) VALUES('{sender}','{recipient}','{room}',now())")
     subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(DIR/'key.pem'),'-out',str(DIR/'cert.pem'),'-days','1','-subj','/CN=localhost'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     config={k:v for k,v in os.environ.items() if not k.startswith('IM_V2_')}
     config.update({'IM_V2_ACCEPT_BATCH_SIZE': '256',
@@ -154,7 +154,7 @@ try:
     holder=subprocess.Popen([str(PG/'psql'),'-X','-v','ON_ERROR_STOP=1','-c',f"BEGIN;SELECT room_id FROM im_v2.rooms WHERE room_id='{room}' FOR UPDATE;SELECT pg_sleep(60)"],env=ENV,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     wait(lambda:sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='PgSleep'")=='1')
     launch('killed')
-    wait(lambda:int(sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%migration_fence_id%'"))>0)
+    wait(lambda:int(sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%owner_epoch%'"))>0)
     assert stop(signal.SIGKILL)==-signal.SIGKILL
     sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='PgSleep'")
     holder.wait(timeout=5);holder=None
@@ -164,7 +164,7 @@ try:
     holder=subprocess.Popen([str(PG/'psql'),'-X','-v','ON_ERROR_STOP=1','-c',f"BEGIN;SELECT room_id FROM im_v2.rooms WHERE room_id='{room}' FOR UPDATE;SELECT pg_sleep(60)"],env=ENV,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     wait(lambda:sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event='PgSleep'")=='1')
     third=seed()
-    wait(lambda:int(sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%migration_fence_id%'"))>0)
+    wait(lambda:int(sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%owner_epoch%'"))>0)
     assert stop(signal.SIGTERM)==0
     assert 'drained=true' in (DIR/'restart.log').read_text()
     assert sql(f"SELECT disposition IS NULL FROM im_v2.direct_authorization_intents WHERE client_message_id='{third}'")=='t'

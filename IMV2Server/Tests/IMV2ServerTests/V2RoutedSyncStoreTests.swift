@@ -6,7 +6,7 @@ import Testing
 import Vapor
 
 struct V2RoutedSyncStoreTests {
-    @Test("sync operations use the current write bucket and never the read fallback")
+    @Test("sync operations use the current write bucket")
     func usesCurrentLogicalOwner() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL") else { return }
         let app = try await Application.make(.testing)
@@ -15,7 +15,7 @@ struct V2RoutedSyncStoreTests {
         let user = try UserID("00000000-0000-0000-0000-000000000fa1")
         let device = try DeviceID("00000000-0000-0000-0000-000000000fa2")
         let route = try V2UserShardRoute(
-            bucket: "users-target", observedRouterEpoch: 9, readFallbackBucket: "users-source"
+            bucket: "users-target", observedRouterEpoch: 9
         )
         let registry = try V2StaticUserShardStorageRegistry(locations: [
             try .init(bucket: "users-source", database: app.db(.psql), schema: "im_v2"),

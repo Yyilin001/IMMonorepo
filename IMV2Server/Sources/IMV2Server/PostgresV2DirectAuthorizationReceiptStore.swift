@@ -102,10 +102,10 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
 
     private func validateOwner(_ attempt: V2DirectAuthorizationAttempt, sql: any SQLDatabase) async throws {
         guard let room = try await sql.raw("""
-            SELECT room_shard_id, owner_epoch, room_kind, migration_fence_id
+            SELECT room_shard_id, owner_epoch, room_kind
             FROM \(unsafeRaw: schema).rooms WHERE room_id = \(bind: attempt.roomID) FOR NO KEY UPDATE
             """).first(decoding: OwnerRow.self), room.roomShardID == attempt.ownerShardID,
-              room.ownerEpoch == attempt.ownerEpoch, room.roomKind == "direct", room.migrationFenceID == nil else {
+              room.ownerEpoch == attempt.ownerEpoch, room.roomKind == "direct" else {
             throw V2DirectAuthorizationReceiptError.ownerChanged
         }
         guard let pair = try await sql.raw("""
@@ -204,9 +204,9 @@ func v2AcquireMessageOperationLock(roomID: UUID, senderID: UUID, clientMessageID
 }
 
 private struct OwnerRow: Decodable {
-    let roomShardID: String; let ownerEpoch: Int64; let roomKind: String; let migrationFenceID: UUID?
+    let roomShardID: String; let ownerEpoch: Int64; let roomKind: String
     enum CodingKeys: String, CodingKey {
-        case roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomKind = "room_kind", migrationFenceID = "migration_fence_id"
+        case roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomKind = "room_kind"
     }
 }
 private struct PairRow: Decodable {

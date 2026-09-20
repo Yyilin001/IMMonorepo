@@ -74,9 +74,7 @@ public struct V2GroupRoomShardSelector: Equatable, Sendable {
 /// 它先固定控制面意图，再执行唯一选中的归属存储，最后确定规范房间路由。
 /// 客户端提交的数据库地址或临时哈希都不会被接受。
 ///
-/// 十万成员的分阶段建群在这里刻意尚未启用：在成员清单具备带独立摘要的分页
-/// 控制面到归属传输之前，该类型不应贸然实现
-/// ``V2StagedGroupMessagingStore``。
+/// 分阶段建群通过带摘要的控制面成员分页传输到归属存储。
 public struct V2RoutedGroupMessagingStore:
     V2GroupMessagingStore,
     V2StagedGroupMessagingStore

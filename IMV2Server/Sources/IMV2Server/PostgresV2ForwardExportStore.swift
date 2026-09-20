@@ -129,11 +129,11 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 return .export(export)
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms
+                SELECT room_shard_id, owner_epoch FROM im_v2.rooms
                 WHERE room_id = \(bind: sourceRoom) FOR UPDATE
                 """).first(decoding: ExportRoomRow.self)
             else { throw V2ForwardExportError.sourceUnavailable }
-            guard room.shardID == sourceRoute.shardID, room.epoch == sourceRoute.epoch, room.migrationFenceID == nil
+            guard room.shardID == sourceRoute.shardID, room.epoch == sourceRoute.epoch
             else { throw V2ForwardExportError.ownerChanged }
             guard let content = try await sql.raw("""
                 SELECT message.sender_user_id, message.content_revision, message.text_body,
@@ -252,8 +252,8 @@ private struct ExportIDRow: Decodable {
     enum CodingKeys: String, CodingKey { case exportID = "export_id" }
 }
 private struct ExportRoomRow: Decodable {
-    let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch"; case migrationFenceID = "migration_fence_id" }
+    let shardID: String; let epoch: Int64
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch" }
 }
 private struct ExportContentRow: Decodable {
     let senderID: UUID; let revision: Int64; let text: String; let entitiesJSON: String

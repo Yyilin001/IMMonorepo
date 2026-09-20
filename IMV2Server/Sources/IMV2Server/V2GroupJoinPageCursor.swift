@@ -10,7 +10,7 @@ struct V2GroupJoinPageCursor: Codable {
     /// 载荷结构版本。
     var version = 2
     /// 过滤条件标识，固定为待处理或审批中。
-    var filter = "pending-or-approving"
+    var filter = "pending"
     /// 目标房间。
     let roomID: UUID
     /// 版本 1 使用的文本时间戳。
@@ -60,7 +60,7 @@ struct V2GroupJoinPageCursor: Codable {
         guard value.utf8.count <= 1_024,
               let data = Data(base64Encoded: value),
               let cursor = try? JSONDecoder().decode(Self.self, from: data),
-              cursor.filter == "pending-or-approving", cursor.roomID == roomID
+              cursor.filter == "pending", cursor.roomID == roomID
         else { throw V2GroupInvitationServiceError.invalidRequest }
         switch cursor.version {
         case 2:

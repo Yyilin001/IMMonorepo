@@ -479,7 +479,7 @@ public struct V2GroupInvitationService: Sendable {
             applicant: stored.applicant,
             note: stored.note,
             state: stored.state,
-            resumableDecisionOperationID: stored.state == .approving && stored.decidedByUserID == reviewerUserID ? stored.decisionOperationID : nil,
+            resumableDecisionOperationID: nil,
             createdAt: stored.createdAt,
             decidedAt: stored.decidedAt
         )

@@ -244,20 +244,20 @@ enum V2GroupJoinQuotaPhase: String, Codable, Sendable {
 }
 
 enum V2GroupJoinQuotaOutcome: String, Codable, Sendable {
-    case pending, approving, approved, rejected, cancelled
+    case pending, approved, rejected, cancelled
     case alreadyMember = "already_member"
     case unavailable, rateLimited = "rate_limited", permissionDenied = "permission_denied"
 
     var phase: V2GroupJoinQuotaPhase {
         switch self {
-        case .pending, .approving: .tracking
+        case .pending: .tracking
         case .approved, .rejected, .cancelled, .alreadyMember: .terminal
         case .unavailable, .rateLimited, .permissionDenied: .denied
         }
     }
     var requiresRequest: Bool {
         switch self {
-        case .pending, .approving, .approved, .rejected, .cancelled: true
+        case .pending, .approved, .rejected, .cancelled: true
         case .alreadyMember, .unavailable, .rateLimited, .permissionDenied: false
         }
     }

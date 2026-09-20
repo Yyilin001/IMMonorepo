@@ -112,8 +112,6 @@ enum IMV2OperatorServerApp {
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
             var userStateReplayStores: [String: any V2DurableWorkReplayStore] = [:]
             var forwardReplayStores: [String: any V2ForwardWorkReplayStore] = [:]
-            var approvalRecoveryStores: [String: any V2GroupApprovalRecoveryStore] = [:]
-            var inviteImportLocations: [V2RoomShardStorageLocation] = []
             for storage in configuration.roomShardStorage {
                 let ownerDatabase: any Database
                 if let existing = shardDatabasesByURL[storage.databaseURL] {
@@ -131,20 +129,12 @@ enum IMV2OperatorServerApp {
                 try await V2SchemaReadiness.verify(database: ownerDatabase)
                 userStateReplayStores[storage.shardID] = PostgresV2DurableWorkReplayStore(database: ownerDatabase)
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
-                approvalRecoveryStores[storage.shardID] = PostgresV2GroupApprovalRecoveryStore(database: ownerDatabase)
-                inviteImportLocations.append(try .init(shardID: storage.shardID, database: ownerDatabase, schema: storage.schema))
             }
             let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
                 operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
                 storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
             })
-            let userShardMigrationStore = PostgresV2UserShardMigrationStore(database: database)
-            let userShardMigrationExecutor = V2UserShardProjectionMigrationExecutor(
-                store: userShardMigrationStore,
-                registry: userShardStorage,
-                coLocatedControlBuckets: coLocatedControlBuckets
-            )
             app.http.server.configuration.hostname = configuration.listener.host
             app.http.server.configuration.port = configuration.listener.port
             V2VaporDurableWorkOperatorReplayRoutes(
@@ -156,27 +146,6 @@ enum IMV2OperatorServerApp {
                 )
             ).register(on: app)
             V2VaporForwardWorkOperatorReplayRoutes(authenticator: configuration.authenticator, service: forwardReplay).register(on: app)
-            V2VaporGroupApprovalRecoveryRoutes(authenticator: configuration.authenticator,
-                service: try .init(stores: approvalRecoveryStores, operatorPrincipal: configuration.operatorPrincipal)).register(on: app)
-            V2VaporGroupInviteDirectoryImportRoutes(authenticator: configuration.authenticator,
-                service: try PostgresV2GroupInviteDirectoryImporter(controlDatabase: database,
-                    owners: V2StaticRoomShardStorageRegistry(locations: inviteImportLocations),
-                    operatorPrincipal: configuration.operatorPrincipal)).register(on: app)
-            V2VaporUserShardRouteOperatorRoutes(
-                authenticator: configuration.authenticator,
-                control: V2PostgresUserShardRouteControl(
-                    database: database,
-                    operatorPrincipal: configuration.operatorPrincipal,
-                    finalizer: userShardMigrationExecutor
-                )
-            ).register(on: app)
-            V2VaporUserShardMigrationOperatorRoutes(
-                authenticator: configuration.authenticator,
-                service: V2UserShardMigrationOperatorService(
-                    store: userShardMigrationStore,
-                    executor: userShardMigrationExecutor
-                )
-            ).register(on: app)
             V2VaporAccountDisableOperatorRoutes(
                 authenticator: configuration.accountDisableAuthenticator,
                 service: try V2PostgresAccountDisableService(

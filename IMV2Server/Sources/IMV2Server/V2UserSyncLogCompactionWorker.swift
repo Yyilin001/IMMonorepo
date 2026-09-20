@@ -117,8 +117,6 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                                 retention.compacted_through_sequence
                       )
                   )
-                  AND (checkpoint.migration_fence_expires_at IS NULL
-                       OR checkpoint.migration_fence_expires_at <= \(bind: now))
                 ORDER BY retention.updated_at, retention.user_id
                 FOR UPDATE OF checkpoint, retention SKIP LOCKED
                 LIMIT 1

@@ -438,7 +438,7 @@ public actor V2RoomAdmissionCommandCreditPool {
     }
     guard let current = try await sql.raw(
       """
-      SELECT admission.shard_lease_id, admission.shard_lease_generation, room.migration_fence_id
+      SELECT admission.shard_lease_id, admission.shard_lease_generation
       FROM im_v2.room_admission AS admission
       JOIN im_v2.rooms AS room ON room.room_id = admission.room_id
       WHERE admission.room_id = \(bind: key.roomID)
@@ -446,7 +446,6 @@ public actor V2RoomAdmissionCommandCreditPool {
     ).first(decoding: CurrentRoomAdmissionFence.self) else {
       return .unavailable(.missingShardLease)
     }
-    guard current.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
     guard current.shardLeaseID == key.shardLeaseID,
       current.shardLeaseGeneration == key.shardLeaseGeneration
     else { return .unavailable(.missingShardLease) }
@@ -463,12 +462,12 @@ public actor V2RoomAdmissionCommandCreditPool {
     }
     // The caller may already hold FOR NO KEY UPDATE while awaiting this
     // independent reservation. KEY SHARE remains compatible with that lock,
-    // but conflicts with the migration installer's explicit FOR UPDATE.
+    // but serializes against exclusive room updates.
     return try await sql.raw(
       """
       WITH writable_room AS MATERIALIZED (
           SELECT room_id FROM im_v2.rooms
-          WHERE room_id = \(bind: key.roomID) AND migration_fence_id IS NULL
+          WHERE room_id = \(bind: key.roomID)
           FOR KEY SHARE
       ), candidate AS MATERIALIZED (
           SELECT admission.room_id,
@@ -509,12 +508,10 @@ private struct Reservation: Sendable {
 }
 
 private struct CurrentRoomAdmissionFence: Decodable, Sendable {
-  let migrationFenceID: UUID?
   let shardLeaseID: UUID
   let shardLeaseGeneration: Int64
 
   enum CodingKeys: String, CodingKey {
-    case migrationFenceID = "migration_fence_id"
     case shardLeaseID = "shard_lease_id"
     case shardLeaseGeneration = "shard_lease_generation"
   }

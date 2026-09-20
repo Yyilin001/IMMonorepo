@@ -14,7 +14,7 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | 处理 paused durable work | [operator replay runbook](10-operations/durable-work-operator-replay.md) |
 | 执行已批准的单账号禁用 | [account-disable runbook](10-operations/account-disable-runbook.md) |
 | 查看 metrics、告警与尚缺运行证据 | [observability](10-operations/observability.md) |
-| 执行用户分片迁移 | [user-shard migration runbook](10-operations/user-shard-migration-runbook.md) |
+| 配置静态用户分片 | [用户分片部署范围](10-operations/user-shard-migration-runbook.md) |
 | 个人快照构建与恢复 | [个人快照运维](10-operations/personal-snapshot-runbook.md) |
 | 当前会话同步与恢复 | [客户端排序与房间恢复](../../docs/reviews/client-owned-conversation-sync-plan.md) |
 | 私聊房间日志恢复决策 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) |

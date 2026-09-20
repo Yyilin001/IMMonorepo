@@ -153,8 +153,6 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
                 JOIN \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
                   ON checkpoint.user_id = artifact.user_id
                 WHERE artifact.state = 'building'
-                  AND (checkpoint.migration_fence_expires_at IS NULL
-                       OR checkpoint.migration_fence_expires_at <= \(bind: now))
                   AND (artifact.lease_expires_at IS NULL OR artifact.lease_expires_at <= \(bind: now))
                   AND artifact.expires_at > \(bind: now)
                 ORDER BY artifact.created_at, artifact.snapshot_id

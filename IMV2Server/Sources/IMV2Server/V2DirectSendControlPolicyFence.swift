@@ -4,7 +4,7 @@ import IMV2Core
 import SQLKit
 
 /// Control facts only. Room reply markers, membership and quota remain owner facts.
-/// A volatile value is valid only inside withPolicy's callback. Persisted facts
+/// A volatile value is valid only inside the locking transaction. Persisted facts
 /// may be used outside it only with their exact durable authorization attempt.
 struct V2DirectSendControlPolicy: Codable, Equatable, Sendable {
     let sender: V2DirectSendControlAccount
@@ -39,11 +39,7 @@ struct V2DirectSendControlPair: Hashable, Sendable {
     }
 }
 
-/// With a healthy connection, hold control locks through the owner commit.
-/// Connection loss can release them while the owner callback is still running;
-/// this is not a durable distributed authorization boundary (D07 remains open).
-/// All users and canonical pairs in a batch are locked in one stable order,
-/// before entering owner transactions. Gateway binds an independent control pool.
+/// Read control facts under ordered policy locks for durable grant reservation.
 struct V2DirectSendControlPolicyFence: Sendable {
     let database: any Database
     let schema: String
@@ -54,32 +50,8 @@ struct V2DirectSendControlPolicyFence: Sendable {
         self.schema = schema
     }
 
-    func withPolicy<Result: Sendable>(
-        senderID: UserID, recipientID: UserID,
-        operation: @escaping @Sendable (V2DirectSendControlPolicy) async throws -> Result
-    ) async throws -> Result {
-        guard let sender = senderID.uuidValue, let recipient = recipientID.uuidValue else {
-            throw V2DirectSendControlPolicyError.invalidPair
-        }
-        let pair = V2DirectSendControlPair(sender: sender, recipient: recipient)
-        return try await withPolicies(pairs: [pair]) { policies in
-            guard let policy = policies[pair] else { throw V2DirectSendControlPolicyError.corruptPersistence }
-            return try await operation(policy)
-        }
-    }
-
-    func withPolicies<Result: Sendable>(
-        pairs: [V2DirectSendControlPair],
-        operation: @escaping @Sendable ([V2DirectSendControlPair: V2DirectSendControlPolicy]) async throws -> Result
-    ) async throws -> Result {
-        try await withLockedPolicies(pairs: pairs) { _, policies in
-            try await operation(policies)
-        }
-    }
-
-    /// Persist authorization obligations inside this transaction. Return only
-    /// after its commit, before starting any owner work. The old withPolicies
-    /// callback alone remains unsuitable as a durable cross-database boundary.
+    /// Persist authorization obligations in this transaction, then commit before
+    /// starting owner work. Control locks alone do not survive connection loss.
     func withLockedPolicies<Result: Sendable>(
         pairs: [V2DirectSendControlPair],
         operation: @escaping @Sendable (any Database, [V2DirectSendControlPair: V2DirectSendControlPolicy]) async throws -> Result

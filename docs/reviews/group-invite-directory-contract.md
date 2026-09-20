@@ -1,5 +1,7 @@
 # 群邀请 token 目录与创建意图合同（B27 第一阶段）
 
+> 2026-09-20 当前范围：历史目录回填与分页导入已移除。当前从空库初始化，保留新邀请的目录创建和失败补偿；下文的回填与迁移说明仅作历史记录。
+
 2026-09-06。本文记录第一阶段的 control 目录和创建协调器；后续 Account 接线与 schema 23 见[owner 路由合同](group-invitation-owner-routing-contract.md)，B27 仍未关闭。房间 owner 路由、epoch fence、control 身份快照、移除 owner 本地 profile 依赖、跨 owner 全局申请配额与完整迁移仍按修复计划继续。
 
 ## 数据归属与读取

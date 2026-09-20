@@ -30,7 +30,7 @@ public struct PostgresV2UserStateEventGCWorker: Sendable {
                 WHERE state = 'delivered' AND delivered_at < \(bind: cutoff)
                   AND (work.source_room_id IS NULL OR (
                       SELECT true FROM \(unsafeRaw: schema).rooms AS room
-                      WHERE room.room_id = work.source_room_id AND room.migration_fence_id IS NULL
+                      WHERE room.room_id = work.source_room_id
                       FOR SHARE OF room SKIP LOCKED
                   ))
                 ORDER BY delivered_at, source_event_id, user_id, projection_kind

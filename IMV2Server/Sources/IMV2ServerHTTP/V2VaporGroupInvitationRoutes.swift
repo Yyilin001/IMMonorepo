@@ -70,10 +70,10 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             let body = try request.content.decode(SubmitBody.self)
             guard let secret = try? V2GroupInviteSecret(body.token), let operation = try? GroupJoinRequestOperationID(body.operationID) else { throw Abort(.badRequest) }
             switch try await mapErrors({ try await invitations.submit(.init(applicantUserID: actor.userID, operationID: operation, secret: secret, note: body.note)) }) {
-            case .submitted(let value): return try response(SubmissionResponse(kind: "submitted", request: RequestResponse(value, resumable: nil), preview: nil))
-            case .alreadyPending(let value): return try response(SubmissionResponse(kind: "already_pending", request: RequestResponse(value, resumable: nil), preview: nil))
-            case .cancelled(let value): return try response(SubmissionResponse(kind: "cancelled", request: RequestResponse(value, resumable: nil), preview: nil))
-            case .rejected(let value): return try response(SubmissionResponse(kind: "rejected", request: RequestResponse(value, resumable: nil), preview: nil))
+            case .submitted(let value): return try response(SubmissionResponse(kind: "submitted", request: RequestResponse(value), preview: nil))
+            case .alreadyPending(let value): return try response(SubmissionResponse(kind: "already_pending", request: RequestResponse(value), preview: nil))
+            case .cancelled(let value): return try response(SubmissionResponse(kind: "cancelled", request: RequestResponse(value), preview: nil))
+            case .rejected(let value): return try response(SubmissionResponse(kind: "rejected", request: RequestResponse(value), preview: nil))
             case .alreadyMember(let value): return try response(SubmissionResponse(kind: "already_member", request: nil, preview: PreviewResponse(value)))
             case .unavailable: throw Abort(.notFound)
             case .rateLimited: throw Abort(.tooManyRequests)
@@ -181,11 +181,11 @@ private struct PublicIdentityResponse: Content { let userID, handle, displayName
 private struct RequestResponse: Content {
     let requestID, inviteID, roomID: String
     let applicant: PublicIdentityResponse
-    let note: String?, state: String, resumableDecisionOperationID: String?
+    let note: String?, state: String
     let createdAtMilliseconds: Int64, decidedAtMilliseconds: Int64?
-    init(_ value: V2GroupJoinRequest, resumable: String? = nil) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; resumableDecisionOperationID = value.resumableDecisionOperationID?.rawValue ?? resumable; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
-    init(_ value: V2GroupJoinRequestRecord, resumable: String? = nil) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; resumableDecisionOperationID = resumable; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
-    enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicant, note, state, resumableDecisionOperationID = "resumable_decision_operation_id", createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" }
+    init(_ value: V2GroupJoinRequest) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
+    init(_ value: V2GroupJoinRequestRecord) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
+    enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicant, note, state, createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" }
 }
 
 /// 入群申请提交的统一返回模型，包含分支状态。

@@ -118,32 +118,6 @@ struct V2DeviceCredentialClockTests {
         }
     }
 
-    @Test("Legacy cancellation rejects invalid server timestamps before writing and recovers with a valid clock")
-    func legacyCancellationClock() async throws {
-        try await withClockDatabase { database in
-            let state = DeviceClockState()
-            database.afterDeviceLookup.withLock { $0 = {} }
-            database.allowsTimestampReads.withLock { $0 = true }
-            let service = V2PostgresLegacyDeviceRegistrationCancellationService(
-                database: database, now: { state.clock.withLock { $0 } })
-            let request = try V2TrustedLegacyDeviceRegistrationCancellation(userID: .init(uuid: UUID()),
-                assertionDeviceID: .init(uuid: UUID()), targetDeviceID: .init(uuid: UUID()), operationID: UUID())
-            for seconds in Self.invalidSeconds {
-                state.clock.withLock { $0 = Date(timeIntervalSince1970: seconds) }
-                await #expect(throws: V2DeviceSessionServiceError.unavailable) {
-                    try await service.cancel(request)
-                }
-            }
-            #expect(database.writes.withLock { $0 } == 0)
-            #expect(database.dates.withLock { $0.isEmpty })
-
-            let corrected = Date(timeIntervalSince1970: 1_750_000_000.25)
-            state.clock.withLock { $0 = corrected }
-            await #expect(throws: ClockDatabaseStop.boundary) { try await service.cancel(request) }
-            #expect(database.writes.withLock { $0 } == 1)
-            #expect(database.dates.withLock { $0 } == [corrected])
-        }
-    }
 
     @Test("Session generation is checked before mutation and its exact successor is bound",
           arguments: [Int64.min, -1, 0, 1, Int64.max - 1, Int64.max])

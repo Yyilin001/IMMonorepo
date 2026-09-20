@@ -85,8 +85,7 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
                 return .idempotent(try prior.result())
             }
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageEditStoreError.corruptPersistenceState }
-            guard let room = try await sql.raw("SELECT room_kind, frozen_at, room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: EditRoomRow.self) else { throw V2MessageEditStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+            guard let room = try await sql.raw("SELECT room_kind, frozen_at, room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: EditRoomRow.self) else { throw V2MessageEditStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageEditStoreError.corruptPersistenceState }
             let actor = try await sql.raw("""
                 SELECT membership.role,
@@ -176,7 +175,7 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
 }
 
 private struct EditActorRow: Decodable { let role: String; let muted: Bool }
-private struct EditRoomRow: Decodable { let kind: String; let frozenAt: Date?; let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; let migrationFenceID: UUID?; enum CodingKeys: String, CodingKey { case kind = "room_kind", frozenAt = "frozen_at", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", migrationFenceID = "migration_fence_id" } }
+private struct EditRoomRow: Decodable { let kind: String; let frozenAt: Date?; let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case kind = "room_kind", frozenAt = "frozen_at", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
 private struct EditMessageRow: Decodable { let roomID: UUID; let senderUserID: UUID; let contentRevision: Int64; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", senderUserID = "sender_user_id", contentRevision = "content_revision", withdrawnAt = "withdrawn_at" } }
 private struct EditCommittedTimestampRow: Decodable {
     let createdAt: Date

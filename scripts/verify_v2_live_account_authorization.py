@@ -54,9 +54,6 @@ def main():
     parser.add_argument('--current-logout', action='store_true', help='also verify current-device logout through real HTTPS and PostgreSQL')
     parser.add_argument('--interrupted-issuance', action='store_true', help='with --app-ui --current-logout, terminate the owned App after issuance and cancellation commit but before either response is forwarded')
     parser.add_argument('--load-credentials', action='store_true', help='exercise the actual load credential preparation script and cancel its issued session through the saved proof')
-    parser.add_argument('--legacy-registration', action='store_true', help='after baseline checks, verify legacy cancellation with real password factors, HTTPS and PostgreSQL rollback')
-    parser.add_argument('--legacy-client', action='store_true', help='with --current-logout, run ClientKit legacy archive recovery and lost acknowledgement replay against HTTPS')
-    parser.add_argument('--legacy-app', action='store_true', help='with --app-ui --current-logout, terminate App after legacy cleanup commit and verify real Keychain replay')
     parser.add_argument('--multi-gateway-nats-binary', type=Path, help='with --private-hint or nonempty --room-recovery-scale, start owned NATS and a second TLS Gateway for cross-gateway recovery')
     parser.add_argument('--room-recovery-slow-tls', action='store_true', help='pause the owned opaque TLS relay and require real App backpressure closure and recovery')
     parser.add_argument('--room-recovery-membership-race', action='store_true', help='remove and rejoin a member while a real old room state response is delayed')
@@ -93,10 +90,6 @@ def main():
         parser.error('--headless-app requires --app-ui --gateway')
     if args.interrupted_issuance and not (args.app_ui and args.current_logout):
         parser.error('--interrupted-issuance requires --app-ui --current-logout')
-    if args.legacy_client and not args.current_logout:
-        parser.error('--legacy-client requires --current-logout')
-    if args.legacy_app and not (args.app_ui and args.current_logout):
-        parser.error('--legacy-app requires --app-ui --current-logout')
     output = args.output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     for tool in ['swift', 'initdb', 'pg_ctl', 'psql', 'createdb', 'openssl']:
@@ -148,9 +141,8 @@ def main():
         simulator = None
         counts = collections.Counter()
         count_lock = threading.Lock()
-        interruption_ready = {phase: threading.Event() for phase in ['issue', 'cancel', 'legacy']}
+        interruption_ready = {phase: threading.Event() for phase in ['issue', 'cancel']}
         interruption = dict(device=None, proof=None, issueTerminations=0, cancelTerminations=0, cancelReplays=0, proofMatched=True, failure=None)
-        interruption.update(legacyDevice=None, legacyOperation=None, legacyAssertionDevice=None, legacyTerminations=0, legacyReplays=0, legacyMatched=True)
         result = None
         app_result = None
         with (output / 'setup.log').open('w') as setup, (output / 'account.log').open('w') as account_log:
@@ -365,6 +357,8 @@ def main():
                         FROM generate_series(1,{args.room_recovery_scale}) AS n;
                         INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id,membership_revision,room_sequence,timeline_sequence)
                         SELECT room_id,'rooms-primary','standard',1,1,1 FROM recovery_seed;
+                        INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at)
+                        SELECT room_id,'rooms-primary',0,now(),now() FROM recovery_seed;
                         INSERT INTO im_v2.group_rooms(room_id,owner_user_id,title,created_at)
                         SELECT room_id,'{user}'::uuid,'Recovery scale',now() FROM recovery_seed;
                         INSERT INTO im_v2.room_admission
@@ -485,7 +479,7 @@ def main():
                             return
                         body = self.rfile.read(length)
                         parsed = None
-                        if args.interrupted_issuance or args.legacy_app or args.room_recovery_scale is not None:
+                        if args.interrupted_issuance or args.room_recovery_scale is not None:
                             try:
                                 parsed = json.loads(body)
                             except (ValueError, UnicodeError):
@@ -530,18 +524,6 @@ def main():
                                         and str(parsed.get('userID', '')).lower() == scale_auth['user']):
                                     scale_auth['successfulRefreshes'] += 1
                             terminate_phase = None
-                            if args.legacy_app and isinstance(parsed, dict):
-                                with count_lock:
-                                    if self.path == '/v2/account-auth/password/register' and response.status == 200 and re.fullmatch(r'legacyapp_[a-f0-9]{20}', parsed.get('accountHandle', '')):
-                                        interruption['legacyDevice'] = str(uuid.UUID(parsed['deviceID'])).upper()
-                                    if self.path == '/v2/device-credentials/cancel-legacy-registration' and response.status == 204 and interruption['legacyDevice'] is not None and parsed.get('targetDeviceID') == interruption['legacyDevice']:
-                                        if interruption['legacyTerminations'] == 0:
-                                            interruption['legacyOperation'] = parsed['operationID']
-                                            interruption['legacyAssertionDevice'] = parsed['assertionDeviceID']
-                                            terminate_phase = 'legacy'
-                                        else:
-                                            interruption['legacyMatched'] &= parsed['operationID'] == interruption['legacyOperation'] and parsed['assertionDeviceID'] != interruption['legacyAssertionDevice']
-                                            interruption['legacyReplays'] += 1
                             if args.interrupted_issuance and isinstance(parsed, dict):
                                 request_device = parsed.get('deviceID')
                                 if isinstance(request_device, dict):
@@ -602,8 +584,6 @@ def main():
                                         IMV2_LIVE_ACCOUNT_CA_DER=str(private / 'ca.der'))
                 if args.current_logout:
                     test_environment['IMV2_LIVE_CURRENT_LOGOUT'] = '1'
-                if args.legacy_client:
-                    test_environment['IMV2_LIVE_LEGACY_RECOVERY'] = '1'
                 live_filter = 'V2LiveAccountAuthorizationTests|V2LiveCurrentDeviceLogoutTests' if args.current_logout else 'V2LiveAccountAuthorizationTests'
                 print('Fresh PostgreSQL, native account and isolated HTTPS listener ready.', flush=True)
                 with (output / 'client.log').open('w') as log:
@@ -644,26 +624,6 @@ def main():
                 (output / 'http-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
                 if result:
                     raise RuntimeError('live authentication tests failed; inspect client.log')
-                if args.legacy_client:
-                    # The fixture deliberately allows only two simultaneous
-                    # password workers. Run the third suite after the baseline
-                    # suites instead of accidentally testing load rejection.
-                    with (output / 'legacy-client-tests.log').open('w') as log:
-                        tests = subprocess.Popen(['swift', 'test', '--skip-build', '--filter', 'V2LiveLegacyRegistrationRecoveryTests'],
-                            cwd=ROOT / 'IMV2ClientKit', env=test_environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                        try:
-                            legacy_result = tests.wait(timeout=120)
-                        except BaseException:
-                            if tests.poll() is None:
-                                os.killpg(tests.pid, signal.SIGTERM)
-                                try:
-                                    tests.wait(timeout=5)
-                                except subprocess.TimeoutExpired:
-                                    os.killpg(tests.pid, signal.SIGKILL)
-                                    tests.wait(timeout=5)
-                            raise
-                    assert legacy_result == 0, 'legacy ClientKit acceptance failed; inspect legacy-client-tests.log'
-                    assert re.search(r'Test run with 1 test in 1 suite passed', (output / 'legacy-client-tests.log').read_text())
                 if args.load_credentials:
                     prepared_path = private / 'load-credentials.jsonl'
                     with (output / 'load-preparation.log').open('w') as log:
@@ -729,8 +689,6 @@ def main():
                             additional_tests += ['-only-testing:IMAppLocalAccountE2ETests/IMAppRoomRecoveryScaleTests']
                         if args.private_hint:
                             additional_tests += ['-only-testing:IMAppLocalAccountE2ETests/IMAppLocalAccountUITests/testReceiverCanBlockAndRestoreExistingDirectMessageDelivery']
-                        if args.legacy_app:
-                            additional_tests += ['-only-testing:IMAppLocalAccountE2ETests/IMAppLegacyRegistrationUITests']
                         ui = subprocess.Popen(['xcodebuild', 'test', '-project', str(ROOT / 'IMApp/IMApp.xcodeproj'),
                             '-scheme', 'IMAppLocalAccountE2E', '-configuration', 'Debug',
                             '-destination', 'platform=iOS Simulator,id=' + simulator,
@@ -788,7 +746,7 @@ def main():
                         'test-results', 'summary', '--path', str(output / 'app.xcresult'), '--compact'],
                         env=environment, text=True))
                     (output / 'app-summary.json').write_text(json.dumps(app_summary, indent=2) + '\n')
-                    if app_result != 0 or app_summary.get('passedTests') != (2 if args.gateway else 1) + int(args.interrupted_issuance) + int(args.legacy_app) + int(args.private_hint) + int(args.room_recovery_scale is not None) or app_summary.get('failedTests') != 0:
+                    if app_result != 0 or app_summary.get('passedTests') != (2 if args.gateway else 1) + int(args.interrupted_issuance) + int(args.private_hint) + int(args.room_recovery_scale is not None) or app_summary.get('failedTests') != 0:
                         # Only these existing messages contain whitelisted error
                         # classifications/types. Never export arbitrary App logs.
                         predicate = ('process == "IMApp" AND ('
@@ -897,8 +855,8 @@ def main():
                 # Automatic reconnect signs the scoped App into the scale
                 # account in addition to the test-owned sender session. The
                 # three transport reconnects must reuse that one App device.
-                expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 2 * int(args.legacy_client) + 2 * int(args.legacy_app) + 3 * int(args.private_hint) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
-                expected_revoked = 1 + (2 if args.gateway else 1 if args.app_ui else 0) + int(args.headless_app) + (3 if args.current_logout else 0) + int(args.interrupted_issuance) + int(args.load_credentials) + int(args.legacy_client) + int(args.legacy_app)
+                expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 3 * int(args.private_hint) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
+                expected_revoked = 1 + (2 if args.gateway else 1 if args.app_ui else 0) + int(args.headless_app) + (3 if args.current_logout else 0) + int(args.interrupted_issuance) + int(args.load_credentials)
                 assert persisted == '{}|{}|0|0|{}'.format(expected_devices, expected_revoked, expected_revoked), persisted
                 if args.room_recovery_app_reconnect:
                     scale_user = str(uuid.UUID(scale_auth['user']))
@@ -924,13 +882,13 @@ def main():
                     }, indent=2) + '\n')
                 assert counts[('POST', '/v2/devices/revoke', 204)] == (4 if args.headless_app else 3 if args.gateway else 2 if args.app_ui else 1)
                 if args.current_logout:
-                    assert counts[('POST', '/v2/device-credentials/cancel-registration', 204)] == 4 + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + int(args.legacy_app)
+                    assert counts[('POST', '/v2/device-credentials/cancel-registration', 204)] == 4 + 2 * int(args.interrupted_issuance) + int(args.load_credentials)
                     assert counts[('POST', '/v2/device-credentials/cancel-registration', 410)] == 1
                     assert counts[('POST', '/v2/device-credentials/cancel-registration', 400)] == 1
                     cancellations = subprocess.check_output(['psql', '-X', '-A', '-t', *database_arguments,
                         '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1', '-c',
                         'SELECT count(*), count(user_id), count(cancelled_at) FROM im_v2.device_registration_cancellations'], env=environment, text=True).strip()
-                    assert cancellations == '{}|{}|{}'.format(expected_devices + 1 + int(args.legacy_app), expected_devices, 2 + int(args.interrupted_issuance) + int(args.load_credentials) + int(args.legacy_app)), cancellations
+                    assert cancellations == '{}|{}|{}'.format(expected_devices + 1, expected_devices, 2 + int(args.interrupted_issuance) + int(args.load_credentials)), cancellations
                     (output / 'registration-cancellation.log').write_text('PASS pre-issuance cancellation replay; entire issuance response discarded before issuer decode; cold owner queued original proof; cancellation runner retained proof after lost cancellation response and replayed successfully: ' + cancellations + '\n')
                     assert counts[('POST', '/v2/devices/revoke-current', 204)] >= 1
                     assert counts[('POST', '/v2/devices/revoke-current', 400)] == 1
@@ -952,7 +910,7 @@ def main():
                         FROM im_v2.device_session_operations"""], env=environment, text=True).strip()
                     total, targets, other_kinds, active_targets = map(int, operations.split('|'))
                     # The lost issuance uses its separate cancellation journal.
-                    assert targets == expected_revoked - 1 - int(args.interrupted_issuance) - int(args.load_credentials) - int(args.legacy_client) - int(args.legacy_app), operations
+                    assert targets == expected_revoked - 1 - int(args.interrupted_issuance) - int(args.load_credentials), operations
                     app_compensations = 2 if args.gateway else 1 if args.app_ui else 0
                     assert targets <= total <= targets + app_compensations, operations
                     assert other_kinds == active_targets == 0, operations
@@ -974,36 +932,12 @@ def main():
                         '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1', '-c', interrupted_sql], env=environment, text=True).strip()
                     assert observed == '2|1|1|1|0|0', observed
                     (output / 'interrupted-issuance.log').write_text('PASS actual App terminated twice before response forwarding; Keychain proof matched on both cold cancellation requests; one revocation event; new login uses a new device: ' + observed + '\n')
-                if args.legacy_registration:
-                    from verify_v2_legacy_registration_http import verify_legacy_registration
-                    verify_legacy_registration(proxy.server_port, private / 'ca.pem', database_arguments, environment, output)
-                if args.legacy_app:
-                    assert interruption['failure'] is None, interruption['failure']
-                    assert interruption['legacyTerminations'] == interruption['legacyReplays'] == 1
-                    assert interruption['legacyMatched']
-                    old = str(uuid.UUID(interruption['legacyDevice']))
-                    first = str(uuid.UUID(interruption['legacyAssertionDevice']))
-                    legacy_sql = """SELECT
-                        (SELECT count(*) FROM im_v2.auth_devices WHERE user_id=(SELECT user_id FROM im_v2.auth_devices WHERE device_id='{0}'::uuid)),
-                        (SELECT count(*) FROM im_v2.auth_devices WHERE device_id='{0}'::uuid AND revoked_at IS NOT NULL),
-                        (SELECT count(*) FROM im_v2.legacy_device_registration_cancellations WHERE device_id='{0}'::uuid),
-                        (SELECT count(*) FROM im_v2.device_revocation_events WHERE device_id='{0}'::uuid),
-                        (SELECT count(*) FROM im_v2.device_access_tokens WHERE device_id='{0}'::uuid AND revoked_at IS NULL),
-                        (SELECT count(*) FROM im_v2.device_refresh_sessions WHERE device_id='{0}'::uuid AND revoked_at IS NULL),
-                        (SELECT count(*) FROM im_v2.auth_devices WHERE device_id='{1}'::uuid),
-                        (SELECT count(*) FROM im_v2.device_registration_cancellations WHERE device_id='{1}'::uuid AND user_id IS NULL AND cancelled_at IS NOT NULL)""".format(old, first)
-                    observed = subprocess.check_output(['psql', '-X', '-A', '-t', *database_arguments, '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1', '-c', legacy_sql], env=environment, text=True).strip()
-                    assert observed == '2|1|1|1|0|0|0|1', observed
-                    (output / 'legacy-app.log').write_text('PASS real App termination before legacy acknowledgement; unseeded restart replayed original archived operation with new assertion device; new login survives another cold restore; target state: ' + observed + '\n')
-                if args.legacy_client:
-                    assert counts[('POST', '/v2/device-credentials/cancel-legacy-registration', 204)] >= 2
-                    (output / 'legacy-client.log').write_text('PASS real ClientKit factor/legacy cancellation/issuance; discarded first cleanup acknowledgement, reopened archive and replayed before issuing new credentials; old access rejected and new device authorized.\n')
                 print('PASS: selected real HTTPS account tests and persisted device/HTTP effects.', flush=True)
             finally:
                 for ready in interruption_ready.values():
                     ready.set()
-                if args.interrupted_issuance or args.legacy_app:
-                    (output / 'interruption-summary.json').write_text(json.dumps({key: value for key, value in interruption.items() if key not in ['device', 'proof', 'legacyDevice', 'legacyOperation', 'legacyAssertionDevice']}, indent=2) + '\n')
+                if args.interrupted_issuance:
+                    (output / 'interruption-summary.json').write_text(json.dumps({key: value for key, value in interruption.items() if key not in ['device', 'proof']}, indent=2) + '\n')
                 if args.gateway:
                     (output / 'gateway-samples.json').write_text(json.dumps(gateway_samples, indent=2) + '\n')
                 (output / 'http-summary.json').write_text(json.dumps({

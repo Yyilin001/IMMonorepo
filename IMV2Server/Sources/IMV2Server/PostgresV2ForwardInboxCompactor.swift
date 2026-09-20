@@ -21,7 +21,7 @@ public struct PostgresV2ForwardInboxCompactor: Sendable {
             WITH candidates AS (
                 SELECT inbox.export_id FROM im_v2.message_forward_inbox AS inbox
                 WHERE (SELECT true FROM im_v2.rooms AS room
-                       WHERE room.room_id = inbox.target_room_id AND room.migration_fence_id IS NULL
+                       WHERE room.room_id = inbox.target_room_id
                        FOR SHARE OF room SKIP LOCKED)
                   AND inbox.state IN ('completed', 'rejected') AND inbox.payload IS NOT NULL
                   AND inbox.completed_at <= \(bind: cutoff)

@@ -52,7 +52,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                     INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id)
                     VALUES (\(bind: room.uuidValue!), 'source', 'terminal-test'), (\(bind: target.uuidValue!), 'target', 'terminal-test')
                     """).run()
-                func verifyMigrationFence(roomID: RoomID, shard: String, source: Bool, at: Date) async throws {
+                func verifyBusyRoom(roomID: RoomID, shard: String, source: Bool, at: Date) async throws {
                     @Sendable func compact(_ database: any Database) async throws -> Int {
                         if source { return try await PostgresV2ForwardExportCompactor(database: database).runOnce(now: at, limit: 1) }
                         return try await PostgresV2ForwardInboxCompactor(database: database).runOnce(now: at, limit: 1)
@@ -62,22 +62,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                         try await scoped.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!) FOR UPDATE").run()
                         #expect(try await compact(app.db(.psql)) == 0)
                     }
-                    // Roll back this isolated fence fixture, then continue
-                    // ordinary compaction verification on the same envelope.
-                    await #expect(throws: CancellationError.self) {
-                        try await app.db(.psql).transaction { transaction in
-                            let scoped = try #require(transaction as? any SQLDatabase)
-                            try await scoped.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomID.uuidValue!), \(bind: shard), 0, \(bind: now), \(bind: now))").run()
-                            let control = PostgresV2RoomOwnerMigrationPreparationStore(database: transaction, registeredShardIDs: [shard, "next"])
-                            let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: roomID,
-                                source: .init(shardID: shard, epoch: 0), targetShardID: "next")
-                            _ = try await control.prepare(request, now: now)
-                            let freezing = try await control.beginFreezing(request, now: now)
-                            try await PostgresV2RoomMigrationWriteFence(database: transaction).install(for: freezing)
-                            #expect(try await compact(transaction) == 0)
-                            throw CancellationError()
-                        }
-                    }
+
                 }
                 try await sql.raw("""
                     INSERT INTO im_v2.message_forward_exports VALUES
@@ -158,7 +143,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                 }
                 #expect(try await sourceCompactor.runOnce(now: sourceCompactAt, limit: 1) == 0)
                 #expect(try await delivery.complete(lease, now: now))
-                try await verifyMigrationFence(roomID: room, shard: "source", source: true, at: sourceCompactAt)
+                try await verifyBusyRoom(roomID: room, shard: "source", source: true, at: sourceCompactAt)
                 #expect(try await sourceCompactor.runOnce(now: sourceCompactAt.addingTimeInterval(-1), limit: 1) == 0)
                 await #expect(throws: CancellationError.self) {
                     try await app.db(.psql).transaction { transaction in
@@ -213,7 +198,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                     UPDATE im_v2.message_forward_inbox SET state = \(bind: rejected ? "rejected" : "completed"),
                         error_code = \(bind: code), completed_at = \(bind: now) WHERE export_id = \(bind: id)
                     """).run()
-                try await verifyMigrationFence(roomID: target, shard: "target", source: false, at: compactAt)
+                try await verifyBusyRoom(roomID: target, shard: "target", source: false, at: compactAt)
                 #expect(try await compactor.runOnce(now: compactAt.addingTimeInterval(-1), limit: 1) == 0)
                 await #expect(throws: CancellationError.self) {
                     try await app.db(.psql).transaction { transaction in

@@ -982,7 +982,6 @@ struct V2GatewayRuntimeConfigurationTests {
             return
         }
         #expect(nats.routingKey == Data(repeating: 9, count: 32))
-        #expect(nats.payloadEncoding == .json)
         #expect(nats.wakeDeferralDelayMilliseconds == 60)
         #expect(nats.usesTLS)
 
@@ -1003,25 +1002,6 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(deferredNATS.wakeDeferralDelayMilliseconds == 75)
         values.removeValue(forKey: "IM_V2_GROUP_WAKE_DEFERRAL_MS")
 
-        values["IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"] = "protobuf_v1"
-        let binaryConfiguration = try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(values)
-        )
-        guard case .nats(let binaryNATS) = binaryConfiguration.groupEventWake else {
-            Issue.record("Expected binary NATS group wake configuration")
-            return
-        }
-        #expect(binaryNATS.payloadEncoding == .protobufV1)
-
-        values["IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"] = "unknown"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(values)
-            )
-        }
-        values.removeValue(forKey: "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING")
 
         values["IM_V2_GROUP_WAKE_DEFERRAL_MS"] = "1001"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(

@@ -71,8 +71,7 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
                 return .idempotent(try prior.result(actorUserID: command.actorUserID))
             }
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageReactionStoreError.corruptPersistenceState }
-            guard let room = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReactionRoomRow.self) else { throw V2MessageReactionStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+            guard let room = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReactionRoomRow.self) else { throw V2MessageReactionStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageReactionStoreError.corruptPersistenceState }
             guard let message = try await sql.raw("SELECT room_id, withdrawn_at FROM im_v2.messages WHERE message_id = \(bind: messageID) FOR UPDATE").first(decoding: ReactionMessageRow.self), message.roomID == roomID else { throw V2MessageReactionStoreError.messageNotFound }
             guard message.withdrawnAt == nil else { throw V2MessageReactionStoreError.messageWithdrawn }
@@ -132,7 +131,7 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
     }
 }
 
-private struct ReactionRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; let migrationFenceID: UUID?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", migrationFenceID = "migration_fence_id" } }
+private struct ReactionRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
 private struct ReactionMessageRow: Decodable { let roomID: UUID; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", withdrawnAt = "withdrawn_at" } }
 private struct ReactionExistsRow: Decodable { let exists: Int }
 private struct ReactionCountRow: Decodable {

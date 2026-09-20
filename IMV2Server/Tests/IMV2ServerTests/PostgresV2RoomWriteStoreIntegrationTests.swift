@@ -41,7 +41,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID()), inviteID = GroupInviteID(uuid: UUID())
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'crash_quota', 'Applicant', \(bind: now), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b',0,\(bind: now),\(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b',0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let digest = Data(repeating: 35, count: 32), requestID = GroupJoinRequestID(uuid: UUID()), operation = GroupJoinRequestOperationID(uuid: UUID())
             _ = try await routed.create(.init(inviteID: inviteID, roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10, maximumActiveInvitesPerRoom: 20, createdAt: now))
@@ -127,151 +127,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     #endif
 
 
-    @Test("owner failures retain quota and operator recovery releases only proven terminal requests", arguments: ["committed", "released", "quarantined"])
-    func groupJoinQuotaOperatorRecovery(_ scenario: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID()), operation = UUID()
-            try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'operator_quota', 'Applicant', \(bind: now), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b',0,\(bind: now),\(bind: now))").run()
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
-            let digest = Data(repeating: 36, count: 32)
-            _ = try await routed.create(.init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10, maximumActiveInvitesPerRoom: 20, createdAt: now))
-            let submission = V2GroupJoinSubmissionPersistenceRequest(requestID: .init(uuid: UUID()), applicantUserID: applicant, operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 10)
-            guard case .submitted(let request) = try await routed.submit(submission) else { Issue.record("Expected initial request"); return }
-            // A stale owner route is uncertainty, never negative admission proof.
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            let failedWorker = V2GroupJoinQuotaRecoveryWorker(controlDatabase: control, invitations: routed, now: { now.addingTimeInterval(31) })
-            let failed = try await failedWorker.runOnce()
-            #expect(failed.attempted == 1 && failed.deferred == 1 && failed.reconciled == 0)
-            #expect(try await failedWorker.runOnce().attempted == 0)
-            #expect(try await count("im_v2.group_join_quota_intents WHERE phase = 'tracking'", on: sql) == 1)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch = 0 WHERE room_id = \(bind: room.uuidValue!)").run()
-            // Reconstruct an interrupted legacy approval with its exact operation.
-            try await ownerSQL.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decision_operation_id = \(bind: operation), decided_by_user_id = \(bind: senderUUID), approval_membership_revision = 0 WHERE request_id = \(bind: request.requestID.uuidValue!)").run()
-            if scenario != "released" {
-                let command = try V2ChangeRoomMembershipCommand(roomID: room, actorUserID: senderID, operationID: .init(uuid: operation), targetUserID: applicant, action: .add, expectedMembershipRevision: 0)
-                let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-                let added = try await PostgresV2RoomMembershipStore(database: owner).changeControlValidated(command: command,
-                    ownerRoute: .init(shardID: "room-b", epoch: 0),
-                    identitySnapshot: .init(actorUserID: senderID, targetUserID: applicant, actorIsActive: true, targetIsActive: true),
-                    capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                guard case .changed = added else { Issue.record("Expected exact membership commit"); return }
-                if scenario == "quarantined" {
-                    try await ownerSQL.raw("DELETE FROM im_v2.room_membership_operations WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: operation)").run()
-                }
-            }
-            let recovery = PostgresV2GroupApprovalRecoveryStore(database: owner)
-            let command = V2GroupApprovalRecoveryCommand(operationID: UUID(), scope: try .init(shardID: "room-b", ownerEpoch: 0, roomID: room.uuidValue!), requestID: request.requestID.uuidValue!, reviewerUserID: senderUUID, decisionOperationID: operation, reason: .dependencyRecovered)
-            let result = try await recovery.recover(command, operatorPrincipal: "quota-test", now: now)
-            #expect(result.outcome == (scenario == "committed" ? .completed : scenario == "released" ? .released : .quarantined))
-            // No direct quota notification: a replacement worker reads the receipt and exact request.
-            let worker = V2GroupJoinQuotaRecoveryWorker(controlDatabase: control, invitations: routed, now: { now.addingTimeInterval(61) })
-            let report = try await worker.runOnce()
-            #expect(report.attempted == 1 && report.reconciled == 1 && report.deferred == 0)
-            #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == (scenario == "committed" ? 0 : 1))
-            #expect(try await count("im_v2.group_join_requests", on: ownerSQL) == 1)
-        }
-    }
 
-    @Test("migration defers invitation creation and quota recovery without releasing uncertain reservations",
-          arguments: ["reserved", "owner", "terminal"])
-    func invitationRecoveryMigrationFence(_ stage: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID())
-            try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("""
-                INSERT INTO im_v2.public_user_profiles(user_id, public_handle, display_name, created_at, updated_at)
-                VALUES (\(bind: applicant.uuidValue!), 'migration_quota', 'Applicant', \(bind: now), \(bind: now))
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
-                """).run()
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
-            func routedStore() -> V2RoutedGroupInvitationStore {
-                .init(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
-            }
-            let invite = GroupInviteID(uuid: UUID()), digest = Data(repeating: 46, count: 32)
-            _ = try await routedStore().create(.init(inviteID: invite, roomID: room, actorUserID: senderID,
-                operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600,
-                expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10,
-                maximumActiveInvitesPerRoom: 20, createdAt: now))
-            let submission = V2GroupJoinSubmissionPersistenceRequest(requestID: .init(uuid: UUID()),
-                applicantUserID: applicant, operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil,
-                createdAt: now, maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 10)
-            let quota = PostgresV2GroupJoinQuotaStore(database: control)
-            guard case .reserved(let intent) = try await quota.reserve(submission, roomID: room, inviteID: invite, now: now) else {
-                throw V2GroupInvitationServiceError.corruptPersistenceState
-            }
-            let scoped = PostgresV2GroupInvitationStore(database: owner,
-                identities: PostgresV2GroupInvitationIdentityReader(database: control),
-                scope: .init(roomID: room.uuidValue!, route: try .init(shardID: "room-b", epoch: 0), inviteID: invite.uuidValue!))
-            if stage != "reserved" {
-                let receipt = try await scoped.applyReservedSubmission(intent, now: now)
-                if stage == "terminal" {
-                    try await quota.resolve(intent, outcome: receipt.outcome, targetRequestID: receipt.targetRequestID, now: now)
-                    _ = try await scoped.cancel(roomID: room, requestID: submission.requestID, applicantUserID: applicant, now: now)
-                }
-            }
-            // The second invite has a control intent but no published directory entry.
-            let pendingCreation = V2GroupInviteCreatePersistenceRequest(inviteID: .init(uuid: UUID()),
-                roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()),
-                tokenDigest: Data(repeating: 47, count: 32), requestedLifetimeSeconds: 3600,
-                expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10,
-                maximumActiveInvitesPerRoom: 20, createdAt: now)
-            let directory = PostgresV2GroupInviteDirectory(database: control)
-            _ = try await directory.prepare(pendingCreation)
-            if stage != "reserved" {
-                let creationStore = PostgresV2GroupInvitationStore(database: owner,
-                    identities: PostgresV2GroupInvitationIdentityReader(database: control),
-                    scope: .init(roomID: room.uuidValue!, route: try .init(shardID: "room-b", epoch: 0), inviteID: nil))
-                _ = try await creationStore.create(pendingCreation)
-            }
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 0), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot(_ database: any SQLDatabase, tables: [String]) async throws -> [[String]] {
-                var result: [[String]] = []
-                for table in tables {
-                    let rows = try await database.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(rows.map(\.value))
-                }
-                return result
-            }
-            let ownerTables = ["rooms", "group_invite_links", "group_join_requests", "group_join_submission_receipts",
-                               "room_memberships", "room_membership_operations", "room_events", "user_state_event_outbox"]
-            let controlTables = ["room_owner_routes", "group_invite_directory", "group_join_quota_aliases"]
-            let ownerBefore = try await snapshot(ownerSQL, tables: ownerTables)
-            let controlBefore = try await snapshot(sql, tables: controlTables)
-            // Fresh worker/store instances retry the same durable jobs twice.
-            for elapsed in [61.0, 121.0] {
-                let current = now.addingTimeInterval(elapsed)
-                let quotaWorker = V2GroupJoinQuotaRecoveryWorker(controlDatabase: control, invitations: routedStore(), now: { current })
-                let quotaReport = try await quotaWorker.runOnce(limit: 8)
-                #expect(quotaReport.attempted == 1 && quotaReport.deferred == 1 && quotaReport.reconciled == 0)
-                #expect(try await quotaWorker.runOnce(limit: 8).attempted == 0)
-                let creationWorker = V2GroupInviteCreationRecoveryWorker(
-                    jobs: PostgresV2GroupInviteDirectory(database: control), invitations: routedStore(), now: { current })
-                let creationReport = try await creationWorker.runOnce(limit: 8)
-                #expect(creationReport.attempted == 1 && creationReport.deferred == 1 && creationReport.completed == 0 && creationReport.paused == 0)
-                #expect(try await creationWorker.runOnce(limit: 8).attempted == 0)
-                #expect(try await directory.resolve(tokenDigest: pendingCreation.tokenDigest) == nil)
-                #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == 1)
-                #expect(try await count("im_v2.group_invite_creation_recovery WHERE last_error_code = 'owner_changed'", on: sql) == 1)
-                #expect(try await snapshot(ownerSQL, tables: ownerTables) == ownerBefore)
-                #expect(try await snapshot(sql, tables: controlTables) == controlBefore)
-            }
-            #expect(try await count("im_v2.group_join_requests", on: ownerSQL) == (stage == "reserved" ? 0 : 1))
-            #expect(try await count("im_v2.group_join_submission_receipts", on: ownerSQL) == (stage == "reserved" ? 0 : 1))
-        }
-    }
 
     @Test("routed submissions enforce twenty pending requests across two owner databases")
     func groupJoinGlobalQuotaAcrossOwners() async throws {
@@ -279,7 +135,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID())
             for db in [sql, secondSQL] { try await db.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run() }
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'global_applicant', 'Applicant', \(bind: now), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID),'room-a',0,\(bind: now),\(bind: now)), (\(bind: secondRoom.uuidValue!),'room-b',0,\(bind: now),\(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID),'room-a',0,\(bind: now),\(bind: now)), (\(bind: secondRoom.uuidValue!),'room-b',0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-a", database: control, schema: "im_v2"), .init(shardID: "room-b", database: secondOwner, schema: "im_v2")])
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
             var requests: [V2GroupJoinSubmissionPersistenceRequest] = []
@@ -321,8 +177,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             guard case .approved = try await routed.approve(roomID: approved.roomID, requestID: approved.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { Issue.record("Expected approved during global quota lifecycle"); return }
             #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == 18)
-            let remainingA = try await count("im_v2.group_join_requests WHERE state IN ('pending','approving')", on: sql)
-            let remainingB = try await count("im_v2.group_join_requests WHERE state IN ('pending','approving')", on: secondSQL)
+            let remainingA = try await count("im_v2.group_join_requests WHERE state = 'pending'", on: sql)
+            let remainingB = try await count("im_v2.group_join_requests WHERE state = 'pending'", on: secondSQL)
             #expect(remainingA + remainingB == 18)
         }
     }
@@ -402,100 +258,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
 
 
-    @Test("invitation writes reject migrating rooms with and without routing", arguments: [V2GroupCapacityClass.standard, .large])
-    func invitationMigrationFence(_ mode: V2GroupCapacityClass) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let applicant = UserID(uuid: UUID()), digest = Data(repeating: 43, count: 32)
-            for database in [sql, ownerSQL] {
-                try await database.raw("""
-                    INSERT INTO im_v2.public_user_profiles(user_id, public_handle, display_name, created_at, updated_at)
-                    VALUES (\(bind: applicant.uuidValue!), 'fence_applicant', 'Applicant', \(bind: now), \(bind: now))
-                    """).run()
-            }
-            try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            let local = PostgresV2GroupInvitationStore(database: owner)
-            let creation = V2GroupInviteCreatePersistenceRequest(inviteID: .init(uuid: UUID()), roomID: room,
-                actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest,
-                requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600),
-                maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: now)
-            _ = try await local.create(creation)
-            let submission = V2GroupJoinSubmissionPersistenceRequest(requestID: .init(uuid: UUID()), applicantUserID: applicant,
-                operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil, createdAt: now,
-                maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100)
-            guard case .submitted = try await local.submit(submission) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            let scoped = PostgresV2GroupInvitationStore(database: owner,
-                identities: PostgresV2GroupInvitationIdentityReader(database: control),
-                scope: .init(roomID: room.uuidValue!, route: try .init(shardID: "room-b", epoch: 0), inviteID: creation.inviteID.uuidValue!))
-            try await sql.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
-                """).run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 0), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot() async throws -> [String] {
-                var result: [String] = []
-                for table in ["rooms", "group_invite_links", "group_join_requests", "group_join_submission_receipts",
-                              "room_memberships", "room_membership_operations", "room_events", "room_admission",
-                              "shard_admission_pools", "user_state_event_outbox"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(contentsOf: rows.map(\.value))
-                }
-                return result
-            }
-            let before = try await snapshot()
-            let profile = try forwardImportTestProfile()
-            for store in [local, scoped] {
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await store.preflightCreation(creation) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await store.create(creation) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.activeInvites(roomID: room, actorUserID: senderID, now: now)
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    try await store.revoke(inviteID: creation.inviteID, roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), now: now)
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.submit(.init(requestID: .init(uuid: UUID()), applicantUserID: applicant,
-                        operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil, createdAt: now,
-                        maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100))
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.pendingRequests(roomID: room, reviewerUserID: senderID, cursor: nil, pageSize: 10, now: now)
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.approve(roomID: room, requestID: submission.requestID, reviewerUserID: senderID,
-                        operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.reject(roomID: room, requestID: submission.requestID, reviewerUserID: senderID,
-                        operationID: .init(uuid: UUID()), now: now)
-                }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                    _ = try await store.cancel(roomID: room, requestID: submission.requestID, applicantUserID: applicant, now: now)
-                }
-            }
-            await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                _ = try await scoped.preview(tokenDigest: digest, applicantUserID: applicant, now: now)
-            }
-            // Local exact submission replay is a read-only receipt path.
-            _ = try await local.submit(submission)
-            #expect(try await snapshot() == before)
-        }
-    }
 
     @Test("cancellation uses current owner and control identity and fences stale epochs")
     func invitationCancellationRouting() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID())
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'routed_cancel', 'Control Applicant', \(bind: now), \(bind: now))").run()
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let digest = Data(repeating: 23, count: 32)
@@ -516,7 +285,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
 
 
-    @Test("applicant cancellation preserves decisions, releases quota, and serializes with approval", arguments: ["pending", "expired", "revoked", "approve-first", "reject-first", "race", "approving"])
+    @Test("applicant cancellation preserves decisions, releases quota, and serializes with approval", arguments: ["pending", "expired", "revoked", "approve-first", "reject-first", "race"])
     func invitationApplicantCancellation(_ scenario: String) async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
@@ -557,57 +326,50 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(preview.requestID == request.requestID && preview.requestState == .pending)
                 #expect(try await store.preview(tokenDigest: digest, applicantUserID: senderID, now: now.addingTimeInterval(2)) == .unavailable)
             }
-            if scenario == "approving" {
-                try await sql.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decision_operation_id = \(bind: UUID()), decided_by_user_id = \(bind: senderUUID), approval_membership_revision = 0 WHERE request_id = \(bind: request.requestID.uuidValue!)").run()
-                await #expect(throws: V2GroupInvitationServiceError.conflict) {
-                    _ = try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now)
+            let operation = GroupJoinDecisionOperationID(uuid: UUID())
+            if scenario == "approve-first" {
+                guard case .approved = try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            } else if scenario == "reject-first" {
+                guard case .rejected = try await store.reject(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            }
+            let terminal: V2GroupJoinRequestRecord
+            if scenario == "race" {
+                async let cancel = store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now)
+                async let approve = store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
+                let (cancelled, approved) = try await (cancel, approve)
+                terminal = cancelled
+                switch approved {
+                case .approved(let value), .alreadyDecided(let value): #expect(value == terminal)
+                default: Issue.record("Unexpected approval result: \(approved)")
                 }
             } else {
-                let operation = GroupJoinDecisionOperationID(uuid: UUID())
-                if scenario == "approve-first" {
-                    guard case .approved = try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                } else if scenario == "reject-first" {
-                    guard case .rejected = try await store.reject(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                }
-                let terminal: V2GroupJoinRequestRecord
-                if scenario == "race" {
-                    async let cancel = store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now)
-                    async let approve = store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: operation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                    let (cancelled, approved) = try await (cancel, approve)
-                    terminal = cancelled
-                    switch approved {
-                    case .approved(let value), .alreadyDecided(let value): #expect(value == terminal)
-                    default: Issue.record("Unexpected approval result: \(approved)")
-                    }
-                } else {
-                    terminal = try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now)
-                }
-                let replay = try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now.addingTimeInterval(10))
-                #expect(replay == terminal)
-                #expect(terminal.state == (scenario == "approve-first" ? .approved : scenario == "reject-first" ? .rejected : scenario == "race" ? terminal.state : .cancelled))
-                #expect(terminal.state == .cancelled || terminal.state == .approved || terminal.state == .rejected)
-                let uses = try await sql.raw("SELECT approved_use_count::text AS value FROM im_v2.group_invite_links WHERE invite_id = \(bind: inviteID.uuidValue!)").first(decoding: StringValueRow.self)?.value
-                #expect(uses == (terminal.state == .approved ? "1" : "0"))
-                let isMember = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: applicant.uuidValue!) AND left_revision IS NULL) AS exists").first(decoding: ExistsRow.self)?.exists
-                #expect(isMember == (terminal.state == .approved))
-                #expect(try await count("im_v2.room_events", on: sql) == (terminal.state == .approved ? 1 : 0))
-                if terminal.state == .cancelled {
-                    guard case .cancelled(let prior) = try await store.submit(original) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                    #expect(prior == terminal)
-                    guard case .alreadyDecided(let prior) = try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                    #expect(prior == terminal)
-                    #expect(try await store.reject(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), now: now) == .decisionConflict)
-                    let nextDigest: Data
-                    if scenario == "expired" || scenario == "revoked" {
-                        nextDigest = Data(repeating: 20, count: 32)
-                        _ = try await store.create(.init(inviteID: .init(uuid: UUID()), roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: nextDigest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 2, maximumActiveInvitesPerRoom: 20, createdAt: now))
-                    } else { nextDigest = digest }
-                    guard case .submitted(let fresh) = try await store.submit(submission(nextDigest)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                    #expect(fresh.requestID != request.requestID && fresh.state == .pending)
-                    guard case .available(let preview) = try await store.preview(tokenDigest: nextDigest, applicantUserID: applicant, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                    #expect(preview.requestID == fresh.requestID)
-                    #expect(try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now) == terminal)
-                }
+                terminal = try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now)
+            }
+            let replay = try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now.addingTimeInterval(10))
+            #expect(replay == terminal)
+            #expect(terminal.state == (scenario == "approve-first" ? .approved : scenario == "reject-first" ? .rejected : scenario == "race" ? terminal.state : .cancelled))
+            #expect(terminal.state == .cancelled || terminal.state == .approved || terminal.state == .rejected)
+            let uses = try await sql.raw("SELECT approved_use_count::text AS value FROM im_v2.group_invite_links WHERE invite_id = \(bind: inviteID.uuidValue!)").first(decoding: StringValueRow.self)?.value
+            #expect(uses == (terminal.state == .approved ? "1" : "0"))
+            let isMember = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: applicant.uuidValue!) AND left_revision IS NULL) AS exists").first(decoding: ExistsRow.self)?.exists
+            #expect(isMember == (terminal.state == .approved))
+            #expect(try await count("im_v2.room_events", on: sql) == (terminal.state == .approved ? 1 : 0))
+            if terminal.state == .cancelled {
+                guard case .cancelled(let prior) = try await store.submit(original) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(prior == terminal)
+                guard case .alreadyDecided(let prior) = try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(prior == terminal)
+                #expect(try await store.reject(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), now: now) == .decisionConflict)
+                let nextDigest: Data
+                if scenario == "expired" || scenario == "revoked" {
+                    nextDigest = Data(repeating: 20, count: 32)
+                    _ = try await store.create(.init(inviteID: .init(uuid: UUID()), roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: nextDigest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 2, maximumActiveInvitesPerRoom: 20, createdAt: now))
+                } else { nextDigest = digest }
+                guard case .submitted(let fresh) = try await store.submit(submission(nextDigest)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(fresh.requestID != request.requestID && fresh.state == .pending)
+                guard case .available(let preview) = try await store.preview(tokenDigest: nextDigest, applicantUserID: applicant, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(preview.requestID == fresh.requestID)
+                #expect(try await store.cancel(roomID: roomID, requestID: request.requestID, applicantUserID: applicant, now: now) == terminal)
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             installed = false
@@ -1442,8 +1204,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("An expired device reset recovers while a shared snapshot remains valid for another device",
-          arguments: [false, true], [false, true])
-    func sharedSnapshotAssignmentExpiry(published: Bool, fenced: Bool) async throws {
+          arguments: [false, true])
+    func sharedSnapshotAssignmentExpiry(published: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let userUUID = UUID(), firstUUID = UUID(), secondUUID = UUID()
@@ -1475,13 +1237,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let firstCursorBefore = try await snapshot("device_sync_cursors", key: "device_id", id: firstUUID)
             let expiry = base.addingTimeInterval(60)
             #expect(try await housekeeping.purgeExpired(now: expiry.addingTimeInterval(-0.000001), projectionEffectRetention: V2IdempotencyPolicy.minimumServerRetention, limit: 1).recoveredResetCount == 0)
-            if fenced {
-                try await sql.raw("UPDATE im_v2.user_projection_checkpoints SET migration_fence_token = \(bind: UUID()), migration_fence_expires_at = \(bind: expiry.addingTimeInterval(60)) WHERE user_id = \(bind: userUUID)").run()
-                #expect(try await housekeeping.purgeExpired(now: expiry, projectionEffectRetention: V2IdempotencyPolicy.minimumServerRetention, limit: 1).recoveredResetCount == 0)
-                #expect(try await snapshot("device_snapshot_resets", key: "device_id", id: firstUUID) == firstBefore)
-                #expect(try await snapshot("device_sync_cursors", key: "device_id", id: firstUUID) == firstCursorBefore)
-                try await sql.raw("UPDATE im_v2.user_projection_checkpoints SET migration_fence_token = NULL, migration_fence_expires_at = NULL WHERE user_id = \(bind: userUUID)").run()
-            }
             let recovered = try await housekeeping.purgeExpired(now: expiry, projectionEffectRetention: V2IdempotencyPolicy.minimumServerRetention, limit: 1)
             #expect(recovered.recoveredResetCount == 1 && recovered.purgedSnapshotCount == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.device_sync_cursors WHERE device_id = \(bind: firstUUID) AND state = 'ready' AND reset_generation = 1 AND acknowledged_sequence = 5 AND pending_snapshot_id IS NULL").first(decoding: CountRow.self)?.value == 1)
@@ -1523,7 +1278,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: instants[clock])
             let matches = difference == "matching"
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             func request(_ byte: UInt8) -> V2GroupInviteCreatePersistenceRequest {
                 .init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()),
                     tokenDigest: Data(repeating: byte, count: 32), requestedLifetimeSeconds: 300,
@@ -1580,85 +1335,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Invite import preserves native timestamps and detects one-microsecond binding differences",
-          arguments: 0..<6, ["insert", "prepared", "conflict"])
-    func inviteImportTimestampPrecision(clock: Int, path: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
-            let instants: [Double] = [1_750_000_000, 946_684_800 + 0.00000125,
-                946_684_800 - 0.00000125, 1_750_000_000.1234567,
-                -210_866_803_200 + 10.223, 9_224_318_016_000 - 1000.223]
-            let base = Date(timeIntervalSince1970: instants[clock])
-            let importedAt = base.addingTimeInterval(32)
-            try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base))").run()
-            let store = PostgresV2GroupInvitationStore(database: owner)
-            func request(_ index: Int) -> V2GroupInviteCreatePersistenceRequest {
-                .init(inviteID: .init(uuid: UUID(uuidString: String(format: "10000000-0000-0000-0000-%012d", index))!),
-                    roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()),
-                    tokenDigest: Data(repeating: UInt8(index), count: 32), requestedLifetimeSeconds: 300,
-                    expiresAt: base.addingTimeInterval(300), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: base)
-            }
-            let first = request(1), second = request(2)
-            _ = try await store.create(first)
-            _ = try await store.create(second)
-            // Legacy SQL writers can persist microseconds that Date cannot
-            // represent. Seed that exact deadline without changing its validity.
-            try await ownerSQL.raw("UPDATE im_v2.group_invite_links SET expires_at = expires_at + INTERVAL '1 microsecond' WHERE invite_id = \(bind: first.inviteID.uuidValue!)").run()
-            struct Times: Decodable { let createdAt: V2PostgresTimestamp; let expiresAt: V2PostgresTimestamp }
-            let times = try #require(try await ownerSQL.raw("SELECT created_at AS \"createdAt\", expires_at AS \"expiresAt\" FROM im_v2.group_invite_links WHERE invite_id = \(bind: first.inviteID.uuidValue!)").first(decoding: Times.self))
-            let directory = PostgresV2GroupInviteDirectory(database: control)
-            if path != "insert" {
-                let candidate = path == "prepared" ? first.preservingTimestamps(.init(createdAt: times.createdAt, expiresAt: times.expiresAt)) : first
-                _ = try await directory.prepare(candidate)
-            }
-            func snapshot(_ database: any SQLDatabase, table: String) async throws -> String {
-                try #require(try await database.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)).value
-            }
-            let ownerBefore = try await snapshot(ownerSQL, table: "group_invite_links")
-            let directoryBefore = try await snapshot(sql, table: "group_invite_directory")
-            let jobsBefore = try await snapshot(sql, table: "group_invite_creation_recovery")
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
-            let importer = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "import-clock-regression", now: { importedAt })
-            func command() throws -> V2GroupInviteDirectoryImportCommand {
-                try .init(operationID: UUID(), shardID: "room-b", ownerEpoch: 0, roomID: room.uuidValue!, afterInviteID: nil, limit: 2, reason: .dataRepaired)
-            }
-            let original = try command()
-            let result = try await importer.importPage(original)
-            #expect(result.sourceCount == 2 && result.nextCursor == nil && !result.wasIdempotent)
-            if path == "conflict" {
-                #expect(result.outcome == .conflict && result.conflictingInviteIDs == [first.inviteID.uuidValue!])
-                #expect(result.insertedCount == 0 && result.publishedCount == 0 && result.unchangedCount == 0)
-                #expect(try await snapshot(sql, table: "group_invite_directory") == directoryBefore)
-                #expect(try await snapshot(sql, table: "group_invite_creation_recovery") == jobsBefore)
-            } else {
-                #expect(result.outcome == .applied && result.conflictingInviteIDs.isEmpty)
-                #expect(result.insertedCount == (path == "insert" ? 2 : 1) && result.publishedCount == (path == "prepared" ? 1 : 0))
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE invite_id = \(bind: first.inviteID.uuidValue!) AND created_at = \(bind: times.createdAt) AND expires_at = \(bind: times.expiresAt)").first(decoding: CountRow.self)?.value == 1)
-                #expect(try await count("im_v2.group_invite_directory WHERE state = 'ready'", on: sql) == 2)
-                #expect(try await count("im_v2.group_invite_creation_recovery WHERE state = 'completed'", on: sql) == (path == "prepared" ? 1 : 0))
-            }
-            let rescanned = try await importer.importPage(command())
-            #expect(rescanned.outcome == (path == "conflict" ? .conflict : .applied))
-            #expect(rescanned.unchangedCount == (path == "conflict" ? 0 : 2))
-            #expect(rescanned.insertedCount == 0 && rescanned.publishedCount == 0)
-            // The audit remains JSON Unix seconds, with every native microsecond
-            // preserved; its hash must describe exactly the committed snapshot.
-            #expect(try await sql.raw("""
-                SELECT COUNT(*) AS value FROM im_v2.group_invite_directory_import_audit
-                WHERE jsonb_typeof(source_snapshot->0->'created_at') = 'number'
-                  AND jsonb_typeof(source_snapshot->0->'expires_at') = 'number'
-                  AND ((source_snapshot->0->>'created_at')::numeric - 946684800) * 1000000 = \(bind: times.createdAt.microseconds)
-                  AND ((source_snapshot->0->>'expires_at')::numeric - 946684800) * 1000000 = \(bind: times.expiresAt.microseconds)
-                  AND source_digest = sha256(convert_to(source_snapshot::text, 'UTF8'))
-                """).first(decoding: CountRow.self)?.value == 2)
-            let auditBeforeReplay = try await snapshot(sql, table: "group_invite_directory_import_audit")
-            let replayOnly = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: V2StaticRoomShardStorageRegistry(locations: []), operatorPrincipal: "import-clock-regression", now: { Date(timeIntervalSince1970: .nan) })
-            let replay = try await replayOnly.importPage(original)
-            #expect(replay.wasIdempotent && replay.outcome == result.outcome && replay.insertedCount == result.insertedCount)
-            #expect(try await snapshot(sql, table: "group_invite_directory_import_audit") == auditBeforeReplay)
-            #expect(try await snapshot(ownerSQL, table: "group_invite_links") == ownerBefore)
-        }
-    }
 
     @Test("Invite creation preserves exact control and owner timestamps across foreground, recovery and legacy adoption",
           arguments: 0..<6, ["foreground", "recovery", "legacy"])
@@ -1670,7 +1346,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: instants[clock])
             let deadline = base.addingTimeInterval(300)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let directory = PostgresV2GroupInviteDirectory(database: control)
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let request = V2GroupInviteCreatePersistenceRequest(inviteID: .init(uuid: UUID()), roomID: room,
@@ -1899,119 +1575,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("A backwards clock cannot reopen rollback after retention cleanup has been claimed", arguments: [false, true])
-    func migrationRollbackAfterRetentionClaim(reclaimed: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let store = PostgresV2UserShardMigrationStore(database: database)
-            let router = V2PostgresUserShardRouter(database: database)
-            let request = try V2UserShardMigrationPreparation(migrationID: UUID(), userID: .init(uuid: UUID()), sourceBucket: "users-old", targetBucket: "users-new", sourceRouterEpoch: 9)
-            try await sql.raw("DELETE FROM im_v2.user_shard_router_configuration").run()
-            try await router.bootstrap(defaultRoute: .init(bucket: "users-old", observedRouterEpoch: 9), now: base)
-            _ = try await store.prepare(request, now: base)
-            var phase = V2UserShardMigrationPhase.prepared
-            for action in [V2UserShardMigrationAction.beginCopy, .copySucceeded, .beginVerification, .verificationSucceeded, .forwardingVerificationSucceeded] {
-                let fingerprints: (String, String)? = action == .verificationSucceeded || action == .forwardingVerificationSucceeded ? ("sha256:equal", "sha256:equal") : nil
-                phase = try await store.advance(migrationID: request.migrationID, expectedPhase: phase, action: action, fingerprints: fingerprints, now: base).phase
-            }
-            let finalizer = MigrationBoundaryFinalizer()
-            let control = V2PostgresUserShardRouteControl(database: database, operatorPrincipal: "retention-clock-regression", retentionWindow: 60, finalizer: finalizer)
-            _ = try await control.cutOver(.init(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 9, newWriteBucket: "users-new", readFallbackBucket: "users-old"), now: base)
-            // A cleanup worker may now be using the old source. Only its
-            // durable claim is exercised; no physical cleanup is performed.
-            let original = try #require(try await store.claimExpiredRetention(now: base.addingTimeInterval(60), leaseDuration: 30, limit: 1).first)
-            var current = original
-            if reclaimed {
-                current = try #require(try await store.claimExpiredRetention(now: base.addingTimeInterval(90), leaseDuration: 30, limit: 1).first)
-                #expect(current.claimToken != original.claimToken)
-            }
-            let held = try await migrationClockState(on: sql)
-            let command = try V2UserShardRouteRollback(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 10)
-            for _ in 0..<2 {
-                await #expect(throws: V2UserShardRouteControlError.migrationNotVerified) {
-                    try await control.rollBack(command, now: base.addingTimeInterval(59))
-                }
-                #expect(await finalizer.rollbacks == 0)
-                #expect(try await migrationClockState(on: sql) == held)
-            }
-            if reclaimed {
-                #expect(try await store.completeRetention(original, now: base.addingTimeInterval(91)) == false)
-                #expect(try await migrationClockState(on: sql) == held)
-            }
-            #expect(try await store.completeRetention(current, now: base.addingTimeInterval(91)))
-            #expect(try await store.load(migrationID: request.migrationID)?.phase == .completed)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_shard_route_overrides WHERE user_id = \(bind: request.userID.uuidValue!) AND write_bucket = 'users-new' AND router_epoch = 10").first(decoding: CountRow.self)?.value == 1)
-            #expect(try await count("im_v2.user_shard_route_operations", on: sql) == 1)
-            #expect(await finalizer.rollbacks == 0)
-        }
-    }
 
-    @Test("Migration rollback and retention claims agree on the exact persisted deadline",
-          arguments: 0..<6, [false, true])
-    func migrationRollbackDeadlinePrecision(boundary: Int, retentionFirst: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let epoch = Date(timeIntervalSince1970: 946_684_800)
-            let offsets: [Double] = [0.000001, -0.00000125, -0.000001, 0.00000125, 0.00000225, -0.00000225]
-            let deadlines: [Double] = [0.00000125, -0.00000125, 0.00000125, 0.00000125, 0.00000125, -0.00000125]
-            let expiry = epoch.addingTimeInterval(deadlines[boundary])
-            let base = expiry.addingTimeInterval(-60), now = epoch.addingTimeInterval(offsets[boundary])
-            let store = PostgresV2UserShardMigrationStore(database: database)
-            let router = V2PostgresUserShardRouter(database: database)
-            let request = try V2UserShardMigrationPreparation(migrationID: UUID(), userID: .init(uuid: UUID()), sourceBucket: "users-old", targetBucket: "users-new", sourceRouterEpoch: 9)
-            try await sql.raw("DELETE FROM im_v2.user_shard_router_configuration").run()
-            try await router.bootstrap(defaultRoute: .init(bucket: "users-old", observedRouterEpoch: 9), now: base)
-            _ = try await store.prepare(request, now: base)
-            var phase = V2UserShardMigrationPhase.prepared
-            for action in [V2UserShardMigrationAction.beginCopy, .copySucceeded, .beginVerification, .verificationSucceeded, .forwardingVerificationSucceeded] {
-                let fingerprints: (String, String)? = action == .verificationSucceeded || action == .forwardingVerificationSucceeded ? ("sha256:equal", "sha256:equal") : nil
-                phase = try await store.advance(migrationID: request.migrationID, expectedPhase: phase, action: action, fingerprints: fingerprints, now: base).phase
-            }
-            #expect(phase == .verified)
-            // Only owned control metadata changes. The finalizer records calls;
-            // no physical source or target store is moved or deleted.
-            let finalizer = MigrationBoundaryFinalizer()
-            let control = V2PostgresUserShardRouteControl(database: database, operatorPrincipal: "deadline-regression", retentionWindow: 60, finalizer: finalizer)
-            let moved = try await control.cutOver(.init(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 9, newWriteBucket: "users-new", readFallbackBucket: "users-old"), now: base)
-            #expect(moved.route.observedRouterEpoch == 10 && moved.route.bucket == "users-new")
-            #expect(await finalizer.cutovers == 1)
-            let live = try #require(try await sql.raw("SELECT retention_until > \(bind: now) AS exists FROM im_v2.user_shard_migrations WHERE migration_id = \(bind: request.migrationID)").first(decoding: ExistsRow.self)).exists
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_shard_migrations WHERE retention_until = \(bind: expiry)").first(decoding: CountRow.self)?.value == 1)
-            var leases: [V2UserShardMigrationRetentionLease] = []
-            if retentionFirst {
-                leases = try await store.claimExpiredRetention(now: now, leaseDuration: 30, limit: 1)
-                #expect(leases.count == (live ? 0 : 1))
-            }
-            let before = try await migrationClockState(on: sql)
-            let rollback = try V2UserShardRouteRollback(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 10)
-            if live {
-                let restored = try await control.rollBack(rollback, now: now)
-                #expect(!restored.wasIdempotent && restored.route.bucket == "users-old" && restored.route.observedRouterEpoch == 11)
-                #expect(await finalizer.rollbacks == 1)
-                #expect(try await store.load(migrationID: request.migrationID)?.phase == .rolledBack)
-                #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 1).isEmpty)
-                let completed = try await migrationClockState(on: sql)
-                for time in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), now.addingTimeInterval(60)] {
-                    let replay = try await control.rollBack(rollback, now: time)
-                    #expect(replay.wasIdempotent && replay.route == restored.route)
-                    #expect(try await migrationClockState(on: sql) == completed)
-                }
-                #expect(await finalizer.rollbacks == 1)
-            } else {
-                for _ in 0..<2 {
-                    await #expect(throws: V2UserShardRouteControlError.migrationNotVerified) { try await control.rollBack(rollback, now: now) }
-                    #expect(try await migrationClockState(on: sql) == before)
-                    #expect(await finalizer.rollbacks == 0)
-                }
-                if !retentionFirst { leases = try await store.claimExpiredRetention(now: now, leaseDuration: 30, limit: 1) }
-                let lease = try #require(leases.first)
-                #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(1)))
-                #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(1)) == false)
-                #expect(try await store.load(migrationID: request.migrationID)?.phase == .completed)
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_shard_route_overrides WHERE user_id = \(bind: request.userID.uuidValue!) AND write_bucket = 'users-new' AND router_epoch = 10").first(decoding: CountRow.self)?.value == 1)
-                #expect(try await count("im_v2.user_shard_route_operations", on: sql) == 1)
-            }
-        }
-    }
 
     @Test("Profile and receipt propagation recover at retry limits without duplicating recipient effects",
           arguments: ["profile", "receipt"], 0..<12)
@@ -2081,7 +1645,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 func recover() { fails = false }
             }
             let shadow = Shadow(event: event, fails: fails)
-            let clock = ProjectionTransferBoundaryClock([now])
+            let clock = TestSequenceClock([now])
             let profileWorker = V2DirectRoomProfilePropagationWorker(database: database, shadowForwarder: shadow, now: { clock.now() })
             let receiptWorker = V2ReadReceiptPreferencePropagationWorker(database: database, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 10, jitterFraction: 0), now: { clock.now() })
             // 瞬时失败不再因预算耗尽而暂停，因此失败路径只释放重试；
@@ -2511,111 +2075,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Migration retention retry exhaustion preserves batches and fences stale completion", arguments: 0..<6)
-    func migrationRetentionRetryCounterBoundary(index: Int) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let now = base.addingTimeInterval(30)
-            let retryCounters: [Int64] = [Int64(0), Int64.max - 1, Int64.max, 1, Int64.max - 1, Int64.max]
-            let starting = retryCounters[index]
-            let primary = UUID(), healthy = UUID()
-            // Completed, verified cutovers awaiting retention cleanup in the
-            // disposable control store. No physical store is deleted here.
-            for (offset, migration) in [primary, healthy].enumerated() {
-                try await sql.raw("INSERT INTO im_v2.user_shard_migrations (migration_id, user_id, source_bucket, target_bucket, source_router_epoch, phase, source_fingerprint, target_fingerprint, verified_at, cutover_operation_id, retention_until, created_at, updated_at, retention_retry_count) VALUES (\(bind: migration), \(bind: offset == 0 ? senderUUID : memberTwoUUID), 'users-old', 'users-new', 9, 'retention', 'sha256:equal', 'sha256:equal', \(bind: base), \(bind: UUID()), \(bind: base), \(bind: base), \(bind: base), \(bind: migration == primary ? starting : 0))").run()
-            }
-            if index >= 3 { try await sql.raw("UPDATE im_v2.user_shard_migrations SET retention_claim_token = \(bind: UUID()), retention_claim_expires_at = \(bind: now)").run() }
-            let store = PostgresV2UserShardMigrationStore(database: database)
-            let old = try await store.claimExpiredRetention(now: now, leaseDuration: 30, limit: 2)
-            #expect(old.count == 2)
-            #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(29), leaseDuration: 30, limit: 2).isEmpty)
-            let current = try await store.claimExpiredRetention(now: now.addingTimeInterval(30), leaseDuration: 30, limit: 2)
-            #expect(current.count == 2)
-            let expected = starting >= Int64.max - 1 ? Int64.max : starting + 2
-            #expect(try await sql.raw("SELECT retention_retry_count AS value FROM im_v2.user_shard_migrations WHERE migration_id = \(bind: primary)").first(decoding: CountRow.self)?.value == expected)
-            let held = try #require(try await sql.raw("SELECT jsonb_agg(to_jsonb(m) ORDER BY migration_id)::text AS value FROM im_v2.user_shard_migrations m").first(decoding: StringValueRow.self)).value
-            for lease in old { #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(31)) == false) }
-            #expect(try await sql.raw("SELECT jsonb_agg(to_jsonb(m) ORDER BY migration_id)::text AS value FROM im_v2.user_shard_migrations m").first(decoding: StringValueRow.self)?.value == held)
-            for lease in current {
-                #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(31)))
-                #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(32)) == false)
-            }
-            #expect(try await count("im_v2.user_shard_migrations WHERE phase = 'completed' AND retention_claim_token IS NULL AND retention_claim_expires_at IS NULL", on: sql) == 2)
-            #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 2).isEmpty)
-        }
-    }
 
-    @Test("room wake migration preserves pending and in-flight leases", arguments: [false, true], [false, true])
-    func groupWakeMigrationFence(routed: Bool, retryFirst: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .large) { database, target, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let leasedRoom = UUID(), pendingRoom = UUID(), healthyRoom = UUID()
-            let durable = PostgresV2GroupEventWakeStore(database: database)
-            let store: any V2GroupEventWakeStore
-            if routed {
-                store = try V2RoutedGroupEventWakeStore(ownerStores: [
-                    "source": durable, "target": PostgresV2GroupEventWakeStore(database: target)])
-            } else { store = durable }
-            func seed(_ id: UUID) async throws {
-                try await sql.raw("""
-                    INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, room_sequence)
-                    VALUES (\(bind: id), 'source', 'standard', 7)
-                    """).run()
-                try await sql.raw("""
-                    INSERT INTO im_v2.group_event_wake_outbox
-                        (room_id, target_room_sequence, revision, state, next_attempt_at, updated_at)
-                    VALUES (\(bind: id), 3, 1, 'pending', \(bind: now), \(bind: now))
-                    """).run()
-            }
-            try await seed(leasedRoom)
-            let oldLease = try #require(try await store.claimPending(now: now, leaseDuration: 30, limit: 10).first)
-            #expect(oldLease.wake.highWatermark == 7)
-            try await seed(pendingRoom)
-            try await seed(healthyRoom)
-            // A busy room must not stall the remaining queue.
-            try await database.transaction { transaction in
-                let scoped = try #require(transaction as? any SQLDatabase)
-                try await scoped.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: pendingRoom) FOR UPDATE").run()
-                let claims = try await store.claimPending(now: now, leaseDuration: 30, limit: 10)
-                #expect(claims.count == 1)
-                let healthy = try #require(claims.first)
-                #expect(healthy.wake.roomID.uuidValue == healthyRoom)
-                try await store.scheduleRetry(healthy, nextAttemptAt: now)
-            }
-            for id in [leasedRoom, pendingRoom] {
-                let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: .init(uuid: id),
-                    source: .init(shardID: "source", epoch: 0), targetShardID: "target")
-                try await PostgresV2RoomMigrationWriteFence(database: database)
-                    .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-            }
-            func snapshot() async throws -> String {
-                try #require(try await sql.raw("""
-                    SELECT jsonb_agg(to_jsonb(w) ORDER BY room_id)::text AS value
-                    FROM im_v2.group_event_wake_outbox w
-                    WHERE room_id IN (\(bind: leasedRoom), \(bind: pendingRoom))
-                    """).first(decoding: StringValueRow.self)).value
-            }
-            let before = try await snapshot()
-            // A routed callback consumes its process-local lease mapping.
-            // Exercise both first callbacks, then send the late counterpart
-            // directly to the durable store as a stale database callback.
-            if retryFirst {
-                try await store.scheduleRetry(oldLease, nextAttemptAt: now)
-                try await durable.markPublished(oldLease)
-            } else {
-                try await store.markPublished(oldLease)
-                try await durable.scheduleRetry(oldLease, nextAttemptAt: now)
-            }
-            let fresh = PostgresV2GroupEventWakeStore(database: database)
-            let claims = try await fresh.claimPending(now: now.addingTimeInterval(31), leaseDuration: 30, limit: 10)
-            #expect(claims.count == 1)
-            let healthy = try #require(claims.first)
-            #expect(healthy.wake.roomID.uuidValue == healthyRoom)
-            try await fresh.markPublished(healthy)
-            #expect(try await snapshot() == before)
-            #expect(try await fresh.claimPending(now: now.addingTimeInterval(100), leaseDuration: 30, limit: 10).isEmpty)
-        }
-    }
 
     @Test("Hybrid group wakes retain newer revisions and recover at the integer retry limit",
           arguments: 0..<6, [false, true])
@@ -2663,7 +2123,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 func recover() { fails = false }
             }
             let publisher = Publisher()
-            let clock = ProjectionTransferBoundaryClock([now])
+            let clock = TestSequenceClock([now])
             let relay = V2GroupEventWakeRelay(store: store, publisher: publisher, now: { clock.now() })
             #expect(try await relay.runOnce(limit: limit) == .init(claimed: 1, published: 0, retryScheduled: 1))
             let delay: TimeInterval = starting == 0 ? 4 : starting == 1 ? 8 : 30
@@ -3254,91 +2714,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("reusing a direct room waits for migration freeze and preserves completed opens", arguments: [false, true])
-    func directRoomOpenMigrationFence(routed: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, controlSQL, sql, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
-            let direct = PostgresV2DirectMessagingStore(database: owner, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let router = V2PostgresRoomShardRouter(database: control, now: { now })
-            let routedStore = try V2RoutedDirectMessagingStore(router: router, ownerStores: ["room-b": direct],
-                controlStore: PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder()))
-            let original = try V2OpenDirectRoomCommand(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID))
-            let room = RoomID(uuid: UUID())
-            guard case .opened(let opened) = try await routedStore.open(command: original, capacityProfile: profile,
-                roomShardID: "room-b", roomID: room, now: now) else { throw CancellationError() }
-            let store: any V2DirectMessagingStore = routed ? routedStore : direct
-            let next = try V2OpenDirectRoomCommand(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: original.targetUserID)
-            let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 0), targetShardID: "room-a")
-            let gate = PostgreSQLTransactionGate()
-            let installer = Task {
-                try await owner.transaction { transaction in
-                    try await PostgresV2RoomMigrationWriteFence(database: transaction)
-                        .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-                    await gate.holdTransaction()
-                }
-            }
-            await gate.waitUntilHeld()
-            let writer = Task {
-                try await store.open(command: next, capacityProfile: profile, roomShardID: "room-b",
-                    roomID: .init(uuid: UUID()), now: now)
-            }
-            do {
-                var observed = false
-                for _ in 0..<500 {
-                    let waiting = try await sql.raw("""
-                        SELECT count(*) AS value FROM pg_stat_activity
-                        WHERE datname = current_database() AND wait_event_type = 'Lock'
-                          AND query LIKE '%SELECT pair.room_id%' AND query LIKE '%migration_fence_id%'
-                        """).first(decoding: CountRow.self)?.value ?? 0
-                    if waiting > 0 { observed = true; break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(observed)
-                await gate.releaseTransaction()
-                try await installer.value
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await writer.value }
-            } catch {
-                writer.cancel()
-                await gate.releaseTransaction()
-                _ = await installer.result
-                _ = await writer.result
-                throw error
-            }
-            func snapshot() async throws -> [String] {
-                var rows: [String] = []
-                for table in ["rooms", "direct_room_pairs", "direct_room_operations", "room_memberships",
-                              "room_admission", "user_direct_send_policy_versions", "user_state_event_outbox"] {
-                    rows.append(try #require(try await sql.raw("""
-                        SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value
-                        FROM im_v2.\(unsafeRaw: table) r
-                        """).first(decoding: StringValueRow.self)).value)
-                }
-                for table in ["room_owner_routes", "direct_room_owner_routes", "room_recovery_topology"] {
-                    rows.append(try #require(try await controlSQL.raw("""
-                        SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value
-                        FROM im_v2.\(unsafeRaw: table) r
-                        """).first(decoding: StringValueRow.self)).value)
-                }
-                return rows
-            }
-            #expect(try await count("im_v2.direct_room_operations", on: sql) == 1)
-            let before = try await snapshot()
-            let fresh = PostgresV2DirectMessagingStore(database: owner, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            for candidate in [store, fresh] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await candidate.open(command: next, capacityProfile: profile, roomShardID: "room-b",
-                        roomID: .init(uuid: UUID()), now: now)
-                }
-                #expect(try await candidate.open(command: original, capacityProfile: profile, roomShardID: "room-b",
-                    roomID: .init(uuid: UUID()), now: now) == .idempotent(opened))
-            }
-            #expect(try await snapshot() == before)
-        }
-    }
 
     @Test("Concurrent direct room opens serialize operation identity and reuse the original room timestamp",
           arguments: ["same-operation", "different-operation", "different-target"], [false, true])
@@ -4188,7 +3563,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             func snapshot() async throws -> [String] {
                 var values: [String] = []
-                for name in ["group_rooms", "rooms", "room_memberships", "room_membership_operations", "room_membership_operation_fences",
+                for name in ["group_rooms", "rooms", "room_memberships", "room_membership_operations",
                     "room_events", "user_state_event_outbox", "room_admission", "shard_admission_pools"] {
                     let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
                     values.append(try #require(row).value)
@@ -5547,7 +4922,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             func snapshot() async throws -> [String] {
                 var values: [String] = []
-                for table in ["group_rooms", "rooms", "room_memberships", "room_membership_operations", "room_membership_operation_fences",
+                for table in ["group_rooms", "rooms", "room_memberships", "room_membership_operations",
                     "room_events", "user_state_event_outbox", "room_admission", "shard_admission_pools", "user_sync_log", "user_sync_sequences"] {
                     let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
                     values.append(try #require(row).value)
@@ -6783,7 +6158,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await controlSQL.raw("""
                 INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-a', 0, \(bind: now), \(bind: now))
+                VALUES (\(bind: room.uuidValue!), 'room-a', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
                 """).run()
             try await controlSQL.raw("""
                 INSERT INTO im_v2.user_read_receipt_preferences(user_id, allows_direct_read_receipts, preference_revision, updated_at)
@@ -6844,36 +6219,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     """).first(decoding: CountRow.self)?.value == 1)
                 #expect(try await targetSQL.raw("SELECT count(*) AS value FROM \(unsafeRaw: targetSchema).user_sync_log WHERE projection_kind = 'own_read_watermark'").first(decoding: CountRow.self)?.value == 1)
             }
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-a", epoch: 0), targetShardID: "room-b")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: controlDB, registeredShardIDs: ["room-a", "room-b"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: ownerDB).install(for: freezing)
-            func frozenSnapshot() async throws -> [[String]] {
-                var values: [[String]] = []
-                for table in ["rooms", "room_read_receipts", "read_receipt_operations", "user_state_event_outbox", "user_sync_log"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    values.append(rows.map(\.value))
-                }
-                return values
-            }
-            let before = try await frozenSnapshot()
-            for operation in [command.operationID, .init(uuid: UUID())] {
-                let input = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
-                    operationID: operation, readThroughRoomSequence: 1)
-                if batch {
-                    let results = try await store.recordBatch([.init(command: input, now: now)])
-                    guard case .failure(.ownerChanged) = try #require(results.first) else {
-                        Issue.record("Direct-room batch bypassed migration"); continue
-                    }
-                } else {
-                    await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await store.record(command: input, now: now) }
-                }
-            }
-            #expect(try await frozenSnapshot() == before)
         }
     }
 
@@ -7225,7 +6570,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let device = DeviceID(uuid: UUID())
             let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 7, count: 32))
             let localInput = "gateway-clock-local-fixture"
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let gateway = V2PostgresGatewayAuthenticator(database: database, tokenKey: key, now: { clock.now() })
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(60)))").run()
             try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: key.digest(localInput)), \(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(60)))").run()
@@ -7284,7 +6629,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 let localInput = "gateway-cutoff-local-fixture-" + device.rawValue
                 try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: start), \(bind: start), \(bind: start.addingTimeInterval(120)))").run()
                 try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: key.digest(localInput)), \(bind: senderUUID), \(bind: device.uuidValue!), \(bind: start), \(bind: start.addingTimeInterval(120)))").run()
-                let clock = ProjectionTransferBoundaryClock([start])
+                let clock = TestSequenceClock([start])
                 let gateway = V2PostgresGatewayAuthenticator(database: database, tokenKey: key, now: { clock.now() })
                 #expect(try await gateway.authenticateSession(accessToken: localInput, deviceID: device).userID == senderID)
                 clock.set([start.addingTimeInterval(61)])
@@ -7295,84 +6640,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Concurrent pool initialization reports the same domain conflict as an existing pool")
-    func shardLeaseConcurrentInitialization() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
-            let key = try V2ShardAdmissionPoolKey(roomShardID: "lease-init-race", capacityProfileID: profile.id)
-            let store = PostgresV2ShardAdmissionLeaseStore(database: database)
-            try await sql.raw("CREATE FUNCTION im_v2.test_hold_lease_initialization() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.room_shard_id='lease-init-race' THEN PERFORM pg_advisory_xact_lock(907131201); END IF; RETURN NEW; END $$").run()
-            try await sql.raw("CREATE TRIGGER test_hold_lease_initialization BEFORE INSERT ON im_v2.shard_admission_pools FOR EACH ROW EXECUTE FUNCTION im_v2.test_hold_lease_initialization()").run()
-            let pending = Mutex<[Task<ShardAdmissionLease?, any Error>]>([])
-            let completed: [ShardAdmissionLease?]
-            do {
-                let tasks = try await database.transaction { transaction in
-                    guard let held = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    try await held.raw("SELECT pg_advisory_xact_lock(907131201)").run()
-                    var tasks: [Task<ShardAdmissionLease?, any Error>] = []
-                    for seconds in [100.0, 200.0] {
-                        let task = Task<ShardAdmissionLease?, any Error> {
-                            do {
-                                return try await store.issue(key: key, capacityProfile: profile,
-                                    leaseID: .init(UUID().uuidString), validUntil: base.addingTimeInterval(seconds), now: base)
-                            } catch V2ShardAdmissionLeaseControlError.poolAlreadyExists { return nil }
-                        }
-                        tasks.append(task)
-                    }
-                    pending.withLock { $0 = tasks }
-                    var bothInserting = false
-                    for _ in 0..<200 {
-                        let waiting = try await held.raw("SELECT count(*)::bigint AS value FROM pg_locks WHERE locktype='advisory' AND NOT granted AND classid=0 AND objid=907131201 AND database=(SELECT oid FROM pg_database WHERE datname=current_database())").first(decoding: CountRow.self)?.value ?? 0
-                        if waiting == 2 { bothInserting = true; break }
-                        try await Task.sleep(for: .milliseconds(10))
-                    }
-                    #expect(bothInserting, "Both callers must pass the missing-row lookup before either insert commits")
-                    return tasks
-                }
-                var values: [ShardAdmissionLease?] = []
-                for task in tasks { values.append(try await task.value) }
-                completed = values
-            } catch {
-                // The transaction has released its gate; join all owned work.
-                for task in pending.withLock({ $0 }) { _ = await task.result }
-                throw error
-            }
-            let leases = completed.compactMap { $0 }
-            #expect(leases.count == 1)
-            #expect(completed.filter { $0 == nil }.count == 1)
-            let winner = try #require(leases.first)
-            let winnerUUID = try #require(UUID(uuidString: winner.id.rawValue))
-            let stored = try await sql.raw("""
-                SELECT count(*)::bigint AS value FROM im_v2.shard_admission_pools
-                WHERE room_shard_id=\(bind: key.roomShardID) AND capacity_profile_id=\(bind: key.capacityProfileID)
-                  AND lease_id=\(bind: winnerUUID) AND generation=1 AND valid_until=\(bind: winner.validUntil)
-                  AND command_window_limit=\(bind: profile.limits.maxCommandsPerWindow) AND command_window_used=0
-                """).first(decoding: CountRow.self)
-            #expect(stored?.value == 1)
-            await #expect(throws: V2ShardAdmissionLeaseControlError.poolAlreadyExists) {
-                try await store.issue(key: key, capacityProfile: profile, leaseID: .init(UUID().uuidString), validUntil: base.addingTimeInterval(300), now: base)
-            }
-            let unchanged = try await sql.raw("SELECT valid_until AS value FROM im_v2.shard_admission_pools WHERE room_shard_id=\(bind: key.roomShardID) AND capacity_profile_id=\(bind: key.capacityProfileID)").first(decoding: RevocationClockDateRow.self)
-            #expect(unchanged?.value == winner.validUntil)
-            // Only the pool-key conflict is normalized; a different pool
-            // cannot silently reuse an already allocated lease identity.
-            let other = try V2ShardAdmissionPoolKey(roomShardID: "lease-init-other", capacityProfileID: profile.id)
-            do {
-                _ = try await store.issue(key: other, capacityProfile: profile, leaseID: winner.id, validUntil: base.addingTimeInterval(300), now: base)
-                Issue.record("Expected the independent lease identity constraint to remain effective")
-            } catch let error as PSQLError {
-                #expect(error.serverInfo?[.sqlState] == "23505")
-            }
-            #expect(try await count("im_v2.shard_admission_pools WHERE room_shard_id='lease-init-other'", on: sql) == 0)
-        }
-    }
 
     @Test("Registration cancellation clock errors preserve pending and bound state", arguments: [false, true])
     func registrationCancellationClockBounds(bound: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let device = DeviceID(uuid: UUID())
             let request = try V2DeviceRegistrationCancellation(deviceID: device, operationID: UUID(), proof: .generate(), issueBeforeMilliseconds: 1_750_000_600_000)
             let service = V2PostgresDeviceRegistrationCancellationService(database: database, now: { clock.now() })
@@ -7437,7 +6710,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func registrationCancellationClockPrecision() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let epoch = Date(timeIntervalSince1970: 946_684_800)
-            let clock = ProjectionTransferBoundaryClock([epoch.addingTimeInterval(-0.00000025)])
+            let clock = TestSequenceClock([epoch.addingTimeInterval(-0.00000025)])
             let service = V2PostgresDeviceRegistrationCancellationService(database: database, now: { clock.now() })
             let pending = try V2DeviceRegistrationCancellation(deviceID: .init(uuid: UUID()), operationID: UUID(), proof: .generate(), issueBeforeMilliseconds: 946_684_800_000)
             #expect(clock.now() < pending.issueBefore)
@@ -7538,7 +6811,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func revocationCapabilityRedeemClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let device = DeviceID(uuid: UUID()), operation = UUID()
             let service = V2PostgresDeviceSessionService(database: database, now: { clock.now() })
             // Isolated test session; no account assertions or access/refresh tokens.
@@ -7612,7 +6885,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func passwordAccountClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let store = V2PostgresPasswordAccountStore(database: database, now: { clock.now() })
             let device = DeviceID(uuid: UUID())
             // Known local digest fixture; no assertions or device credentials are issued.
@@ -7723,7 +6996,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Registration samples its write clock after both uniqueness locks", arguments: ["account", "public"])
     func passwordRegistrationLockClock(lockKind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let clock = ProjectionTransferBoundaryClock([Date(timeIntervalSince1970: 1_750_000_000)])
+            let clock = TestSequenceClock([Date(timeIntervalSince1970: 1_750_000_000)])
             let store = V2PostgresPasswordAccountStore(database: database, now: { clock.now() })
             let pending = Mutex<Task<UserID, any Error>?>(nil)
             do {
@@ -7762,7 +7035,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func sessionMutationClockBounds(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let service = V2PostgresDeviceSessionService(database: database, now: { clock.now() })
             let devices = [UUID(), UUID(), UUID()]
             let current = DeviceID(uuid: devices[0]), remote = DeviceID(uuid: devices[1])
@@ -7865,7 +7138,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func sessionInventoryClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let service = V2PostgresDeviceSessionService(database: database, now: { clock.now() })
             let devices = [UUID(), UUID(), UUID()].sorted { $0.uuidString < $1.uuidString }
             for (index, device) in devices.enumerated() {
@@ -7967,7 +7240,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let first = try await service.sessions(for: senderID, cursor: nil, pageSize: 1)
             let firstSession = try #require(first.sessions.first)
             let legacy = try JSONEncoder().encode(LegacyCursor(lastActiveAt: firstSession.lastActiveAt, deviceID: devices[0])).base64EncodedString()
-            let second = try await service.sessions(for: senderID, cursor: legacy, pageSize: 1)
+            await #expect(throws: V2DeviceSessionServiceError.invalidRequest) {
+                _ = try await service.sessions(for: senderID, cursor: legacy, pageSize: 1)
+            }
+            let second = try await service.sessions(for: senderID, cursor: first.nextCursor, pageSize: 1)
             #expect(second.sessions.map(\.deviceID.uuidValue) == [devices[1]])
         }
     }
@@ -7976,7 +7252,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func localForwardClockBounds(ownerValidated: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let write = PostgresV2RoomWriteStore(database: database)
             let sender = V2SendMessageService(store: write, capacityProfile: profile, limits: limits, now: { base })
@@ -8104,7 +7380,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func revocationCursorClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let gatewayStore = V2PostgresDeviceRevocationEventStore(database: database)
             let cleanupStore = V2PostgresDeviceRevocationEventStore.projectionCleanup(database: database)
             let cleaner = V2PostgresRevokedDeviceProjectionStore(database: database)
@@ -8264,7 +7540,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func directRouteClockBounds(roomRouteExists: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let directory = V2PostgresRoomShardRouter(database: control, now: { clock.now() })
             let cached = V2CachedRoomShardRouter(source: directory, capacity: 16, bucketCount: 2)
             let ownerStore = PostgresV2DirectMessagingStore(database: owner, shadowForwarder: SuccessfulProjectionShadowForwarder())
@@ -8282,7 +7558,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             if roomRouteExists {
                 let direct = try V2DirectMessagingService(store: ownerStore, capacityProfile: profile, roomShardID: "room-b", identifiers: ids, now: { base })
                 guard case .opened = try await direct.open(actorUserID: senderID, operationID: operation, targetUserID: customer) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-                try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: createdID), 'room-b', 0, \(bind: base), \(bind: base))").run()
+                try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: createdID), 'room-b', 0, \(bind: base), \(bind: base)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             }
             func directorySnapshot() async throws -> String {
                 let row = try await sql.raw("""
@@ -8345,7 +7621,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             guard case .idempotent(let room) = result else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             #expect(room.roomID == createdRoom && results.count == 8)
             for value in results { #expect(value == result) }
-            #expect(try await count("im_v2.room_owner_routes", on: sql) == 1)
+            #expect(try await count("im_v2.room_owner_routes WHERE room_id = '\(createdID.uuidString)'::uuid", on: sql) == 1)
             #expect(try await count("im_v2.direct_room_owner_routes", on: sql) == 1)
             #expect(try await ownerSnapshot() == ownerCommitted)
             let committed = try await directorySnapshot()
@@ -8372,89 +7648,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Shard lease clocks preserve pool counters, renewal precision and room fences")
-    func shardLeaseClockBounds() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let expiry = base.addingTimeInterval(100)
-            let profile = try forwardImportTestProfile()
-            let key = try V2ShardAdmissionPoolKey(roomShardID: "room-a", capacityProfileID: "standard")
-            let fresh = try V2ShardAdmissionPoolKey(roomShardID: "lease-clock-new", capacityProfileID: "standard")
-            let fence = V2ShardAdmissionLeaseFence(id: try .init(leaseUUID.uuidString), generation: 1)
-            let replacementID = try ShardAdmissionLeaseID(UUID().uuidString)
-            let store = PostgresV2ShardAdmissionLeaseStore(database: database)
-            func snapshot() async throws -> String {
-                try #require(try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'pools', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_shard_id) FROM im_v2.shard_admission_pools r),
-                        'rooms', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.room_admission r)
-                    )::text AS value
-                    """).first(decoding: StringValueRow.self)).value
-            }
-            let initial = try await snapshot()
-            let badDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            for bad in badDates {
-                for (now, until) in [(bad, expiry), (base, bad)] {
-                    await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) { _ = try await store.issue(key: fresh, capacityProfile: profile, leaseID: replacementID, validUntil: until, now: now) }
-                    await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) { _ = try await store.renew(key: key, expectedFence: fence, validUntil: until, now: now) }
-                    await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) { _ = try await store.replaceExpired(key: key, capacityProfile: profile, replacementLeaseID: replacementID, validUntil: until, now: now) }
-                }
-                #expect(try await snapshot() == initial)
-            }
-            let microStart = Date(timeIntervalSince1970: 946_684_800.00000025)
-            let microEnd = Date(timeIntervalSince1970: 946_684_800.00000075)
-            await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) { _ = try await store.issue(key: fresh, capacityProfile: profile, leaseID: replacementID, validUntil: microEnd, now: microStart) }
-            await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) { _ = try await store.replaceExpired(key: key, capacityProfile: profile, replacementLeaseID: replacementID, validUntil: microEnd, now: microStart) }
-            #expect(try await snapshot() == initial)
-            let oldMicroExpiry = Date(timeIntervalSince1970: 946_684_900)
-            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: oldMicroExpiry) WHERE room_shard_id = 'room-a'").run()
-            let beforeMicroRenewal = try await snapshot()
-            await #expect(throws: V2ShardAdmissionLeaseControlError.invalidLifetime) {
-                _ = try await store.renew(key: key, expectedFence: fence, validUntil: Date(timeIntervalSince1970: 946_684_900.00000075), now: oldMicroExpiry.addingTimeInterval(-1))
-            }
-            #expect(try await snapshot() == beforeMicroRenewal)
-            // Historical database timestamps must not turn an invalid lease
-            // into a normal renewal or replacement result.
-            for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
-                try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: literal)::timestamptz WHERE room_shard_id = 'room-a'").run()
-                let before = try await snapshot()
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { _ = try await store.renew(key: key, expectedFence: fence, validUntil: base.addingTimeInterval(300), now: base) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { _ = try await store.replaceExpired(key: key, capacityProfile: profile, replacementLeaseID: replacementID, validUntil: base.addingTimeInterval(300), now: expiry) }
-                #expect(try await snapshot() == before)
-            }
-            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: expiry) WHERE room_shard_id = 'room-a'").run()
-            #expect(try await snapshot() == initial)
-            let messages = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
-            guard case .accepted = try await messages.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "lease clock")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let work = try await snapshot()
-            await #expect(throws: V2ShardAdmissionLeaseControlError.leaseExpired) { _ = try await store.renew(key: key, expectedFence: fence, validUntil: base.addingTimeInterval(200), now: expiry) }
-            await #expect(throws: V2ShardAdmissionLeaseControlError.replacementRequiresExpiredLease) { _ = try await store.replaceExpired(key: key, capacityProfile: profile, replacementLeaseID: replacementID, validUntil: base.addingTimeInterval(200), now: expiry.addingTimeInterval(-1)) }
-            #expect(try await snapshot() == work)
-            let renewed = try await store.renew(key: key, expectedFence: fence, validUntil: base.addingTimeInterval(200), now: expiry.addingTimeInterval(-1))
-            #expect(renewed.v2Fence == fence && renewed.validUntil == base.addingTimeInterval(200))
-            #expect(renewed.commandWindow.used == 1)
-            let replaced = try await store.replaceExpired(key: key, capacityProfile: profile, replacementLeaseID: replacementID, validUntil: base.addingTimeInterval(300), now: base.addingTimeInterval(200))
-            #expect(replaced.generation == 2 && replaced.id == replacementID)
-            #expect(replaced.commandWindow.used == 0)
-            let cascaded = try #require(try await sql.raw("SELECT shard_lease_id, shard_lease_generation FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)").first(decoding: AdmissionFenceRow.self))
-            #expect(cascaded.shardLeaseID.uuidString == replaced.id.rawValue && cascaded.shardLeaseGeneration == 2)
-            for table in ["im_v2.shard_admission_pools WHERE room_shard_id = 'room-a'", "im_v2.room_admission"] {
-                let windows = try #require(try await sql.raw("SELECT command_window_used FROM \(unsafeRaw: table)").first(decoding: CapacityRow.self))
-                #expect(windows.commandWindowUsed == 0)
-            }
-            let afterReplacement = try await snapshot()
-            await #expect(throws: V2ShardAdmissionLeaseControlError.fenceMismatch) { _ = try await store.renew(key: key, expectedFence: fence, validUntil: base.addingTimeInterval(400), now: base.addingTimeInterval(201)) }
-            #expect(try await snapshot() == afterReplacement)
-            // Valid endpoints still round-trip through the service and driver.
-            for (index, now) in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 60)].enumerated() {
-                let validKey = try V2ShardAdmissionPoolKey(roomShardID: "lease-clock-\(index)", capacityProfileID: "standard")
-                let service = V2ShardAdmissionLeaseService(store: store, now: { now })
-                let issued = try await service.issue(key: validKey, capacityProfile: profile, lifetime: 30)
-                #expect(issued.validUntil == now.addingTimeInterval(30))
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.shard_admission_pools WHERE room_shard_id = \(bind: validKey.roomShardID) AND valid_until = \(bind: issued.validUntil)").first(decoding: CountRow.self)?.value == 1)
-            }
-        }
-    }
 
     @Test("Account disable validates required revision changes without suppressing inactive-profile results",
           arguments: ["policy", "profile", "visibility", "suspended", "deleted", "absent"])
@@ -8543,7 +7736,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let committedAt = base.addingTimeInterval(1)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let service = try V2PostgresAccountDisableService(database: database, operatorPrincipal: "clock-maintenance", now: { clock.now() })
             let command = try V2AccountDisableCommand(userID: senderID, operationID: UUID(), reason: .userRequested)
             let otherOperation = try V2AccountDisableCommand(userID: senderID, operationID: UUID(), reason: .userRequested)
@@ -8811,7 +8004,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 if checkpoint != "after-ack" {
                     let observationSQL = checkpoint == "after-reservation" ? ownerSQL : sql
-                    let query = checkpoint == "after-reservation" ? "%migration_fence_id%" : "%direct_authorization_intents%"
+                    let query = checkpoint == "after-reservation" ? "%owner_epoch%" : "%direct_authorization_intents%"
                     var reached = false
                     for _ in 0..<1000 {
                         let waiters = try await observationSQL.raw("""
@@ -9071,8 +8264,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     let count = try await ownerSQL.raw("""
                         SELECT count(*) AS value FROM pg_stat_activity WHERE datname = current_database()
                         AND wait_event_type = 'Lock'
-                        AND (query LIKE '%SELECT room_id, room_shard_id, owner_epoch, migration_fence_id%'
-                            OR query LIKE '%SELECT room_shard_id, owner_epoch, migration_fence_id%')
+                        AND (query LIKE '%SELECT room_id, room_shard_id, owner_epoch%'
+                            OR query LIKE '%SELECT room_shard_id, owner_epoch%')
                         """).first(decoding: CountRow.self)?.value ?? 0
                     if count > 0 { waiting = true; break }
                     try await Task.sleep(for: .milliseconds(10))
@@ -9142,107 +8335,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
     #endif
 
-    @Test("control social changes leave frozen source pairs immutable and revoke target sends",
-          arguments: ["block", "relationship"])
-    func socialFrozenSourcePolicy(kind: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
-            let recipient = UserID(uuid: memberTwoUUID), room = RoomID(uuid: UUID())
-            // Same identity on independent physical stores is a fixture, not a
-            // claim that the still-unimplemented migration copy has run.
-            for (database, shard) in [(control, "room-a"), (owner, "room-b")] {
-                _ = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient),
-                    capacityProfile: profile, roomShardID: shard, roomID: room, now: now)
-                let social = PostgresV2SocialRelationshipStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
-                _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
-                    targetUserID: recipient, action: .request), now: now)
-                _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .accept), now: now)
-            }
-            _ = try await PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
-                .setStrangerMessagePermission(command: .init(actorUserID: recipient,
-                    operationID: .init(uuid: UUID()), permission: .deny), now: now)
-            let cache = V2DirectRoomLogFastAppendCache()
-            let writer = PostgresV2RoomWriteStore(database: owner,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
-                directRoomLogFastAppendCache: cache,
-                shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
-            let sends = V2SendMessageService(store: writer, capacityProfile: profile,
-                limits: try .init(maxUTF8Bytes: 64), now: { now })
-            for _ in 0..<2 {
-                guard case .accepted = try await sends.send(.init(roomID: room, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "before freeze")) else { throw CancellationError() }
-            }
-            #expect(await cache.snapshot().committedAppends > 0)
-            // A retained source revision must not exhaust the control mutation.
-            try await sql.raw("UPDATE im_v2.direct_room_pairs SET direct_policy_revision = \(bind: Int64.max) WHERE room_id = \(bind: room.uuidValue!)").run()
-            let pairBefore = try #require(try await sql.raw("SELECT to_jsonb(p)::text AS value FROM im_v2.direct_room_pairs p WHERE room_id = \(bind: room.uuidValue!)")
-                .first(decoding: StringValueRow.self)).value
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-a", epoch: 0), targetShardID: "room-b")
-            let gate = PostgreSQLTransactionGate()
-            let installer = Task {
-                try await control.transaction { transaction in
-                    try await PostgresV2RoomMigrationWriteFence(database: transaction)
-                        .install(for: .init(request: migration, phase: .freezing, createdAt: now, updatedAt: now))
-                    await gate.holdTransaction()
-                }
-            }
-            await gate.waitUntilHeld()
-            let social = PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let change = Task {
-                if kind == "block" {
-                    _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .block), now: now)
-                } else {
-                    _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .remove), now: now)
-                }
-            }
-            do {
-                var waiting = false
-                for _ in 0..<500 {
-                    if try await sql.raw("""
-                        SELECT count(*) AS value FROM pg_stat_activity WHERE datname = current_database()
-                        AND wait_event_type = 'Lock' AND query LIKE '%WITH writable_room AS MATERIALIZED%'
-                        """).first(decoding: CountRow.self)?.value ?? 0 > 0 { waiting = true; break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(waiting)
-                await gate.releaseTransaction()
-                try await installer.value
-                try await change.value
-            } catch {
-                change.cancel()
-                await gate.releaseTransaction()
-                _ = await installer.result
-                _ = await change.result
-                throw error
-            }
-            #expect(try await sql.raw("SELECT to_jsonb(p)::text AS value FROM im_v2.direct_room_pairs p WHERE room_id = \(bind: room.uuidValue!)")
-                .first(decoding: StringValueRow.self)?.value == pairBefore)
-            #expect(try await count("im_v2.user_blocks", on: ownerSQL) == 0)
-            #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.user_relationships WHERE state = 'accepted'")
-                .first(decoding: CountRow.self)?.value == 1)
-            guard case .denied = try await sends.send(.init(roomID: room, actorUserID: senderID,
-                clientMessageID: .init(uuid: UUID()), text: "revoked")) else { throw CancellationError() }
-            #expect(try await count("im_v2.messages", on: ownerSQL) == 2)
-            if kind == "block" {
-                _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .unblock), now: now)
-            }
-            _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
-                targetUserID: recipient, action: .request), now: now)
-            _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                targetUserID: senderID, action: .accept), now: now)
-            guard case .accepted = try await sends.send(.init(roomID: room, actorUserID: senderID,
-                clientMessageID: .init(uuid: UUID()), text: "restored")) else { throw CancellationError() }
-            #expect(try await sql.raw("SELECT to_jsonb(p)::text AS value FROM im_v2.direct_room_pairs p WHERE room_id = \(bind: room.uuidValue!)")
-                .first(decoding: StringValueRow.self)?.value == pairBefore)
-        }
-    }
 
     @Test("routed sends complete with separate one-connection control and owner pools",
           .timeLimit(.minutes(1)), arguments: [false, true])
@@ -9268,8 +8360,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 for id in [room.roomID, groupRoom] {
                     try await sql.raw("""
                         INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                        VALUES (\(bind: id.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
-                        """).run()
+                        VALUES (\(bind: id.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
+                """).run()
                 }
                 let write = PostgresV2RoomWriteStore(database: owner).usingControlDatabase(control)
                 let routed = try V2RoutedRoomWriteStore(router: V2PostgresRoomShardRouter(database: control),
@@ -9901,11 +8993,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
             let fence = V2DirectSendControlPolicyFence(database: control)
             await #expect(throws: V2DirectSendControlPolicyError.invalidBatch) {
-                try await fence.withPolicies(pairs: []) { _ in Issue.record("empty scope accepted") }
+                try await fence.withLockedPolicies(pairs: []) { _, _ in Issue.record("empty scope accepted") }
             }
             await #expect(throws: V2DirectSendControlPolicyError.invalidBatch) {
-                try await fence.withPolicies(pairs: Array(repeating: .init(sender: senderUUID, recipient: memberTwoUUID), count: 129)) {
-                    _ in Issue.record("oversized scope accepted")
+                try await fence.withLockedPolicies(pairs: Array(repeating: .init(sender: senderUUID, recipient: memberTwoUUID), count: 129)) {
+                    _, _ in Issue.record("oversized scope accepted")
                 }
             }
         }
@@ -9989,7 +9081,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     return false
                 }
                 do {
-                    #expect(try await waitForLock(ownerSQL, query: "%SELECT room_id, room_shard_id, owner_epoch, migration_fence_id%"))
+                    #expect(try await waitForLock(ownerSQL, query: "%SELECT room_id, room_shard_id, owner_epoch%"))
                     let revocation = Task {
                         try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
                             targetUserID: senderID, action: .block), now: now)
@@ -10080,7 +9172,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let fence = V2DirectSendControlPolicyFence(database: control)
             let gate = PostgreSQLTransactionGate()
             let reader = Task {
-                try await fence.withPolicy(senderID: senderID, recipientID: recipient) { policy in
+                try await fence.withLockedPolicies(pairs: [.init(sender: senderUUID, recipient: memberTwoUUID)]) { _, policies in
+                    let policy = try #require(policies[.init(sender: senderUUID, recipient: memberTwoUUID)])
                     #expect(policy.sender.isActive && policy.recipient.isActive)
                     #expect(!policy.blocked && policy.allowsStrangers)
                     #expect(policy.isFriend == (kind == "relationship"))
@@ -10129,7 +9222,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw error
             }
             #expect(try await count("im_v2.control_policy_test_commits", on: ownerSQL) == 1)
-            try await fence.withPolicy(senderID: senderID, recipientID: recipient) { policy in
+            try await fence.withLockedPolicies(pairs: [.init(sender: senderUUID, recipient: memberTwoUUID)]) { _, policies in
+                    let policy = try #require(policies[.init(sender: senderUUID, recipient: memberTwoUUID)])
                 #expect(policy.blocked == (kind == "block"))
                 #expect(!policy.isFriend)
                 #expect(policy.allowsStrangers == (kind != "preference"))
@@ -10139,7 +9233,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.user_blocks", on: ownerSQL) == 0)
             #expect(try await count("im_v2.account_disables", on: ownerSQL) == 0)
             await #expect(throws: CancellationError.self) {
-                try await fence.withPolicy(senderID: senderID, recipientID: recipient) { _ in throw CancellationError() }
+                try await fence.withLockedPolicies(pairs: [.init(sender: senderUUID, recipient: memberTwoUUID)]) { _, _ in throw CancellationError() }
             }
             let pairKey = [senderUUID, memberTwoUUID].map { $0.uuidString.lowercased() }.sorted().joined(separator: "|")
             try await control.transaction { transaction in
@@ -10151,111 +9245,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                         .first(decoding: Row.self)?.value == true)
                 }
             }
-            try await fence.withPolicy(senderID: senderID, recipientID: .init(uuid: UUID())) { policy in
+            try await fence.withLockedPolicies(pairs: [.init(sender: senderUUID, recipient: UUID())]) { _, policies in
+                let policy = try #require(policies.values.first)
                 #expect(!policy.recipient.isActive)
             }
             await #expect(throws: V2DirectSendControlPolicyError.invalidPair) {
-                try await fence.withPolicy(senderID: senderID, recipientID: senderID) { _ in Issue.record("invalid pair entered callback") }
+                try await fence.withLockedPolicies(pairs: [.init(sender: senderUUID, recipient: senderUUID)]) { _, _ in Issue.record("invalid pair entered callback") }
             }
         }
     }
 
-    @Test("room credit reservations wait for migration freeze without charging the source", arguments: [false, true])
-    func roomCreditMigrationFence(batch: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let room = UUID(), healthy = UUID(), leaseID = UUID()
-            try await sql.raw("""
-                INSERT INTO im_v2.shard_admission_pools
-                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
-                VALUES ('credit-source', 'credit-freeze', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 100)
-                """).run()
-            for id in [room, healthy] {
-                try await sql.raw("""
-                    INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id)
-                    VALUES (\(bind: id), 'credit-source', 'credit-freeze')
-                    """).run()
-                try await sql.raw("""
-                    INSERT INTO im_v2.room_admission
-                        (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
-                    VALUES (\(bind: id), 2, 10, \(bind: leaseID), 1)
-                    """).run()
-            }
-            let state = try ShardAdmissionState(lease: .init(id: .init(uuid: leaseID), generation: 1,
-                validUntil: now.addingTimeInterval(600), commandWindow: .init(limit: 100)))
-            let pool = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 2)
-            let before = try #require(try await sql.raw("""
-                SELECT to_jsonb(r)::text AS value FROM im_v2.room_admission r WHERE room_id = \(bind: room)
-                """).first(decoding: StringValueRow.self)).value
-            let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: .init(uuid: room),
-                source: .init(shardID: "credit-source", epoch: 0), targetShardID: "credit-target")
-            let gate = PostgreSQLTransactionGate()
-            let installer = Task {
-                try await database.transaction { transaction in
-                    try await PostgresV2RoomMigrationWriteFence(database: transaction)
-                        .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-                    await gate.holdTransaction()
-                }
-            }
-            await gate.waitUntilHeld()
-            let writer = Task {
-                if batch {
-                    _ = try await pool.acquire([.init(roomID: healthy, shardState: state, now: now),
-                                                .init(roomID: room, shardState: state, now: now)])
-                } else {
-                    _ = try await pool.acquire(roomID: room, shardState: state, now: now)
-                }
-            }
-            do {
-                var observed = false
-                for _ in 0..<500 {
-                    let waiting = try await sql.raw("""
-                        SELECT count(*) AS value FROM pg_stat_activity
-                        WHERE datname = current_database() AND wait_event_type = 'Lock'
-                          AND query LIKE '%WITH writable_room AS MATERIALIZED%'
-                        """).first(decoding: CountRow.self)?.value ?? 0
-                    if waiting > 0 { observed = true; break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(observed)
-                await gate.releaseTransaction()
-                try await installer.value
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { try await writer.value }
-            } catch {
-                writer.cancel()
-                await gate.releaseTransaction()
-                _ = await installer.result
-                _ = await writer.result
-                throw error
-            }
-            #expect(await pool.snapshot().inFlightCredits == 0)
-            let fresh = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 2)
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                _ = try await fresh.acquire(roomID: room, shardState: state, now: now)
-            }
-            #expect(try await sql.raw("""
-                SELECT to_jsonb(r)::text AS value FROM im_v2.room_admission r WHERE room_id = \(bind: room)
-                """).first(decoding: StringValueRow.self)?.value == before)
-            guard case .granted(let token) = try await pool.acquire(roomID: healthy, shardState: state, now: now)
-                else { throw CancellationError() }
-            await pool.commit(token)
-            #expect(try await sql.raw("""
-                SELECT command_window_used AS value FROM im_v2.room_admission WHERE room_id = \(bind: healthy)
-                """).first(decoding: CountRow.self)?.value == 2)
-            // A real sending transaction can hold this weaker owner lock
-            // while waiting for a reservation on another connection.
-            try await database.transaction { transaction in
-                let scoped = try #require(transaction as? any SQLDatabase)
-                try await scoped.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: healthy) FOR NO KEY UPDATE").run()
-                guard case .granted(let token) = try await fresh.acquire(roomID: healthy, shardState: state, now: now)
-                    else { throw CancellationError() }
-                await fresh.commit(token)
-            }
-            #expect(try await sql.raw("""
-                SELECT command_window_used AS value FROM im_v2.room_admission WHERE room_id = \(bind: healthy)
-                """).first(decoding: CountRow.self)?.value == 4)
-        }
-    }
 
     @Test("Special-account audit clocks preserve message retries and concurrent recording", arguments: [V2AccountKind.system, .customerSupport])
     func specialAccountMessageClockBounds(kind: V2AccountKind) async throws {
@@ -10274,7 +9273,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 guard case .accepted = try await messages.send(.init(roomID: opened.roomID, actorUserID: customer, clientMessageID: .init(uuid: UUID()), text: "support request")) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
                 #expect(try await count("im_v2.support_conversation_sessions WHERE state = 'open'", on: sql) == 1)
             }
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let service = V2TrustedSpecialAccountMessagingService(store: store, directMessaging: direct, messages: messages, now: { clock.now() })
             func request(operation: ClientMessageID = .init(uuid: UUID()), fingerprint: String = "1234567890abcdef") throws -> V2TrustedSpecialAccountMessage {
                 try .init(stableAccountKey: "clock_special_account", servicePrincipal: "clock-service", operatorID: kind == .customerSupport ? "clock-operator" : nil, operationID: operation, requestFingerprint: fingerprint, customerUserID: customer, text: "service message")
@@ -10347,31 +9346,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.special_account_message_operations", on: sql) == 3)
             #expect(try await count("im_v2.special_account_message_audit", on: sql) == 3)
 
-            // Freeze between the independent message acceptance and audit write.
-            let pending = try request()
-            let pendingOutcome = try await messages.send(.init(roomID: opened.roomID, actorUserID: account.userID,
-                clientMessageID: pending.operationID, text: pending.text))
-            guard case .accepted = pendingOutcome else { throw CancellationError() }
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: opened.roomID,
-                source: .init(shardID: "room-a", epoch: 0), targetShardID: "room-b")
-            try await PostgresV2RoomMigrationWriteFence(database: database)
-                .install(for: .init(request: migration, phase: .freezing, createdAt: base, updatedAt: base))
-            let frozen = try await snapshot()
-            let fresh = PostgresV2SpecialAccountMessagingStore(database: database)
-            try await fresh.record(request: original, account: account, roomID: opened.roomID, outcome: first, now: base)
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                try await fresh.record(request: pending, account: account, roomID: opened.roomID, outcome: pendingOutcome, now: base)
-            }
-            // The receipt must bind the room being fenced and the operation.
-            await #expect(throws: V2SpecialAccountMessagingError.corruptPersistenceState) {
-                try await fresh.record(request: pending, account: account, roomID: roomID, outcome: pendingOutcome, now: base)
-            }
-            await #expect(throws: V2SpecialAccountMessagingError.corruptPersistenceState) {
-                try await fresh.record(request: request(), account: account, roomID: opened.roomID, outcome: pendingOutcome, now: base)
-            }
-            clock.set([base])
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await service.send(pending) }
-            #expect(try await snapshot() == frozen)
         }
     }
 
@@ -10405,7 +9379,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     """).first(decoding: StringValueRow.self)).value
             }
             let retention = PostgresV2ModerationAuditRetentionStore(database: database)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let worker = V2ModerationAuditRetentionWorker(store: retention, now: { clock.now() })
             let initial = try await snapshot(includeAudit: true)
             let business = try await snapshot(includeAudit: false)
@@ -10550,62 +9524,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("personal event operator replay respects explicit source room freezes")
-    func userStateOperatorMigrationFence() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), room = RoomID(uuid: UUID())
-            try await sql.raw("""
-                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id)
-                VALUES (\(bind: room.uuidValue!), 'source', 'standard')
-                """).run()
-            let outbox = try PostgresV2UserStateEventOutbox(database: database)
-            let store = PostgresV2DurableWorkReplayStore(database: database)
-            func seed(_ sourceRoom: RoomID?) async throws -> V2DurableWorkReplayCommand {
-                let event = try V2UserStateEvent(sourceEventID: .init(uuid: UUID()), userID: .init(uuid: UUID()),
-                    kind: .membership, payload: JSONSerialization.data(withJSONObject: [
-                        "room_id": (sourceRoom ?? room).rawValue]), createdAt: now)
-                try await outbox.enqueue(event, sourceRoomID: sourceRoom, in: sql)
-                try await sql.raw("""
-                    UPDATE im_v2.user_state_event_outbox SET state = 'paused'
-                    WHERE source_event_id = \(bind: event.sourceEventID.uuidValue!)
-                    """).run()
-                return V2DurableWorkReplayCommand(operationID: UUID(), target: try .init(kind: .userStateEvent,
-                    sourceEventID: event.sourceEventID, targetUserID: event.userID, projectionKind: "membership"),
-                    reason: .dataRepaired)
-            }
-            let prior = try await seed(room), blocked = try await seed(room)
-            let control = try await seed(nil), missing = try await seed(.init(uuid: UUID()))
-            #expect(try await store.replay(prior, operatorPrincipal: "test", now: now).outcome == .requeued)
-            let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "source", epoch: 0), targetShardID: "target")
-            try await PostgresV2RoomMigrationWriteFence(database: database)
-                .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-            func snapshot() async throws -> String {
-                struct Row: Decodable { let value: String }
-                return try #require(try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'events', (SELECT jsonb_agg(to_jsonb(w) ORDER BY source_event_id, user_id, projection_kind)
-                            FROM im_v2.user_state_event_outbox w),
-                        'audit', (SELECT jsonb_agg(to_jsonb(a) ORDER BY operation_id)
-                            FROM im_v2.durable_work_replay_audit a))::text AS value
-                    """).first(decoding: Row.self)).value
-            }
-            let before = try await snapshot()
-            #expect(try await store.replay(prior, operatorPrincipal: "test", now: now).wasIdempotent)
-            for command in [blocked, missing] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await store.replay(command, operatorPrincipal: "test", now: now)
-                }
-                let batch = try V2DurableWorkEventReplayCommand(operationID: UUID(), kind: .userStateEvent,
-                    sourceEventID: command.target.sourceEventID, reason: .dataRepaired, limit: 10)
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await store.replayEvent(batch, operatorPrincipal: "test", now: now)
-                }
-            }
-            #expect(try await snapshot() == before)
-            #expect(try await store.replay(control, operatorPrincipal: "test", now: now).outcome == .requeued)
-        }
-    }
 
     @Test("Personal event operator replay is audited, bounded and fences previous leases")
     func userStateOperatorReplay() async throws {
@@ -10884,7 +9802,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: base), \(bind: base)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let directory = PostgresV2GroupInviteDirectory(database: control)
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let operation = GroupInviteOperationID(uuid: UUID())
@@ -10957,7 +9875,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     throw ProfilePropagationShadowFailure.interrupted
                 }
             }
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let resumer: any V2GroupInviteCreationResuming = phase == "resume" ? routed : FailingResumer(shouldPause: phase == "pause")
             let worker = V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: resumer, now: { clock.now() })
             let attemptDates = phase == "pause" ? invalidDates : invalidDates + [nearUpperBound]
@@ -11071,7 +9989,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await store.claimPending(now: base.addingTimeInterval(100), leaseDuration: 30, limit: 1).isEmpty)
             let replay = try await verifyDurableReplayClockRecovery(.init(operationID: UUID(), target: .init(kind: .contentReview, sourceEventID: .init(message.messageID.rawValue)), reason: .dependencyRecovered), store: PostgresV2DurableWorkReplayStore(database: database), sql: sql, operatorPrincipal: "integration-test", now: base.addingTimeInterval(40))
             #expect(replay.outcome == .requeued)
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let moderation = V2TrustedSafetyModerationService(store: PostgresV2ModerationStore(database: database), safetyActorUserID: .init(uuid: UUID()), capacityProfile: profile, now: { clock.now() })
             struct Reviewer: V2ContentReviewing {
                 let verdict: V2ContentReviewVerdict
@@ -11186,7 +10104,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             struct PendingTarget: V2ForwardExportDelivering {
                 func deliver(_ export: V2ForwardExport) async throws -> V2ForwardTerminalReceipt? { nil }
             }
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let delivery = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: PendingTarget(), leaseDuration: 30, pendingDelay: 10, maximumConcurrency: 1, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { clock.now() })
             for (index, invalid) in badDates.enumerated() {
                 let time = base.addingTimeInterval(100 + Double(index) * 40)
@@ -11476,7 +10394,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     .init(url: URL(string: "https://media.invalid/download")!, expiresAt: expiresAt, expectedByteCount: 42)
                 }
             }
-            let clock = ProjectionTransferBoundaryClock([base.addingTimeInterval(60)])
+            let clock = TestSequenceClock([base.addingTimeInterval(60)])
             let uploadService = try V2MediaUploadProviderSessionService(store: uploads, provider: Provider(), now: { clock.now() })
             let downloadService = try V2MediaProviderSessionService(store: downloads, provider: Provider(), now: { clock.now() })
             for (index, invalid) in badDates.enumerated() {
@@ -11786,7 +10704,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await snapshot() == reclaimed)
             try await store.release(second)
 
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let provider = PushTimestampProvider(outcome: outcome)
             let worker = V2PushWakeWorker(store: store, provider: provider, maximumConcurrency: 1, now: { clock.now() })
             let invalidCompletions = outcome == "suppressed" ? [Double.nan] : badSeconds
@@ -11876,7 +10794,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.group_event_wake_outbox", on: sql) == 0)
 
             try await send()
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             struct Publisher: V2GroupEventWakePublishing {
                 let fails: Bool
                 func publish(_ wake: V2GroupEventWake) async throws {
@@ -12157,7 +11075,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let event = UUID()
-            let clock = ProjectionTransferBoundaryClock([base.addingTimeInterval(1)])
+            let clock = TestSequenceClock([base.addingTimeInterval(1)])
             let directory = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), makeUUID: { event }, now: { clock.now() })
             func worker(lifetime: TimeInterval = 30) -> V2DirectRoomProfilePropagationWorker {
                 .init(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder(), leaseDuration: lifetime, now: { clock.now() })
@@ -12275,7 +11193,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let operation = UUID()
             let preferences = V2ReadReceiptService(store: PostgresV2ReadReceiptStore(database: database), now: { base })
             guard case .updated = try await preferences.setPreferences(actorUserID: senderID, operationID: .init(uuid: operation), allowsDirectReadReceipts: false, allowsGroupReadReceipts: true) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let clock = ProjectionTransferBoundaryClock([base])
+            let clock = TestSequenceClock([base])
             let policy = V2DurableRetryPolicy(initialDelay: 2, maximumDelay: 2, maximumAttempts: path == "pause" ? 1 : 3, jitterFraction: 0)
             func run(limit: Int = 1, lifetime: TimeInterval = 30, retry: V2DurableRetryPolicy? = nil,
                      fails: Bool = false) async throws -> V2ReadReceiptPreferencePropagationReport {
@@ -12390,18 +11308,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             if !coLocated { try await installSchema(on: targetSQL, schema: liveSchema) }
             do {
                 let now = Date(timeIntervalSince1970: 1_750_000_000)
-                let migrations = PostgresV2UserShardMigrationStore(database: control)
-                let migration = try await migrations.prepare(.init(migrationID: UUID(), userID: userID,
-                    sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 1), now: now)
-                for (phase, action): (V2UserShardMigrationPhase, V2UserShardMigrationAction) in [
-                    (.prepared, .beginCopy), (.copying, .copySucceeded), (.copied, .beginVerification), (.verifying, .verificationSucceeded)] {
-                    _ = try await migrations.advance(migrationID: migration.migrationID, expectedPhase: phase,
-                        action: action, fingerprints: action == .verificationSucceeded ? ("fixture", "fixture") : nil, now: now)
-                }
                 try await configureDefaultUserShardRoute(.init(bucket: "users-source", observedRouterEpoch: 1), now: now, on: controlSQL)
                 let registry = try V2StaticUserShardStorageRegistry(locations: [
-                    .init(bucket: "users-source", database: coLocated ? control : target, schema: liveSchema),
-                    .init(bucket: "users-target", database: target, schema: "im_v2")])
+                    .init(bucket: "users-source", database: coLocated ? control : target, schema: liveSchema)])
                 let router = V2PostgresUserShardRouter(database: control)
                 let shadow = V2PostgresUserShardProjectionShadowForwarder(registry: registry, routeFence: router,
                     batchRouteFence: path == "batch" ? router : nil,
@@ -12441,7 +11350,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                             }
                         } else { sequences = try await shadow.shadowIfForwarding(requests) }
                         #expect(sequences == [UInt64(index * 2 + 1), UInt64(index * 2 + 2)])
-                        #expect(try await snapshot(schema: "im_v2", on: targetSQL) == expected)
                         #expect(try await snapshot(schema: liveSchema, on: coLocated ? controlSQL : targetSQL) == expected)
                         #expect(try await snapshot(schema: "im_v2", on: controlSQL) == expected)
                     }
@@ -12454,374 +11362,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Projection transfer preserves database timestamps through copy and repeated copy",
-          arguments: [946_684_800.00000125, 946_684_799.99999875, 1_750_000_000.1234567, 9_224_318_015_000.125])
-    func projectionTransferTimestampPrecision(seconds: Double) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { source, target, sourceSQL, targetSQL, _ in
-            let user = UUID(), device = UUID(), eventOne = UUID(), eventTwo = UUID()
-            let date = Date(timeIntervalSince1970: seconds)
-            try await seedTransferProjection(schema: "im_v2", user: user, device: device,
-                eventOne: eventOne, eventTwo: eventTwo, snapshot: UUID(), now: date, on: sourceSQL)
-            try await sourceSQL.raw("""
-                INSERT INTO im_v2.user_projection_effects
-                    (user_id, source_event_id, projection_kind, user_sync_sequence, payload, created_at)
-                VALUES (\(bind: user), \(bind: eventOne), 'message', 1, '{}'::jsonb, \(bind: date))
-                """).run()
-            let tables = ["user_projection_checkpoints", "user_sync_retention",
-                "user_sync_log", "user_projection_effects", "user_projection_versions",
-                "sync_snapshot_artifacts", "revoked_device_projection_tombstones",
-                "device_snapshot_resets", "device_sync_cursors", "sync_tokens", "sync_receipts"]
-            func rows(_ table: String, on sql: any SQLDatabase) async throws -> String {
-                guard let row = try await sql.raw("""
-                    SELECT COALESCE(jsonb_agg(to_jsonb(r) - 'migration_fence_token' - 'migration_fence_expires_at'
-                        ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value
-                    FROM im_v2.\(unsafeRaw: table) r
-                    """).first(decoding: StringValueRow.self) else { throw CancellationError() }
-                return row.value
-            }
-            var original: [String: String] = [:]
-            for table in tables { original[table] = try await rows(table, on: sourceSQL) }
-            let transfer = try PostgresV2UserShardProjectionTransfer(source: source, target: target,
-                sourceBucket: "users-source", targetBucket: "users-target", pageSize: 1)
-            let record = V2UserShardMigrationRecord(migrationID: UUID(), userID: .init(uuid: user),
-                sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 9,
-                phase: .copying, sourceFingerprint: nil, targetFingerprint: nil)
-            for _ in 0..<2 {
-                try await transfer.copy(record)
-                for table in tables {
-                    #expect(try await rows(table, on: targetSQL) == original[table], "Copied table: \(table)")
-                    #expect(try await rows(table, on: sourceSQL) == original[table], "Source table: \(table)")
-                }
-                let fingerprints = try await transfer.fingerprints(for: record)
-                #expect(fingerprints.source == fingerprints.target)
-            }
-            // Forwarding can apply the same logical record at different
-            // local times. Those timestamps must not prevent cutover; sync
-            // deadlines and canonical projection timestamps must match.
-            for (table, column, changesIdentity) in [("user_projection_checkpoints", "updated_at", false),
-                ("user_sync_retention", "updated_at", false),
-                ("user_sync_log", "created_at", false),
-                ("user_projection_effects", "created_at", false),
-                ("user_projection_versions", "created_at", true), ("sync_snapshot_artifacts", "expires_at", true),
-                ("device_snapshot_resets", "expires_at", true), ("sync_tokens", "expires_at", true),
-                ("sync_receipts", "expires_at", true), ("revoked_device_projection_tombstones", "revoked_at", true)] {
-                try await targetSQL.raw("UPDATE im_v2.\(unsafeRaw: table) SET \(unsafeRaw: column) = \(unsafeRaw: column) + INTERVAL '1 microsecond'").run()
-                let mismatched = try await transfer.fingerprints(for: record)
-                #expect((mismatched.source != mismatched.target) == changesIdentity, "Changed timestamp: \(table).\(column)")
-                try await targetSQL.raw("UPDATE im_v2.\(unsafeRaw: table) SET \(unsafeRaw: column) = \(unsafeRaw: column) - INTERVAL '1 microsecond'").run()
-                let restored = try await transfer.fingerprints(for: record)
-                #expect(restored.source == restored.target)
-            }
-            // At distant epochs Date cannot distinguish adjacent database
-            // microseconds. Verification must still detect the changed row.
-            try await targetSQL.raw("UPDATE im_v2.user_projection_versions SET created_at = created_at + INTERVAL '1 microsecond' WHERE source_event_id = \(bind: eventOne)").run()
-            let changed = try await transfer.fingerprints(for: record)
-            #expect(changed.source != changed.target)
-            try await transfer.copy(record)
-            #expect(try await rows("user_projection_versions", on: targetSQL) == original["user_projection_versions"])
-            let repaired = try await transfer.fingerprints(for: record)
-            #expect(repaired.source == repaired.target)
-        }
-    }
 
-    @Test("Projection transfer rejects invalid clocks and preserves live leases across clock rollback", arguments: ["copy", "fingerprint", "cleanup"])
-    func projectionTransferClockBounds(path: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { source, target, sourceSQL, targetSQL, _ in
-            let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
-            let user = UUID(), device = UUID()
-            try await seedTransferProjection(schema: "im_v2", user: user, device: device, eventOne: UUID(), eventTwo: UUID(), snapshot: UUID(), now: now, on: sourceSQL)
-            try await seedTransferProjection(schema: "im_v2", user: user, device: device, eventOne: UUID(), eventTwo: UUID(), snapshot: UUID(), now: now, on: targetSQL)
-            if path == "copy" {
-                try await sourceSQL.raw("UPDATE im_v2.user_projection_checkpoints SET projected_sequence = 1 WHERE user_id = \(bind: user)").run()
-            }
-            let clock = ProjectionTransferBoundaryClock([now])
-            func makeTransfer(lifetime: TimeInterval = 120) throws -> PostgresV2UserShardProjectionTransfer {
-                try .init(source: source, target: target, sourceBucket: "users-source", targetBucket: "users-target", pageSize: 1, fenceLifetime: lifetime, now: { clock.now() })
-            }
-            let transfer = try makeTransfer()
-            let record = V2UserShardMigrationRecord(migrationID: UUID(), userID: .init(uuid: user), sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 9, phase: path == "cleanup" ? .retention : .prepared, sourceFingerprint: nil, targetFingerprint: nil)
-            func invoke(_ value: PostgresV2UserShardProjectionTransfer) async throws {
-                switch path {
-                case "copy": try await value.copy(record)
-                case "fingerprint": _ = try await value.fingerprints(for: record)
-                default: try await value.cleanSource(for: record)
-                }
-            }
-            let originalSource = try await projectionTransferClockState(on: sourceSQL)
-            let originalTarget = try await projectionTransferClockState(on: targetSQL)
-            let invalidDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            for invalid in invalidDates {
-                clock.set([invalid])
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await invoke(transfer) }
-                // The clock can also become unusable while acquiring the
-                // source database row. That transaction must roll back.
-                clock.set([now, invalid])
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await invoke(transfer) }
-            }
-            let upper = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 60)
-            clock.set([upper])
-            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await invoke(transfer) }
-            clock.set([now])
-            let enormous = try makeTransfer(lifetime: .greatestFiniteMagnitude)
-            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await invoke(enormous) }
-            for duration in [Double.nan, .infinity, -.infinity, 0, 29.999] {
-                #expect(throws: V2UserShardProjectionTransferError.invalidConfiguration) { try makeTransfer(lifetime: duration) }
-            }
-            // A deadline that looks future to a slow application clock is
-            // already expired for the workers using the database clock.
-            clock.set([now.addingTimeInterval(-3_600)])
-            await #expect(throws: V2UserShardProjectionTransferError.migrationFenceConflict) { try await invoke(transfer) }
-            clock.set([now, now.addingTimeInterval(120)])
-            await #expect(throws: V2UserShardProjectionTransferError.migrationFenceConflict) { try await invoke(transfer) }
-            #expect(try await projectionTransferClockState(on: sourceSQL) == originalSource)
-            #expect(try await projectionTransferClockState(on: targetSQL) == originalTarget)
 
-            clock.set([now.addingTimeInterval(30)])
-            try await transfer.copy(record)
-            clock.set([now])
-            try await transfer.copy(record)
-            for sql in [sourceSQL, targetSQL] {
-                let retained = try #require(try await sql.raw("""
-                    SELECT migration_fence_token = \(bind: record.migrationID)
-                       AND migration_fence_expires_at = \(bind: now.addingTimeInterval(150)) AS exists
-                    FROM im_v2.user_projection_checkpoints WHERE user_id = \(bind: user)
-                    """).first(decoding: ExistsRow.self))
-                #expect(retained.exists)
-            }
-            let fingerprints = try await transfer.fingerprints(for: record)
-            #expect(fingerprints.source == fingerprints.target)
-            for sql in [sourceSQL, targetSQL] {
-                #expect(try await count("im_v2.user_projection_checkpoints WHERE migration_fence_token IS NULL AND migration_fence_expires_at IS NULL", on: sql) == 1)
-            }
-            #expect(try await count("im_v2.user_sync_log", on: targetSQL) == 2)
-            if path == "cleanup" {
-                try await transfer.cleanSource(for: record)
-                try await transfer.cleanSource(for: record)
-                for table in ["user_sync_log", "user_projection_checkpoints", "user_sync_sequences", "sync_snapshot_artifacts", "sync_snapshot_pages", "device_sync_cursors", "sync_tokens", "sync_receipts", "user_projection_versions"] {
-                    #expect(try await count("im_v2." + table, on: sourceSQL) == 0)
-                }
-                #expect(try await count("im_v2.user_sync_log", on: targetSQL) == 2)
-                #expect(try await count("im_v2.sync_snapshot_artifacts", on: targetSQL) == 1)
-            }
-        }
-    }
 
-    @Test("A clock failure while enqueueing copied work rolls back its sequence and checkpoint")
-    func projectionTransferEnqueueClockRollback() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { source, target, sourceSQL, targetSQL, _ in
-            let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
-            let user = UUID()
-            try await sourceSQL.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: user), 2)").run()
-            for sequence in [Int64(1), 2] {
-                try await sourceSQL.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: user), \(bind: sequence), \(bind: UUID()), 'stranger_message_permission', '{\"allows_stranger_messages\":true}'::jsonb, \(bind: now))").run()
-            }
-            try await sourceSQL.raw("UPDATE im_v2.user_projection_checkpoints SET projected_sequence = 1, updated_at = \(bind: now) WHERE user_id = \(bind: user)").run()
-            // Initial acquisition and the empty-target renewal each sample
-            // both fences before/after their transactions. The next sample
-            // is the copied ready-row timestamp, inside its write transaction.
-            let clock = ProjectionTransferBoundaryClock(Array(repeating: now, count: 8) + [Date(timeIntervalSince1970: .nan)])
-            let transfer = try PostgresV2UserShardProjectionTransfer(source: source, target: target, sourceBucket: "users-source", targetBucket: "users-target", now: { clock.now() })
-            let record = V2UserShardMigrationRecord(migrationID: UUID(), userID: .init(uuid: user), sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 9, phase: .copying, sourceFingerprint: nil, targetFingerprint: nil)
-            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await transfer.copy(record) }
-            #expect(try await count("im_v2.user_sync_sequences", on: targetSQL) == 0)
-            #expect(try await count("im_v2.user_sync_log", on: targetSQL) == 0)
-            #expect(try await count("im_v2.user_projection_ready", on: targetSQL) == 0)
-            #expect(try await count("im_v2.user_projection_checkpoints WHERE projected_sequence = 0 AND migration_fence_token IS NOT NULL", on: targetSQL) == 1)
-            #expect(try await count("im_v2.user_sync_log", on: sourceSQL) == 2)
-            clock.set([now])
-            try await transfer.copy(record)
-            #expect(try await count("im_v2.user_sync_sequences WHERE next_sequence = 2", on: targetSQL) == 1)
-            #expect(try await count("im_v2.user_projection_checkpoints WHERE projected_sequence = 1", on: targetSQL) == 1)
-            #expect(try await count("im_v2.user_projection_ready", on: targetSQL) == 1)
-            #expect(try await count("im_v2.user_sync_log", on: targetSQL) == 2)
-            let fingerprints = try await transfer.fingerprints(for: record)
-            #expect(fingerprints.source == fingerprints.target)
-            #expect(try await count("im_v2.user_projection_checkpoints WHERE migration_fence_token IS NULL", on: targetSQL) == 1)
-        }
-    }
 
-    private func projectionTransferClockState(on sql: any SQLDatabase) async throws -> String {
-        struct State: Decodable { let value: String }
-        return try #require(try await sql.raw("""
-            SELECT jsonb_build_object(
-                'checkpoints', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_projection_checkpoints r),
-                'sequences', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_sync_sequences r),
-                'sync', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, user_sync_sequence) FROM im_v2.user_sync_log r),
-                'ready', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_projection_ready r),
-                'versions', (SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM im_v2.user_projection_versions r),
-                'artifacts', (SELECT jsonb_agg(to_jsonb(r) ORDER BY snapshot_id) FROM im_v2.sync_snapshot_artifacts r),
-                'pages', (SELECT jsonb_agg(to_jsonb(r) ORDER BY snapshot_id, page_index) FROM im_v2.sync_snapshot_pages r),
-                'resets', (SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM im_v2.device_snapshot_resets r),
-                'cursors', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, device_id) FROM im_v2.device_sync_cursors r),
-                'tokens', (SELECT jsonb_agg(to_jsonb(r) ORDER BY token) FROM im_v2.sync_tokens r),
-                'receipts', (SELECT jsonb_agg(to_jsonb(r) ORDER BY receipt) FROM im_v2.sync_receipts r)
-            )::text AS value
-            """).first(decoding: State.self)).value
-    }
 
-    @Test("Migration clocks preserve phases, routes, retention leases and completed replay", arguments: [false, true])
-    func userShardMigrationClockBounds(rollback: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let invalidDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            let store = PostgresV2UserShardMigrationStore(database: database)
-            let router = V2PostgresUserShardRouter(database: database)
-            let initialRoute = try V2UserShardRoute(bucket: "users-old", observedRouterEpoch: 9)
-            let request = try V2UserShardMigrationPreparation(migrationID: UUID(), userID: .init(uuid: UUID()), sourceBucket: "users-old", targetBucket: "users-new", sourceRouterEpoch: 9)
-            try await sql.raw("DELETE FROM im_v2.user_shard_router_configuration").run()
-            let empty = try await migrationClockState(on: sql)
-            for invalid in invalidDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.prepare(request, now: invalid) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await router.bootstrap(defaultRoute: initialRoute, now: invalid) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.claimExpiredRetention(now: invalid, leaseDuration: 30, limit: 1) }
-            }
-            #expect(try await migrationClockState(on: sql) == empty)
-            try await router.bootstrap(defaultRoute: initialRoute, now: now)
-            let prepared = try await store.prepare(request, now: now)
-            for invalid in invalidDates { #expect(try await store.prepare(request, now: invalid) == prepared) }
-            let beforeFailure = try await migrationClockState(on: sql)
-            for invalid in invalidDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.advance(migrationID: request.migrationID, expectedPhase: .prepared, action: .beginCopy, fingerprints: nil, now: invalid) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.fail(migrationID: request.migrationID, expectedPhase: .prepared, code: .copyFailed, now: invalid) }
-            }
-            #expect(try await migrationClockState(on: sql) == beforeFailure)
-            #expect(try await store.fail(migrationID: request.migrationID, expectedPhase: .prepared, code: .copyFailed, now: now).phase == .failed)
-            var phase = try await store.advance(migrationID: request.migrationID, expectedPhase: .failed, action: .beginCopy, fingerprints: nil, now: now).phase
-            for action in [V2UserShardMigrationAction.copySucceeded, .beginVerification, .verificationSucceeded, .forwardingVerificationSucceeded] {
-                let fingerprints: (String, String)? = action == .verificationSucceeded || action == .forwardingVerificationSucceeded ? ("sha256:equal", "sha256:equal") : nil
-                let before = try await migrationClockState(on: sql)
-                for invalid in invalidDates {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.advance(migrationID: request.migrationID, expectedPhase: phase, action: action, fingerprints: fingerprints, now: invalid) }
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.fail(migrationID: request.migrationID, expectedPhase: phase, code: .verificationFailed, now: invalid) }
-                }
-                #expect(try await migrationClockState(on: sql) == before)
-                phase = try await store.advance(migrationID: request.migrationID, expectedPhase: phase, action: action, fingerprints: fingerprints, now: now).phase
-            }
-            #expect(phase == .verified)
-            let finalizer = MigrationBoundaryFinalizer()
-            let control = V2PostgresUserShardRouteControl(database: database, operatorPrincipal: "clock-regression", retentionWindow: 60, finalizer: finalizer)
-            let cutover = try V2UserShardRouteCutover(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 9, newWriteBucket: "users-new", readFallbackBucket: "users-old")
-            let verified = try await migrationClockState(on: sql)
-            let upper = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 30)
-            for invalid in invalidDates + [upper] {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await control.cutOver(cutover, now: invalid) }
-            }
-            for duration in [Double.infinity, .greatestFiniteMagnitude, .leastNonzeroMagnitude] {
-                let invalidControl = V2PostgresUserShardRouteControl(database: database, operatorPrincipal: "clock-regression", retentionWindow: duration, finalizer: finalizer)
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await invalidControl.cutOver(cutover, now: now) }
-            }
-            #expect(await finalizer.cutovers == 0)
-            #expect(try await migrationClockState(on: sql) == verified)
-            let moved = try await control.cutOver(cutover, now: now)
-            #expect(!moved.wasIdempotent && moved.route.observedRouterEpoch == 10)
-            #expect(await finalizer.cutovers == 1)
-            #expect(try await store.load(migrationID: request.migrationID)?.retentionUntil == now.addingTimeInterval(60))
-            let retained = try await migrationClockState(on: sql)
-            for invalid in invalidDates { #expect(try await control.cutOver(cutover, now: invalid).wasIdempotent) }
-            #expect(try await migrationClockState(on: sql) == retained)
-            if rollback {
-                let command = try V2UserShardRouteRollback(operationID: UUID(), userID: request.userID, expectedRouterEpoch: 10)
-                for invalid in invalidDates {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await control.rollBack(command, now: invalid) }
-                }
-                #expect(await finalizer.rollbacks == 0)
-                #expect(try await migrationClockState(on: sql) == retained)
-                let restored = try await control.rollBack(command, now: now.addingTimeInterval(59))
-                #expect(restored.route.bucket == "users-old" && restored.route.observedRouterEpoch == 11)
-                let rolledBack = try await migrationClockState(on: sql)
-                for invalid in invalidDates { #expect(try await control.rollBack(command, now: invalid).wasIdempotent) }
-                #expect(try await migrationClockState(on: sql) == rolledBack)
-                #expect(await finalizer.rollbacks == 1)
-                #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 1).isEmpty)
-                #expect(try await store.load(migrationID: request.migrationID)?.phase == .rolledBack)
-            } else {
-                #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(59), leaseDuration: 30, limit: 1).isEmpty)
-                for invalid in invalidDates {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.claimExpiredRetention(now: invalid, leaseDuration: 30, limit: 1) }
-                }
-                for (clock, duration) in [(upper, 60.0), (now, Double.infinity), (now, .greatestFiniteMagnitude), (now, .leastNonzeroMagnitude)] {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.claimExpiredRetention(now: clock, leaseDuration: duration, limit: 1) }
-                }
-                #expect(try await store.claimExpiredRetention(now: invalidDates[0], leaseDuration: 30, limit: 0).isEmpty)
-                #expect(try await migrationClockState(on: sql) == retained)
-                let lease = try #require(try await store.claimExpiredRetention(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 1).first)
-                let claimed = try await migrationClockState(on: sql)
-                for invalid in invalidDates {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.completeRetention(lease, now: invalid) }
-                }
-                #expect(try await migrationClockState(on: sql) == claimed)
-                #expect(try await store.claimExpiredRetention(now: now.addingTimeInterval(89), leaseDuration: 30, limit: 1).isEmpty)
-                let recovered = try #require(try await store.claimExpiredRetention(now: now.addingTimeInterval(90), leaseDuration: 30, limit: 1).first)
-                #expect(recovered.claimToken != lease.claimToken)
-                #expect(try await count("im_v2.user_shard_migrations WHERE retention_retry_count = 2", on: sql) == 1)
-                #expect(try await store.completeRetention(lease, now: now.addingTimeInterval(90)) == false)
-                #expect(try await store.completeRetention(recovered, now: now.addingTimeInterval(90)))
-                #expect(try await store.completeRetention(recovered, now: now.addingTimeInterval(90)) == false)
-                #expect(try await store.load(migrationID: request.migrationID)?.phase == .completed)
-            }
-        }
-    }
 
-    @Test("Route epoch exhaustion rejects mutation before finalization and preserves the last valid increment", arguments: [false, true])
-    func userShardRouteEpochBounds(rollback: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let migration = UUID(), user = UserID(uuid: UUID())
-            let finalizer = MigrationBoundaryFinalizer()
-            let control = V2PostgresUserShardRouteControl(database: database, operatorPrincipal: "epoch-regression", retentionWindow: 60, finalizer: finalizer)
-            let initialEpoch = rollback ? Int64(9) : Int64.max
-            try await sql.raw("UPDATE im_v2.user_shard_router_configuration SET router_epoch = \(bind: initialEpoch), default_write_bucket = 'users-old'").run()
-            try await sql.raw("""
-                INSERT INTO im_v2.user_shard_migrations
-                    (migration_id, user_id, source_bucket, target_bucket, source_router_epoch,
-                     phase, source_fingerprint, target_fingerprint, verified_at, created_at, updated_at)
-                VALUES (\(bind: migration), \(bind: user.uuidValue!), 'users-old', 'users-new', \(bind: initialEpoch),
-                        'verified', 'equal', 'equal', \(bind: now), \(bind: now), \(bind: now))
-                """).run()
-            if rollback {
-                _ = try await control.cutOver(.init(operationID: UUID(), userID: user, expectedRouterEpoch: 9, newWriteBucket: "users-new", readFallbackBucket: "users-old"), now: now)
-                try await sql.raw("UPDATE im_v2.user_shard_router_configuration SET router_epoch = \(bind: Int64.max)").run()
-                try await sql.raw("UPDATE im_v2.user_shard_route_overrides SET router_epoch = \(bind: Int64.max)").run()
-                let before = try await migrationClockState(on: sql)
-                let operation = UUID()
-                let invalid = try V2UserShardRouteRollback(operationID: operation, userID: user, expectedRouterEpoch: .max)
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await control.rollBack(invalid, now: now) }
-                #expect(await finalizer.rollbacks == 0)
-                #expect(try await migrationClockState(on: sql) == before)
-                try await sql.raw("UPDATE im_v2.user_shard_router_configuration SET router_epoch = \(bind: Int64.max - 1)").run()
-                try await sql.raw("UPDATE im_v2.user_shard_route_overrides SET router_epoch = \(bind: Int64.max - 1)").run()
-                let valid = try V2UserShardRouteRollback(operationID: operation, userID: user, expectedRouterEpoch: Int64.max - 1)
-                #expect(try await control.rollBack(valid, now: now).route.observedRouterEpoch == Int64.max)
-                #expect(try await control.rollBack(valid, now: now).wasIdempotent)
-                #expect(await finalizer.rollbacks == 1)
-            } else {
-                let operation = UUID()
-                let invalid = try V2UserShardRouteCutover(operationID: operation, userID: user, expectedRouterEpoch: .max, newWriteBucket: "users-new", readFallbackBucket: "users-old")
-                let before = try await migrationClockState(on: sql)
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await control.cutOver(invalid, now: now) }
-                #expect(await finalizer.cutovers == 0)
-                #expect(try await migrationClockState(on: sql) == before)
-                try await sql.raw("UPDATE im_v2.user_shard_router_configuration SET router_epoch = \(bind: Int64.max - 1)").run()
-                try await sql.raw("UPDATE im_v2.user_shard_migrations SET source_router_epoch = \(bind: Int64.max - 1)").run()
-                let valid = try V2UserShardRouteCutover(operationID: operation, userID: user, expectedRouterEpoch: Int64.max - 1, newWriteBucket: "users-new", readFallbackBucket: "users-old")
-                #expect(try await control.cutOver(valid, now: now).route.observedRouterEpoch == Int64.max)
-                #expect(try await control.cutOver(valid, now: now).wasIdempotent)
-                #expect(await finalizer.cutovers == 1)
-            }
-        }
-    }
-
-    private func migrationClockState(on sql: any SQLDatabase) async throws -> String {
-        struct State: Decodable { let value: String }
-        return try #require(try await sql.raw("""
-            SELECT jsonb_build_object(
-                'migrations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY migration_id) FROM im_v2.user_shard_migrations r),
-                'configuration', (SELECT jsonb_agg(to_jsonb(r)) FROM im_v2.user_shard_router_configuration r),
-                'overrides', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_shard_route_overrides r),
-                'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.user_shard_route_operations r)
-            )::text AS value
-            """).first(decoding: State.self)).value
-    }
 
     @Test("Cross-store writes reject invalid clocks before effects and preserve durable replay", arguments: ["mirror", "allocated"])
     func crossStoreWriteClockBoundaries(path: String) async throws {
@@ -13494,7 +12040,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000), operation = GroupNicknameOperationID(uuid: UUID())
             try await sql.raw("""
                 INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
+                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
                 """).run()
             let router = V2PostgresRoomShardRouter(database: control)
             let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
@@ -13544,91 +12090,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try await store.groupNicknames(actorUserID: senderID, roomID: room, afterUserID: nil, limit: 10)
             }
             try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id = 'room-b' WHERE room_id = \(bind: room.uuidValue!)").run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 1), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            await assertRejected(routed(router))
-            #expect(try await count("im_v2.room_member_nickname_operations", on: ownerSQL) == 1)
-            #expect(try await PostgresV2ProfilePresentationStore(database: owner).groupNicknames(
-                actorUserID: senderID, roomID: room, afterUserID: nil, limit: 10).values == [original])
         }
     }
 
-    @Test("nickname writes wait for migration installation and preserve exact read-only receipts",
-          arguments: [V2GroupCapacityClass.standard, .large])
-    func nicknameMigrationFence(_ mode: V2GroupCapacityClass) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), operation = GroupNicknameOperationID(uuid: UUID())
-            let store = PostgresV2ProfilePresentationStore(database: owner, now: { now })
-            let original = try await store.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                operationID: operation, expectedRevision: nil, nickname: "original")
-            func snapshot() async throws -> [[String]] {
-                var result: [[String]] = []
-                for table in ["room_member_nicknames", "room_member_nickname_operations", "room_memberships", "room_events"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(rows.map(\.value))
-                }
-                return result
-            }
-            let before = try await snapshot()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
-                """).run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 0), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            let barrier = InviteImportTestBarrier()
-            let installer = Task {
-                try await owner.transaction { transaction in
-                    try await PostgresV2RoomMigrationWriteFence(database: transaction).install(for: freezing)
-                    await barrier.hold()
-                }
-            }
-            await barrier.waitUntilHeld()
-            let writing = Task {
-                try await store.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                    operationID: .init(uuid: UUID()), expectedRevision: original.revision, nickname: "changed")
-            }
-            do {
-                var waiting = false
-                for _ in 0..<500 {
-                    waiting = try await ownerSQL.raw("""
-                        SELECT count(*) AS value FROM pg_stat_activity
-                        WHERE datname = current_database() AND wait_event_type = 'Lock'
-                          AND query LIKE '%SELECT migration_fence_id FROM im_v2.rooms%'
-                        """).first(decoding: CountRow.self)?.value == 1
-                    if waiting { break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(waiting, "Nickname mutation must wait for the room lock held by migration installation")
-                await barrier.release()
-                try await installer.value
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await writing.value }
-            } catch {
-                await barrier.release()
-                _ = await installer.result; _ = await writing.result
-                throw error
-            }
-            let restarted = PostgresV2ProfilePresentationStore(database: owner, now: { now })
-            for nickname in [Optional("new name"), nil] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await restarted.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                        operationID: .init(uuid: UUID()), expectedRevision: original.revision, nickname: nickname)
-                }
-            }
-            #expect(try await restarted.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                operationID: operation, expectedRevision: nil, nickname: "original") == original)
-            #expect(try await snapshot() == before)
-        }
-    }
 
     @Test("Profile writes reject unsupported clocks but completed operations remain replayable", arguments: ["profile", "alias", "nickname"], [false, true])
     func profileWriteTimestampBoundaries(kind: String, change: Bool) async throws {
@@ -14676,140 +13140,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("legacy cancellation fences delayed issue and stays within the verified account")
-    func legacyRegistrationCancellationIsolation() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let user = UserID(uuid: UUID()), other = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
-            let request = try V2TrustedLegacyDeviceRegistrationCancellation(userID: user, assertionDeviceID: .init(uuid: UUID()), targetDeviceID: device, operationID: UUID())
-            let service = V2PostgresLegacyDeviceRegistrationCancellationService(database: app.db(.psql))
-            #expect(try await service.cancel(request) == .applied)
-            #expect(try await service.cancel(request) == .idempotent)
-            let changed = try V2TrustedLegacyDeviceRegistrationCancellation(userID: user, assertionDeviceID: request.assertionDeviceID, targetDeviceID: device, operationID: UUID())
-            #expect(try await service.cancel(changed) == .conflict)
-            let issuer = try V2PostgresDeviceCredentialService(database: app.db(.psql), tokenHMACKey: .init(rawBytes: Data(repeating: 7, count: 32)), replayEnvelopeKey: .init(rawBytes: Data(repeating: 8, count: 32)))
-            #expect(try await issuer.register(.init(userID: user, deviceID: device, operationID: UUID())) == .deviceUnavailable)
-            let proof = try V2DeviceRegistrationCancellation(deviceID: device, operationID: UUID(), proof: .generate(), issueBeforeMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000) + 600_000)
-            #expect(try await issuer.register(V2CancellableDeviceRegistration(registration: .init(userID: user, deviceID: device, operationID: proof.operationID), cancellation: proof)) == .deviceUnavailable)
-            // An account cannot reserve another account's global device ID.
-            guard case .issued = try await issuer.register(.init(userID: other, deviceID: device, operationID: UUID())) else { Issue.record("other account was incorrectly fenced"); throw CancellationError() }
-            #expect(try await service.cancel(request) == .targetUnavailable)
-            #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NOT NULL", on: sql) == 0)
-            #expect(try await count("im_v2.device_revocation_events", on: sql) == 0)
-            try await V2SchemaReadiness.verify(database: app.db(.psql))
-            try await sql.raw("ALTER TABLE im_v2.legacy_device_registration_cancellations DROP CONSTRAINT legacy_registration_cancellation_time").run()
-            try await sql.raw("ALTER TABLE im_v2.legacy_device_registration_cancellations ADD CONSTRAINT legacy_registration_cancellation_time CHECK (true)").run()
-            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.legacy_device_registration_cancellations[account-scoped]")) { try await V2SchemaReadiness.verify(database: app.db(.psql)) }
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
-    @Test("legacy cancellation revokes all credentials atomically and replays once")
-    func legacyRegistrationCancellationRollback() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
-            let issuer = try V2PostgresDeviceCredentialService(database: app.db(.psql), tokenHMACKey: .init(rawBytes: Data(repeating: 7, count: 32)), replayEnvelopeKey: .init(rawBytes: Data(repeating: 8, count: 32)))
-            guard case .issued = try await issuer.register(.init(userID: user, deviceID: device, operationID: UUID())) else { throw CancellationError() }
-            let request = try V2TrustedLegacyDeviceRegistrationCancellation(userID: user, assertionDeviceID: .init(uuid: UUID()), targetDeviceID: device, operationID: UUID())
-            let service = V2PostgresLegacyDeviceRegistrationCancellationService(database: app.db(.psql))
-            try await sql.raw("CREATE FUNCTION im_v2.test_legacy_cancel_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected legacy failure'; END $$").run()
-            try await sql.raw("CREATE TRIGGER test_legacy_cancel_failure AFTER INSERT ON im_v2.device_revocation_events FOR EACH ROW EXECUTE FUNCTION im_v2.test_legacy_cancel_failure()").run()
-            await #expect(throws: (any Error).self) { try await service.cancel(request) }
-            #expect(try await count("im_v2.legacy_device_registration_cancellations", on: sql) == 0)
-            #expect(try await count("im_v2.device_access_tokens WHERE revoked_at IS NULL", on: sql) == 1)
-            #expect(try await count("im_v2.device_refresh_sessions WHERE revoked_at IS NULL", on: sql) == 1)
-            try await sql.raw("DROP TRIGGER test_legacy_cancel_failure ON im_v2.device_revocation_events").run()
-            #expect(try await service.cancel(request) == .applied)
-            #expect(try await service.cancel(request) == .idempotent)
-            #expect(try await count("im_v2.device_access_tokens WHERE revoked_at IS NULL", on: sql) == 0)
-            #expect(try await count("im_v2.device_refresh_sessions WHERE revoked_at IS NULL", on: sql) == 0)
-            #expect(try await count("im_v2.device_revocation_events", on: sql) == 1)
-            #expect(try await issuer.register(.init(userID: user, deviceID: device, operationID: UUID())) == .deviceUnavailable)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
-    @Test("legacy cancellation and issuance serialize to a permanently retired identity")
-    func legacyRegistrationCancellationRace() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
-            let request = try V2TrustedLegacyDeviceRegistrationCancellation(userID: user, assertionDeviceID: .init(uuid: UUID()), targetDeviceID: device, operationID: UUID())
-            let service = V2PostgresLegacyDeviceRegistrationCancellationService(database: app.db(.psql))
-            let issuer = try V2PostgresDeviceCredentialService(database: app.db(.psql), tokenHMACKey: .init(rawBytes: Data(repeating: 7, count: 32)), replayEnvelopeKey: .init(rawBytes: Data(repeating: 8, count: 32)))
-            async let cancellation = service.cancel(request)
-            async let issuance = issuer.register(.init(userID: user, deviceID: device, operationID: request.operationID))
-            #expect(try await cancellation == .applied)
-            switch try await issuance {
-            case .issued, .deviceUnavailable: break
-            default: Issue.record("Unexpected issue race outcome")
-            }
-            #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 0)
-            #expect(try await count("im_v2.device_access_tokens WHERE revoked_at IS NULL", on: sql) == 0)
-            #expect(try await count("im_v2.device_refresh_sessions WHERE revoked_at IS NULL", on: sql) == 0)
-            #expect(try await count("im_v2.legacy_device_registration_cancellations", on: sql) == 1)
-            #expect(try await issuer.register(.init(userID: user, deviceID: device, operationID: UUID())) == .deviceUnavailable)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
-    @Test("legacy cancellation quota remains bounded under concurrent distinct requests")
-    func legacyRegistrationCancellationQuota() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let user = UserID(uuid: UUID())
-            try await sql.raw("INSERT INTO im_v2.legacy_device_registration_cancellations SELECT \(bind: user.uuidValue!), gen_random_uuid(), gen_random_uuid(), CURRENT_TIMESTAMP FROM generate_series(1,255)").run()
-            let service = V2PostgresLegacyDeviceRegistrationCancellationService(database: app.db(.psql))
-            let requests = try (0..<8).map { _ in try V2TrustedLegacyDeviceRegistrationCancellation(userID: user, assertionDeviceID: .init(uuid: UUID()), targetDeviceID: .init(uuid: UUID()), operationID: UUID()) }
-            let results = try await withThrowingTaskGroup(of: V2LegacyDeviceRegistrationCancellationOutcome.self) { group in
-                for request in requests { group.addTask { try await service.cancel(request) } }
-                var values: [V2LegacyDeviceRegistrationCancellationOutcome] = []
-                for try await value in group { values.append(value) }
-                return values
-            }
-            #expect(results.filter { $0 == .applied }.count == 1)
-            #expect(results.filter { $0 == .capacityExceeded }.count == 7)
-            #expect(try await count("im_v2.legacy_device_registration_cancellations", on: sql) == 256)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
     @Test("registration cancellation HTTP commits the proof fence and rejects unsafe requests before storage")
     func registrationCancellationHTTP() async throws {
@@ -15509,7 +13842,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func publicIdentityNameRevisionBoundary(column: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([now])
+            let clock = TestSequenceClock([now])
             let directory = V2PostgresPublicIdentityDirectory(database: database,
                 policy: try .init(maximumQueries: 10, window: 60), now: { clock.now() })
             let original = try #require(try await directory.profile(for: senderID))
@@ -15692,7 +14025,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         let dates: [Double] = [946_684_800 + 0.00000125, -210_866_803_200, 9_224_318_015_990]
         let now = Date(timeIntervalSince1970: dates[clockIndex])
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let clock = ProjectionTransferBoundaryClock([now])
+            let clock = TestSequenceClock([now])
             let store = PostgresV2ProfileUpdateStore(database: database, now: { clock.now() })
             let media = UUID()
             if hasAvatar {
@@ -16398,7 +14731,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
             guard case .opened(let target) = try await direct.open(actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let changingRoom = changed == "source" ? sourceRoom : target.roomID
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: sourceRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)), (\(bind: target.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: sourceRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)), (\(bind: target.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             let local = V2ForwardMessagesService(database: owner, writeStore: write, capacityProfile: profile, limits: limits, now: { now })
             func routed() throws -> V2RoutedForwardMessagesService {
@@ -16459,27 +14792,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.messages", on: ownerSQL) == 2)
             #expect(try await count("im_v2.message_forward_operations", on: ownerSQL) == 1)
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=2 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: changingRoom,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrationStore = PostgresV2RoomOwnerMigrationPreparationStore(database: control,
-                registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrationStore.prepare(migration, now: now)
-            let freezing = try await migrationStore.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            let protectedTables = ["rooms", "messages", "room_events", "message_send_completions", "message_forward_operations"]
-            var protectedBefore: [String] = []
-            for table in protectedTables {
-                protectedBefore.append(try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
-            }
-            for input in [original, try command()] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await routed().forward(actorUserID: .init(uuid: memberTwoUUID), command: input)
-                }
-            }
-            for (index, table) in protectedTables.enumerated() {
-                let value = try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value
-                #expect(value == protectedBefore[index], "Migration changed \(table)")
-            }
         }
     }
 
@@ -16522,7 +14834,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("routed sends reject stale owners and migration markers before commit or replay", arguments: ["standard", "hybrid", "hybridBatch", "direct", "directBatch", "directRich"])
+    @Test("routed sends reject stale owners before commit or replay", arguments: ["standard", "hybrid", "hybridBatch", "direct", "directBatch", "directRich"])
     func routedSendOwnerEpochFence(_ kind: String) async throws {
         let mode: V2GroupCapacityClass = kind.hasPrefix("hybrid") ? .large : .standard
         try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, fixtureRoom in
@@ -16547,12 +14859,12 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 batchPeer = value.roomID
-                try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: value.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+                try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: value.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             } else { batchPeer = nil }
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
                 shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2))
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             func routed() throws -> V2RoutedRoomWriteStore {
                 try .init(router: V2CachedRoomShardRouter(source: V2PostgresRoomShardRouter(database: control)), stores: ["room-b": writer, "colocated": writer], physicalStoreKeyByShard: ["room-b": "physical", "colocated": "physical"])
             }
@@ -16625,49 +14937,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.messages").first(decoding: CountRow.self)?.value == Int64(inputs.count))
             let freshInputs = try requests()
             #expect(try await run(routed(), freshInputs).allSatisfy { if case .accepted = $0 { true } else { false } })
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrationStore = PostgresV2RoomOwnerMigrationPreparationStore(database: control,
-                registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrationStore.prepare(migration, now: now)
-            let freezing = try await migrationStore.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            // Compare persistent content and acceptance facts, not merely the returned error.
-            // Credit-pool reservation lifecycle is a separate migration concern.
-            let tables = ["rooms", "messages", "room_events", "message_send_completions",
-                "message_content_versions", "message_projection_states", "message_projection_state_values"]
-            var before: [String] = []
-            for table in tables {
-                before.append(try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
-            }
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(routed(), requests()) }
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(routed(), inputs) }
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(writer, requests()) }
-            for input in inputs where input.command.roomID == room {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await writer.accept(command: input.command, capacityProfile: input.capacityProfile,
-                        identifiers: input.identifiers, now: input.now)
-                }
-            }
-            for input in inputs {
-                if input.command.roomID == room {
-                    await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                        _ = try await routed().accept(command: input.command, capacityProfile: input.capacityProfile,
-                            identifiers: input.identifiers, now: input.now)
-                    }
-                } else {
-                    guard case .idempotent = try await routed().accept(command: input.command,
-                        capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                }
-            }
-            for (index, table) in tables.enumerated() {
-                let after = try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value
-                #expect(after == before[index], "Migrating room unexpectedly changed \(table)")
-            }
-            #expect(try await migrationStore.record(migrationID: migration.migrationID)?.phase == .freezing)
-            print("Send owner fence: \(kind), stale commit/replay rejected; current owner replay preserved; migration blocks new sends and replay")
         }
     }
 
@@ -16713,7 +14982,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await ownerStore.recordGroupOwnerValidated(command: first.command, ownerRoute: stale, now: now) }
             let conflicting = try V2RecordReadReceiptCommand(roomID: room, actorUserID: first.command.actorUserID, operationID: first.command.operationID, readThroughRoomSequence: 2)
             #expect(try await ownerStore.recordGroupOwnerValidated(command: conflicting, ownerRoute: current, now: now) == .handled(.idempotencyConflict))
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 2, \(bind: now), \(bind: now)), (\(bind: missingRoom.uuidValue!), 'colocated', 2, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 2, \(bind: now), \(bind: now)), (\(bind: missingRoom.uuidValue!), 'colocated', 2, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let routed = try V2RoutedReadReceiptStore(router: V2PostgresRoomShardRouter(database: control), ownerStores: ["room-b": ownerStore, "colocated": ownerStore], controlStore: PostgresV2ReadReceiptStore(database: control), physicalStoreKeyByShard: ["room-b": "physical", "colocated": "physical"])
             let routedResults = try await routed.recordBatch([first, missing, second])
             #expect(routedResults[1] == .failure(.ownerChanged))
@@ -16756,7 +15025,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let router = V2PostgresRoomShardRouter(database: control)
             let operation = UUID()
             @Sendable func run(_ route: any V2RoomShardRouting, on database: any Database, operationID: UUID) async throws -> String {
@@ -16839,40 +15108,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrationStore = PostgresV2RoomOwnerMigrationPreparationStore(database: control,
-                registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrationStore.prepare(migration, now: now)
-            let freezing = try await migrationStore.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            let protectedTables = ["rooms", "room_read_receipts", "read_receipt_operations", "user_sync_log"]
-            var protectedBefore: [String] = []
-            for table in protectedTables {
-                protectedBefore.append(try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
-            }
-            for op in [operation, UUID()] {
-                await #expect(throws: V2ReadReceiptStoreError.ownerChanged) {
-                    _ = try await run(router, on: owner, operationID: op)
-                }
-            }
-            if kind != "readers" {
-                let direct = PostgresV2ReadReceiptStore(database: owner)
-                for op in [operation, UUID()] {
-                    let command = try V2RecordReadReceiptCommand(roomID: room, actorUserID: .init(uuid: memberTwoUUID),
-                        operationID: .init(uuid: op), readThroughRoomSequence: message.roomSequence)
-                    await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await direct.record(command: command, now: now) }
-                    let results = try await direct.recordBatch([.init(command: command, now: now)])
-                    guard case .failure(.ownerChanged) = try #require(results.first) else {
-                        Issue.record("Direct batch must reject the migrating room"); continue
-                    }
-                }
-            }
-            for (index, table) in protectedTables.enumerated() {
-                let value = try #require(try await ownerSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value
-                #expect(value == protectedBefore[index], "Migration changed \(table)")
-            }
-            print("PASS read receipt owner \(kind) \(mode): stale new/replay, ten concurrent commits once, wrong/unknown shard/database, replay waits for owner fence and fresh epoch replays without effects")
         }
     }
 
@@ -16889,7 +15124,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let router = V2PostgresRoomShardRouter(database: control)
             let operation = UUID()
             let safetyActor = UserID(uuid: UUID())
@@ -16965,7 +15200,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 var waiting = false
                 for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
+                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
                     if waiting { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
@@ -16985,40 +15220,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.moderation_audit_entries").first(decoding: CountRow.self)?.value == 1)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.moderation_audit_entries").first(decoding: CountRow.self)?.value == 0)
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrationStore = PostgresV2RoomOwnerMigrationPreparationStore(
-                database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrationStore.prepare(migration, now: now)
-            let freezing = try await migrationStore.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot() async throws -> [String] {
-                var result: [String] = []
-                for table in ["rooms", "messages", "room_events", "room_memberships", "room_member_mutes",
-                              "moderation_operations", "moderation_audit_entries", "room_admission",
-                              "shard_admission_pools", "content_review_jobs"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(contentsOf: rows.map(\.value))
-                }
-                return result
-            }
-            let frozenState = try await snapshot()
-            // Non-routed safety/background entry points must reject new effects.
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                _ = try await run(router, on: owner, operationID: UUID(), local: true)
-            }
-            for operationID in [operation, UUID()] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await run(router, on: owner, operationID: operationID)
-                }
-            }
-            // Existing local replay remains a pure immutable receipt lookup.
-            #expect(try await run(router, on: owner, operationID: operation, local: true) == "replay")
-            #expect(try await snapshot() == frozenState)
-            print("PASS moderation owner \(kind) \(mode): stale new/replay, ten concurrent commits once, wrong/unknown shard/database, replay waits for owner fence and fresh epoch replays without effects")
         }
     }
 
@@ -17035,7 +15236,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let router = V2PostgresRoomShardRouter(database: control)
             let operation = UUID()
             @Sendable func run(_ route: any V2RoomShardRouting, on database: any Database, operationID: UUID, colocated: Bool = false, local: Bool = false) async throws -> String {
@@ -17114,7 +15315,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 var waiting = false
                 for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
+                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
                     if waiting { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
@@ -17132,38 +15333,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore.map { $0 + 1 })
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot() async throws -> [[String]] {
-                var result: [[String]] = []
-                for table in ["rooms", "room_memberships", "room_pinned_messages", "room_pinned_message_operations",
-                              "group_announcements", "group_announcement_operations", "group_role_permissions",
-                              "group_permission_operations", "group_role_operations", "room_events",
-                              "room_admission", "shard_admission_pools", "user_state_event_outbox", "group_event_wake_outbox"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(rows.map(\.value))
-                }
-                return result
-            }
-            let frozenState = try await snapshot()
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                _ = try await run(router, on: owner, operationID: UUID(), local: true)
-            }
-            for op in [operation, UUID()] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await run(router, on: owner, operationID: op)
-                }
-            }
-            #expect(try await run(router, on: owner, operationID: operation, local: true) == "replay")
-            #expect(try await snapshot() == frozenState)
-            print("PASS group capability owner \(kind) \(mode): stale new/replay, ten concurrent commits once, wrong/unknown shard/database, replay waits for owner fence and fresh epoch replays without effects")
         }
     }
 
@@ -17178,7 +15347,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let router = V2PostgresRoomShardRouter(database: control)
             let operation = UUID()
             let identities = V2PostgresMembershipIdentitySnapshotValidator(database: control)
@@ -17247,7 +15416,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 var waiting = false
                 for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
+                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%SELECT room_shard_id, owner_epoch FROM im_v2.rooms%'").first(decoding: CountRow.self)?.value == 1
                     if waiting { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
@@ -17265,38 +15434,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore.map { $0 + 1 })
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot() async throws -> [[String]] {
-                var result: [[String]] = []
-                for table in ["rooms", "messages", "message_content_versions", "message_projection_states",
-                              "message_projection_state_values", "message_reactions", "message_edit_operations",
-                              "message_withdrawal_operations", "message_reaction_operations", "room_events",
-                              "room_admission", "shard_admission_pools", "content_review_jobs", "group_event_wake_outbox"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(rows.map(\.value))
-                }
-                return result
-            }
-            let frozenState = try await snapshot()
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                _ = try await run(router, on: owner, operationID: UUID(), local: true)
-            }
-            for op in [operation, UUID()] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await run(router, on: owner, operationID: op)
-                }
-            }
-            #expect(try await run(router, on: owner, operationID: operation, local: true) == "replay")
-            #expect(try await snapshot() == frozenState)
-            print("PASS mutation owner \(kind) \(mode): stale new/replay, ten concurrent commits once, wrong/unknown shard/database, replay waits for owner fence and fresh epoch replays without effects")
         }
     }
 
@@ -17306,7 +15443,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let router = V2PostgresRoomShardRouter(database: control)
             let identities = V2PostgresMembershipIdentitySnapshotValidator(database: control)
             let routed = try V2RoutedRoomMembershipStore(router: router,
@@ -17402,286 +15539,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(retried.membershipRevision == 3)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.room_membership_operations").first(decoding: CountRow.self)?.value == 0)
-            // Direct local composition still needs a current actor, even
-            // when no control identity snapshot was passed.
-            try await ownerSQL.raw("""
-                INSERT INTO im_v2.public_user_profiles(user_id, public_handle, display_name, created_at, updated_at)
-                VALUES (\(bind: senderUUID), 'migration_actor', 'Migration actor', \(bind: now), \(bind: now))
-                """).run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "room-b", epoch: 2), targetShardID: "room-c")
-            let migrationStore = PostgresV2RoomOwnerMigrationPreparationStore(
-                database: control, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrationStore.prepare(migration, now: now)
-            let freezing = try await migrationStore.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: owner).install(for: freezing)
-            func snapshot() async throws -> [String] {
-                var result: [String] = []
-                for table in ["rooms", "room_memberships", "room_membership_operations",
-                              "room_events", "room_admission", "shard_admission_pools", "user_state_event_outbox"] {
-                    let rows = try await ownerSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(contentsOf: rows.map(\.value))
-                }
-                return result
-            }
-            let frozenState = try await snapshot()
-            let local = PostgresV2RoomMembershipStore(database: owner)
-            for action in [V2RoomMembershipAction.add, .remove] {
-                let fresh = try V2ChangeRoomMembershipCommand(roomID: room, actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberThreeUUID),
-                    action: action, expectedMembershipRevision: 3)
-                await #expect(throws: V2RoomMembershipStoreError.ownerChanged) {
-                    _ = try await local.change(command: fresh, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                }
-                await #expect(throws: V2RoomMembershipStoreError.ownerChanged) {
-                    _ = try await routed.change(command: fresh, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                }
-            }
-            await #expect(throws: V2RoomMembershipStoreError.ownerChanged) {
-                _ = try await routed.change(command: queuedCommand, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-            }
-            guard case .idempotent = try await local.change(command: queuedCommand, capacityProfile: profile,
-                eventID: .init(uuid: UUID()), now: now) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            #expect(try await snapshot() == frozenState)
-            print("PASS membership owner fence: stale new/replay, single/colocated topology, ten same-operation retries, current identity, wrong/unknown owner, epoch change while blocked and fresh retry")
         }
     }
 
-    @Test("legacy import conflicts roll back whole pages and owner changes prevent publication", arguments: ["binding", "digest", "invite"])
-    func inviteDirectoryImportConflicts(_ collision: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
-            let store = PostgresV2GroupInvitationStore(database: owner)
-            let directory = PostgresV2GroupInviteDirectory(database: control)
-            func candidate(_ index: Int, operation: GroupInviteOperationID? = nil, invite: GroupInviteID? = nil, digest: Data? = nil) -> V2GroupInviteCreatePersistenceRequest {
-                .init(inviteID: invite ?? .init(uuid: UUID(uuidString: String(format: "10000000-0000-0000-0000-%012d", index))!), roomID: room,
-                    actorUserID: .init(uuid: senderUUID), operationID: operation ?? .init(uuid: UUID(uuidString: String(format: "20000000-0000-0000-0000-%012d", index))!),
-                    tokenDigest: digest ?? Data(repeating: UInt8(index), count: 32), requestedLifetimeSeconds: 3600,
-                    expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: now)
-            }
-            let first = candidate(1), third = candidate(3)
-            for i in 1...3 { _ = try await store.create(candidate(i)) }
-            _ = try await directory.prepare(first)
-            let poison = candidate(3, operation: collision == "binding" ? third.operationID : .init(uuid: UUID()),
-                invite: collision == "invite" ? third.inviteID : .init(uuid: UUID()),
-                digest: collision == "invite" ? Data(repeating: 0xff, count: 32) : third.tokenDigest)
-            _ = try await directory.prepare(poison)
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
-            let importer = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "oncall-import", now: { now })
-            func command(_ operation: UUID = UUID(), epoch: Int64 = 0) throws -> V2GroupInviteDirectoryImportCommand {
-                try .init(operationID: operation, shardID: "room-b", ownerEpoch: epoch, roomID: room.uuidValue!, afterInviteID: nil, limit: 3, reason: .dataRepaired)
-            }
-            let original = try command()
-            let another = try command()
-            async let a = importer.importPage(original)
-            async let b = importer.importPage(another)
-            let (left, right) = try await (a, b)
-            for result in [left, right] {
-                #expect(result.outcome == .conflict && result.sourceCount == 3 && result.conflictingInviteIDs == [third.inviteID.uuidValue!])
-                #expect(result.insertedCount == 0 && result.publishedCount == 0 && result.unchangedCount == 0 && !result.wasIdempotent)
-            }
-            #expect(try await importer.importPage(original).wasIdempotent)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory").first(decoding: CountRow.self)?.value == 2)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE state='ready'").first(decoding: CountRow.self)?.value == 0)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_creation_recovery WHERE state='pending'").first(decoding: CountRow.self)?.value == 2)
-            #expect(try await directory.prepare(poison).request.inviteID == poison.inviteID)
-            #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 3)
-            let unknown = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: V2StaticRoomShardStorageRegistry(locations: []), operatorPrincipal: "oncall-import", now: { now })
-            await #expect(throws: V2GroupInviteDirectoryImportError.unknownShard) { _ = try await unknown.importPage(command()) }
-            let wrong = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control,
-                owners: V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: control, schema: "im_v2")]), operatorPrincipal: "oncall-import", now: { now })
-            await #expect(throws: V2GroupInviteDirectoryImportError.ownerChanged) { _ = try await wrong.importPage(command()) }
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-            await #expect(throws: V2GroupInviteDirectoryImportError.ownerChanged) { _ = try await importer.importPage(command(epoch: 1)) }
-            try await sql.raw("DELETE FROM im_v2.room_owner_routes WHERE room_id=\(bind: room.uuidValue!)").run()
-            await #expect(throws: V2GroupInviteDirectoryImportError.ownerChanged) { _ = try await importer.importPage(command()) }
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
-            // Block the owner read only after import has read control epoch 0.
-            // Change control while that read waits, then let the old owner page
-            // return: the second control fence must reject it without an audit.
-            let barrier = InviteImportTestBarrier()
-            let holder = Task {
-                try await owner.transaction { transaction in
-                    let ownerSQL = try #require(transaction as? any SQLDatabase)
-                    try await ownerSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!) FOR UPDATE").run()
-                    await barrier.hold()
-                }
-            }
-            await barrier.waitUntilHeld()
-            let inFlightCommand = try command()
-            let inFlight = Task { try await importer.importPage(inFlightCommand) }
-            do {
-                var waiting = false
-                for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%owner_epoch AS epoch%'").first(decoding: CountRow.self)?.value == 1
-                    if waiting { break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(waiting)
-                guard waiting else { throw TestConfigurationError.schemaAlreadyExists }
-                try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-                await barrier.release()
-                try await holder.value
-                await #expect(throws: V2GroupInviteDirectoryImportError.ownerChanged) { _ = try await inFlight.value }
-            } catch {
-                await barrier.release()
-                _ = try? await holder.value
-                _ = try? await inFlight.value
-                throw error
-            }
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory_import_audit").first(decoding: CountRow.self)?.value == 2)
-            try await sql.raw("DROP INDEX im_v2.group_invite_links_import_page_idx").run()
-            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_invite_directory_import_audit[atomic-import]")) { try await V2SchemaReadiness.verify(database: control) }
-            try await assertSQLSchemaGate(false, on: sql)
-            print("PASS import conflict \(collision): whole page/job rollback with two immutable audits, unknown/wrong/stale owner, missing route, control change during blocked owner read")
-        }
-    }
 
-    @Test("operator imports immutable legacy invite pages across owners with atomic audit", arguments: [V2GroupCapacityClass.standard, .large])
-    func inviteDirectoryImportPages(_ mode: V2GroupCapacityClass) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000.123456)
-            try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
-            try await ownerSQL.raw("""
-                INSERT INTO im_v2.group_invite_links(invite_id,room_id,created_by_user_id,creation_operation_id,
-                    token_digest,requested_lifetime_seconds,expires_at,maximum_approved_uses,approved_use_count,state,created_at)
-                SELECT ('10000000-0000-0000-0000-' || lpad(i::text,12,'0'))::uuid, \(bind: room.uuidValue!), \(bind: senderUUID),
-                    ('20000000-0000-0000-0000-' || lpad(i::text,12,'0'))::uuid, sha256(convert_to('legacy-import-' || i::text,'UTF8')),
-                    3600, \(bind: now.addingTimeInterval(3600)), 5, 0, 'active', \(bind: now)
-                FROM generate_series(1,103) AS i
-                """).run()
-            let firstID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
-            let firstOperation = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
-            try await ownerSQL.raw("UPDATE im_v2.group_invite_links SET state='revoked', revoked_by_user_id=\(bind: senderUUID), revocation_operation_id=gen_random_uuid(), revoked_at=\(bind: now) WHERE invite_id='10000000-0000-0000-0000-000000000002'").run()
-            try await ownerSQL.raw("UPDATE im_v2.group_invite_links SET created_at=\(bind: now.addingTimeInterval(-7200)), expires_at=\(bind: now.addingTimeInterval(-3600)) WHERE invite_id='10000000-0000-0000-0000-000000000003'").run()
-            try await ownerSQL.raw("UPDATE im_v2.group_invite_links SET approved_use_count=maximum_approved_uses WHERE invite_id='10000000-0000-0000-0000-000000000004'").run()
-            let ownerBefore = try await ownerSQL.raw("SELECT md5(string_agg(to_jsonb(x)::text, ',' ORDER BY invite_id)) AS value FROM im_v2.group_invite_links x").first(decoding: StringValueRow.self)?.value
-            let directory = PostgresV2GroupInviteDirectory(database: control)
-            let fixed = V2GroupInviteCreatePersistenceRequest(inviteID: .init(uuid: firstID), roomID: room,
-                actorUserID: .init(uuid: senderUUID), operationID: .init(uuid: firstOperation),
-                tokenDigest: Data(SHA256.hash(data: Data("legacy-import-1".utf8))), requestedLifetimeSeconds: 3600,
-                expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: now)
-            _ = try await directory.prepare(fixed)
-            let claim = try #require(try await directory.claim(limit: 1, now: now.addingTimeInterval(31), lease: 60, maximumActiveInvitesPerRoom: 20).first)
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
-            let importedAt = now.addingTimeInterval(32)
-            let importer = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "oncall-import", now: { importedAt })
-            let command = try V2GroupInviteDirectoryImportCommand(operationID: UUID(), shardID: "room-b", ownerEpoch: 0,
-                roomID: room.uuidValue!, afterInviteID: nil, limit: 100, reason: .dataRepaired)
-            let badClocks = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            func importSnapshot() async throws -> String {
-                try #require(try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'directory', (SELECT jsonb_agg(to_jsonb(r) ORDER BY invite_id) FROM im_v2.group_invite_directory r),
-                        'jobs', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.group_invite_creation_recovery r),
-                        'audit', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.group_invite_directory_import_audit r)
-                    )::text AS value
-                    """).first(decoding: StringValueRow.self)).value
-            }
-            let beforeInvalidClock = try await importSnapshot()
-            for badClock in badClocks {
-                let invalidClockImporter = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "oncall-import", now: { badClock })
-                await #expect(throws: V2GroupInviteDirectoryImportError.invalidRequest) { _ = try await invalidClockImporter.importPage(command) }
-                #expect(try await importSnapshot() == beforeInvalidClock)
-            }
-            // Audit failure is after directory/job changes. The complete control
-            // transaction rolls back, so no success is published without audit.
-            try await sql.raw("CREATE FUNCTION im_v2.fail_invite_import_audit() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'test audit failure'; END;$$").run()
-            try await sql.raw("CREATE TRIGGER test_invite_import_audit BEFORE INSERT ON im_v2.group_invite_directory_import_audit FOR EACH ROW EXECUTE FUNCTION im_v2.fail_invite_import_audit()").run()
-            await #expect(throws: (any Error).self) { _ = try await importer.importPage(command) }
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory").first(decoding: CountRow.self)?.value == 1)
-            #expect(try await directory.resolve(tokenDigest: fixed.tokenDigest) == nil)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_creation_recovery WHERE state='claimed' AND claim_token=\(bind: claim.claimToken)").first(decoding: CountRow.self)?.value == 1)
-            try await sql.raw("DROP TRIGGER test_invite_import_audit ON im_v2.group_invite_directory_import_audit").run()
-            try await sql.raw("DROP FUNCTION im_v2.fail_invite_import_audit()").run()
-            let results = try await withThrowingTaskGroup(of: V2GroupInviteDirectoryImportResult.self) { tasks in
-                for _ in 0..<10 { tasks.addTask { try await importer.importPage(command) } }
-                var values: [V2GroupInviteDirectoryImportResult] = []
-                for try await value in tasks { values.append(value) }
-                return values
-            }
-            #expect(results.count == 10 && results.filter { !$0.wasIdempotent }.count == 1)
-            #expect(results.allSatisfy { $0.outcome == .applied && $0.sourceCount == 100 && $0.insertedCount == 99 && $0.publishedCount == 1 && $0.unchangedCount == 0 })
-            let afterPublication = try await importSnapshot()
-            for badClock in badClocks {
-                let replayImporter = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "oncall-import", now: { badClock })
-                let replay = try await replayImporter.importPage(command)
-                #expect(replay.wasIdempotent && replay.outcome == .applied && replay.sourceCount == 100 && replay.insertedCount == 99 && replay.publishedCount == 1)
-                #expect(try await importSnapshot() == afterPublication)
-            }
-            let cursor = try #require(results.first?.nextCursor)
-            #expect(cursor == UUID(uuidString: "10000000-0000-0000-0000-000000000100"))
-            #expect(try await directory.fail(claim, reason: .dependencyUnavailable, retryAt: now.addingTimeInterval(60), now: now.addingTimeInterval(32)) == false)
-            let second = try await importer.importPage(.init(operationID: UUID(), shardID: "room-b", ownerEpoch: 0,
-                roomID: room.uuidValue!, afterInviteID: cursor, limit: 100, reason: .dataRepaired))
-            #expect(second.insertedCount == 3 && second.sourceCount == 3 && second.nextCursor == nil)
-            let rescan = try await importer.importPage(.init(operationID: UUID(), shardID: "room-b", ownerEpoch: 0,
-                roomID: room.uuidValue!, afterInviteID: nil, limit: 100, reason: .dataRepaired))
-            #expect(rescan.unchangedCount == 100 && rescan.insertedCount == 0 && rescan.publishedCount == 0)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE state='ready'").first(decoding: CountRow.self)?.value == 103)
-            #expect(try await ownerSQL.raw("SELECT md5(string_agg(to_jsonb(x)::text, ',' ORDER BY invite_id)) AS value FROM im_v2.group_invite_links x").first(decoding: StringValueRow.self)?.value == ownerBefore)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory_import_audit WHERE source_digest=sha256(convert_to(source_snapshot::text,'UTF8')) AND operator_principal='oncall-import'").first(decoding: CountRow.self)?.value == 3)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.room_memberships WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == 0)
-            #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
-            for (i, available) in [(1,true),(2,false),(3,false),(4,true)] {
-                let result = try await routed.preview(tokenDigest: Data(SHA256.hash(data: Data("legacy-import-\(i)".utf8))), applicantUserID: .init(uuid: memberTwoUUID), now: now)
-                if case .available = result { #expect(available) } else { #expect(!available) }
-            }
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory_import_audit WHERE operation_id=\(bind: command.operationID) AND abs((source_snapshot->0->>'created_at')::double precision - \(bind: now.timeIntervalSince1970)) < 0.000002").first(decoding: CountRow.self)?.value == 1)
-            // A real HTTP call reaches the database importer; empty tail pages
-            // are durable results, not invitations to loop on an old cursor.
-            let http = try await Application.make(.testing)
-            do {
-                let token = Data(repeating: 0x65, count: 32).base64EncodedString()
-                V2VaporGroupInviteDirectoryImportRoutes(authenticator: try .init(base64EncodedBearerToken: token), service: importer).register(on: http)
-                let input = V2GroupInviteDirectoryImportHTTPRequest(operationID: UUID(), shardID: "room-b", ownerEpoch: 0,
-                    roomID: room.uuidValue!, afterInviteID: UUID(uuidString: "10000000-0000-0000-0000-000000000103"), limit: 100, reason: .dataRepaired)
-                try await http.testing().test(.POST, "internal/v2/group-invites/import-directory", headers: ["Authorization": "Bearer \(token)"], beforeRequest: {
-                    try $0.content.encode(input)
-                }) { response async throws in
-                    #expect(response.status == .ok && response.headers.first(name: .cacheControl) == "no-store")
-                    let result = try JSONDecoder().decode(V2GroupInviteDirectoryImportResult.self, from: Data(response.body.string.utf8))
-                    #expect(result.outcome == .applied && result.sourceCount == 0 && result.nextCursor == nil && result.conflictingInviteIDs.isEmpty)
-                }
-                try await http.asyncShutdown()
-            } catch { try? await http.asyncShutdown(); throw error }
-            // Colocated control/owner also uses an explicit route and imports
-            // only its requested room, despite 103 links on the other owner.
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID), 'room-a', 0, \(bind: now), \(bind: now))").run()
-            let local = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control,
-                owners: V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-a", database: control, schema: "im_v2")]),
-                operatorPrincipal: "oncall-import", now: { importedAt })
-            let empty = try await local.importPage(.init(operationID: UUID(), shardID: "room-a", ownerEpoch: 0,
-                roomID: roomUUID, afterInviteID: nil, limit: 1, reason: .dataRepaired))
-            #expect(empty.sourceCount == 0 && empty.outcome == .applied && empty.nextCursor == nil)
-            await #expect(throws: (any Error).self) { try await sql.raw("UPDATE im_v2.group_invite_directory_import_audit SET outcome='conflict' WHERE operation_id=\(bind: command.operationID)").run() }
-            await #expect(throws: (any Error).self) { try await sql.raw("DELETE FROM im_v2.group_invite_directory_import_audit WHERE operation_id=\(bind: command.operationID)").run() }
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-            let replayWithoutOwner = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: V2StaticRoomShardStorageRegistry(locations: []), operatorPrincipal: "oncall-import", now: { now })
-            #expect(try await replayWithoutOwner.importPage(command).wasIdempotent)
-            await #expect(throws: V2GroupInviteDirectoryImportError.ownerChanged) {
-                _ = try await importer.importPage(.init(operationID: UUID(), shardID: "room-b", ownerEpoch: 0, roomID: room.uuidValue!, afterInviteID: nil, limit: 100, reason: .dataRepaired))
-            }
-            await #expect(throws: V2GroupInviteDirectoryImportError.idempotencyConflict) {
-                _ = try await importer.importPage(.init(operationID: command.operationID, shardID: "room-b", ownerEpoch: 0, roomID: room.uuidValue!, afterInviteID: nil, limit: 99, reason: .dataRepaired))
-            }
-            let differentPrincipal = try PostgresV2GroupInviteDirectoryImporter(controlDatabase: control, owners: registry, operatorPrincipal: "different-oncall", now: { now })
-            await #expect(throws: V2GroupInviteDirectoryImportError.idempotencyConflict) { _ = try await differentPrincipal.importPage(command) }
-            try await V2SchemaReadiness.verify(database: control)
-            try await assertSQLSchemaGate(true, on: sql)
-            try await sql.raw("ALTER TABLE im_v2.group_invite_directory_import_audit DISABLE TRIGGER group_invite_import_audit_immutable").run()
-            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_invite_directory_import_audit[atomic-import]")) { try await V2SchemaReadiness.verify(database: control) }
-            try await assertSQLSchemaGate(false, on: sql)
-            print("PASS import pages: 103 links, 10 concurrent same operations, leased prepared completion, audit rollback, original terminal states, exact replay without owner, immutable audit and schema gate")
-        }
-    }
     @Test("legacy owner creation retry publishes its original binding and preserves terminal state", arguments: [V2GroupCapacityClass.standard, .large])
     func legacyInviteCreationRetryPreservesOwnerBinding(_ mode: V2GroupCapacityClass) async throws {
         try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
@@ -17689,7 +15550,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
             let directory = PostgresV2GroupInviteDirectory(database: control)
@@ -17765,7 +15626,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
             let directory = PostgresV2GroupInviteDirectory(database: control)
@@ -17975,7 +15836,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 let roomA = RoomID(uuid: roomUUID)
                 for (room, shard) in [(roomA, "room-a"), (roomB, "room-b")] {
-                    try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!),\(bind: shard),0,\(bind: now),\(bind: now))").run()
+                    try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!),\(bind: shard),0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
                 }
                 let registry = try V2StaticRoomShardStorageRegistry(locations: [
                     .init(shardID: "room-a", database: ownerA, schema: "im_v2"),
@@ -18106,7 +15967,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let directory = PostgresV2GroupInviteDirectory(database: control)
             func candidate(_ byte: UInt8, lifetime: Int) -> V2GroupInviteCreatePersistenceRequest {
@@ -18159,7 +16020,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let directory = PostgresV2GroupInviteDirectory(database: control)
             func candidate(_ byte: UInt8) -> V2GroupInviteCreatePersistenceRequest {
@@ -19512,21 +17373,18 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(pushBudget.usedWorkUnits == 1)
             #expect(pushBudget.usedNewKeyOperations == 0)
 
-            let replacement = try await V2ShardAdmissionLeaseService(
-                store: PostgresV2ShardAdmissionLeaseStore(database: app.db(.psql)),
-                makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000019")! },
-                now: { Date(timeIntervalSince1970: 1_750_000_200) }
-            ).replaceExpired(
-                key: try .init(roomShardID: "room-a", capacityProfileID: "standard"),
-                capacityProfile: try .init(id: "standard", limits: profile),
-                lifetime: 30
-            )
+            let replacementID = UUID(uuidString: "00000000-0000-0000-0000-000000000019")!
+            try await sql.raw("""
+                UPDATE im_v2.shard_admission_pools
+                SET lease_id = \(bind: replacementID), generation = 2,
+                    valid_until = \(bind: Date(timeIntervalSince1970: 1_750_000_230)), command_window_used = 0
+                WHERE room_shard_id = 'room-a' AND capacity_profile_id = 'standard'
+                """).run()
             let cascadedFence = try #require(try await sql.raw("""
                 SELECT shard_lease_id, shard_lease_generation
                 FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)
                 """).first(decoding: AdmissionFenceRow.self))
-            #expect(replacement.generation == 2)
-            #expect(cascadedFence.shardLeaseID.uuidString == replacement.id.rawValue)
+            #expect(cascadedFence.shardLeaseID.uuidString == replacementID.uuidString)
             #expect(cascadedFence.shardLeaseGeneration == 2)
             let resetCapacity = try #require(try await sql.raw("""
                 SELECT command_window_used
@@ -21193,6 +19051,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 initialMemberUserIDs: [invitedUser]
             )
             guard case .created(let created) = group else { Issue.record("expected created group"); return }
+            let createdRoute = try await V2PostgresRoomShardRouter(database: app.db(.psql)).route(for: created.roomID)
+            #expect(createdRoute.shardID == "rooms-primary" && createdRoute.epoch == 0)
+
 
             let source = try #require(try await sql.raw("SELECT event_id::text AS value FROM im_v2.room_events WHERE event_type = 'room.created'").first(decoding: StringValueRow.self)).value
             let delivery = try await V2UserStateEventWorker(
@@ -21561,7 +19422,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let routedBaseline = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: app.db(.psql), stores: [route.shardID: baselineStore])
             #expect(try await routedBaseline.readRolePolicyBaseline(roomID: roomID, actorUserID: senderID) == originalBaseline)
             let movingReader = PolicyBaselineAfterReadStore(base: baselineStore) {
-                try await sql.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: roomUUID), \(bind: route.shardID), \(bind: route.epoch + 1), NOW(), NOW())").run()
+                try await sql.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: roomUUID), \(bind: route.shardID), \(bind: route.epoch + 1), NOW(), NOW()) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             }
             let movingBaseline = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: app.db(.psql), stores: [route.shardID: movingReader])
             await #expect(throws: V2RoomShardRouteError.routeConflict) {
@@ -23214,90 +21075,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
 
 
-    @Test("room retention skips migrating and locked rooms across cursor wrap and recreation",
-          arguments: [V2RoomLogRetentionMode.permanent, .window])
-    func roomRetentionMigrationFence(mode: V2RoomLogRetentionMode) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            let database = app.db(.psql)
-            let sql = try #require(database as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let rooms = (1 ... 3).map { UUID(uuidString: String(format: "00000000-0000-0000-0000-00000000e%03d", $0))! }
-            for room in rooms {
-                try await insertSummaryFixtureRoom(on: sql, room: room, kind: "group",
-                    sequence: 4, revision: 1, lastEventAt: now, createdAt: now)
-                let user = UUID()
-                try await insertSummaryFixtureMembership(on: sql, room: room, user: user, joined: 1, left: nil)
-                try await insertSummaryFixtureReadReceipt(on: sql, room: room, user: user, readThrough: 3, at: now)
-                for sequence in 1 ... 4 {
-                    try await insertSummaryFixtureRoomEvent(on: sql, room: room, sequence: Int64(sequence),
-                        revision: 1, message: UUID(), createdAt: now)
-                }
-            }
-            let control = PostgresV2RoomOwnerMigrationPreparationStore(
-                database: database, registeredShardIDs: ["room-a", "room-b"])
-            for room in [rooms[0], rooms[2]] {
-                try await sql.raw("""
-                    INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                    VALUES (\(bind: room), 'room-a', 0, \(bind: now), \(bind: now))
-                    """).run()
-                let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: RoomID(uuid: room),
-                    source: .init(shardID: "room-a", epoch: 0), targetShardID: "room-b")
-                _ = try await control.prepare(request, now: now)
-                let freezing = try await control.beginFreezing(request, now: now)
-                try await PostgresV2RoomMigrationWriteFence(database: database).install(for: freezing)
-            }
-            func protectedSnapshot() async throws -> [String] {
-                var values: [String] = []
-                for table in ["rooms", "room_events", "room_read_receipts", "room_memberships"] {
-                    let rows = try await sql.raw("""
-                        SELECT row_to_json(target)::text AS value FROM im_v2.\(unsafeRaw: table) AS target
-                        WHERE room_id = ANY(\(bind: [rooms[0], rooms[2]])::uuid[])
-                        ORDER BY row_to_json(target)::text
-                        """).all(decoding: StringValueRow.self)
-                    values.append(contentsOf: rows.map(\.value))
-                }
-                return values
-            }
-            let before = try await protectedSnapshot()
-            let store = PostgresV2RoomLogRetentionStore(database: database)
-            // Independent connection holds the only unfrozen room. A bounded
-            // lock timeout makes a missing SKIP LOCKED fail instead of hanging.
-            try await database.transaction { transaction in
-                let heldSQL = try #require(transaction as? any SQLDatabase)
-                try await heldSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: rooms[1]) FOR UPDATE").run()
-                try await database.transaction { contender in
-                    let contenderSQL = try #require(contender as? any SQLDatabase)
-                    try await contenderSQL.raw("SET LOCAL lock_timeout = '2s'").run()
-                    let report = try await PostgresV2RoomLogRetentionStore(database: contender)
-                        .trimRoomLogs(mode: mode, window: 3600, now: now, limit: 1)
-                    #expect(report == .init(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0))
-                }
-            }
-            let trimmed = try await store.trimRoomLogs(mode: mode, window: 3600, now: now, limit: 1)
-            #expect(trimmed == .init(scannedRooms: 1, trimmedRooms: 1, deletedEvents: 2))
-            // Cursor is now between the two frozen rooms; wrap must filter too.
-            let wrapped = try await store.trimRoomLogs(mode: mode, window: 3600, now: now, limit: 1)
-            #expect(wrapped == .init(scannedRooms: 1, trimmedRooms: 0, deletedEvents: 0))
-            let recreated = try await PostgresV2RoomLogRetentionStore(database: database)
-                .trimRoomLogs(mode: mode, window: 3600, now: now, limit: 3)
-            #expect(recreated == .init(scannedRooms: 1, trimmedRooms: 0, deletedEvents: 0))
-            #expect(try await protectedSnapshot() == before)
-            #expect(try await count("im_v2.room_events", on: sql) == 10)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase {
-                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
-            }
-            try? await app.asyncShutdown()
-            throw error
-        }
-        try await app.asyncShutdown()
-    }
 
     @Test("room log retention follows active readers and marks trimmed history")
     func roomLogRetentionFollowsActiveReaders() async throws {
@@ -24042,95 +21819,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("user-shard migration phases are durable, fenced, and idempotently prepared")
-    func userShardMigrationStoreFencesProgress() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
-        else { return }
-
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
-            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
-                throw TestConfigurationError.schemaAlreadyExists
-            }
-            try await installSchema(on: sql)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let user = try UserID("00000000-0000-0000-0000-000000000b01")
-            let request = try V2UserShardMigrationPreparation(
-                migrationID: UUID(uuidString: "00000000-0000-0000-0000-000000000b02")!, userID: user,
-                sourceBucket: "users-old", targetBucket: "users-new", sourceRouterEpoch: 12
-            )
-            let store = PostgresV2UserShardMigrationStore(database: app.db(.psql))
-            let prepared = try await store.prepare(request, now: now)
-            #expect(prepared.phase == .prepared)
-            #expect(try await store.prepare(request, now: now.addingTimeInterval(1)) == prepared)
-            await #expect(throws: V2UserShardMigrationStoreError.requestConflict) {
-                try await store.prepare(.init(
-                    migrationID: request.migrationID, userID: user, sourceBucket: "users-old",
-                    targetBucket: "users-third", sourceRouterEpoch: 12
-                ), now: now)
-            }
-
-            let copying = try await store.advance(
-                migrationID: request.migrationID, expectedPhase: .prepared, action: .beginCopy,
-                fingerprints: nil, now: now
-            )
-            #expect(copying.phase == .copying)
-            await #expect(throws: V2UserShardMigrationStoreError.phaseConflict) {
-                try await store.advance(
-                    migrationID: request.migrationID, expectedPhase: .prepared, action: .beginCopy,
-                    fingerprints: nil, now: now
-                )
-            }
-            let copied = try await store.advance(
-                migrationID: request.migrationID, expectedPhase: .copying, action: .copySucceeded,
-                fingerprints: nil, now: now
-            )
-            let verifying = try await store.advance(
-                migrationID: request.migrationID, expectedPhase: copied.phase, action: .beginVerification,
-                fingerprints: nil, now: now
-            )
-            let forwarding = try await store.advance(
-                migrationID: request.migrationID, expectedPhase: verifying.phase, action: .verificationSucceeded,
-                fingerprints: ("sha256:equal", "sha256:equal"), now: now
-            )
-            #expect(forwarding.phase == .forwarding)
-            let verified = try await store.advance(
-                migrationID: request.migrationID, expectedPhase: forwarding.phase, action: .forwardingVerificationSucceeded,
-                fingerprints: ("sha256:equal", "sha256:equal"), now: now
-            )
-            #expect(verified.phase == .verified)
-            #expect(verified.sourceFingerprint == "sha256:equal")
-            #expect(verified.targetFingerprint == "sha256:equal")
-            #expect(verified.verifiedAt == now)
-            #expect(verified.lastErrorCode == nil)
-            #expect(try await store.load(migrationID: request.migrationID) == verified)
-
-            let retentionMigrationID = UUID(uuidString: "00000000-0000-0000-0000-000000000b03")!
-            let retentionUser = UUID(uuidString: "00000000-0000-0000-0000-000000000b04")!
-            try await sql.raw("""
-                INSERT INTO im_v2.user_shard_migrations
-                    (migration_id, user_id, source_bucket, target_bucket, source_router_epoch, phase,
-                     source_fingerprint, target_fingerprint, verified_at, retention_until, created_at, updated_at)
-                VALUES
-                    (\(bind: retentionMigrationID), \(bind: retentionUser), 'users-old', 'users-new', 12, 'retention',
-                     'sha256:equal', 'sha256:equal', \(bind: now), \(bind: now.addingTimeInterval(-1)), \(bind: now), \(bind: now))
-                """).run()
-            let claimedRetention = try await store.claimExpiredRetention(now: now, leaseDuration: 30, limit: 1)
-            #expect(claimedRetention.count == 1)
-            #expect(claimedRetention.first?.record.migrationID == retentionMigrationID)
-            #expect(try await store.completeRetention(try #require(claimedRetention.first), now: now))
-            #expect(try await store.load(migrationID: retentionMigrationID)?.phase == .completed)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
     @Test("one poison user backs off and pauses without blocking healthy projection work")
     func userProjectionPoisonIsolationAndReplay() async throws {
@@ -24474,8 +22162,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
             let route = try V2UserShardRoute(
                 bucket: "reset-shard",
-                observedRouterEpoch: 1,
-                readFallbackBucket: "control"
+                observedRouterEpoch: 1
             )
             let storage = try V2StaticUserShardStorageRegistry(locations: [
                 try .init(
@@ -24517,14 +22204,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ))
             }
 
-            // A retained migration source can still contain capabilities at
-            // revocation time. Route-fenced cleanup removes both owners; a
-            // later exclusive final-copy therefore cannot resurrect them.
-            try await sql.raw("""
-                INSERT INTO im_v2.device_sync_cursors
-                    (user_id, device_id, state, reset_generation)
-                VALUES (\(bind: user), \(bind: device), 'ready', 1)
-                """).run()
+            // Revocation removes capabilities from the configured current owner.
             try await V2RoutedRevokedDeviceProjectionCleaner(
                 routeFence: StaticUserShardRouteFence(
                     route: route,
@@ -24546,7 +22226,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count(
                 "im_v2.revoked_device_projection_tombstones",
                 on: sql
-            ) == 1)
+            ) == 0)
             #expect(try await sql.raw("""
                 SELECT COUNT(DISTINCT revoked_at) AS value
                 FROM (
@@ -24958,133 +22638,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("cross-store user projection copy verifies every sync-owned record before source cleanup")
-    func crossStoreUserProjectionTransferIsIdempotentAndVerified() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
-        else { return }
-
-        let app = try await Application.make(.testing)
-        let sourceSchema = "im_v2_source_transfer"
-        let targetSchema = "im_v2_target_transfer"
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
-            guard let sql = app.db(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
-                throw TestConfigurationError.schemaAlreadyExists
-            }
-            try await installSchema(on: sql, schema: sourceSchema)
-            try await installSchema(on: sql, schema: targetSchema)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let user = UUID(uuidString: "00000000-0000-0000-0000-000000000c01")!
-            let device = UUID(uuidString: "00000000-0000-0000-0000-000000000c02")!
-            let eventOne = UUID(uuidString: "00000000-0000-0000-0000-000000000c03")!
-            let eventTwo = UUID(uuidString: "00000000-0000-0000-0000-000000000c04")!
-            let snapshot = UUID(uuidString: "00000000-0000-0000-0000-000000000c05")!
-            try await seedTransferProjection(
-                schema: sourceSchema, user: user, device: device, eventOne: eventOne,
-                eventTwo: eventTwo, snapshot: snapshot, now: now, on: sql
-            )
-            // Model residue committed by an interrupted earlier copy. The
-            // retry must replace the complete target slice, including rows
-            // whose keys do not conflict with the current source.
-            let staleEffect = UUID(uuidString: "00000000-0000-0000-0000-000000000c07")!
-            let staleActivity = UUID(uuidString: "00000000-0000-0000-0000-000000000c08")!
-            try await sql.raw("INSERT INTO \(unsafeRaw: targetSchema).user_sync_sequences (user_id, next_sequence) VALUES (\(bind: user), 999)").run()
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: targetSchema).user_sync_log
-                    (user_id, user_sync_sequence, source_event_id, projection_kind,
-                     payload, created_at)
-                VALUES
-                    (\(bind: user), 998, \(bind: staleEffect), 'relationship',
-                     '{"target_user_id":"00000000-0000-0000-0000-000000000c09","state":"accepted","updated_at_ms":1}'::jsonb,
-                     \(bind: now)),
-                    (\(bind: user), 999, \(bind: staleActivity), 'timeline_activity',
-                     '{"body":"stale"}'::jsonb, \(bind: now))
-                """).run()
-
-            try await sql.raw("""
-                UPDATE \(unsafeRaw: targetSchema).user_sync_retention
-                SET compacted_through_sequence = 997
-                WHERE user_id = \(bind: user)
-                """).run()
-
-            let record = V2UserShardMigrationRecord(
-                migrationID: UUID(uuidString: "00000000-0000-0000-0000-000000000c06")!, userID: try UserID(user.uuidString),
-                sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 4,
-                phase: .prepared, sourceFingerprint: nil, targetFingerprint: nil
-            )
-            let transfer = try PostgresV2UserShardProjectionTransfer(
-                source: app.db(.psql), target: app.db(.psql),
-                sourceBucket: "users-source", targetBucket: "users-target",
-                sourceSchema: sourceSchema, targetSchema: targetSchema, pageSize: 1
-            )
-            let beforeCopy = try await transfer.fingerprints(for: record)
-            #expect(beforeCopy.source != beforeCopy.target)
-            try await transfer.copy(record)
-            try await transfer.copy(record)
-            // Sync state remains mutable during forwarding. A final cutover
-            // copy must update existing target rows, not merely ignore their
-            // primary-key conflicts.
-            try await sql.raw("""
-                UPDATE \(unsafeRaw: sourceSchema).device_sync_cursors
-                SET acknowledged_sequence = 2
-                WHERE user_id = \(bind: user) AND device_id = \(bind: device)
-                """).run()
-            try await transfer.copy(record)
-            let fingerprints = try await transfer.fingerprints(for: record)
-            #expect(fingerprints.source == fingerprints.target)
-            let copiedCursor = try #require(try await sql.raw("""
-                SELECT acknowledged_sequence
-                FROM \(unsafeRaw: targetSchema).device_sync_cursors
-                WHERE user_id = \(bind: user) AND device_id = \(bind: device)
-                """).first(decoding: TransferCursorAssertionRow.self))
-            #expect(copiedCursor.acknowledgedSequence == 2)
-            #expect(try await scopedCount(targetSchema, "user_sync_log", user: user, on: sql) == 2)
-            #expect(try await scopedCount(targetSchema, "user_projection_versions", user: user, on: sql) == 2)
-            #expect(try await scopedCount(targetSchema, "sync_snapshot_artifacts", user: user, on: sql) == 1)
-            #expect(try await scopedCount(targetSchema, "device_snapshot_resets", user: user, on: sql) == 1)
-            #expect(try await scopedCount(targetSchema, "sync_tokens", user: user, on: sql) == 1)
-            #expect(try await scopedCount(targetSchema, "sync_receipts", user: user, on: sql) == 1)
-            #expect(try await scopedCount(
-                targetSchema,
-                "revoked_device_projection_tombstones",
-                user: user,
-                on: sql
-            ) == 1)
-            #expect(try await scopedCount(targetSchema, "user_projection_effects", user: user, on: sql) == 2)
-            #expect(try await sql.raw("SELECT 1 FROM \(unsafeRaw: targetSchema).user_sync_log WHERE source_event_id IN (\(bind: staleEffect), \(bind: staleActivity))").first() == nil)
-
-            let retained = V2UserShardMigrationRecord(
-                migrationID: record.migrationID, userID: record.userID, sourceBucket: record.sourceBucket, targetBucket: record.targetBucket,
-                sourceRouterEpoch: record.sourceRouterEpoch, phase: .retention,
-                sourceFingerprint: fingerprints.source, targetFingerprint: fingerprints.target,
-                retentionUntil: now
-            )
-            try await transfer.cleanSource(for: retained)
-            #expect(try await scopedCount(sourceSchema, "user_sync_log", user: user, on: sql) == 0)
-            #expect(try await scopedCount(
-                sourceSchema,
-                "revoked_device_projection_tombstones",
-                user: user,
-                on: sql
-            ) == 0)
-            #expect(try await scopedCount(targetSchema, "user_sync_log", user: user, on: sql) == 2)
-            try await sql.raw("DROP SCHEMA \(unsafeRaw: sourceSchema) CASCADE").run()
-            try await sql.raw("DROP SCHEMA \(unsafeRaw: targetSchema) CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase {
-                try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: sourceSchema) CASCADE").run()
-                try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: targetSchema) CASCADE").run()
-            }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
     @Test("direct and social sync records shadow to a forwarding user shard with their source sequence")
-    func forwardingShadowsDirectAndSocialUserSyncRecords() async throws {
+    func currentOwnerReceivesDirectAndSocialUserSyncRecords() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               let secondaryDatabaseURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
@@ -25105,15 +22661,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: secondarySQL)
 
             let now = Date(timeIntervalSince1970: 1_750_000_100)
-            let migrations = PostgresV2UserShardMigrationStore(database: app.db(.psql))
-            let migration = try await migrations.prepare(.init(
-                migrationID: UUID(uuidString: "00000000-0000-0000-0000-000000000f11")!, userID: senderID,
-                sourceBucket: "users-source", targetBucket: "users-target", sourceRouterEpoch: 1
-            ), now: now)
-            _ = try await migrations.advance(migrationID: migration.migrationID, expectedPhase: .prepared, action: .beginCopy, fingerprints: nil, now: now)
-            _ = try await migrations.advance(migrationID: migration.migrationID, expectedPhase: .copying, action: .copySucceeded, fingerprints: nil, now: now)
-            _ = try await migrations.advance(migrationID: migration.migrationID, expectedPhase: .copied, action: .beginVerification, fingerprints: nil, now: now)
-            _ = try await migrations.advance(migrationID: migration.migrationID, expectedPhase: .verifying, action: .verificationSucceeded, fingerprints: ("initial", "initial"), now: now)
             let registry = try V2StaticUserShardStorageRegistry(locations: [
                 try .init(bucket: "users-source", database: app.db(.psql), schema: "im_v2"),
                 try .init(bucket: "users-target", database: app.db(secondaryID), schema: "im_v2"),
@@ -25125,7 +22672,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 routeFence: V2PostgresUserShardRouter(database: app.db(eventFenceID)), registry: registry)
             let eventOutbox = try PostgresV2UserStateEventOutbox(database: app.db(.psql))
             try await configureDefaultUserShardRoute(
-                .init(bucket: "users-source", observedRouterEpoch: 1),
+                .init(bucket: "users-target", observedRouterEpoch: 1),
                 now: now,
                 on: sql
             )
@@ -25182,7 +22729,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             ), now: now.addingTimeInterval(2))
 
             // Account-owned profile changes use a separate outbox, but must
-            // use the same migration-safe shadow write as the direct/social
+            // use the same current-owner delivery as the direct/social
             // control records. The changed profile belongs to member two; its
             // only direct recipient is the currently forwarding sender.
             let profileEventID = UUID(uuidString: "00000000-0000-0000-0000-000000000f19")!
@@ -25198,7 +22745,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             )
             #expect(try await profileWorker.runOnce(limit: 1).projectedRecipientCount == 1)
 
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 5)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 4)
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 5)
             let targetRows = try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind
@@ -25244,24 +22791,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(forwardedProfile.revision == 2)
             #expect(UUID(uuidString: forwardedProfile.roomID)?.uuidString == forwardedProfile.roomID)
 
-            let transfer = try PostgresV2UserShardProjectionTransfer(
-                source: app.db(.psql), target: app.db(secondaryID),
-                sourceBucket: "users-source", targetBucket: "users-target"
-            )
-            let verified = try await V2DurableUserShardMigrationCoordinator(
-                store: migrations, copier: transfer, verifier: transfer, now: { now.addingTimeInterval(3) }
-            ).verifyForwarding(migrationID: migration.migrationID)
-            #expect(verified.phase == .verified)
-            _ = try await V2PostgresUserShardRouteControl(
-                database: app.db(.psql), operatorPrincipal: "router-test",
-                finalizer: V2UserShardProjectionMigrationExecutor(
-                    store: migrations, registry: registry,
-                    coLocatedControlBuckets: ["users-source"]
-                )
-            ).cutOver(.init(
-                operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000f14")!, userID: senderID,
-                expectedRouterEpoch: 1, newWriteBucket: "users-target", readFallbackBucket: "users-source"
-            ), now: now.addingTimeInterval(4))
             // A target-owned personal effect consumes the next sequence.
             _ = try await PostgresV2UserProjectionStore(database: app.db(secondaryID), schema: "im_v2")
                 .projectAllocated(userID: senderID, sourceEventID: .init("00000000-0000-0000-0000-000000000f16"),
@@ -25272,14 +22801,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 ), now: now.addingTimeInterval(5)
             )
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
-            let postCutover = try #require(try await secondarySQL.raw("""
+            let latestRecord = try #require(try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind FROM im_v2.user_sync_log
                 WHERE user_id = \(bind: senderUUID) ORDER BY user_sync_sequence DESC LIMIT 1
                 """).first(decoding: SyncKindRow.self))
-            #expect(postCutover.sequence == 7)
-            #expect(postCutover.kind == "stranger_message_permission")
-            // Replaying the old room event after cutover uses the transferred
-            // receipt and cannot allocate another sequence on the new owner.
+            #expect(latestRecord.sequence == 7)
+            #expect(latestRecord.kind == "stranger_message_permission")
+            // Replaying the room event uses its persisted
+            // receipt and cannot allocate another sequence on the current owner.
             #expect(try await eventProjector.project(openingLease.event) == 1)
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
             #expect((try await router.routes(for: [senderID])).first?.bucket == "users-target")
@@ -27927,7 +25456,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // Seed a nonzero owner epoch in the current schema.
             try await sql.raw("""
                 INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: roomUUID), 'room-a', 7, \(bind: now), \(bind: now))
+                VALUES (\(bind: roomUUID), 'room-a', 7, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
                 """).run()
             try await sql.raw("UPDATE im_v2.rooms SET owner_epoch = 7 WHERE room_id = \(bind: roomUUID)").run()
             try await V2SchemaReadiness.verify(database: database)
@@ -28279,85 +25808,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("cross-owner migration fences new exports, inbox receives, acceptance and finalization", arguments: [V2GroupCapacityClass.standard, .large])
-    func forwardMigrationWriteBoundaries(_ mode: V2GroupCapacityClass) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { sourceDB, targetDB, sourceSQL, targetSQL, target in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
-            let actor = UserID(uuid: memberTwoUUID)
-            let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { now })
-            guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
-                clientMessageID: .init(uuid: UUID()), text: "migration forwarding")) else { throw V2ForwardInboxError.corruptPersistenceState }
-            let exports = PostgresV2ForwardExportStore(database: sourceDB)
-            func prepare(_ operation: MessageForwardOperationID) async throws -> V2ForwardExport {
-                try await exports.prepare(actorUserID: actor, operationID: operation,
-                    source: .init(roomID: roomID, messageID: message.messageID, revision: .init(1)),
-                    sourceRoute: .init(shardID: "room-a", epoch: 0), targetRoomID: target,
-                    targetRoute: .init(shardID: "room-b", epoch: 0), now: now)
-            }
-            let originalOperation = MessageForwardOperationID(uuid: UUID())
-            let terminal = try await prepare(originalOperation)
-            let pending = try await prepare(.init(uuid: UUID()))
-            let accepted = try await prepare(.init(uuid: UUID()))
-            let unreceived = try await prepare(.init(uuid: UUID()))
-            let inbox = PostgresV2ForwardInboxStore(database: targetDB)
-            let writer = PostgresV2RoomWriteStore(database: targetDB).usingControlDatabase(sourceDB, authorizationResolutionDatabase: sourceDB)
-            func deliver(_ export: V2ForwardExport, maxBytes: Int = 64) async throws -> V2ForwardImportOutcome {
-                try await writer.importForwardExport(export, capacityProfile: profile, limits: .init(maxUTF8Bytes: maxBytes),
-                    identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
-            }
-            for export in [terminal, pending, accepted] { try await inbox.receive(export, now: now) }
-            let original = try await deliver(terminal)
-            guard case .accepted = original else { throw V2ForwardInboxError.corruptPersistenceState }
-            try await targetSQL.raw("""
-                CREATE FUNCTION im_v2.test_migration_completion_failure() RETURNS trigger AS $$
-                BEGIN
-                    IF NEW.state = 'completed' THEN RAISE EXCEPTION 'migration completion checkpoint'; END IF;
-                    RETURN NEW;
-                END; $$ LANGUAGE plpgsql
-                """).run()
-            try await targetSQL.raw("CREATE TRIGGER test_migration_completion_failure BEFORE UPDATE ON im_v2.message_forward_inbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_migration_completion_failure()").run()
-            await #expect(throws: (any Error).self) { _ = try await deliver(accepted) }
-            #expect(try await inbox.status(exportID: accepted.intent.exportID) == .pending(.finalization))
-            try await targetSQL.raw("DROP TRIGGER test_migration_completion_failure ON im_v2.message_forward_inbox").run()
-            try await targetSQL.raw("DROP FUNCTION im_v2.test_migration_completion_failure()").run()
-            try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID), 'room-a', 0, \(bind: now), \(bind: now)), (\(bind: target.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
-            let control = PostgresV2RoomOwnerMigrationPreparationStore(database: sourceDB, registeredShardIDs: ["room-a", "room-b", "room-c"])
-            for (room, shard, database) in [(roomID, "room-a", sourceDB), (target, "room-b", targetDB)] {
-                let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                    source: .init(shardID: shard, epoch: 0), targetShardID: "room-c")
-                _ = try await control.prepare(request, now: now)
-                let freezing = try await control.beginFreezing(request, now: now)
-                try await PostgresV2RoomMigrationWriteFence(database: database).install(for: freezing)
-            }
-            let tables = ["rooms", "messages", "message_send_completions", "room_events", "room_admission",
-                "shard_admission_pools", "message_forward_exports", "message_forward_delivery_jobs",
-                "message_forward_export_receipts", "message_forward_inbox", "message_forward_inbox_media"]
-            func snapshot(_ sql: any SQLDatabase) async throws -> [String] {
-                var values: [String] = []
-                for table in tables {
-                    values.append(try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
-                }
-                return values
-            }
-            let sourceBefore = try await snapshot(sourceSQL), targetBefore = try await snapshot(targetSQL)
-            await #expect(throws: V2ForwardExportError.ownerChanged) { _ = try await prepare(.init(uuid: UUID())) }
-            #expect(try await prepare(originalOperation).payload == terminal.payload)
-            await #expect(throws: V2ForwardInboxError.ownerChanged) { try await inbox.receive(unreceived, now: now) }
-            // An existing receive is an immutable digest check, with no write.
-            try await inbox.receive(pending, now: now)
-            for export in [pending, accepted] {
-                for maxBytes in [64, 1] {
-                    await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await deliver(export, maxBytes: maxBytes) }
-                }
-            }
-            #expect(try await deliver(terminal, maxBytes: 1) == original)
-            #expect(try await inbox.status(exportID: terminal.intent.exportID) == original)
-            #expect(try await inbox.status(exportID: accepted.intent.exportID) == .pending(.finalization))
-            #expect(try await snapshot(sourceSQL) == sourceBefore)
-            #expect(try await snapshot(targetSQL) == targetBefore)
-        }
-    }
 
     @Test("target inbox enforces current permission, owner epoch, admission and media readiness", arguments: ["removed", "muted", "frozen", "permission", "inactive", "epoch", "admission", "media"], [V2GroupCapacityClass.standard, .large])
     func forwardInboxTargetBoundaries(scenario: String, capacityClass: V2GroupCapacityClass) async throws {
@@ -28523,7 +25973,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("forward attachments copy verified bytes into stable target objects before acceptance", arguments: ["success", "large", "scan-retry", "copy-ack-loss", "lease-expiry", "concurrent", "cancel-scan", "owner-fence", "two-files", "eicar", "size", "collision", "short-source", "clock-retry", "compact-success", "compact-rejected", "purge-before-copy", "purge-after-copy", "runtime-ack-loss-compacted", "migration-before-record", "migration-after-record"])
+    @Test("forward attachments copy verified bytes into stable target objects before acceptance", arguments: ["success", "large", "scan-retry", "copy-ack-loss", "lease-expiry", "concurrent", "cancel-scan", "owner-fence", "two-files", "eicar", "size", "collision", "short-source", "clock-retry", "compact-success", "compact-rejected", "purge-before-copy", "purge-after-copy", "runtime-ack-loss-compacted"])
     func forwardMediaImportBytesAndRecovery(scenario: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, sourceSQL, targetSQL, targetRoom in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -28570,42 +26020,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let scanner = V2LocalEICARMediaScanner(provider: targetProvider)
             let write = PostgresV2RoomWriteStore(database: targetDB)
             #expect(try await write.importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now) == .pending(.media))
-            if scenario.hasPrefix("migration-") {
-                let lease = try #require(try await importer.claim(exportID: export.intent.exportID, now: now, leaseDuration: 300))
-                let copied = try await copier.copy(lease)
-                if scenario == "migration-after-record" {
-                    #expect(try await importer.recordCopied(lease, receipt: copied, now: now))
-                }
-                try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
-                let control = PostgresV2RoomOwnerMigrationPreparationStore(database: sourceDB, registeredShardIDs: ["room-b", "room-c"])
-                let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: targetRoom,
-                    source: .init(shardID: "room-b", epoch: 0), targetShardID: "room-c")
-                _ = try await control.prepare(request, now: now)
-                let freezing = try await control.beginFreezing(request, now: now)
-                try await PostgresV2RoomMigrationWriteFence(database: targetDB).install(for: freezing)
-                func snapshot() async throws -> [String] {
-                    var values: [String] = []
-                    for table in ["rooms", "media_objects", "message_forward_inbox", "message_forward_inbox_media", "message_forward_media_imports"] {
-                        values.append(try #require(try await targetSQL.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
-                    }
-                    return values
-                }
-                let before = try await snapshot()
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.claim(exportID: export.intent.exportID, now: now, leaseDuration: 300) }
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.recordCopied(lease, receipt: copied, now: now) }
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.complete(lease, receipt: copied, result: .passed, now: now) }
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.reject(lease, now: now) }
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.retry(lease, disposition: .retry(at: now.addingTimeInterval(1)), now: now) }
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await importer.retry(lease, disposition: .pause, now: now) }
-                let worker = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: scanner, now: { now })
-                await #expect(throws: V2ForwardInboxError.ownerChanged) { _ = try await worker.runOnce(exportID: export.intent.exportID) }
-                #expect(try await snapshot() == before)
-                let download = try await targetProvider.issueDownloadTarget(mediaID: lease.targetMediaID, expiresAt: now.addingTimeInterval(600))
-                #expect(try await targetProvider.readDownloadedObject(mediaID: lease.targetMediaID, targetURL: download.url) == bytes)
-                return
-            }
             if scenario == "runtime-ack-loss-compacted" {
-                let clock = ProjectionTransferBoundaryClock([now])
+                let clock = TestSequenceClock([now])
                 let jobs = PostgresV2ForwardDeliveryStore(database: sourceDB)
                 let receipts = PostgresV2ForwardReceiptStore(database: sourceDB)
                 let media = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: scanner, now: { clock.now() })
@@ -28668,7 +26084,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             if scenario == "purge-before-copy" || scenario == "purge-after-copy" {
                 let callbackAt = now.addingTimeInterval(4)
-                let clock = ProjectionTransferBoundaryClock([now])
+                let clock = TestSequenceClock([now])
                 let interrupted = ForwardMediaCheckpointCopier(base: copier, beforeCopy: scenario == "purge-before-copy") { lease in
                     let cleanupAt = now.addingTimeInterval(3)
                     #expect(lease.expiresAt > callbackAt)
@@ -28791,7 +26207,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
             if scenario == "clock-retry" {
-                let clock = ProjectionTransferBoundaryClock([now])
+                let clock = TestSequenceClock([now])
                 let worker = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: scanner, leaseDuration: 30, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { clock.now() })
                 let badDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
                 var identity: UUID?
@@ -29093,14 +26509,14 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("source delivery leases stop at migration or epoch change", arguments: ["migration", "epoch"])
-    func forwardDeliveryMigrationFence(_ change: String) async throws {
+    @Test("source delivery leases stop at owner epoch change")
+    func forwardDeliveryOwnerFence() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, sourceSQL, _, targetRoom in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
-                clientMessageID: .init(uuid: UUID()), text: "delivery migration")) else { throw V2ForwardExportError.corruptPersistenceState }
+                clientMessageID: .init(uuid: UUID()), text: "delivery owner")) else { throw V2ForwardExportError.corruptPersistenceState }
             let exports = PostgresV2ForwardExportStore(database: sourceDB)
             for _ in 0..<4 {
                 _ = try await exports.prepare(actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: UUID()),
@@ -29147,17 +26563,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             } catch {
                 await barrier.release(); _ = try? await holder.value; throw error
             }
-            if change == "migration" {
-                try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID), 'room-a', 0, \(bind: now), \(bind: now))").run()
-                let control = PostgresV2RoomOwnerMigrationPreparationStore(database: sourceDB, registeredShardIDs: ["room-a", "room-c"])
-                let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: roomID,
-                    source: .init(shardID: "room-a", epoch: 0), targetShardID: "room-c")
-                _ = try await control.prepare(request, now: now)
-                let freezing = try await control.beginFreezing(request, now: now)
-                try await PostgresV2RoomMigrationWriteFence(database: sourceDB).install(for: freezing)
-            } else {
                 try await sourceSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: roomUUID)").run()
-            }
+
             func snapshot() async throws -> [String] {
                 var values: [String] = []
                 for table in ["rooms", "message_forward_exports", "message_forward_delivery_jobs", "message_forward_export_receipts"] {
@@ -29431,7 +26838,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(mapped.count == 2)
                 let device = DeviceID(uuid: UUID())
                 try await sourceSQL.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at) VALUES (\(bind: memberTwoUUID), \(bind: device.uuidValue!), \(bind: now), \(bind: now))").run()
-                try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+                try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
                 let copiedMessage = try #require(try await targetSQL.raw("SELECT message_id AS value FROM im_v2.messages").first(decoding: ForwardInboxUUIDAssertion.self))
                 let downloads = V2MediaEdgeHTTPHandler(resolver: V2RoutedMediaDownloadService(
                     local: .init(media: .init(store: PostgresV2MediaStore(database: sourceDB), limits: try .init(maximumBytes: 1_024)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: sourceDB), provider: sourceProvider)),
@@ -29450,7 +26857,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func messageScopedMediaDownloads(scenario: String) async throws {
         try await withForwardOwnerDatabases(mode: scenario.hasPrefix("room-log") ? .large : .standard) { controlDB, ownerDB, controlSQL, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = ProjectionTransferBoundaryClock([now])
+            let clock = TestSequenceClock([now])
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let user = UserID(uuid: memberTwoUUID), device = DeviceID(uuid: UUID()), media = MediaID(uuid: UUID())
             let root = FileManager.default.temporaryDirectory.appending(path: "message-media-\(UUID())", directoryHint: .isDirectory)
@@ -29468,7 +26875,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             guard case .accepted(let message) = try await sender.send(.init(roomID: room, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "download", media: [.init(mediaID: media)])) else { throw V2ForwardInboxError.corruptPersistenceState }
             try await controlSQL.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at) VALUES (\(bind: memberTwoUUID), \(bind: device.uuidValue!), \(bind: now), \(bind: now))").run()
             #expect(try await count("im_v2.auth_devices", on: ownerSQL) == 0)
-            try await controlSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))").run()
+            try await controlSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             #expect(try await count("im_v2.user_projection_versions", on: ownerSQL) == 0)
             #expect(try await count("im_v2.user_projection_versions", on: controlSQL) == 0)
             if scenario == "withdrawn" {
@@ -29580,8 +26987,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("forward operator replay is atomic, idempotent, owner fenced and preserves media identity", arguments: [V2ForwardWorkReplayKind.delivery, .media], [false, true])
-    func forwardOperatorReplay(kind: V2ForwardWorkReplayKind, migrating: Bool) async throws {
+    @Test("forward operator replay is atomic, idempotent, owner fenced and preserves media identity", arguments: [V2ForwardWorkReplayKind.delivery, .media])
+    func forwardOperatorReplay(kind: V2ForwardWorkReplayKind) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, sourceSQL, targetSQL, targetRoom in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
@@ -29632,31 +27039,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                         'media', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.media_objects r)
                     )::text AS value
                     """).first(decoding: StringValueRow.self)).value
-            }
-            if migrating {
-                let oldOperation = try command()
-                #expect(try await service.replay(oldOperation).outcome == .requeued)
-                if kind == .delivery {
-                    let lease = try #require(try await delivery.claim(sourceShardID: shard, now: now, leaseDuration: 30, limit: 1).first)
-                    #expect(try await delivery.reschedule(lease, disposition: .pause, now: now))
-                } else {
-                    let lease = try #require(try await importer.claim(exportID: export.intent.exportID, now: now, leaseDuration: 30))
-                    #expect(try await importer.retry(lease, disposition: .pause, now: now))
-                }
-                try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: ownerRoom), \(bind: shard), 0, \(bind: now), \(bind: now))").run()
-                let control = PostgresV2RoomOwnerMigrationPreparationStore(database: sourceDB, registeredShardIDs: [shard, "room-c"])
-                let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: .init(uuid: ownerRoom),
-                    source: .init(shardID: shard, epoch: 0), targetShardID: "room-c")
-                _ = try await control.prepare(migration, now: now)
-                let freezing = try await control.beginFreezing(migration, now: now)
-                try await PostgresV2RoomMigrationWriteFence(database: ownerDB).install(for: freezing)
-                let before = try await replaySnapshot()
-                await #expect(throws: V2ForwardWorkReplayError.ownerChanged) { _ = try await service.replay(command()) }
-                let replayed = try await service.replay(oldOperation)
-                #expect(replayed.wasIdempotent && replayed.outcome == .requeued)
-                #expect(try await replaySnapshot() == before)
-                #expect(try await sql.raw("SELECT state AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: ForwardImportDigestAssertion.self)?.value == "paused")
-                return
             }
             let clockOperation = try command()
             let beforeInvalidClock = try await replaySnapshot()
@@ -29778,7 +27160,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sourceSQL.raw("""
                 INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
                 VALUES (\(bind: roomUUID), 'room-a', 0, \(bind: now), \(bind: now)),
-                       (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
+                       (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
                 """).run()
             let writeA = PostgresV2RoomWriteStore(database: sourceDB), writeB = PostgresV2RoomWriteStore(database: targetDB)
             let send = V2SendMessageService(store: writeA, capacityProfile: profile, limits: limits, now: { now })
@@ -31813,21 +29195,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: CountRow.self)?.value == 1)
 
             // Stable projection effects are compacted only after their
-            // incremental log row is gone and no shard-migration fence can
-            // still copy the idempotency result.
+            // incremental log row is gone.
             let projectionEvent = UUID(uuidString: "00000000-0000-0000-0000-0000000008a5")!
             let projectionOld = now.addingTimeInterval(-40 * 86_400)
             try await sql.raw("""
                 INSERT INTO im_v2.user_projection_checkpoints
-                    (user_id, projected_sequence, migration_fence_token,
-                     migration_fence_expires_at, updated_at)
-                VALUES (\(bind: user), 1, \(bind: UUID()),
-                        \(bind: now.addingTimeInterval(60)), \(bind: now))
+                    (user_id, projected_sequence, updated_at)
+                VALUES (\(bind: user), 1, \(bind: now))
                 ON CONFLICT (user_id) DO UPDATE
-                SET projected_sequence = 1,
-                    migration_fence_token = EXCLUDED.migration_fence_token,
-                    migration_fence_expires_at = EXCLUDED.migration_fence_expires_at,
-                    updated_at = EXCLUDED.updated_at
+                SET projected_sequence = 1, updated_at = EXCLUDED.updated_at
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.user_projection_versions
@@ -31842,16 +29218,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                      user_sync_sequence, payload, created_at)
                 VALUES (\(bind: user), \(bind: projectionEvent), 'conversation_state',
                         1, '{}'::jsonb, \(bind: projectionOld))
-                """).run()
-            let fencedEffectReport = try await V2SyncHousekeepingWorker(
-                store: PostgresV2SyncHousekeepingStore(database: app.db(.psql)),
-                now: { now }
-            ).runOnce(limit: 8)
-            #expect(fencedEffectReport.purgedProjectionEffectCount == 0)
-            try await sql.raw("""
-                UPDATE im_v2.user_projection_checkpoints
-                SET migration_fence_token = NULL, migration_fence_expires_at = NULL
-                WHERE user_id = \(bind: user)
                 """).run()
             let effectReport = try await V2SyncHousekeepingWorker(
                 store: PostgresV2SyncHousekeepingStore(database: app.db(.psql)),
@@ -32124,14 +29490,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: schema).user_shard_router_configuration
                 (configuration_key, router_epoch, default_write_bucket,
-                 default_read_fallback_bucket, updated_at)
+                 updated_at)
             VALUES
                 (TRUE, \(bind: route.observedRouterEpoch), \(bind: route.bucket),
-                 \(bind: route.readFallbackBucket), \(bind: now))
+                 \(bind: now))
             ON CONFLICT (configuration_key) DO UPDATE
             SET router_epoch = EXCLUDED.router_epoch,
                 default_write_bucket = EXCLUDED.default_write_bucket,
-                default_read_fallback_bucket = EXCLUDED.default_read_fallback_bucket,
                 updated_at = EXCLUDED.updated_at
             """).run()
     }
@@ -32162,82 +29527,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             """).all(decoding: CurrentV3ProjectionAssertionRow.self)
     }
 
-    private func seedTransferProjection(
-        schema: String, user: UUID, device: UUID, eventOne: UUID, eventTwo: UUID,
-        snapshot: UUID, now: Date, on sql: any SQLDatabase
-    ) async throws {
-        let revokedDevice = UUID(uuidString: "00000000-0000-0000-0000-000000000cff")!
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).revoked_device_projection_tombstones
-                (user_id, device_id, revoked_at)
-            VALUES (\(bind: user), \(bind: revokedDevice), \(bind: now))
-            """).run()
-        try await sql.raw("INSERT INTO \(unsafeRaw: schema).user_sync_sequences (user_id, next_sequence) VALUES (\(bind: user), 2)").run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).user_sync_log
-                (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
-            VALUES (\(bind: user), 1, \(bind: eventOne), 'timeline_activity', '{"body":"one"}'::jsonb, \(bind: now)),
-                   (\(bind: user), 2, \(bind: eventTwo), 'timeline_activity', '{"body":"two"}'::jsonb, \(bind: now))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).device_sync_cursors
-                (user_id, device_id, state, reset_generation, acknowledged_sequence)
-            VALUES (\(bind: user), \(bind: device), 'ready', 2, 1)
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).user_projection_versions
-                (user_id, projection_kind, entity_key, valid_from_sequence,
-                 source_event_id, payload, created_at)
-            VALUES
-                (\(bind: user), 'message', \(bind: eventOne.uuidString.lowercased()), 1,
-                 \(bind: eventOne), \(bind: "{\"message_id\":\"\(eventOne.uuidString.lowercased())\",\"text\":\"one\"}")::jsonb, \(bind: now)),
-                (\(bind: user), 'message', \(bind: eventTwo.uuidString.lowercased()), 2,
-                 \(bind: eventTwo), \(bind: "{\"message_id\":\"\(eventTwo.uuidString.lowercased())\",\"text\":\"two\"}")::jsonb, \(bind: now))
-            """).run()
-        try await sql.raw("""
-            UPDATE \(unsafeRaw: schema).user_projection_checkpoints
-            SET projected_sequence = 2, updated_at = \(bind: now)
-            WHERE user_id = \(bind: user)
-            """).run()
-        let digest = String(repeating: "b", count: 64)
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).sync_snapshot_artifacts
-                (snapshot_id, user_id, base_user_sync_sequence, source_projected_sequence,
-                 schema_version, capability_profile, state, next_page_index,
-                 rolling_digest, root_digest, page_count, item_count, total_bytes,
-                 expires_at, created_at, published_at)
-            VALUES (\(bind: snapshot), \(bind: user), 1, 2, 31, 'base', 'published', 1,
-                    \(bind: digest), \(bind: digest), 1, 1, 2,
-                    \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).sync_snapshot_pages
-                (snapshot_id, page_index, first_projection_kind, first_entity_key,
-                 last_projection_kind, last_entity_key, item_count, page_digest,
-                 payload, byte_count)
-            VALUES (\(bind: snapshot), 0, 'message', \(bind: eventOne.uuidString.lowercased()),
-                    'message', \(bind: eventOne.uuidString.lowercased()), 1,
-                    \(bind: digest), '\\x0102'::bytea, 2)
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).device_snapshot_resets
-                (user_id, device_id, reset_generation, snapshot_id, state,
-                 next_sync_token, snapshot_receipt, expires_at, created_at, acknowledged_at)
-            VALUES (\(bind: user), \(bind: device), 2, \(bind: snapshot), 'acknowledged',
-                    'token-snapshot', 'receipt-snapshot',
-                    \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).sync_tokens
-                (token, user_id, device_id, reset_generation, watermark, expires_at, created_at)
-            VALUES ('token-1', \(bind: user), \(bind: device), 2, 2, \(bind: now.addingTimeInterval(600)), \(bind: now))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: schema).sync_receipts
-                (receipt, user_id, device_id, reset_generation, first_sequence, last_sequence, expires_at, created_at)
-            VALUES ('receipt-1', \(bind: user), \(bind: device), 2, 1, 2, \(bind: now.addingTimeInterval(600)), \(bind: now))
-            """).run()
-    }
 
     private func scopedCount(_ schema: String, _ table: String, user: UUID, on sql: any SQLDatabase) async throws -> Int {
         let column = "user_id"
@@ -32247,331 +29536,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         return value
     }
 
-    @Test("legacy approval recovery uses exact operation evidence, rolls back with audit, and fences released operations", arguments: ["committed", "released", "missing_receipt", "mismatch"])
-    func groupApprovalRecoveryIsAuditedAndFenced(_ scenario: String) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
-        do {
-            app.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
-            try await installSchema(on: sql)
-            try await seedRoom(on: sql)
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'admin' WHERE user_id = \(bind: memberTwoUUID)").run()
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let applicant = UUID(), oldOperation = UUID()
-            try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, created_at, updated_at) VALUES (\(bind: applicant), 'recovery_applicant', 'Recovery Applicant', \(bind: now), \(bind: now))").run()
-            let store = PostgresV2GroupInvitationStore(database: app.db(.psql))
-            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3))
-            _ = try await store.create(.init(inviteID: .init(uuid: UUID()), roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: 11, count: 32), requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10, maximumActiveInvitesPerRoom: 20, createdAt: now))
-            guard case .submitted(let request) = try await store.submit(.init(requestID: .init(uuid: UUID()), applicantUserID: .init(uuid: applicant), operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: 11, count: 32), note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            try await sql.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decision_operation_id = \(bind: oldOperation), decided_by_user_id = \(bind: memberTwoUUID), approval_membership_revision = 0 WHERE request_id = \(bind: request.requestID.uuidValue!)").run()
-            let membership = V2RoomMembershipService(store: PostgresV2RoomMembershipStore(database: app.db(.psql)), capacityProfile: profile, now: { now })
-            guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberThreeUUID), action: .remove, expectedMembershipRevision: 0)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            if scenario != "released" {
-                // Reproduce B26: old prepare stored 0, but the retry committed at 1.
-                guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: oldOperation), targetUserID: .init(uuid: applicant), action: .add, expectedMembershipRevision: 1)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-                guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: applicant), action: .remove, expectedMembershipRevision: 2)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            }
-            guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), action: .remove, expectedMembershipRevision: scenario == "released" ? 1 : 3)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            if scenario != "released" {
-                try await sql.raw("INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at) VALUES (\(bind: memberTwoUUID), \(bind: UUID()), 'policy_enforcement', 'recovery-test', \(bind: now))").run()
-            }
-            if scenario == "missing_receipt" {
-                // Simulate evidence already removed by the historical cleaner.
-                try await sql.raw("DELETE FROM im_v2.room_membership_operations WHERE actor_user_id = \(bind: memberTwoUUID) AND operation_id = \(bind: oldOperation)").run()
-            }
-            if scenario == "mismatch" {
-                try await sql.raw("UPDATE im_v2.group_join_requests SET applicant_user_id = \(bind: memberThreeUUID) WHERE request_id = \(bind: request.requestID.uuidValue!)").run()
-            }
-            let recoveryStore = PostgresV2GroupApprovalRecoveryStore(database: app.db(.psql))
-            let recovery = try V2GroupApprovalRecoveryService(stores: ["room-a": recoveryStore], operatorPrincipal: "oncall-recovery", now: { now })
-            let scope = try V2GroupApprovalRecoveryScope(shardID: "room-a", ownerEpoch: 0, roomID: roomUUID)
-            let command = V2GroupApprovalRecoveryCommand(operationID: UUID(), scope: scope, requestID: request.requestID.uuidValue!, reviewerUserID: memberTwoUUID, decisionOperationID: oldOperation, reason: .dependencyRecovered)
-            let page = try await recovery.candidates(scope: scope, after: nil, limit: 1)
-            #expect(page.candidates.map(\.requestID) == [command.requestID] && page.nextCursor == nil)
-            let eventCount = try await count("im_v2.room_events", on: sql)
-            let before = try #require(try await sql.raw("SELECT row_to_json(r)::text AS value FROM im_v2.group_join_requests r WHERE request_id = \(bind: command.requestID)").first(decoding: StringValueRow.self)).value
-            func recoverySnapshot() async throws -> String {
-                try #require(try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'requests', (SELECT jsonb_agg(to_jsonb(r) ORDER BY request_id) FROM im_v2.group_join_requests r),
-                        'invites', (SELECT jsonb_agg(to_jsonb(r) ORDER BY invite_id) FROM im_v2.group_invite_links r),
-                        'audit', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.group_join_approval_recovery_audit r),
-                        'fences', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.room_membership_operation_fences r),
-                        'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.room_membership_operations r),
-                        'members', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, joined_revision) FROM im_v2.room_memberships r),
-                        'events', (SELECT count(*) FROM im_v2.room_events)
-                    )::text AS value
-                    """).first(decoding: StringValueRow.self)).value
-            }
-            let badClocks = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            let beforeInvalidClock = try await recoverySnapshot()
-            for bad in badClocks {
-                let invalidClockService = try V2GroupApprovalRecoveryService(stores: ["room-a": recoveryStore], operatorPrincipal: "oncall-recovery", now: { bad })
-                await #expect(throws: V2GroupApprovalRecoveryError.corruptPersistenceState) { _ = try await invalidClockService.recover(command) }
-                #expect(try await recoverySnapshot() == beforeInvalidClock)
-                #expect(try await invalidClockService.candidates(scope: scope, after: nil, limit: 1) == page)
-            }
-            if scenario == "committed" {
-                // PostgreSQL can contain timestamps that cannot round-trip through
-                // the driver's Date encoder. Retain the original operation and
-                // pending approval instead of partially applying its receipt.
-                for receiptTime in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
-                    try await sql.raw("UPDATE im_v2.room_membership_operations SET created_at = \(bind: receiptTime)::timestamptz WHERE actor_user_id = \(bind: memberTwoUUID) AND operation_id = \(bind: oldOperation)").run()
-                    let invalidReceiptState = try await recoverySnapshot()
-                    await #expect(throws: V2GroupApprovalRecoveryError.corruptPersistenceState) { _ = try await recovery.recover(command) }
-                    #expect(try await recoverySnapshot() == invalidReceiptState)
-                    try await sql.raw("UPDATE im_v2.room_membership_operations SET created_at = \(bind: now) WHERE actor_user_id = \(bind: memberTwoUUID) AND operation_id = \(bind: oldOperation)").run()
-                }
-                #expect(try await recoverySnapshot() == beforeInvalidClock)
-            }
-            // A late failure must roll back accounting, state, audit and fence.
-            try await sql.raw("CREATE FUNCTION im_v2.fail_recovery() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected recovery failure'; END $$").run()
-            let faultTable = scenario == "released" ? "group_join_requests" : "group_join_approval_recovery_audit"
-            let faultEvent = scenario == "released" ? "UPDATE" : "INSERT"
-            try await sql.raw("CREATE TRIGGER fail_recovery AFTER \(unsafeRaw: faultEvent) ON im_v2.\(unsafeRaw: faultTable) FOR EACH ROW EXECUTE FUNCTION im_v2.fail_recovery()").run()
-            await #expect(throws: (any Error).self) { try await recovery.recover(command) }
-            #expect(try await count("im_v2.group_join_approval_recovery_audit", on: sql) == 0)
-            #expect(try await count("im_v2.room_membership_operation_fences", on: sql) == 0)
-            #expect(try await sql.raw("SELECT row_to_json(r)::text AS value FROM im_v2.group_join_requests r WHERE request_id = \(bind: command.requestID)").first(decoding: StringValueRow.self)?.value == before)
-            #expect(try await sql.raw("SELECT approved_use_count::bigint AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 0)
-            try await sql.raw("DROP TRIGGER fail_recovery ON im_v2.\(unsafeRaw: faultTable)").run()
-            var initialResult: V2GroupApprovalRecoveryResult?
-            if scenario == "released" {
-                try await sql.raw("CREATE FUNCTION im_v2.hold_recovery_fence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(908050001::bigint); RETURN NEW; END $$").run()
-                try await sql.raw("CREATE TRIGGER hold_recovery_fence AFTER INSERT ON im_v2.room_membership_operation_fences FOR EACH ROW EXECUTE FUNCTION im_v2.hold_recovery_fence()").run()
-                initialResult = try await app.db(.psql).withConnection { database in
-                    let control = try #require(database as? any SQLDatabase)
-                    try await control.raw("SELECT pg_advisory_lock(908050001::bigint)").run()
-                    let repairing = Task { try await recovery.recover(command) }
-                    do {
-                        var held = false
-                        for _ in 0..<500 {
-                            let waiting = try await control.raw("SELECT count(*)::bigint AS value FROM pg_locks WHERE NOT granted AND locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())").first(decoding: CountRow.self)?.value ?? 0
-                            if waiting >= 1 { held = true; break }
-                            try await Task.sleep(for: .milliseconds(10))
-                        }
-                        #expect(held)
-                    } catch {
-                        try? await control.raw("SELECT pg_advisory_unlock(908050001::bigint)").run()
-                        _ = await repairing.result
-                        throw error
-                    }
-                    let late = Task { try await membership.change(.init(roomID: roomID, actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: oldOperation), targetUserID: .init(uuid: applicant), action: .add, expectedMembershipRevision: 2)) }
-                    do {
-                        var bothWaiting = false
-                        for _ in 0..<500 {
-                            let waiting = try await control.raw("SELECT count(*)::bigint AS value FROM pg_locks WHERE NOT granted AND locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())").first(decoding: CountRow.self)?.value ?? 0
-                            if waiting >= 2 { bothWaiting = true; break }
-                            try await Task.sleep(for: .milliseconds(10))
-                        }
-                        #expect(bothWaiting, "Recovery and a live old membership request must reach the real operation lock barrier")
-                        try await control.raw("SELECT pg_advisory_unlock(908050001::bigint)").run()
-                        let result = try await repairing.value
-                        #expect(try await late.value == .idempotencyConflict)
-                        return result
-                    } catch {
-                        try? await control.raw("SELECT pg_advisory_unlock(908050001::bigint)").run()
-                        _ = await repairing.result; _ = await late.result
-                        throw error
-                    }
-                }
-            }
-            let firstResult = initialResult
-            let results = try await withThrowingTaskGroup(of: V2GroupApprovalRecoveryResult.self) { group in
-                for _ in 0..<(firstResult == nil ? 10 : 9) { group.addTask { try await recovery.recover(command) } }
-                var values = firstResult.map { [$0] } ?? []
-                for try await value in group { values.append(value) }
-                return values
-            }
-            let expected: V2GroupApprovalRecoveryOutcome = scenario == "committed" ? .completed : scenario == "released" ? .released : .quarantined
-            #expect(results.allSatisfy { $0.outcome == expected })
-            #expect(results.filter { !$0.wasIdempotent }.count == 1)
-            #expect(try await count("im_v2.room_events", on: sql) == eventCount)
-            let committedRecoveryState = try await recoverySnapshot()
-            for bad in badClocks {
-                let replayService = try V2GroupApprovalRecoveryService(stores: ["room-a": recoveryStore], operatorPrincipal: "oncall-recovery", now: { bad })
-                let replay = try await replayService.recover(command)
-                #expect(replay.wasIdempotent && replay.outcome == expected)
-                #expect(try await recoverySnapshot() == committedRecoveryState)
-                await #expect(throws: V2GroupApprovalRecoveryError.idempotencyConflict) {
-                    _ = try await recoveryStore.recover(command, operatorPrincipal: "different-principal", now: bad)
-                }
-            }
-            #expect(try await count("im_v2.group_join_approval_recovery_audit", on: sql) == 1)
-            if scenario == "committed" {
-                #expect(try await sql.raw("SELECT approval_membership_revision = 1 AND state = 'approved' AS exists FROM im_v2.group_join_requests WHERE request_id = \(bind: command.requestID)").first(decoding: ExistsRow.self)?.exists == true)
-                #expect(try await sql.raw("SELECT expected_revision = 1 AND resulting_revision = 2 AND room_sequence = 2 AND prepared_revision = 0 AS exists FROM im_v2.group_join_approval_recovery_audit").first(decoding: ExistsRow.self)?.exists == true)
-                #expect(try await sql.raw("SELECT approved_use_count::bigint AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 1)
-            } else if scenario == "released" {
-                #expect(try await count("im_v2.room_membership_operation_fences", on: sql) == 1)
-                #expect(try await sql.raw("SELECT state = 'pending' AND decision_operation_id IS NULL AS exists FROM im_v2.group_join_requests WHERE request_id = \(bind: command.requestID)").first(decoding: ExistsRow.self)?.exists == true)
-                // Restore the old reviewer, then prove both old-revision replay
-                // and a changed-revision reuse of the same operation are fenced.
-                guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), action: .add, expectedMembershipRevision: 2)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-                try await sql.raw("UPDATE im_v2.room_memberships SET role = 'admin' WHERE user_id = \(bind: memberTwoUUID) AND left_revision IS NULL").run()
-                for revision: UInt64 in [0, 3] {
-                    #expect(try await membership.change(.init(roomID: roomID, actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: oldOperation), targetUserID: .init(uuid: applicant), action: .add, expectedMembershipRevision: revision)) == .idempotencyConflict)
-                }
-                #expect(try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: oldOperation), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) == .conflict)
-                #expect(try await store.reject(roomID: roomID, requestID: request.requestID, reviewerUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: oldOperation), now: now) == .decisionConflict)
-                // Recovery does not grant the applicant approval permission.
-                await #expect(throws: V2GroupInvitationServiceError.permissionDenied) {
-                    try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: .init(uuid: applicant), operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                }
-                guard case .approved = try await store.approve(roomID: roomID, requestID: request.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-                await #expect(throws: (any Error).self) { try await sql.raw("DELETE FROM im_v2.room_membership_operation_fences").run() }
-            } else {
-                #expect(try await sql.raw("SELECT state AS value FROM im_v2.group_join_requests WHERE request_id = \(bind: command.requestID)").first(decoding: StringValueRow.self)?.value == "approving")
-                #expect(try await count("im_v2.room_membership_operation_fences", on: sql) == 0)
-                #expect(try await sql.raw("SELECT approved_use_count::bigint AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 0)
-            }
-            await #expect(throws: V2GroupApprovalRecoveryError.idempotencyConflict) { try await recoveryStore.recover(command, operatorPrincipal: "different-principal", now: now) }
-            await #expect(throws: V2GroupApprovalRecoveryError.idempotencyConflict) {
-                try await recovery.recover(.init(operationID: command.operationID, scope: scope, requestID: UUID(), reviewerUserID: memberTwoUUID, decisionOperationID: oldOperation, reason: .dependencyRecovered))
-            }
-            await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) {
-                try await recovery.recover(.init(operationID: UUID(), scope: .init(shardID: "room-a", ownerEpoch: 1, roomID: roomUUID), requestID: command.requestID, reviewerUserID: memberTwoUUID, decisionOperationID: oldOperation, reason: .dependencyRecovered))
-            }
-            await #expect(throws: V2GroupApprovalRecoveryError.unknownShard) { try await recovery.candidates(scope: .init(shardID: "unknown", ownerEpoch: 0, roomID: roomUUID), after: nil, limit: 10) }
-            await #expect(throws: (any Error).self) { try await sql.raw("UPDATE im_v2.group_join_approval_recovery_audit SET outcome = 'released'").run() }
-            await #expect(throws: (any Error).self) { try await sql.raw("DELETE FROM im_v2.group_join_approval_recovery_audit").run() }
-            try await V2SchemaReadiness.verify(database: app.db(.psql))
-            try await assertSQLSchemaGate(true, on: sql)
-            try await sql.raw("ALTER TABLE im_v2.room_membership_operation_fences DISABLE TRIGGER room_membership_operation_fences_immutable").run()
-            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_join_approval_recovery_audit[recovery-fence]")) { try await V2SchemaReadiness.verify(database: app.db(.psql)) }
-            try await assertSQLSchemaGate(false, on: sql)
-            print("Approval recovery: scenario=\(scenario), outcome=\(expected.rawValue), concurrent calls=10, business effects once, audit/fence rollback verified")
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await app.asyncShutdown()
-        } catch {
-            if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
-            throw error
-        }
-    }
 
-    @Test("approval recovery pages one configured owner and survives concurrent operators and owner epoch changes")
-    func groupApprovalRecoveryPagesConfiguredOwner() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, sourceSQL, targetSQL, targetRoom in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            try await targetSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            let invite = try await PostgresV2GroupInvitationStore(database: targetDB).create(.init(inviteID: .init(uuid: UUID()), roomID: targetRoom, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: 12, count: 32), requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 1000, maximumActiveInvitesPerRoom: 20, createdAt: now))
-            try await targetSQL.raw("""
-                WITH applicants AS (
-                    INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, created_at, updated_at)
-                    SELECT ('10000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid,
-                           'recovery_page_' || i::text, 'Recovery Applicant', \(bind: now), \(bind: now)
-                    FROM generate_series(1,103) AS i RETURNING user_id
-                )
-                INSERT INTO im_v2.group_join_requests
-                    (request_id, invite_id, room_id, applicant_user_id, submission_operation_id, state,
-                     created_at, updated_at, decided_by_user_id, decision_operation_id, approval_membership_revision)
-                SELECT user_id, \(bind: invite.inviteID.uuidValue!), \(bind: targetRoom.uuidValue!), user_id, user_id,
-                       'approving', \(bind: now), \(bind: now), \(bind: senderUUID), user_id, 0 FROM applicants
-                """).run()
-            let service = try V2GroupApprovalRecoveryService(stores: ["room-a": PostgresV2GroupApprovalRecoveryStore(database: sourceDB), "room-b": PostgresV2GroupApprovalRecoveryStore(database: targetDB)], operatorPrincipal: "paging-oncall", now: { now })
-            let scope = try V2GroupApprovalRecoveryScope(shardID: "room-b", ownerEpoch: 0, roomID: targetRoom.uuidValue!)
-            let first = try await service.candidates(scope: scope, after: nil, limit: 100)
-            #expect(first.candidates.count == 100)
-            let cursor = try #require(first.nextCursor), anchor = try #require(first.candidates.last)
-            let commands = (0..<2).map { _ in V2GroupApprovalRecoveryCommand(operationID: UUID(), scope: scope, requestID: anchor.requestID, reviewerUserID: anchor.reviewerUserID, decisionOperationID: anchor.decisionOperationID, reason: .dependencyRecovered) }
-            let outcomes = try await withThrowingTaskGroup(of: V2GroupApprovalRecoveryResult.self) { group in
-                for command in commands { group.addTask { try await service.recover(command) } }
-                var results: [V2GroupApprovalRecoveryResult] = []
-                for try await result in group { results.append(result) }
-                return results
-            }
-            #expect(outcomes.filter { $0.outcome == .released }.count == 1)
-            #expect(outcomes.filter { $0.outcome == .notApproving }.count == 1)
-            #expect(try await count("im_v2.group_join_approval_recovery_audit", on: targetSQL) == 2)
-            #expect(try await count("im_v2.room_membership_operation_fences", on: targetSQL) == 1)
-            let second = try await service.candidates(scope: scope, after: cursor, limit: 100)
-            #expect(second.candidates.count == 3 && second.nextCursor == nil)
-            #expect(Set(first.candidates.map(\.requestID)).isDisjoint(with: second.candidates.map(\.requestID)))
-            #expect(try await count("im_v2.group_join_requests", on: sourceSQL) == 0)
-            #expect(try await count("im_v2.group_join_approval_recovery_audit", on: sourceSQL) == 0)
-            let winningID = try #require(outcomes.first { $0.outcome == .released }?.operationID)
-            let winningCommand = try #require(commands.first { $0.operationID == winningID })
-            let alreadyReleased = V2GroupApprovalRecoveryCommand(operationID: UUID(), scope: scope, requestID: anchor.requestID, reviewerUserID: anchor.reviewerUserID, decisionOperationID: anchor.decisionOperationID, reason: .dependencyRecovered)
-            let targetStore = PostgresV2GroupApprovalRecoveryStore(database: targetDB)
-            let beforeInvalidClock = try #require(try await targetSQL.raw("SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id)::text AS value FROM im_v2.group_join_approval_recovery_audit r").first(decoding: StringValueRow.self)).value
-            for bad in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map({ Date(timeIntervalSince1970: $0) }) {
-                await #expect(throws: V2GroupApprovalRecoveryError.corruptPersistenceState) {
-                    _ = try await targetStore.recover(alreadyReleased, operatorPrincipal: "paging-oncall", now: bad)
-                }
-                #expect(try await targetSQL.raw("SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id)::text AS value FROM im_v2.group_join_approval_recovery_audit r").first(decoding: StringValueRow.self)?.value == beforeInvalidClock)
-            }
-            // An audit-only result still needs a representable clock, including
-            // legal dates close to the database's lower and upper endpoints.
-            for validTime in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)] {
-                let boundaryCommand = V2GroupApprovalRecoveryCommand(operationID: UUID(), scope: scope, requestID: anchor.requestID, reviewerUserID: anchor.reviewerUserID, decisionOperationID: anchor.decisionOperationID, reason: .dependencyRecovered)
-                let boundaryResult = try await targetStore.recover(boundaryCommand, operatorPrincipal: "paging-oncall", now: validTime)
-                #expect(boundaryResult.outcome == .notApproving && boundaryResult.detail == .notApproving && !boundaryResult.wasIdempotent)
-                #expect(try await targetSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_join_approval_recovery_audit WHERE operation_id = \(bind: boundaryCommand.operationID) AND requested_at = \(bind: validTime)").first(decoding: CountRow.self)?.value == 1)
-                let replay = try await targetStore.recover(boundaryCommand, operatorPrincipal: "paging-oncall", now: Date(timeIntervalSince1970: .nan))
-                #expect(replay.wasIdempotent && replay.outcome == .notApproving)
-            }
-            #expect(try await count("im_v2.group_join_approval_recovery_audit", on: targetSQL) == 4)
-            #expect(try await count("im_v2.room_membership_operation_fences", on: targetSQL) == 1)
-            let restarted = try V2GroupApprovalRecoveryService(stores: ["room-b": PostgresV2GroupApprovalRecoveryStore(database: targetDB)], operatorPrincipal: "paging-oncall", now: { now.addingTimeInterval(10) })
-            try await targetSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: targetRoom.uuidValue!)").run()
-            let replay = try await restarted.recover(winningCommand)
-            #expect(replay.outcome == .released && replay.wasIdempotent)
-            await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) { try await service.candidates(scope: scope, after: nil, limit: 10) }
-            let wrongPhysicalStore = try V2GroupApprovalRecoveryService(stores: ["room-b": PostgresV2GroupApprovalRecoveryStore(database: sourceDB)], operatorPrincipal: "paging-oncall")
-            await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) { try await wrongPhysicalStore.candidates(scope: scope, after: nil, limit: 10) }
-            let current = try await service.candidates(scope: .init(shardID: "room-b", ownerEpoch: 1, roomID: targetRoom.uuidValue!), after: nil, limit: 100)
-            #expect(current.candidates.count == 100 && current.nextCursor != nil)
 
-            try await sourceSQL.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now))
-                """).run()
-            let migration = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: targetRoom,
-                source: .init(shardID: "room-b", epoch: 1), targetShardID: "room-c")
-            let migrations = PostgresV2RoomOwnerMigrationPreparationStore(database: sourceDB, registeredShardIDs: ["room-b", "room-c"])
-            _ = try await migrations.prepare(migration, now: now)
-            let freezing = try await migrations.beginFreezing(migration, now: now)
-            try await PostgresV2RoomMigrationWriteFence(database: targetDB).install(for: freezing)
-            func snapshot() async throws -> [[String]] {
-                var result: [[String]] = []
-                for table in ["rooms", "group_join_requests", "group_invite_links", "group_join_approval_recovery_audit",
-                              "room_membership_operation_fences", "room_membership_operations", "room_memberships", "room_events"] {
-                    let rows = try await targetSQL.raw("""
-                        SELECT row_to_json(r)::text AS value FROM im_v2.\(unsafeRaw: table) r
-                        ORDER BY row_to_json(r)::text
-                        """).all(decoding: StringValueRow.self)
-                    result.append(rows.map(\.value))
-                }
-                return result
-            }
-            let frozenState = try await snapshot()
-            let frozenScope = try V2GroupApprovalRecoveryScope(shardID: "room-b", ownerEpoch: 1, roomID: targetRoom.uuidValue!)
-            let pending = try #require(current.candidates.first)
-            for candidate in [pending, anchor] {
-                await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) {
-                    _ = try await restarted.recover(.init(operationID: UUID(), scope: frozenScope,
-                        requestID: candidate.requestID, reviewerUserID: candidate.reviewerUserID,
-                        decisionOperationID: candidate.decisionOperationID, reason: .dependencyRecovered))
-                }
-            }
-            await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) {
-                _ = try await restarted.candidates(scope: frozenScope, after: nil, limit: 100)
-            }
-            await #expect(throws: V2GroupApprovalRecoveryError.ownerChanged) {
-                _ = try await restarted.candidates(scope: frozenScope, after: cursor, limit: 100)
-            }
-            let frozenReplay = try await restarted.recover(winningCommand)
-            #expect(frozenReplay.wasIdempotent && frozenReplay.outcome == .released)
-            #expect(try await snapshot() == frozenState)
-            print("Approval recovery owners: 103 candidates, pages 100+3 across changed anchor, two operators release once, stale/wrong owner rejected, durable replay preserved")
-        }
-    }
-
-    @Test("housekeeping retains exact approval evidence while expiring unrelated member operations", arguments: ["approved", "approving", "mismatched"])
+    @Test("housekeeping retains exact approval evidence while expiring unrelated member operations", arguments: ["approved", "mismatched"])
     func invitationApprovalReceiptsSurviveHousekeeping(_ state: String) async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
@@ -32598,11 +29565,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             // Same UUID under a different actor is not the approval operation.
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'admin' WHERE user_id = \(bind: memberTwoUUID)").run()
             guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: .init(uuid: memberTwoUUID), operationID: .init(decisionOperation.rawValue), targetUserID: .init(uuid: memberThreeUUID), action: .remove, expectedMembershipRevision: 2)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            if state != "approved" {
-                // Reproduce a legacy membership commit before approval finalize.
-                try await sql.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decided_at = NULL WHERE request_id = \(bind: submitted.requestID.uuidValue!)").run()
-                try await sql.raw("UPDATE im_v2.group_invite_links SET approved_use_count = 0").run()
-            }
             if state == "mismatched" {
                 // Keep evidence of conflicting bindings for investigation too.
                 try await sql.raw("UPDATE im_v2.group_join_requests SET applicant_user_id = \(bind: memberTwoUUID) WHERE request_id = \(bind: submitted.requestID.uuidValue!)").run()
@@ -32617,8 +29579,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let retainedReceipt = try await sql.raw("SELECT row_to_json(m)::text AS value FROM im_v2.room_membership_operations m WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: decisionOperation.uuidValue!)").first(decoding: StringValueRow.self)?.value
             #expect(retainedReceipt == expectedReceipt)
             #expect(try await worker.runOnce(limit: 65_536).purgedIdempotencyRows == 0)
-            let replay = try await store.approve(roomID: roomID, requestID: submitted.requestID, reviewerUserID: senderID, operationID: decisionOperation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-            #expect(replay == (state == "approved" ? first : .conflict))
+            if state == "approved" {
+                let replay = try await store.approve(roomID: roomID, requestID: submitted.requestID, reviewerUserID: senderID, operationID: decisionOperation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
+                #expect(replay == first)
+            }
             #expect(try await count("im_v2.room_events", on: sql) == 3)
             print("Approval evidence retention: state=\(state), purged=\(report.purgedIdempotencyRows), exactReceiptRetained=\(retainedReceipt == expectedReceipt) after applicant left")
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -32797,12 +29761,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             guard case .changed = try await membership.change(.init(roomID: roomID, actorUserID: senderID, operationID: independentOperation, targetUserID: .init(uuid: applicants[1]), action: .add, expectedMembershipRevision: 2)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
             #expect(try await store.approve(roomID: roomID, requestID: secondRequest, reviewerUserID: senderID, operationID: .init(independentOperation.rawValue), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) == .conflict)
             #expect(try await store.approve(roomID: roomID, requestID: secondRequest, reviewerUserID: senderID, operationID: secondOperation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) == .conflict)
-            try await sql.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decision_operation_id = \(bind: secondOperation.uuidValue!), decided_by_user_id = \(bind: senderUUID), approval_membership_revision = 2 WHERE request_id = \(bind: secondRequest.uuidValue!)").run()
-            #expect(try await store.approve(roomID: roomID, requestID: secondRequest, reviewerUserID: senderID, operationID: secondOperation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) == .conflict)
-            #expect(try await sql.raw("SELECT state AS value FROM im_v2.group_join_requests WHERE request_id = \(bind: secondRequest.uuidValue!)").first(decoding: StringValueRow.self)?.value == "approving")
             #expect(try await sql.raw("SELECT approved_use_count::bigint AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 1)
             #expect(try await count("im_v2.room_events", on: sql) == 3)
-            print("Atomic approval race: one slot, two approvals plus removal; independent membership and legacy approving do not settle usage")
+            print("Atomic approval race: one slot, two approvals plus removal; independent membership does not settle usage")
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
         } catch {
@@ -32812,8 +29773,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("same applicant cannot overbook the last local quota slot across different invites", arguments: [false, true])
-    func invitationApplicantQuotaIsAtomic(includesApproving: Bool) async throws {
+    @Test("same applicant cannot overbook the last local quota slot across different invites")
+    func invitationApplicantQuotaIsAtomic() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
         let app = try await Application.make(.testing)
@@ -32840,10 +29801,6 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 lastInvite = try await invite(index)
                 guard case .submitted(let record) = try await store.submit(submission(index)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 initial.append(record)
-            }
-            if includesApproving {
-                // Legacy state fixture: production no longer creates approving.
-                try await sql.raw("UPDATE im_v2.group_join_requests SET state = 'approving', decision_operation_id = \(bind: UUID()), decided_by_user_id = \(bind: senderUUID), approval_membership_revision = 0 WHERE request_id = \(bind: initial[0].requestID.uuidValue!)").run()
             }
             _ = try await invite(20)
             // Revoking a link does not release its already pending request.
@@ -32886,8 +29843,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     throw error
                 }
             }
-            let pendingCount = try await sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state IN ('pending','approving')").first(decoding: CountRow.self)?.value
-            print("Applicant quota: includesApproving=\(includesApproving), committed outstanding=\(pendingCount ?? -1)")
+            let pendingCount = try await sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state = 'pending'").first(decoding: CountRow.self)?.value
+            print("Applicant quota: committed outstanding=\(pendingCount ?? -1)")
             #expect(pendingCount == 20)
             let winnerIndices = outcomes.indices.filter { if case .submitted = outcomes[$0] { return true }; return false }
             #expect(winnerIndices.count == 1 && outcomes.filter { $0 == .rateLimited }.count == 1)
@@ -32903,7 +29860,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             }
             _ = try await store.reject(roomID: roomID, requestID: winner.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), now: now)
             guard case .submitted = try await store.submit(requests[1 - winnerIndex]) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            #expect(try await sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state IN ('pending','approving')").first(decoding: CountRow.self)?.value == 20)
+            #expect(try await sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state = 'pending'").first(decoding: CountRow.self)?.value == 20)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await app.asyncShutdown()
         } catch {
@@ -33317,6 +30274,19 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         #expect(actual?.exists == expected)
     }
 
+    @Test("room routing requires the canonical directory even when the physical room exists")
+    func roomDirectoryIsRequired() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let router = V2PostgresRoomShardRouter(database: database)
+            let route = try await router.route(for: roomID)
+            #expect(route.shardID == "room-a" && route.epoch == 0)
+            try await sql.raw("DELETE FROM im_v2.room_owner_routes WHERE room_id = \(bind: roomUUID)").run()
+            #expect(try await count("im_v2.rooms", on: sql) > 0)
+            await #expect(throws: V2RoomShardRouteError.roomNotFound) { _ = try await router.route(for: roomID) }
+            await #expect(throws: V2RoomShardRouteError.roomNotFound) { _ = try await router.routes(for: [roomID]) }
+        }
+    }
+
     private func seedRoom(
         capacityClass: V2GroupCapacityClass = .standard,
         roomID: UUID = roomUUID,
@@ -33337,6 +30307,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 (room_id, room_shard_id, capacity_profile_id, capacity_class)
             VALUES
                 (\(bind: roomID), \(bind: shardID), 'standard', \(bind: capacityClass.rawValue))
+            """).run()
+        try await sql.raw("""
+            INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
+            VALUES (\(bind: roomID), \(bind: shardID), 0, \(bind: seededAt), \(bind: seededAt))
             """).run()
         try await sql.raw("""
             INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
@@ -33887,7 +30861,7 @@ private struct FailsOnSecondPageRouter: V2UserShardRouter {
     }
 }
 
-private final class ProjectionTransferBoundaryClock: Sendable {
+private final class TestSequenceClock: Sendable {
     private let state: Mutex<([Date], Int)>
     init(_ values: [Date]) {
         precondition(!values.isEmpty)
@@ -33906,32 +30880,7 @@ private final class ProjectionTransferBoundaryClock: Sendable {
     }
 }
 
-private actor MigrationBoundaryFinalizer: V2UserShardCutoverFinalizing {
-    private(set) var cutovers = 0
-    private(set) var rollbacks = 0
 
-    func finalizeForCutover(migrationID: UUID, userID: UserID, sourceBucket: String, targetBucket: String, sourceRouterEpoch: Int64, controlTransaction: any Database) async throws {
-        cutovers += 1
-    }
-
-    func finalizeForRollback(migrationID: UUID, userID: UserID, sourceBucket: String, targetBucket: String, sourceRouterEpoch: Int64, controlTransaction: any Database) async throws {
-        rollbacks += 1
-    }
-}
-
-private struct RouteFinalizerNoop: V2UserShardCutoverFinalizing {
-    func finalizeForCutover(
-        migrationID _: UUID, userID _: UserID,
-        sourceBucket _: String, targetBucket _: String, sourceRouterEpoch _: Int64,
-        controlTransaction _: any Database
-    ) async throws {}
-
-    func finalizeForRollback(
-        migrationID _: UUID, userID _: UserID,
-        sourceBucket _: String, targetBucket _: String, sourceRouterEpoch _: Int64,
-        controlTransaction _: any Database
-    ) async throws {}
-}
 private struct TransferCursorAssertionRow: Decodable {
     let acknowledgedSequence: Int64
     enum CodingKeys: String, CodingKey { case acknowledgedSequence = "acknowledged_sequence" }

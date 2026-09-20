@@ -28,7 +28,7 @@ struct V2GroupJoinPageCursorTests {
     @Test("A cursor must have exactly the timestamp representation belonging to its version")
     func invalidRepresentations() throws {
         let room = UUID()
-        let base: [String: Any] = ["version": 2, "filter": "pending-or-approving", "roomID": room.uuidString,
+        let base: [String: Any] = ["version": 2, "filter": "pending", "roomID": room.uuidString,
                                    "requestID": UUID().uuidString, "createdAtMicroseconds": 1]
         for mutation: [String: Any] in [
             ["createdAtMicroseconds": NSNull()], ["createdAtMicroseconds": 0.5],

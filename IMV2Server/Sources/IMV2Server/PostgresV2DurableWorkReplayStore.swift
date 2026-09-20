@@ -111,11 +111,10 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                     break
                 }
                 if let roomID = source.sourceRoomID {
-                    guard let room = try await sql.raw("""
-                        SELECT migration_fence_id FROM im_v2.rooms
+                    guard try await sql.raw("""
+                        SELECT room_id FROM im_v2.rooms
                         WHERE room_id = \(bind: roomID) FOR SHARE
-                        """).first(decoding: ReplayContentReviewRoomRow.self),
-                        room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+                        """).first(decoding: ReplayContentReviewRoomRow.self) != nil else { throw V2RoomOwnerFenceError.ownerChanged }
                 }
                 didRequeue = try await sql.raw("""
                     UPDATE im_v2.user_state_event_outbox
@@ -131,17 +130,16 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
             case .contentReview:
                 // Lock the room before the job, matching review workers. The
                 // enclosing transaction also rolls back the audit reservation.
-                guard let room = try await sql.raw("""
-                    SELECT room.migration_fence_id
+                guard try await sql.raw("""
+                    SELECT room.room_id
                     FROM im_v2.rooms AS room
                     JOIN im_v2.content_review_jobs AS job ON job.room_id = room.room_id
                     WHERE job.message_id = \(bind: sourceEventID)
                     FOR SHARE OF room
-                    """).first(decoding: ReplayContentReviewRoomRow.self) else {
+                    """).first(decoding: ReplayContentReviewRoomRow.self) != nil else {
                     didRequeue = false
                     break
                 }
-                guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
                 didRequeue = try await sql.raw("""
                     UPDATE im_v2.content_review_jobs
                     SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -461,8 +459,8 @@ private func replayUUID(_ identifier: UserID) throws -> UUID {
 }
 
 private struct ReplayContentReviewRoomRow: Decodable {
-    let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
 }
 
 

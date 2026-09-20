@@ -109,13 +109,13 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
             let cursorPredicate: SQLQueryString = if let afterRoomID {
                 "room_id > \(bind: afterRoomID)"
             } else { "TRUE" }
-            // 与迁移标记安装争用同一房间锁；冻结或忙碌房间跳过，下轮继续。
+            // 与房间写入争用同一房间锁；忙碌房间跳过，下轮继续。
             // 先锁定有界房间集，再在新语句快照中计算已读下界，避免并发入群被漏算。
             var locked = try await sql.raw("""
                 SELECT room_id FROM im_v2.rooms
                 WHERE \(cursorPredicate)
                   AND room_sequence > log_trimmed_through_room_sequence
-                  AND migration_fence_id IS NULL
+
                 ORDER BY room_id
                 LIMIT \(bind: limit)
                 FOR UPDATE SKIP LOCKED
@@ -124,7 +124,7 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                 locked = try await sql.raw("""
                     SELECT room_id FROM im_v2.rooms
                     WHERE room_sequence > log_trimmed_through_room_sequence
-                      AND migration_fence_id IS NULL
+
                     ORDER BY room_id LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     """).all(decoding: RoomLogLockedRow.self)
             }

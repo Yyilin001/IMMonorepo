@@ -120,10 +120,10 @@ public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
     private func assertOwner(_ owner: ReplayForwardOwner, command: V2ForwardWorkReplayCommand, sql: any SQLDatabase) async throws {
         guard owner.shardID == command.shardID else { throw V2ForwardWorkReplayError.ownerChanged }
         guard let current = try await sql.raw("""
-            SELECT room_id, room_shard_id AS shard_id, owner_epoch AS epoch, migration_fence_id
+            SELECT room_id, room_shard_id AS shard_id, owner_epoch AS epoch
             FROM im_v2.rooms WHERE room_id = \(bind: owner.roomID) FOR UPDATE
             """).first(decoding: ReplayForwardCurrentOwner.self),
-              current.shardID == owner.shardID, current.epoch == owner.epoch, current.migrationFenceID == nil
+              current.shardID == owner.shardID, current.epoch == owner.epoch
         else { throw V2ForwardWorkReplayError.ownerChanged }
     }
 }
@@ -150,6 +150,5 @@ private struct ReplayForwardInbox: Decodable {
 private struct ReplayForwardCurrentOwner: Decodable {
     let shardID: String
     let epoch: Int64
-    let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case shardID = "shard_id", epoch, migrationFenceID = "migration_fence_id" }
+    enum CodingKeys: String, CodingKey { case shardID = "shard_id", epoch }
 }

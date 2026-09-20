@@ -59,13 +59,12 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             let activeAccountCount = try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.public_user_profiles AS profile WHERE (profile.user_id = \(bind: actorID) OR profile.user_id = \(bind: targetID)) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)").first(decoding: DirectCountRow.self)?.value ?? 0
             guard activeAccountCount == 2 else { return .unavailable }
-            if let existingPair = try await sql.raw("SELECT pair.room_id, pair.created_at, room.capacity_profile_id, room.migration_fence_id FROM im_v2.direct_room_pairs AS pair INNER JOIN im_v2.rooms AS room ON room.room_id = pair.room_id WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher) FOR SHARE OF room").first(decoding: DirectPairRow.self) {
+            if let existingPair = try await sql.raw("SELECT pair.room_id, pair.created_at, room.capacity_profile_id FROM im_v2.direct_room_pairs AS pair INNER JOIN im_v2.rooms AS room ON room.room_id = pair.room_id WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher) FOR SHARE OF room").first(decoding: DirectPairRow.self) {
                 // A direct pair is globally unique and its room keeps the
                 // immutable capacity profile selected at creation. Do not
                 // return a room that this deployment cannot subsequently
                 // write; callers can retry after the intended profile is
                 // restored or an explicit room migration completes.
-                guard existingPair.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
                 guard existingPair.capacityProfileID == capacityProfile.id else {
                     return .unavailable
                 }
@@ -92,6 +91,10 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 return .unavailable
             }
             try await sql.raw("INSERT INTO im_v2.rooms (room_id, room_kind, room_shard_id, room_sequence, membership_revision, capacity_profile_id, created_at) VALUES (\(bind: createdRoomID), 'direct', \(bind: roomShardID), 0, 1, \(bind: capacityProfile.id), \(bind: now))").run()
+            try await sql.raw("""
+                INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
+                VALUES (\(bind: createdRoomID), \(bind: roomShardID), 0, \(bind: now), \(bind: now))
+                """).run()
             // Opening a room immediately projects the target's profile to the
             // actor. Persist that producer-side fact beside the pair so later
             // sends do not have to rediscover it by scanning compacted and
@@ -252,8 +255,8 @@ private struct DirectOperationRow: Decodable {
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
 private struct DirectPairRow: Decodable {
-    let roomID: UUID; let createdAt: Date; let capacityProfileID: String; let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at", capacityProfileID = "capacity_profile_id", migrationFenceID = "migration_fence_id" }
+    let roomID: UUID; let createdAt: Date; let capacityProfileID: String
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at", capacityProfileID = "capacity_profile_id" }
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
 private struct DirectCountRow: Decodable { let value: Int }

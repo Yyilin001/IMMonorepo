@@ -295,7 +295,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// 校验给定房间的归属路由均已选定。
     ///
     /// 操作锁必须先于本查询取得。`NO KEY UPDATE` 在围栏任期/分片更新的同时，
-    /// 保持与既有追加/外键锁兼容。加锁查询同时读取迁移标记，等待期间安装的标记也必须拒绝。
+    /// 保持与既有追加/外键锁兼容。加锁后读取当前归属，拒绝过期路由。
     ///
     /// - Parameters:
     ///   - roomIDs: 待校验归属的房间标识。
@@ -308,11 +308,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
         let requested = try roomWriteJSON(rooms.map(\.uuidString))
         let rows = try await sql.raw("""
-            SELECT room_id, room_shard_id, owner_epoch, migration_fence_id, room_kind FROM im_v2.rooms
+            SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
             WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: requested)::jsonb))
             ORDER BY room_id FOR NO KEY UPDATE
             """).all(decoding: SelectedRoomOwnerRow.self)
-        guard rows.allSatisfy({ $0.migrationFenceID == nil }) else { throw V2RoomOwnerFenceError.ownerChanged }
         if let kinds = controlScopeRoomKinds {
             guard rows.allSatisfy({ kinds[$0.roomID] == nil || kinds[$0.roomID] == $0.kind }) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -333,7 +332,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             }
         }
         // Without a selected route, missing rooms keep the ordinary domain error
-        // from the acceptance path. Existing rooms are still migration-fenced.
+        // from the acceptance path.
     }
 
     public func accept(
@@ -7182,7 +7181,7 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
         ), locked_room AS MATERIALIZED (
             SELECT room.room_id, room.room_kind, room.room_shard_id,
                    room.capacity_profile_id, room.capacity_class,
-                   room.frozen_at, room.migration_fence_id, room.room_sequence,
+                   room.frozen_at, room.room_sequence,
                    room.timeline_sequence, room.membership_revision
             FROM requested_rooms AS requested
             JOIN im_v2.rooms AS room ON room.room_id = requested.room_id
@@ -7199,7 +7198,7 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
             FOR NO KEY UPDATE OF room
         ), fresh_input AS MATERIALIZED (
             SELECT input.*, room.room_kind, room.capacity_class,
-                   room.frozen_at, room.migration_fence_id, room.room_sequence,
+                   room.frozen_at, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
                    room.room_shard_id AS actual_room_shard_id,
                    room.capacity_profile_id AS actual_capacity_profile_id
@@ -7288,7 +7287,7 @@ private struct PlainHybridGroupConditionalAppendStatement: PostgresPreparedState
             WHERE fresh.room_kind = 'group'
               AND fresh.capacity_class = 'large'
               AND fresh.frozen_at IS NULL
-              AND fresh.migration_fence_id IS NULL
+
               AND fresh.actual_room_shard_id = fresh.room_shard_id
               AND fresh.actual_capacity_profile_id = fresh.capacity_profile_id
               AND admission.shard_lease_id = fresh.expected_shard_lease_id
@@ -9343,9 +9342,8 @@ private struct SelectedRoomOwnerRow: Decodable {
     let roomID: UUID
     let shardID: String
     let epoch: Int64
-    let migrationFenceID: UUID?
     enum CodingKeys: String, CodingKey {
-        case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch", migrationFenceID = "migration_fence_id", kind = "room_kind"
+        case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch", kind = "room_kind"
     }
 }
 

@@ -22,29 +22,26 @@
 
 ## 当前兼容与 Schema 政策
 
-- 项目尚未上线；只支持仓库明确提供并由回归覆盖的受控迁移，不自动兼容任意旧协议、数据库、`.env.local` 或测试替身。
+- 项目尚未上线；服务端仅以当前协议、当前 schema 和全新数据库为基线，不提供历史兼容或在线数据迁移。
 - wire contract 为 protobuf protocol 30；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
   房间 continuation 表示已认证扫描到的序号，可越过不可见尾部；旧客户端严格相等校验不兼容，见[读取与游标合同](../../docs/reviews/message-mutation-read-contract.md)。
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  `im-v2-current-49`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
-  受控压测环境的既有 current-2 数据库可按 migration regression 覆盖的 expand 顺序在线更新，
-  readiness 会拒绝缺少当前完整性合同的结构。schema 17 到 18 的群权限迁移要求停止旧进程，
-  不支持混合版本运行；步骤、历史缺口处理和回退限制见[权限保留合同](../../docs/reviews/group-policy-retention.md)。
+  `im-v2-current-51`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
+  readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
   schema 19→20 为群申请增加审核人＋决策操作唯一约束；新审批将成员、配额、事件、outbox 和
-  申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 的 D05 现有 owner 审计恢复已验证，B27 owner 路由仍开放，见
+  申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 及其恢复服务已删除，B27 owner 路由仍开放，见
   [原子审批合同](../../docs/reviews/atomic-group-approval-contract.md)。
-  普通成员变更在单库/分库组装中均保留 owner route/epoch，在回执重放前于事务内检查；其他房间写入与完整迁移仍开放，见[成员栅栏合同](../../docs/reviews/room-membership-owner-fence-contract.md)。
-  schema 24→25 增加历史邀请目录的分页导入审计及 owner 全状态索引，独立 operator 原子导入/回滚并复核路由，见[导入合同](../../docs/reviews/group-invite-directory-import-contract.md)。
-  历史 owner 已提交链接的创建重试沿用原 ID/时间补目录，拒绝已有矛盾绑定，见[兼容合同](../../docs/reviews/group-invite-legacy-binding-contract.md)。
+  普通成员变更在单库/分库组装中均保留 owner route/epoch，在回执重放前于事务内检查；其他房间写入的原缺陷验收仍开放，见[成员栅栏合同](../../docs/reviews/room-membership-owner-fence-contract.md)。
+  历史邀请目录分页导入已移除，不再提供旧数据回填入口。
+  当前 owner 已提交链接的创建重试沿用原 ID/时间补目录，拒绝已有矛盾绑定，见[创建重试合同](../../docs/reviews/group-invite-legacy-binding-contract.md)。
   schema 23→24 为 prepared 邀请目录添加持久恢复队列；Account 已接入有界认领、退避与暂停，原创建时间和本次判断时间分开，见[创建恢复合同](../../docs/reviews/group-invite-creation-recovery-contract.md)。
-  schema 22→23 移除邀请/申请到 owner 身份表的四个外键；Account 已按持久 owner/epoch 路由，control 身份读取与 owner 事务分开，完整迁移与全局申请配额仍开放，见[owner 合同](../../docs/reviews/group-invitation-owner-routing-contract.md)。
-  schema 21→22 增加 control 邀请 token 目录与稳定创建 intent，回填同库旧链接；后续 owner 接线见上文，见[目录合同](../../docs/reviews/group-invite-directory-contract.md)。
-  schema 20→21 增加旧审批恢复审计、成员操作阻断及分批索引，独立 operator 入口已验证；
-  [恢复合同](../../docs/reviews/group-approval-recovery-contract.md)要求完整成员历史，在线 owner 迁移仍待验收。
-  schema 18→19 新增 Push 会话与意图版本存储，迁移也要求停止旧写进程；Account HTTP 与 ClientKit 版本传输已接通，持久意图存储已加入 SQLite；自动执行器及 App 开关/退出接线已验证，真实网络和账号生命周期组合仍开放，见[Push 意图合同](../../docs/reviews/push-intent-contract.md)及[HTTP 合同](../../docs/reviews/push-intent-http-contract.md)、[本地持久状态合同](../../docs/reviews/push-intent-local-contract.md)、[自动执行器合同](../../docs/reviews/push-intent-reconciler-contract.md)、[App 合同](../../docs/reviews/push-intent-app-contract.md)及[认证隔离合同](../../docs/reviews/push-intent-auth-contract.md)。
+  schema 22→23 移除邀请/申请到 owner 身份表的四个外键；Account 已按持久 owner/epoch 路由，control 身份读取与 owner 事务分开，全局申请配额另行验收，见[owner 合同](../../docs/reviews/group-invitation-owner-routing-contract.md)。
+  schema 21→22 增加 control 邀请 token 目录与稳定创建 intent；后续 owner 接线见上文，见[目录合同](../../docs/reviews/group-invite-directory-contract.md)。
+  schema 51 移除旧审批恢复、历史邀请导入和旧注册取消的四张专用表。
+  当前 schema 包含 Push 会话与意图版本存储；Account HTTP 与 ClientKit 版本传输已接通，持久意图存储已加入 SQLite；自动执行器及 App 开关/退出接线已验证，真实网络和账号生命周期组合仍开放，见[Push 意图合同](../../docs/reviews/push-intent-contract.md)及[HTTP 合同](../../docs/reviews/push-intent-http-contract.md)、[本地持久状态合同](../../docs/reviews/push-intent-local-contract.md)、[自动执行器合同](../../docs/reviews/push-intent-reconciler-contract.md)、[App 合同](../../docs/reviews/push-intent-app-contract.md)及[认证隔离合同](../../docs/reviews/push-intent-auth-contract.md)。
 - ClientKit 主 SQLite 与派生搜索库分别有当前建库入口，主库还提供已验证的受控迁移。
   消息、reaction、公告、角色权限、置顶效果及恢复调度迁移见修复记录；当前 schema contract 测试固定 173/5 个对象指纹。
   protocol 30 包含显式个人快照重建和当前角色权限基线读取；SQLite 持久保存个人重建意图，
@@ -117,7 +114,7 @@ bash IMV2/scripts/test_v2_local_environment_contract.sh
 3. 在批准的普通聊天与热点群工作负载上测量 PostgreSQL/WAL、队列年龄、sync lag、连接池和
    拒绝行为，据此批准或下调 admission profile。
 4. 完成 WAL/PITR、RPO/RTO、gateway/worker/database kill 与 NATS 分区演练。
-5. 在单 store 首发稳定后，再批准多 store 分片迁移的生产启用。
+5. 使用部署前确定的静态分片配置；在线数据迁移不纳入首版。
 
 开放风险及关闭条件以
 [`residual-risk-register.md`](10-operations/residual-risk-register.md) 为准。

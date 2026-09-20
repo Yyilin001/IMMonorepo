@@ -64,8 +64,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                   AND checkpoint.projected_sequence < sequence.next_sequence
                   AND checkpoint.state = 'ready'
                   AND (checkpoint.next_attempt_at IS NULL OR checkpoint.next_attempt_at <= \(bind: now))
-                  AND (checkpoint.migration_fence_expires_at IS NULL
-                       OR checkpoint.migration_fence_expires_at <= now())
                 ORDER BY ready.available_at, ready.enqueued_at, ready.user_id
                 FOR UPDATE OF ready, checkpoint SKIP LOCKED
                 LIMIT 1

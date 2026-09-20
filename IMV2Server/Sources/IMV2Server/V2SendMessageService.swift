@@ -323,9 +323,6 @@ public struct V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
         case conditionalWriteMismatch = "conditional_write_mismatch"
     }
 
-    /// 兼容旧调用点的未细分回退原因；新增调用点应使用带具体原因的初始化方法。
-    public static let unsupportedRequestShape = Self(reason: .unspecified)
-
     /// 固定的回退原因分类。
     public let reason: Reason
     /// 相对本批输入、可单独隔离的不兼容请求下标。

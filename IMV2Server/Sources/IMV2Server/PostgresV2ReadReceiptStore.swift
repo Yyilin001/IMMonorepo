@@ -52,8 +52,8 @@ public struct PostgresV2ReadReceiptStore:
             let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
             if let ownerRoute {
-                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptSharedOwnerRow.self)
-                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch, actual?.migrationFenceID == nil else {
+                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptSharedOwnerRow.self)
+                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else {
                     throw V2ReadReceiptStoreError.ownerChanged
                 }
             }
@@ -74,8 +74,7 @@ public struct PostgresV2ReadReceiptStore:
                     recordedAt: prior.recordedAt)), nil, nil)
             }
             // Match the operation write's timestamp precision even when the read cursor does not advance.
-            guard let room = try await sql.raw("SELECT room_sequence, membership_revision, migration_fence_id, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2ReadReceiptStoreError.ownerChanged }
+            guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
             guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
             let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
             guard member != nil else { throw V2ReadReceiptStoreError.actorNotMember }
@@ -253,10 +252,10 @@ public struct PostgresV2ReadReceiptStore:
                         let actual = owners[validatedInputs[index].roomID]
                         if let ownerRoutes {
                             let route = ownerRoutes[index]
-                            validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch && actual?.migrationFenceID == nil
+                            validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch
                         } else {
                             // Missing rooms retain the established per-item domain result.
-                            validatedInputs[index].ownerIsValid = actual?.migrationFenceID == nil
+                            validatedInputs[index].ownerIsValid = true
                         }
                     }
                     let statement = try GroupReceiptBatchStatement(inputs: validatedInputs)
@@ -396,8 +395,8 @@ public struct PostgresV2ReadReceiptStore:
             }
             let room = try receiptUUID(roomID)
             if let ownerRoute {
-                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE").first(decoding: ReceiptSharedOwnerRow.self)
-                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch, actual?.migrationFenceID == nil else { throw V2ReadReceiptStoreError.ownerChanged }
+                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE").first(decoding: ReceiptSharedOwnerRow.self)
+                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else { throw V2ReadReceiptStoreError.ownerChanged }
             }
             let message = try receiptUUID(messageID)
             let actor = try receiptUUID(actorUserID)
@@ -993,13 +992,12 @@ private struct ReceiptSharedOwnerRow: Decodable, Sendable {
     let roomID: UUID
     let shardID: String
     let epoch: Int64
-    let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch", migrationFenceID = "migration_fence_id" }
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch" }
 }
 
 private struct GroupReceiptBatchRoomLockStatement: PostgresPreparedStatement {
     static let name = "im_v2_group_read_receipt_owner_locks_v1"
-    static let sql = "SELECT room_id, room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = ANY($1::uuid[]) ORDER BY room_id FOR SHARE"
+    static let sql = "SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = ANY($1::uuid[]) ORDER BY room_id FOR SHARE"
     typealias Row = ReceiptSharedOwnerRow
     let roomIDs: [UUID]
     func makeBindings() throws -> PostgresBindings {
@@ -1008,8 +1006,8 @@ private struct GroupReceiptBatchRoomLockStatement: PostgresPreparedStatement {
         return bindings
     }
     func decodeRow(_ row: PostgresRow) throws -> ReceiptSharedOwnerRow {
-        let decoded = try row.decode((UUID, String, Int64, UUID?).self)
-        return .init(roomID: decoded.0, shardID: decoded.1, epoch: decoded.2, migrationFenceID: decoded.3)
+        let decoded = try row.decode((UUID, String, Int64).self)
+        return .init(roomID: decoded.0, shardID: decoded.1, epoch: decoded.2)
     }
 }
 
@@ -1217,12 +1215,10 @@ private struct ReceiptRoomRow: Decodable {
     let roomSequence: Int64
     let membershipRevision: Int64
     let recordedAt: Date
-    let migrationFenceID: UUID?
     enum CodingKeys: String, CodingKey {
         case roomSequence = "room_sequence"
         case membershipRevision = "membership_revision"
         case recordedAt = "recorded_at"
-        case migrationFenceID = "migration_fence_id"
     }
 }
 private struct ReceiptExistsRow: Decodable { let exists: Int }

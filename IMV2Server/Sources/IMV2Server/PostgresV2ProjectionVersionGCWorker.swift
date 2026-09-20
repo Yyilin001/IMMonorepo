@@ -24,7 +24,7 @@ public struct PostgresV2ProjectionVersionGCWorker: Sendable {
 
     /// 执行一轮有界版本回收。
     ///
-    /// 迁移栅栏仍在生效，或存在以该版本区间为基准序号的活动快照产物时，对应版本会被跳过；
+    /// 存在以该版本区间为基准序号的活动快照产物时，对应版本会被跳过；
     /// 候选行使用 `FOR UPDATE SKIP LOCKED` 选取，因此多个实例可安全并行。
     ///
     /// - Parameters:
@@ -47,12 +47,6 @@ public struct PostgresV2ProjectionVersionGCWorker: Sendable {
                 SELECT version.ctid
                 FROM \(unsafeRaw: table("user_projection_versions")) AS version
                 WHERE version.valid_to_sequence IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
-                      WHERE checkpoint.user_id = version.user_id
-                        AND checkpoint.migration_fence_expires_at > \(bind: now)
-                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM \(unsafeRaw: table("sync_snapshot_artifacts")) AS artifact

@@ -22,14 +22,6 @@ public protocol V2GroupEventWakeInterestManaging: Sendable {
     func deactivate(roomID: RoomID) async
 }
 
-/// NATS 群事件载荷的编码方式。
-public enum V2NATSGroupEventPayloadEncoding: String, Equatable, Sendable {
-    /// 兼容性最稳妥的默认值，当前部署的全部网关都能解析。
-    case json
-    /// 适用于能力一致的 protobuf 副本的带版本二进制编码。
-    case protobufV1 = "protobuf_v1"
-}
-
 /// NATS 群事件唤醒的发布配置。
 public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     /// NATS 服务地址，仅支持 `nats` 或 `tls` 方案。
@@ -48,8 +40,6 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     public let tlsCAPath: String?
     /// 可选的 TLS 服务端名称。
     public let tlsServerName: String?
-    /// 载荷编码方式。
-    public let payloadEncoding: V2NATSGroupEventPayloadEncoding
     /// 持久化唤醒的延迟发布毫秒数。
     ///
     /// 持久化唤醒可能在对应的前台微批完成有界聚合之前就经另一条发布连接到达。
@@ -73,7 +63,6 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
     ///   - routingKey: 路由密钥，至少 32 字节。
     ///   - tlsCAPath: 可选的私有信任根路径。
     ///   - tlsServerName: 可选的 TLS 服务端名称。
-    ///   - payloadEncoding: 载荷编码方式，默认 JSON。
     ///   - wakeDeferralDelayMilliseconds: 唤醒延迟毫秒数，需落在 `0...1000`。
     ///   - acknowledgementTimeout: 确认超时秒数，需为正且不超过 30。
     /// - Throws: 任一约束不满足时抛出
@@ -92,7 +81,6 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
         routingKey: Data,
         tlsCAPath: String? = nil,
         tlsServerName: String? = nil,
-        payloadEncoding: V2NATSGroupEventPayloadEncoding = .json,
         wakeDeferralDelayMilliseconds: Int = 60,
         acknowledgementTimeout: TimeInterval = 2
     ) throws {
@@ -127,7 +115,6 @@ public struct V2NATSGroupEventWakeConfiguration: Equatable, Sendable {
         self.routingKey = routingKey
         self.tlsCAPath = normalizedCAPath
         self.tlsServerName = normalizedServerName
-        self.payloadEncoding = payloadEncoding
         self.wakeDeferralDelayMilliseconds = wakeDeferralDelayMilliseconds
         self.acknowledgementTimeout = acknowledgementTimeout
         self.acknowledgementTimeoutNanoseconds = timeoutNanoseconds
@@ -658,15 +645,11 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     private static let maximumCachedSubjects = 4_096
     /// Core NATS 默认 `max_payload` 为 1 MiB。
     ///
-    /// 灰度安全的 JSON 模式会把 `Data` 膨胀约 4/3，
-    /// 因此这条保守的原始正文上限同样可以约束更小的 protobuf 表示，
-    /// 无需运维提高 broker 上限。
+    /// 有界批次为 protobuf 信封和鉴权封装预留空间。
     private static let maximumGroupEventsPerPublication = 64
     private static let maximumGroupEventRawPayloadBytesPerPublication = 512 * 1_024
-    /// 在副本逐步切换版本化 protobuf 解码器的过程中，继续接受更大的旧版 JSON 表示。
-    ///
-    /// 两种编码都保持在 Core NATS 常规 1 MiB `max_payload` 之下。
-    private static let maximumInboundNotificationPayloadBytes = 896 * 1_024
+    /// protobuf 正文与信封保持在 Core NATS 常规 1 MiB 上限之下。
+    private static let maximumInboundNotificationPayloadBytes = 640 * 1_024
         + V2NATSAuthenticatedPayloadCodec.overheadBytes
 
     private struct Connect: Encodable {
@@ -678,62 +661,6 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             case verbose
             case pedantic
             case token = "auth_token"
-        }
-    }
-
-    private struct WireWake: Codable, Sendable {
-        let roomID: String
-        let highWatermark: UInt64
-        let directEvent: WireDirectEvent?
-        let directEvents: [WireDirectEvent]?
-
-        enum CodingKeys: String, CodingKey {
-            case roomID = "room_id"
-            case highWatermark = "high_watermark"
-            case directEvent = "direct_event"
-            case directEvents = "direct_events"
-        }
-
-        init(
-            roomID: String,
-            highWatermark: UInt64,
-            directEvent: WireDirectEvent?,
-            directEvents: [WireDirectEvent]? = nil
-        ) {
-            self.roomID = roomID
-            self.highWatermark = highWatermark
-            self.directEvent = directEvent
-            self.directEvents = directEvents
-        }
-    }
-
-    private struct WireDirectEvent: Codable, Sendable {
-        let sourceEventID: String
-        let roomSequence: UInt64
-        let projectionKind: String
-        let payload: Data
-        let recipientUserIDs: [String]
-        let groupMembershipRevision: UInt64?
-        let excludedConnectionID: UUID?
-
-        enum CodingKeys: String, CodingKey {
-            case sourceEventID = "source_event_id"
-            case roomSequence = "room_sequence"
-            case projectionKind = "projection_kind"
-            case payload
-            case recipientUserIDs = "recipient_user_ids"
-            case groupMembershipRevision = "group_membership_revision"
-            case excludedConnectionID = "excluded_connection_id"
-        }
-
-        init(_ event: V2DirectRoomLiveEvent) {
-            sourceEventID = event.sourceEventID.rawValue
-            roomSequence = event.roomSequence
-            projectionKind = event.projectionKind
-            payload = event.payload
-            recipientUserIDs = event.recipientUserIDs.map(\.rawValue).sorted()
-            groupMembershipRevision = event.groupMembershipRevision
-            excludedConnectionID = event.excludedConnectionID
         }
     }
 
@@ -934,8 +861,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     /// 尽力而为地发布一批前台群实时事件。
     ///
-    /// 跨进程边界保留投递器排好序的混合群组微批。兼容协议默认逐条发布每个事件；
-    /// 若在此照做，会把 NATS 确认、JSON 处理以及远端 Gateway 调度都放大到批次宽度倍。
+    /// 跨进程边界保留投递器排好序的混合群组微批，避免逐条发布事件；
+    /// 若在此照做，会把 NATS 确认、载荷处理以及远端 Gateway 调度都放大到批次宽度倍。
     /// 分块保持适度，使单条 Core NATS 消息即使面对房间允许的最大消息正文，
     /// 也远低于其常规载荷上限。
     ///
@@ -1015,13 +942,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         }
         let connection = try await connectedChannel()
         let channel = connection.channel
-        let encodedPayload: Data
-        switch configuration.payloadEncoding {
-        case .json:
-            encodedPayload = try Self.encodeJSONNotification(notification)
-        case .protobufV1:
-            encodedPayload = try V2NATSGroupEventProtobufCodec.encode(notification)
-        }
+        let encodedPayload = try V2NATSGroupEventProtobufCodec.encode(notification)
         let publishSubject = subject(for: roomID)
         let payload = V2NATSAuthenticatedPayloadCodec.seal(
             encodedPayload,
@@ -1297,113 +1218,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     static func decodeNotificationPayload(
         _ payload: Data
     ) -> V2ForegroundGroupEventNotification? {
-        if V2NATSGroupEventProtobufCodec.recognizes(payload) {
-            return V2NATSGroupEventProtobufCodec.decode(payload)
-        }
-        guard let wire = try? JSONDecoder().decode(WireWake.self, from: payload),
-              let roomID = try? RoomID(wire.roomID)
-        else { return nil }
-        let wake = V2ForegroundGroupEventNotification.wake(.init(
-            roomID: roomID,
-            highWatermark: wire.highWatermark
-        ))
-        if let directEvents = wire.directEvents {
-            guard wire.directEvent == nil,
-                  !directEvents.isEmpty,
-                  directEvents.count <= Self.maximumGroupEventsPerPublication
-            else { return wake }
-            var materialized: [V2DirectRoomLiveEvent] = []
-            materialized.reserveCapacity(directEvents.count)
-            var previousSequence: UInt64?
-            var membershipRevision: UInt64?
-            for direct in directEvents {
-                guard direct.roomSequence > (previousSequence ?? 0),
-                      direct.roomSequence > 0,
-                      !direct.projectionKind.isEmpty,
-                      !direct.payload.isEmpty,
-                      direct.recipientUserIDs.isEmpty,
-                      let revision = direct.groupMembershipRevision,
-                      revision > 0,
-                      direct.excludedConnectionID == nil,
-                      membershipRevision == nil || membershipRevision == revision,
-                      let sourceEventID = try? EventID(direct.sourceEventID)
-                else { return wake }
-                membershipRevision = revision
-                previousSequence = direct.roomSequence
-                materialized.append(.init(
-                    roomID: roomID,
-                    highWatermark: direct.roomSequence,
-                    sourceEventID: sourceEventID,
-                    roomSequence: direct.roomSequence,
-                    projectionKind: direct.projectionKind,
-                    payload: direct.payload,
-                    recipientUserIDs: [],
-                    groupMembershipRevision: revision,
-                    acceptedMembershipRevision: revision,
-                    excludedConnectionID: nil
-                ))
-            }
-            guard previousSequence == wire.highWatermark else { return wake }
-            return .groupEvents(materialized)
-        }
-        guard let direct = wire.directEvent,
-              direct.roomSequence == wire.highWatermark,
-              direct.roomSequence > 0,
-              !direct.projectionKind.isEmpty,
-              !direct.payload.isEmpty,
-              let sourceEventID = try? EventID(direct.sourceEventID)
-        else { return wake }
-        let recipients = Set(direct.recipientUserIDs.compactMap { try? UserID($0) })
-        let isExactAudience = !recipients.isEmpty
-            && recipients.count == direct.recipientUserIDs.count
-            && direct.groupMembershipRevision == nil
-        let isGroupAudience = recipients.isEmpty
-            && direct.recipientUserIDs.isEmpty
-            && (direct.groupMembershipRevision ?? 0) > 0
-        guard isExactAudience || isGroupAudience else { return wake }
-        return .directEvent(.init(
-            roomID: roomID,
-            highWatermark: wire.highWatermark,
-            sourceEventID: sourceEventID,
-            roomSequence: direct.roomSequence,
-            projectionKind: direct.projectionKind,
-            payload: direct.payload,
-            recipientUserIDs: recipients,
-            groupMembershipRevision: direct.groupMembershipRevision,
-            acceptedMembershipRevision: direct.groupMembershipRevision,
-            excludedConnectionID: direct.excludedConnectionID
-        ))
-    }
-
-    private static func encodeJSONNotification(
-        _ notification: V2ForegroundGroupEventNotification
-    ) throws -> Data {
-        let wire: WireWake
-        switch notification {
-        case .wake(let wake):
-            wire = .init(
-                roomID: wake.roomID.rawValue,
-                highWatermark: wake.highWatermark,
-                directEvent: nil
-            )
-        case .directEvent(let event):
-            wire = .init(
-                roomID: event.roomID.rawValue,
-                highWatermark: event.highWatermark,
-                directEvent: .init(event)
-            )
-        case .groupEvents(let events):
-            guard let first = events.first,
-                  let last = events.last
-            else { throw V2NATSGroupEventWakeBrokerError.invalidPayload }
-            wire = .init(
-                roomID: first.roomID.rawValue,
-                highWatermark: last.highWatermark,
-                directEvent: nil,
-                directEvents: events.map(WireDirectEvent.init)
-            )
-        }
-        return try JSONEncoder().encode(wire)
+        V2NATSGroupEventProtobufCodec.decode(payload)
     }
 
     private func connectionClosed(_ closedID: UUID) async {

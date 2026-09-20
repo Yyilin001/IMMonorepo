@@ -40,24 +40,24 @@ public protocol V2OwnerValidatedForwardMessageWriteStore: V2RoomWriteStore {
 ///   - routes: 本次涉及的房间归属，键为房间标识。
 ///   - readOnly: 为 `true` 时只加 `FOR SHARE`，不阻塞其他共享读。
 ///   - sql: 当前事务使用的数据库连接。
-/// - Throws: 房间行数不足、缺少对应归属、分片/代次不一致或存在迁移标记时抛出
+/// - Throws: 房间行数不足、缺少对应归属、分片/代次不一致时抛出
 ///   ``V2RoomOwnerFenceError/ownerChanged``。
 func v2RequireForwardOwners(_ routes: [UUID: V2RoomShardRoute], readOnly: Bool = false,
     sql: any SQLDatabase) async throws {
     let requested = String(decoding: try JSONEncoder().encode(routes.keys.map(\.uuidString)), as: UTF8.self)
     let locking = readOnly ? "FOR SHARE" : "FOR UPDATE"
     let rows = try await sql.raw("""
-        SELECT room_id, room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms
+        SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms
         WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: requested)::jsonb))
         ORDER BY room_id \(unsafeRaw: locking)
         """).all(decoding: ForwardSelectedOwnerRow.self)
     guard rows.count == routes.count, rows.allSatisfy({ row in
         guard let route = routes[row.roomID] else { return false }
-        return row.shardID == route.shardID && row.epoch == route.epoch && row.migrationFenceID == nil
+        return row.shardID == route.shardID && row.epoch == route.epoch
     }) else { throw V2RoomOwnerFenceError.ownerChanged }
 }
 
 private struct ForwardSelectedOwnerRow: Decodable {
-    let roomID: UUID; let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch", migrationFenceID = "migration_fence_id" }
+    let roomID: UUID; let shardID: String; let epoch: Int64
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch" }
 }

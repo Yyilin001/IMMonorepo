@@ -89,7 +89,7 @@ SELECT ((SELECT count(*) = 18 FROM information_schema.columns
 ('group_join_quota_intents_token_digest_check','CHECK ((octet_length(token_digest) = 32))'),
 ('group_join_quota_intents_updated_at_check','CHECK (isfinite(updated_at))'),
 ('group_join_quota_lease_check','CHECK ((((lease_token IS NULL) AND (lease_until IS NULL)) OR ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL) AND isfinite(lease_until) AND (phase = ANY (ARRAY[''held''::text, ''tracking''::text])))))'),
-('group_join_quota_outcome_check','CHECK ((((phase = ''held''::text) AND (outcome IS NULL) AND (target_request_id IS NULL)) OR ((phase = ''tracking''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''pending''::text, ''approving''::text])) AND (target_request_id IS NOT NULL)) OR ((phase = ''denied''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''unavailable''::text, ''rate_limited''::text, ''permission_denied''::text])) AND (target_request_id IS NULL)) OR ((phase = ''terminal''::text) AND (outcome IS NOT NULL) AND (((outcome = ANY (ARRAY[''approved''::text, ''rejected''::text, ''cancelled''::text])) AND (target_request_id IS NOT NULL)) OR ((outcome = ''already_member''::text) AND (target_request_id IS NULL))))))')))
+('group_join_quota_outcome_check','CHECK ((((phase = ''held''::text) AND (outcome IS NULL) AND (target_request_id IS NULL)) OR ((phase = ''tracking''::text) AND (outcome IS NOT NULL) AND (outcome = ''pending''::text) AND (target_request_id IS NOT NULL)) OR ((phase = ''denied''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''unavailable''::text, ''rate_limited''::text, ''permission_denied''::text])) AND (target_request_id IS NULL)) OR ((phase = ''terminal''::text) AND (outcome IS NOT NULL) AND (((outcome = ANY (ARRAY[''approved''::text, ''rejected''::text, ''cancelled''::text])) AND (target_request_id IS NOT NULL)) OR ((outcome = ''already_member''::text) AND (target_request_id IS NULL))))))')))
  AND (SELECT count(*) = 5 FROM pg_index WHERE indrelid = to_regclass('im_v2.group_join_quota_intents') AND indisvalid AND indisready
  AND pg_get_indexdef(indexrelid) IN ('CREATE UNIQUE INDEX group_join_quota_intents_pkey ON im_v2.group_join_quota_intents USING btree (applicant_user_id, operation_id)',
 'CREATE UNIQUE INDEX group_join_quota_intents_request_id_key ON im_v2.group_join_quota_intents USING btree (request_id)',
@@ -153,8 +153,8 @@ SELECT ((SELECT count(*) = 18 FROM information_schema.columns
  AND pg_get_indexdef(i.indexrelid, 5, false) = 'request_id'
  AND i.indoption::text = '0 0 3 3 3') AND ((SELECT count(*) = 2 FROM pg_constraint
  WHERE conrelid = to_regclass('im_v2.group_join_requests') AND convalidated AND NOT condeferrable
- AND (conname, pg_get_constraintdef(oid)) IN (('group_join_requests_decision_check', 'CHECK ((((state = ''cancelled''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = ''pending''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = ''approving''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = ''approved''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = ''rejected''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))'),
-('group_join_requests_state_check', 'CHECK ((state = ANY (ARRAY[''pending''::text, ''approving''::text, ''approved''::text, ''rejected''::text, ''cancelled''::text])))')))
+ AND (conname, pg_get_constraintdef(oid)) IN (('group_join_requests_decision_check', 'CHECK ((((state = ''cancelled''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = ''pending''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = ''approved''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = ''rejected''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))'),
+('group_join_requests_state_check', 'CHECK ((state = ANY (ARRAY[''pending''::text, ''approved''::text, ''rejected''::text, ''cancelled''::text])))')))
  AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
  WHERE i.indrelid = to_regclass('im_v2.group_join_requests')
  AND i.indexrelid = to_regclass('im_v2.group_join_requests_invite_id_applicant_user_id_key')
@@ -172,15 +172,7 @@ SELECT ((SELECT count(*) = 18 FROM information_schema.columns
         AND (tgname, tgtype::integer) IN (
             ('room_owner_routes_recovery_fence', 29),
             ('room_owner_routes_recovery_truncate_fence', 32))))
- AND ((SELECT count(*) = 4 AND bool_and(is_nullable = 'NO') FROM information_schema.columns
- WHERE table_schema = 'im_v2' AND table_name = 'legacy_device_registration_cancellations'
- AND (column_name, udt_name) IN (('user_id','uuid'),('device_id','uuid'),('operation_id','uuid'),('cancelled_at','timestamptz')))
- AND (SELECT count(*) = 3 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.legacy_device_registration_cancellations')
- AND convalidated AND NOT condeferrable AND (conname,pg_get_constraintdef(oid)) IN (
- ('legacy_registration_cancellation_pkey','PRIMARY KEY (user_id, device_id)'),
- ('legacy_registration_cancellation_operation','UNIQUE (user_id, operation_id)'),
- ('legacy_registration_cancellation_time','CHECK (isfinite(cancelled_at))')))
- AND (SELECT count(*) = 2 FROM pg_index WHERE indrelid=to_regclass('im_v2.legacy_device_registration_cancellations') AND indisvalid AND indisready AND indisunique)) AND ((SELECT count(*) = 9 AND bool_and(is_nullable = CASE WHEN column_name IN ('user_id','session_created_at','session_expires_at','cancelled_at') THEN 'YES' ELSE 'NO' END)
+ AND ((SELECT count(*) = 9 AND bool_and(is_nullable = CASE WHEN column_name IN ('user_id','session_created_at','session_expires_at','cancelled_at') THEN 'YES' ELSE 'NO' END)
  FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'device_registration_cancellations'
  AND (column_name, udt_name) IN (('request_digest','text'),('device_id','uuid'),('operation_id','uuid'),('issue_before','timestamptz'),('created_at','timestamptz'),('cancelled_at','timestamptz'),('user_id','uuid'),('session_created_at','timestamptz'),('session_expires_at','timestamptz')))
  AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.device_registration_cancellations')
@@ -192,44 +184,7 @@ SELECT ((SELECT count(*) = 18 FROM information_schema.columns
 ('registration_cancellation_times','CHECK ((isfinite(created_at) AND isfinite(issue_before) AND (issue_before > created_at) AND (issue_before <= (created_at + ''1 day''::interval)) AND ((cancelled_at IS NULL) OR isfinite(cancelled_at))))')))
  AND EXISTS (SELECT 1 FROM pg_index WHERE indrelid=to_regclass('im_v2.device_registration_cancellations')
  AND indisvalid AND indisready AND indisunique AND indnkeyatts=1
- AND pg_get_indexdef(indexrelid,1,false)='device_id' AND pg_get_expr(indpred,indrelid)='(user_id IS NOT NULL)')) AND (((
- SELECT count(*) = 18 AND bool_and(is_nullable = CASE WHEN column_name IN ('after_invite_id','next_cursor') THEN 'YES' ELSE 'NO' END)
- FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'group_invite_directory_import_audit'
- AND (column_name, udt_name) IN (('operation_id','uuid'), ('operator_principal','text'), ('shard_id','text'), ('owner_epoch','int8'), ('room_id','uuid'), ('after_invite_id','uuid'), ('page_size','int8'), ('reason_code','text'), ('requested_at','timestamptz'), ('outcome','text'), ('source_snapshot','jsonb'), ('source_digest','bytea'), ('source_count','int8'), ('inserted_count','int8'), ('published_count','int8'), ('unchanged_count','int8'), ('next_cursor','uuid'), ('conflicting_invite_ids','_uuid'))
-) AND EXISTS (
- SELECT 1 FROM pg_constraint c JOIN pg_index i ON i.indexrelid = c.conindid
- WHERE c.conrelid = to_regclass('im_v2.group_invite_directory_import_audit') AND c.contype = 'p'
- AND c.convalidated AND NOT c.condeferrable AND i.indisvalid AND i.indisready AND i.indisunique
- AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (operation_id)'
-) AND NOT EXISTS (
- SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass('im_v2.group_invite_directory_import_audit') AND c.contype = 'f'
-) AND (
- SELECT count(*) = 10 FROM pg_constraint c WHERE c.conrelid = to_regclass('im_v2.group_invite_directory_import_audit')
- AND c.contype = 'c' AND c.convalidated AND (c.conname, pg_get_constraintdef(c.oid)) IN (
- ('group_invite_import_counts_check','CHECK (((inserted_count >= 0) AND (published_count >= 0) AND (unchanged_count >= 0) AND (((outcome = ''applied''::text) AND (((inserted_count + published_count) + unchanged_count) = source_count) AND (cardinality(conflicting_invite_ids) = 0)) OR ((outcome = ''conflict''::text) AND (inserted_count = 0) AND (published_count = 0) AND (unchanged_count = 0) AND ((cardinality(conflicting_invite_ids) >= 1) AND (cardinality(conflicting_invite_ids) <= source_count))))))'),
- ('group_invite_import_cursor_check','CHECK (((next_cursor IS NULL) OR ((source_count = page_size) AND (next_cursor = (((source_snapshot -> ''-1''::integer) ->> ''invite_id''::text))::uuid))))'),
- ('group_invite_import_digest_check','CHECK ((source_digest = sha256(convert_to((source_snapshot)::text, ''UTF8''::name))))'),
- ('group_invite_import_epoch_check','CHECK ((owner_epoch >= 0))'),
- ('group_invite_import_outcome_check','CHECK ((outcome = ANY (ARRAY[''applied''::text, ''conflict''::text])))'),
- ('group_invite_import_page_check','CHECK (((page_size >= 1) AND (page_size <= 100)))'),
- ('group_invite_import_principal_check','CHECK ((operator_principal ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
- ('group_invite_import_reason_check','CHECK ((reason_code = ANY (ARRAY[''dependency_recovered''::text, ''data_repaired''::text, ''false_positive''::text])))'),
- ('group_invite_import_shard_check','CHECK (((octet_length(shard_id) >= 1) AND (octet_length(shard_id) <= 128) AND (shard_id = btrim(shard_id))))'),
- ('group_invite_import_snapshot_check','CHECK (((jsonb_typeof(source_snapshot) = ''array''::text) AND (jsonb_array_length(source_snapshot) = source_count) AND ((source_count >= 0) AND (source_count <= page_size))))'))
-) AND EXISTS (
- SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
- JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
- WHERE t.tgrelid = to_regclass('im_v2.group_invite_directory_import_audit') AND t.tgname = 'group_invite_import_audit_immutable'
- AND t.tgtype = 27 AND t.tgenabled = 'O' AND NOT t.tgisinternal
- AND n.nspname = 'im_v2' AND p.proname = 'reject_group_invite_import_audit_mutation'
- AND l.lanname = 'plpgsql' AND NOT p.prosecdef AND p.prorettype = 'trigger'::regtype
- AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = '6d5f50ca927c7f256ffa8b1ababb3a2dc8940dd172e67df5f6a97ebc6bc36282'
-) AND EXISTS (
- SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
- WHERE i.indrelid = to_regclass('im_v2.group_invite_links') AND c.relname = 'group_invite_links_import_page_idx'
- AND i.indisvalid AND i.indisready AND i.indnkeyatts = 2 AND i.indnatts = 2 AND a.amname = 'btree' AND i.indpred IS NULL
- AND pg_get_indexdef(i.indexrelid, 1, false) = 'room_id' AND pg_get_indexdef(i.indexrelid, 2, false) = 'invite_id'
-)) AND ((
+ AND pg_get_indexdef(indexrelid,1,false)='device_id' AND pg_get_expr(indpred,indrelid)='(user_id IS NOT NULL)')) AND ((
  SELECT count(*) = 10 AND bool_and(is_nullable = CASE WHEN column_name IN ('claim_token','lease_expires_at','last_error_code','completed_at') THEN 'YES' ELSE 'NO' END)
  FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'group_invite_creation_recovery'
  AND (column_name, udt_name) IN (('actor_user_id','uuid'), ('operation_id','uuid'), ('state','text'), ('attempt_count','int8'), ('next_attempt_at','timestamptz'), ('claim_token','uuid'), ('lease_expires_at','timestamptz'), ('last_error_code','text'), ('updated_at','timestamptz'), ('completed_at','timestamptz'))
@@ -295,46 +250,6 @@ SELECT ((SELECT count(*) = 18 FROM information_schema.columns
  AND n.nspname = 'im_v2' AND p.proname = 'reject_group_invite_directory_mutation'
  AND l.lanname = 'plpgsql' AND NOT p.prosecdef AND p.prorettype = 'trigger'::regtype
  AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = '78d6c9ce33c4fd0d518390cfdf76215068648c55f1510e32aab9a941ba43ea15'
-)) AND (((
- SELECT count(*) = 21 AND count(*) FILTER (WHERE is_nullable = 'NO') = 13
- FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'group_join_approval_recovery_audit'
- AND (column_name, udt_name) IN (('operation_id', 'uuid'), ('operator_principal', 'text'), ('shard_id', 'text'), ('owner_epoch', 'int8'), ('room_id', 'uuid'), ('request_id', 'uuid'), ('reviewer_user_id', 'uuid'), ('decision_operation_id', 'uuid'), ('reason_code', 'text'), ('outcome', 'text'), ('detail', 'text'), ('requested_at', 'timestamptz'), ('applicant_user_id', 'uuid'), ('prepared_revision', 'int8'), ('member_room_id', 'uuid'), ('member_target_user_id', 'uuid'), ('member_action', 'text'), ('expected_revision', 'int8'), ('resulting_revision', 'int8'), ('room_sequence', 'int8'), ('event_id', 'uuid'))
-) AND (
- SELECT count(*) = 6 AND bool_and(is_nullable = 'NO')
- FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'room_membership_operation_fences'
- AND (column_name, udt_name) IN (('actor_user_id', 'uuid'), ('operation_id', 'uuid'), ('room_id', 'uuid'), ('request_id', 'uuid'), ('recovery_operation_id', 'uuid'), ('created_at', 'timestamptz'))
-) AND (
- SELECT count(*) = 6 FROM pg_constraint c
- WHERE c.conrelid = to_regclass('im_v2.group_join_approval_recovery_audit') AND c.contype = 'c' AND c.convalidated
- AND (c.conname, pg_get_constraintdef(c.oid)) IN (('group_join_approval_recovery_audit_owner_epoch_check', 'CHECK ((owner_epoch >= 0))'), ('group_join_approval_recovery_audit_reason_code_check', 'CHECK ((reason_code = ANY (ARRAY[''dependency_recovered''::text, ''data_repaired''::text, ''false_positive''::text])))'), ('group_join_approval_recovery_audit_outcome_check', 'CHECK ((outcome = ANY (ARRAY[''completed''::text, ''released''::text, ''quarantined''::text, ''not_approving''::text])))'), ('group_join_approval_recovery_audit_detail_check', 'CHECK ((detail = ANY (ARRAY[''committed_operation''::text, ''no_historical_add''::text, ''operation_mismatch''::text, ''historical_add_without_receipt''::text, ''invalid_revision''::text, ''invite_exhausted''::text, ''not_approving''::text])))'), ('group_join_approval_recovery_audit_completed_check', 'CHECK (((outcome <> ''completed''::text) OR (expected_revision IS NOT NULL)))'), ('group_join_approval_recovery_audit_result_check', 'CHECK ((((member_room_id IS NULL) AND (member_target_user_id IS NULL) AND (member_action IS NULL) AND (expected_revision IS NULL) AND (resulting_revision IS NULL) AND (room_sequence IS NULL) AND (event_id IS NULL)) OR ((member_room_id IS NOT NULL) AND (member_target_user_id IS NOT NULL) AND (member_action IS NOT NULL) AND (expected_revision IS NOT NULL) AND (resulting_revision IS NOT NULL) AND (room_sequence IS NOT NULL) AND (event_id IS NOT NULL))))'))
-) AND (
- SELECT count(*) = 2 FROM pg_constraint c JOIN pg_index i ON i.indexrelid = c.conindid
- WHERE c.contype = 'p' AND c.convalidated AND NOT c.condeferrable AND i.indisvalid AND i.indisready AND i.indisunique
- AND ((c.conrelid = to_regclass('im_v2.group_join_approval_recovery_audit') AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (operation_id)')
- OR (c.conrelid = to_regclass('im_v2.room_membership_operation_fences') AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (actor_user_id, operation_id)'))
-) AND EXISTS (
- SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass('im_v2.room_membership_operation_fences')
- AND c.contype = 'f' AND c.convalidated AND c.confrelid = to_regclass('im_v2.group_join_approval_recovery_audit')
- AND c.confdeltype = 'r' AND cardinality(c.conkey) = 1 AND cardinality(c.confkey) = 1
- AND c.conkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = c.conrelid AND attname = 'recovery_operation_id')
- AND c.confkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = c.confrelid AND attname = 'operation_id')
-) AND (
- SELECT count(*) = 2 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
- JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
- WHERE t.tgtype = 27 AND t.tgenabled = 'O' AND NOT t.tgisinternal
- AND n.nspname = 'im_v2' AND p.proname = 'reject_approval_recovery_mutation'
- AND l.lanname = 'plpgsql' AND NOT p.prosecdef AND p.prorettype = 'trigger'::regtype
- AND regexp_replace(p.prosrc, '[[:space:]]', '', 'g') = 'BEGINRAISEEXCEPTION''approvalrecoveryevidenceisimmutable'';END;'
- AND ((t.tgrelid = to_regclass('im_v2.group_join_approval_recovery_audit') AND t.tgname = 'group_join_approval_recovery_audit_immutable')
- OR (t.tgrelid = to_regclass('im_v2.room_membership_operation_fences') AND t.tgname = 'room_membership_operation_fences_immutable'))
-) AND EXISTS (
- SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
- WHERE i.indrelid = to_regclass('im_v2.group_join_requests')
- AND i.indexrelid = to_regclass('im_v2.group_join_requests_approving_recovery_idx')
- AND i.indisvalid AND i.indisready AND i.indnkeyatts = 2 AND a.amname = 'btree'
- AND i.indkey[0] = (SELECT attnum FROM pg_attribute WHERE attrelid = i.indrelid AND attname = 'room_id')
- AND i.indkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = i.indrelid AND attname = 'request_id')
- AND pg_get_expr(i.indpred, i.indrelid) = '(state = ''approving''::text)'
 )) AND EXISTS (
  SELECT 1 FROM pg_constraint c JOIN pg_index i ON i.indexrelid = c.conindid
  WHERE c.conrelid = to_regclass('im_v2.group_join_requests')
@@ -634,7 +549,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-49''::text'
+       AND column_default = '''im-v2-current-51''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -644,7 +559,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-49%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-51%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -782,14 +697,4 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND (SELECT count(*) = 3 FROM pg_constraint
        WHERE conrelid = to_regclass('im_v2.control_housekeeping_cursor') AND convalidated AND NOT condeferrable
          AND pg_get_constraintdef(oid) IN ('PRIMARY KEY (singleton)', 'CHECK (singleton)', 'CHECK ((rotation >= 0))'))
-   AND (SELECT count(*) = 9 FROM information_schema.columns
-    WHERE table_schema = 'im_v2' AND table_name = 'room_owner_migrations' AND is_nullable = 'NO'
-      AND (column_name, udt_name) IN (('migration_id','uuid'), ('room_id','uuid'),
-        ('source_shard_id','text'), ('target_shard_id','text'), ('source_epoch','int8'), ('target_epoch','int8'),
-        ('phase','text'), ('created_at','timestamptz'), ('updated_at','timestamptz')))
-  AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = to_regclass('im_v2.room_owner_migrations_active_room_key')
-    AND indisunique AND indisvalid AND indisready
-    AND pg_get_indexdef(indexrelid) = 'CREATE UNIQUE INDEX room_owner_migrations_active_room_key ON im_v2.room_owner_migrations USING btree (room_id) WHERE (phase <> ALL (ARRAY[''completed''::text, ''aborted''::text]))')
-   AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = to_regclass('im_v2.room_owner_migrations') AND tgname = 'room_owner_migrations_identity_guard' AND tgenabled = 'O' AND NOT tgisinternal)
-   AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'im_v2' AND table_name = 'rooms' AND column_name = 'migration_fence_id' AND udt_name = 'uuid' AND is_nullable = 'YES')
-   AND to_regclass('im_v2.local_schema_migrations') IS NULL)))));
+   AND to_regclass('im_v2.local_schema_migrations') IS NULL)));

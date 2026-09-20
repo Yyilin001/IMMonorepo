@@ -126,19 +126,16 @@ public struct PostgresV2RoomMembershipStore:
         let fencedRoom: MembershipRoomRow?
         if let ownerRoute {
             guard let value = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: MembershipRoomRow.self),
-                  value.roomShardID == ownerRoute.shardID, value.ownerEpoch == ownerRoute.epoch,
-                  value.migrationFenceID == nil
+                  value.roomShardID == ownerRoute.shardID, value.ownerEpoch == ownerRoute.epoch
             else { throw V2RoomMembershipStoreError.ownerChanged }
             fencedRoom = value
         } else {
-            // Room-local composition may own an outer route fence. Its new
-            // effects still validate the migration marker below.
+            // Room-local composition validates membership in its write transaction.
             fencedRoom = nil
         }
-        guard try await !v2MembershipOperationIsFenced(actor: actorID, operation: operationID, sql: sql) else { return .idempotencyConflict }
         if let prior = try await sql.raw("""
             SELECT room_id, target_user_id, action, expected_membership_revision,
                    resulting_membership_revision, room_sequence, event_id, created_at
@@ -163,12 +160,11 @@ public struct PostgresV2RoomMembershipStore:
         if let fencedRoom { room = fencedRoom }
         else {
             guard let value = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: MembershipRoomRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
             room = value
         }
-        guard room.migrationFenceID == nil else { throw V2RoomMembershipStoreError.ownerChanged }
         guard let group = try await sql.raw("""
             SELECT owner_user_id, title, created_at
             FROM im_v2.group_rooms WHERE room_id = \(bind: roomID)
@@ -348,7 +344,7 @@ private struct MembershipCommittedTimestampRow: Decodable {
     enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
 }
 
-private struct MembershipRoomRow: Decodable { let migrationFenceID: UUID?; let roomShardID: String; let ownerEpoch: Int64; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id", roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
+private struct MembershipRoomRow: Decodable { let roomShardID: String; let ownerEpoch: Int64; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", ownerEpoch = "owner_epoch", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
 private struct MembershipGroupRow: Decodable { let ownerUserID: UUID; let title: String; let createdAt: Date; enum CodingKeys: String, CodingKey { case ownerUserID = "owner_user_id", title, createdAt = "created_at" } }
 private struct MembershipTargetRow: Decodable { let userID: UUID; let role: String; enum CodingKeys: String, CodingKey { case userID = "user_id", role } }
 private struct MembershipBooleanRow: Decodable { let value: Bool }

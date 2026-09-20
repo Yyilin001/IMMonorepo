@@ -373,7 +373,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
                     WHERE ((state = 'pending' AND COALESCE(next_attempt_at, created_at) <= \(bind: now))
                        OR (state = 'claimed' AND lease_expires_at <= \(bind: now)))
                       AND (SELECT true FROM im_v2.rooms AS room
-                           WHERE room.room_id = job.room_id AND room.migration_fence_id IS NULL
+                           WHERE room.room_id = job.room_id
                            FOR SHARE OF room SKIP LOCKED)
                     ORDER BY created_at, message_id
                     LIMIT \(bind: limit)
@@ -575,7 +575,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         guard try await sql.raw("""
             SELECT room_id FROM im_v2.rooms
             WHERE room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
-              AND migration_fence_id IS NULL
+
             FOR SHARE
             """).first() != nil else { throw V2RoomOwnerFenceError.ownerChanged }
     }

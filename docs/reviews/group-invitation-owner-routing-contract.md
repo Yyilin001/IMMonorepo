@@ -1,5 +1,7 @@
 # 群邀请 owner 路由与 control 身份合同（B27 第二阶段）
 
+> 2026-09-20 当前范围：在线迁移与历史邀请导入均已退出当前范围，旧审批恢复审计及阻断表已删除。当前保留持久 owner 路由和正常创建补偿；下文涉及历史数据迁移的要求不再适用。
+
 2026-09-06。本批已替换 Account 的固定 control 库组装，接入持久 room route、owner epoch 与 control 身份读取。**B27 仍为实施中**：完整房间迁移及其历史覆盖验收尚未闭环，独立 owner 旧链接已接通[审计导入](group-invite-directory-import-contract.md)；后续持久创建恢复见[恢复合同](group-invite-creation-recovery-contract.md)；跨 owner 全局申请配额仍由 B23 跟进。
 
 ## 运行组装

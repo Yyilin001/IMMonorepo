@@ -76,7 +76,7 @@ public struct PostgresV2ModerationAuditRetentionStore: V2ModerationAuditRetentio
                     FROM im_v2.moderation_audit_entries AS audit
                     WHERE retain_until <= \(bind: now)
                       AND (SELECT true FROM im_v2.rooms AS room
-                           WHERE room.room_id = audit.room_id AND room.migration_fence_id IS NULL
+                           WHERE room.room_id = audit.room_id
                            FOR SHARE OF room SKIP LOCKED)
                     ORDER BY retain_until, actor_user_id, operation_id
                     LIMIT \(bind: limit)

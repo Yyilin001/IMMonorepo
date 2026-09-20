@@ -339,7 +339,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
             )
         }
         let nextCursor = rows.count > pageSize ? try pageRows.last.map {
-            try deviceSessionCursorString(lastActiveAt: $0.lastActiveAt, deviceID: $0.deviceID, timestamp: $0.cursorTimestamp)
+            try deviceSessionCursorString(deviceID: $0.deviceID, timestamp: $0.cursorTimestamp)
         } : nil
         return .init(sessions: sessions, nextCursor: nextCursor)
     }
@@ -610,28 +610,20 @@ private struct CapabilityExpiryRow: Decodable {
     enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" }
 }
 private struct DeviceSessionCursor: Codable {
-    let lastActiveAt: Date
     let deviceID: UUID
-    let lastActiveAtMicroseconds: Int64?
+    let lastActiveAtMicroseconds: Int64
 }
 
 private func deviceSessionCursor(_ value: String) throws -> (lastActiveAt: DeviceSessionCursorTimestamp, deviceID: UUID) {
     guard let data = Data(base64Encoded: value), let cursor = try? JSONDecoder().decode(DeviceSessionCursor.self, from: data),
-          v2PostgresTimestampCanEncode(cursor.lastActiveAt) else {
+          v2PostgresTimestampMicrosecondsCanEncode(cursor.lastActiveAtMicroseconds) else {
         throw V2DeviceSessionServiceError.invalidRequest
     }
-    // Legacy cursors stored a Date. Round its approximation to the closest
-    // database microsecond instead of truncating a value such as 0.999999.
-    let epoch = Date(timeIntervalSince1970: 946_684_800)
-    guard let microseconds = cursor.lastActiveAtMicroseconds ?? Int64(exactly: (cursor.lastActiveAt.timeIntervalSince(epoch) * 1_000_000).rounded()),
-          v2PostgresTimestampMicrosecondsCanEncode(microseconds) else {
-        throw V2DeviceSessionServiceError.invalidRequest
-    }
-    return (.init(microseconds: microseconds), cursor.deviceID)
+    return (.init(microseconds: cursor.lastActiveAtMicroseconds), cursor.deviceID)
 }
 
-private func deviceSessionCursorString(lastActiveAt: Date, deviceID: UUID, timestamp: DeviceSessionCursorTimestamp) throws -> String {
-    try JSONEncoder().encode(DeviceSessionCursor(lastActiveAt: lastActiveAt, deviceID: deviceID, lastActiveAtMicroseconds: timestamp.microseconds)).base64EncodedString()
+private func deviceSessionCursorString(deviceID: UUID, timestamp: DeviceSessionCursorTimestamp) throws -> String {
+    try JSONEncoder().encode(DeviceSessionCursor(deviceID: deviceID, lastActiveAtMicroseconds: timestamp.microseconds)).base64EncodedString()
 }
 
 /// 分页必须保留数据库的精确比较键。

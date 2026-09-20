@@ -338,7 +338,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         guard enabled else { return "" }
         return """
             AND (SELECT true FROM im_v2.rooms AS room
-                 WHERE room.room_id = target.room_id AND room.migration_fence_id IS NULL
+                 WHERE room.room_id = target.room_id
                  FOR SHARE OF room SKIP LOCKED)
             """
     }
@@ -369,11 +369,9 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        // Approval decisions refer to the exact membership result even after
-        // the applicant leaves. Keep both pending recovery evidence and final
-        // decision results; missing evidence must never be mistaken for a
-        // membership operation that did not commit. Match only the operation
-        // identity so conflicting legacy bindings remain investigable too.
+        // Approval decisions retain their exact membership result even after
+        // the applicant leaves. Match the operation identity so inconsistent
+        // bindings do not cause evidence to be purged.
         .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)", roomOwned: true),
         .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),

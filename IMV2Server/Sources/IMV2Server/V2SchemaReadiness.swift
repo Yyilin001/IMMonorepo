@@ -8,11 +8,11 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-49"
+    public static let currentSchemaID = "im-v2-current-51"
     private static let requiredTables = [
-        "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_revocation_capabilities", "device_registration_cancellations", "legacy_device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
-        "rooms", "room_owner_migrations", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_invite_directory_import_audit", "group_join_requests", "group_join_quota_intents",
-        "group_join_quota_aliases", "group_join_submission_receipts", "group_join_approval_recovery_audit", "room_membership_operation_fences", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
+        "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
+        "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
+        "group_join_quota_aliases", "group_join_submission_receipts", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
         "shard_admission_pools", "messages", "message_send_completions", "message_content_versions", "message_projection_states", "message_projection_state_values", "room_events", "group_event_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_role_policies", "group_permission_operations", "group_role_operations", "message_forward_operations", "message_forward_exports", "message_forward_inbox", "message_forward_inbox_media", "message_forward_media_imports", "message_forward_export_receipts", "message_forward_delivery_jobs",
         "user_state_event_outbox", "user_state_event_receipts", "user_sync_sequences", "user_sync_log", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
@@ -21,7 +21,6 @@ public enum V2SchemaReadiness {
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints", "push_device_intents",
         "media_objects", "media_upload_operations", "media_upload_grants", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
         "room_recovery_topology", "user_shard_router_configuration", "user_shard_route_overrides",
-        "user_shard_route_operations", "user_shard_migrations",
     ]
 
     public static func verify(database: any Database, schema: String = "im_v2") async throws {
@@ -113,26 +112,6 @@ public enum V2SchemaReadiness {
                 FROM \(unsafeRaw: schema).control_housekeeping_cursor) AS exists
             """).first(decoding: ExistsRow.self), cursor.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).control_housekeeping_cursor[rotation]")
-        }
-        guard let migration = try await sql.raw("""
-            SELECT (SELECT count(*) = 9 FROM information_schema.columns
-            WHERE table_schema = \(bind: schema) AND table_name = 'room_owner_migrations' AND is_nullable = 'NO'
-            AND (column_name, udt_name) IN (('migration_id','uuid'), ('room_id','uuid'),
-            ('source_shard_id','text'), ('target_shard_id','text'), ('source_epoch','int8'), ('target_epoch','int8'),
-            ('phase','text'), ('created_at','timestamptz'), ('updated_at','timestamptz')))
-            AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = to_regclass(\(bind: "\(schema).room_owner_migrations_active_room_key"))
-            AND indisunique AND indisvalid AND indisready
-            AND pg_get_indexdef(indexrelid) = \(bind: "CREATE UNIQUE INDEX room_owner_migrations_active_room_key ON \(schema).room_owner_migrations USING btree (room_id) WHERE (phase <> ALL (ARRAY['completed'::text, 'aborted'::text]))"))
-            AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = to_regclass(\(bind: "\(schema).room_owner_migrations"))
-                AND tgname = 'room_owner_migrations_identity_guard' AND tgenabled = 'O' AND NOT tgisinternal) AS exists
-            """).first(decoding: ExistsRow.self), migration.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).room_owner_migrations[preparation]")
-        }
-        guard let fence = try await sql.raw("""
-            SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = \(bind: schema)
-                AND table_name = 'rooms' AND column_name = 'migration_fence_id' AND udt_name = 'uuid' AND is_nullable = 'YES') AS exists
-            """).first(decoding: ExistsRow.self), fence.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).rooms[migration-fence]")
         }
         guard let ownership = try await sql.raw("""
             SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = \(bind: schema)
@@ -293,20 +272,6 @@ public enum V2SchemaReadiness {
             """).first(decoding: ExistsRow.self), roomActivityContract.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).rooms[activity-contract]")
         }
-        guard let legacyCancellationContract = try await sql.raw("""
-            SELECT ((SELECT count(*) = 4 AND bool_and(is_nullable = 'NO') FROM information_schema.columns
-                WHERE table_schema = \(bind: schema) AND table_name = 'legacy_device_registration_cancellations'
-                AND (column_name, udt_name) IN (('user_id','uuid'),('device_id','uuid'),('operation_id','uuid'),('cancelled_at','timestamptz')))
-                AND (SELECT count(*) = 3 FROM pg_constraint WHERE conrelid = to_regclass(\(bind: schema + ".legacy_device_registration_cancellations"))
-                    AND convalidated AND NOT condeferrable AND (conname, pg_get_constraintdef(oid)) IN (
-                        ('legacy_registration_cancellation_pkey','PRIMARY KEY (user_id, device_id)'),
-                        ('legacy_registration_cancellation_operation','UNIQUE (user_id, operation_id)'),
-                        ('legacy_registration_cancellation_time','CHECK (isfinite(cancelled_at))')))
-                AND (SELECT count(*) = 2 FROM pg_index WHERE indrelid = to_regclass(\(bind: schema + ".legacy_device_registration_cancellations"))
-                    AND indisvalid AND indisready AND indisunique)) AS exists
-            """).first(decoding: ExistsRow.self), legacyCancellationContract.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).legacy_device_registration_cancellations[account-scoped]")
-        }
         guard let cancellationContract = try await sql.raw("""
             SELECT ((SELECT count(*) = 9 AND bool_and(is_nullable = CASE WHEN column_name IN ('user_id','session_created_at','session_expires_at','cancelled_at') THEN 'YES' ELSE 'NO' END)
              FROM information_schema.columns WHERE table_schema = \(bind: schema) AND table_name = 'device_registration_cancellations'
@@ -354,48 +319,6 @@ public enum V2SchemaReadiness {
             ) AS exists
             """).first(decoding: ExistsRow.self), capabilityContract.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).device_revocation_capabilities[session-bound]")
-        }
-        guard let importContract = try await sql.raw("""
-            SELECT ((
-             SELECT count(*) = 18 AND bool_and(is_nullable = CASE WHEN column_name IN ('after_invite_id','next_cursor') THEN 'YES' ELSE 'NO' END)
-             FROM information_schema.columns WHERE table_schema = \(bind: schema) AND table_name = 'group_invite_directory_import_audit'
-             AND (column_name, udt_name) IN (('operation_id','uuid'), ('operator_principal','text'), ('shard_id','text'), ('owner_epoch','int8'), ('room_id','uuid'), ('after_invite_id','uuid'), ('page_size','int8'), ('reason_code','text'), ('requested_at','timestamptz'), ('outcome','text'), ('source_snapshot','jsonb'), ('source_digest','bytea'), ('source_count','int8'), ('inserted_count','int8'), ('published_count','int8'), ('unchanged_count','int8'), ('next_cursor','uuid'), ('conflicting_invite_ids','_uuid'))
-            ) AND EXISTS (
-             SELECT 1 FROM pg_constraint c JOIN pg_index i ON i.indexrelid = c.conindid
-             WHERE c.conrelid = to_regclass(\(bind: "\(schema).group_invite_directory_import_audit")) AND c.contype = 'p'
-             AND c.convalidated AND NOT c.condeferrable AND i.indisvalid AND i.indisready AND i.indisunique
-             AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (operation_id)'
-            ) AND NOT EXISTS (
-             SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass(\(bind: "\(schema).group_invite_directory_import_audit")) AND c.contype = 'f'
-            ) AND (
-             SELECT count(*) = 10 FROM pg_constraint c WHERE c.conrelid = to_regclass(\(bind: "\(schema).group_invite_directory_import_audit"))
-             AND c.contype = 'c' AND c.convalidated AND (c.conname, pg_get_constraintdef(c.oid)) IN (
-             ('group_invite_import_counts_check','CHECK (((inserted_count >= 0) AND (published_count >= 0) AND (unchanged_count >= 0) AND (((outcome = ''applied''::text) AND (((inserted_count + published_count) + unchanged_count) = source_count) AND (cardinality(conflicting_invite_ids) = 0)) OR ((outcome = ''conflict''::text) AND (inserted_count = 0) AND (published_count = 0) AND (unchanged_count = 0) AND ((cardinality(conflicting_invite_ids) >= 1) AND (cardinality(conflicting_invite_ids) <= source_count))))))'),
-             ('group_invite_import_cursor_check','CHECK (((next_cursor IS NULL) OR ((source_count = page_size) AND (next_cursor = (((source_snapshot -> ''-1''::integer) ->> ''invite_id''::text))::uuid))))'),
-             ('group_invite_import_digest_check','CHECK ((source_digest = sha256(convert_to((source_snapshot)::text, ''UTF8''::name))))'),
-             ('group_invite_import_epoch_check','CHECK ((owner_epoch >= 0))'),
-             ('group_invite_import_outcome_check','CHECK ((outcome = ANY (ARRAY[''applied''::text, ''conflict''::text])))'),
-             ('group_invite_import_page_check','CHECK (((page_size >= 1) AND (page_size <= 100)))'),
-             ('group_invite_import_principal_check','CHECK ((operator_principal ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
-             ('group_invite_import_reason_check','CHECK ((reason_code = ANY (ARRAY[''dependency_recovered''::text, ''data_repaired''::text, ''false_positive''::text])))'),
-             ('group_invite_import_shard_check','CHECK (((octet_length(shard_id) >= 1) AND (octet_length(shard_id) <= 128) AND (shard_id = btrim(shard_id))))'),
-             ('group_invite_import_snapshot_check','CHECK (((jsonb_typeof(source_snapshot) = ''array''::text) AND (jsonb_array_length(source_snapshot) = source_count) AND ((source_count >= 0) AND (source_count <= page_size))))'))
-            ) AND EXISTS (
-             SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-             JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
-             WHERE t.tgrelid = to_regclass(\(bind: "\(schema).group_invite_directory_import_audit")) AND t.tgname = 'group_invite_import_audit_immutable'
-             AND t.tgtype = 27 AND t.tgenabled = 'O' AND NOT t.tgisinternal
-             AND n.nspname = \(bind: schema) AND p.proname = 'reject_group_invite_import_audit_mutation'
-             AND l.lanname = 'plpgsql' AND NOT p.prosecdef AND p.prorettype = 'trigger'::regtype
-             AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = '6d5f50ca927c7f256ffa8b1ababb3a2dc8940dd172e67df5f6a97ebc6bc36282'
-            ) AND EXISTS (
-             SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
-             WHERE i.indrelid = to_regclass(\(bind: "\(schema).group_invite_links")) AND c.relname = 'group_invite_links_import_page_idx'
-             AND i.indisvalid AND i.indisready AND i.indnkeyatts = 2 AND i.indnatts = 2 AND a.amname = 'btree' AND i.indpred IS NULL
-             AND pg_get_indexdef(i.indexrelid, 1, false) = 'room_id' AND pg_get_indexdef(i.indexrelid, 2, false) = 'invite_id'
-            )) AS exists
-            """).first(decoding: ExistsRow.self), importContract.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).group_invite_directory_import_audit[atomic-import]")
         }
         guard let inviteRecoveryContract = try await sql.raw("""
             SELECT ((
@@ -478,51 +401,6 @@ public enum V2SchemaReadiness {
             """).first(decoding: ExistsRow.self), directoryContract.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).group_invite_directory[intent-binding]")
         }
-        guard let approvalRecoveryContract = try await sql.raw("""
-            SELECT ((
-             SELECT count(*) = 21 AND count(*) FILTER (WHERE is_nullable = 'NO') = 13
-             FROM information_schema.columns WHERE table_schema = \(bind: schema) AND table_name = 'group_join_approval_recovery_audit'
-             AND (column_name, udt_name) IN (('operation_id', 'uuid'), ('operator_principal', 'text'), ('shard_id', 'text'), ('owner_epoch', 'int8'), ('room_id', 'uuid'), ('request_id', 'uuid'), ('reviewer_user_id', 'uuid'), ('decision_operation_id', 'uuid'), ('reason_code', 'text'), ('outcome', 'text'), ('detail', 'text'), ('requested_at', 'timestamptz'), ('applicant_user_id', 'uuid'), ('prepared_revision', 'int8'), ('member_room_id', 'uuid'), ('member_target_user_id', 'uuid'), ('member_action', 'text'), ('expected_revision', 'int8'), ('resulting_revision', 'int8'), ('room_sequence', 'int8'), ('event_id', 'uuid'))
-            ) AND (
-             SELECT count(*) = 6 AND bool_and(is_nullable = 'NO')
-             FROM information_schema.columns WHERE table_schema = \(bind: schema) AND table_name = 'room_membership_operation_fences'
-             AND (column_name, udt_name) IN (('actor_user_id', 'uuid'), ('operation_id', 'uuid'), ('room_id', 'uuid'), ('request_id', 'uuid'), ('recovery_operation_id', 'uuid'), ('created_at', 'timestamptz'))
-            ) AND (
-             SELECT count(*) = 6 FROM pg_constraint c
-             WHERE c.conrelid = to_regclass(\(bind: "\(schema).group_join_approval_recovery_audit")) AND c.contype = 'c' AND c.convalidated
-             AND (c.conname, pg_get_constraintdef(c.oid)) IN (('group_join_approval_recovery_audit_owner_epoch_check', 'CHECK ((owner_epoch >= 0))'), ('group_join_approval_recovery_audit_reason_code_check', 'CHECK ((reason_code = ANY (ARRAY[''dependency_recovered''::text, ''data_repaired''::text, ''false_positive''::text])))'), ('group_join_approval_recovery_audit_outcome_check', 'CHECK ((outcome = ANY (ARRAY[''completed''::text, ''released''::text, ''quarantined''::text, ''not_approving''::text])))'), ('group_join_approval_recovery_audit_detail_check', 'CHECK ((detail = ANY (ARRAY[''committed_operation''::text, ''no_historical_add''::text, ''operation_mismatch''::text, ''historical_add_without_receipt''::text, ''invalid_revision''::text, ''invite_exhausted''::text, ''not_approving''::text])))'), ('group_join_approval_recovery_audit_completed_check', 'CHECK (((outcome <> ''completed''::text) OR (expected_revision IS NOT NULL)))'), ('group_join_approval_recovery_audit_result_check', 'CHECK ((((member_room_id IS NULL) AND (member_target_user_id IS NULL) AND (member_action IS NULL) AND (expected_revision IS NULL) AND (resulting_revision IS NULL) AND (room_sequence IS NULL) AND (event_id IS NULL)) OR ((member_room_id IS NOT NULL) AND (member_target_user_id IS NOT NULL) AND (member_action IS NOT NULL) AND (expected_revision IS NOT NULL) AND (resulting_revision IS NOT NULL) AND (room_sequence IS NOT NULL) AND (event_id IS NOT NULL))))'))
-            ) AND (
-             SELECT count(*) = 2 FROM pg_constraint c JOIN pg_index i ON i.indexrelid = c.conindid
-             WHERE c.contype = 'p' AND c.convalidated AND NOT c.condeferrable AND i.indisvalid AND i.indisready AND i.indisunique
-             AND ((c.conrelid = to_regclass(\(bind: "\(schema).group_join_approval_recovery_audit")) AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (operation_id)')
-             OR (c.conrelid = to_regclass(\(bind: "\(schema).room_membership_operation_fences")) AND pg_get_constraintdef(c.oid) = 'PRIMARY KEY (actor_user_id, operation_id)'))
-            ) AND EXISTS (
-             SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass(\(bind: "\(schema).room_membership_operation_fences"))
-             AND c.contype = 'f' AND c.convalidated AND c.confrelid = to_regclass(\(bind: "\(schema).group_join_approval_recovery_audit"))
-             AND c.confdeltype = 'r' AND cardinality(c.conkey) = 1 AND cardinality(c.confkey) = 1
-             AND c.conkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = c.conrelid AND attname = 'recovery_operation_id')
-             AND c.confkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = c.confrelid AND attname = 'operation_id')
-            ) AND (
-             SELECT count(*) = 2 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-             JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
-             WHERE t.tgtype = 27 AND t.tgenabled = 'O' AND NOT t.tgisinternal
-             AND n.nspname = \(bind: schema) AND p.proname = 'reject_approval_recovery_mutation'
-             AND l.lanname = 'plpgsql' AND NOT p.prosecdef AND p.prorettype = 'trigger'::regtype
-             AND regexp_replace(p.prosrc, '[[:space:]]', '', 'g') = 'BEGINRAISEEXCEPTION''approvalrecoveryevidenceisimmutable'';END;'
-             AND ((t.tgrelid = to_regclass(\(bind: "\(schema).group_join_approval_recovery_audit")) AND t.tgname = 'group_join_approval_recovery_audit_immutable')
-             OR (t.tgrelid = to_regclass(\(bind: "\(schema).room_membership_operation_fences")) AND t.tgname = 'room_membership_operation_fences_immutable'))
-            ) AND EXISTS (
-             SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
-             WHERE i.indrelid = to_regclass(\(bind: "\(schema).group_join_requests"))
-             AND i.indexrelid = to_regclass(\(bind: "\(schema).group_join_requests_approving_recovery_idx"))
-             AND i.indisvalid AND i.indisready AND i.indnkeyatts = 2 AND a.amname = 'btree'
-             AND i.indkey[0] = (SELECT attnum FROM pg_attribute WHERE attrelid = i.indrelid AND attname = 'room_id')
-             AND i.indkey[1] = (SELECT attnum FROM pg_attribute WHERE attrelid = i.indrelid AND attname = 'request_id')
-             AND pg_get_expr(i.indpred, i.indrelid) = '(state = ''approving''::text)'
-            )) AS exists
-            """).first(decoding: ExistsRow.self), approvalRecoveryContract.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).group_join_approval_recovery_audit[recovery-fence]")
-        }
         guard let decisionContract = try await sql.raw("""
             SELECT EXISTS (
                 SELECT 1 FROM pg_constraint c
@@ -571,7 +449,7 @@ public enum V2SchemaReadiness {
             ('group_join_quota_intents_token_digest_check','CHECK ((octet_length(token_digest) = 32))'),
             ('group_join_quota_intents_updated_at_check','CHECK (isfinite(updated_at))'),
             ('group_join_quota_lease_check','CHECK ((((lease_token IS NULL) AND (lease_until IS NULL)) OR ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL) AND isfinite(lease_until) AND (phase = ANY (ARRAY[''held''::text, ''tracking''::text])))))'),
-            ('group_join_quota_outcome_check','CHECK ((((phase = ''held''::text) AND (outcome IS NULL) AND (target_request_id IS NULL)) OR ((phase = ''tracking''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''pending''::text, ''approving''::text])) AND (target_request_id IS NOT NULL)) OR ((phase = ''denied''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''unavailable''::text, ''rate_limited''::text, ''permission_denied''::text])) AND (target_request_id IS NULL)) OR ((phase = ''terminal''::text) AND (outcome IS NOT NULL) AND (((outcome = ANY (ARRAY[''approved''::text, ''rejected''::text, ''cancelled''::text])) AND (target_request_id IS NOT NULL)) OR ((outcome = ''already_member''::text) AND (target_request_id IS NULL))))))')))
+            ('group_join_quota_outcome_check','CHECK ((((phase = ''held''::text) AND (outcome IS NULL) AND (target_request_id IS NULL)) OR ((phase = ''tracking''::text) AND (outcome IS NOT NULL) AND (outcome = ''pending''::text) AND (target_request_id IS NOT NULL)) OR ((phase = ''denied''::text) AND (outcome IS NOT NULL) AND (outcome = ANY (ARRAY[''unavailable''::text, ''rate_limited''::text, ''permission_denied''::text])) AND (target_request_id IS NULL)) OR ((phase = ''terminal''::text) AND (outcome IS NOT NULL) AND (((outcome = ANY (ARRAY[''approved''::text, ''rejected''::text, ''cancelled''::text])) AND (target_request_id IS NOT NULL)) OR ((outcome = ''already_member''::text) AND (target_request_id IS NULL))))))')))
              AND (SELECT count(*) = 5 FROM pg_index WHERE indrelid = to_regclass('\(unsafeRaw: schema).group_join_quota_intents') AND indisvalid AND indisready
              AND pg_get_indexdef(indexrelid) IN ('CREATE UNIQUE INDEX group_join_quota_intents_pkey ON \(unsafeRaw: schema).group_join_quota_intents USING btree (applicant_user_id, operation_id)',
             'CREATE UNIQUE INDEX group_join_quota_intents_request_id_key ON \(unsafeRaw: schema).group_join_quota_intents USING btree (request_id)',
@@ -650,8 +528,8 @@ public enum V2SchemaReadiness {
              AND pg_get_indexdef(i.indexrelid, 5, false) = 'request_id'
              AND i.indoption::text = '0 0 3 3 3') AND ((SELECT count(*) = 2 FROM pg_constraint
              WHERE conrelid = to_regclass(\(bind: "\(schema).group_join_requests")) AND convalidated AND NOT condeferrable
-             AND (conname, pg_get_constraintdef(oid)) IN (('group_join_requests_decision_check', 'CHECK ((((state = ''cancelled''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = ''pending''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = ''approving''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = ''approved''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = ''rejected''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))'),
-            ('group_join_requests_state_check', 'CHECK ((state = ANY (ARRAY[''pending''::text, ''approving''::text, ''approved''::text, ''rejected''::text, ''cancelled''::text])))')))
+             AND (conname, pg_get_constraintdef(oid)) IN (('group_join_requests_decision_check', 'CHECK ((((state = ''cancelled''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = ''pending''::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = ''approved''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = ''rejected''::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))'),
+            ('group_join_requests_state_check', 'CHECK ((state = ANY (ARRAY[''pending''::text, ''approved''::text, ''rejected''::text, ''cancelled''::text])))')))
              AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am a ON a.oid = c.relam
              WHERE i.indrelid = to_regclass(\(bind: "\(schema).group_join_requests"))
              AND i.indexrelid = to_regclass(\(bind: "\(schema).group_join_requests_invite_id_applicant_user_id_key"))
@@ -1037,7 +915,6 @@ public enum V2SchemaReadiness {
                 AND to_regclass(\(bind: "\(schema).group_invite_links_room_active_idx")) IS NOT NULL
                 AND to_regclass(\(bind: "\(schema).group_join_requests_room_pending_idx")) IS NOT NULL
                 AND to_regclass(\(bind: "\(schema).group_join_requests_applicant_pending_idx")) IS NOT NULL
-                AND to_regclass(\(bind: "\(schema).group_join_requests_invite_approving_idx")) IS NOT NULL
                 AS exists
             """).first(decoding: ExistsRow.self), groupInvitationContract.exists else {
             throw V2SchemaReadinessError.unavailableTable(

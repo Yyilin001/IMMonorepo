@@ -124,7 +124,7 @@ public struct PostgresV2UserStateEventOutbox: V2UserStateEventOutbox {
         """
         (work.source_room_id IS NULL OR (
             SELECT true FROM \(unsafeRaw: schema).rooms AS room
-            WHERE room.room_id = work.source_room_id AND room.migration_fence_id IS NULL
+            WHERE room.room_id = work.source_room_id
             FOR SHARE OF room \(unsafeRaw: skipLocked ? "SKIP LOCKED" : "")
         ))
         """

@@ -9,8 +9,8 @@ import Vapor
 
 @Suite("Independent user state events", .serialized)
 struct PostgresV2UserStateEventTests {
-    @Test("personal event GC preserves frozen, busy and missing source rooms", arguments: [false, true])
-    func sourceRoomGCFence(frozen: Bool) async throws {
+    @Test("personal event GC preserves busy and missing source rooms")
+    func sourceRoomGCFence() async throws {
         try await withUserEventDatabase { database, sql, schema in
             let room = UUID(), healthy = UUID(), missing = UUID()
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -36,73 +36,16 @@ struct PostgresV2UserStateEventTests {
                 try await scoped.raw("""
                     SELECT room_id FROM \(unsafeRaw: schema).rooms WHERE room_id = \(bind: room) FOR UPDATE
                     """).run()
-                if frozen {
-                    let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: .init(uuid: room),
-                        source: .init(shardID: "source", epoch: 0), targetShardID: "target")
-                    try await PostgresV2RoomMigrationWriteFence(database: transaction, schema: schema)
-                        .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-                }
                 #expect(try await gc.runOnce(now: now.addingTimeInterval(120), limit: 10) == 2)
             }
             #expect(try await sql.raw("""
                 SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_state_event_outbox
                 WHERE source_room_id IN (\(bind: room), \(bind: missing))
                 """).first(decoding: UserStateCountRow.self)?.value == 2)
-            #expect(try await gc.runOnce(now: now.addingTimeInterval(121), limit: 10) == (frozen ? 0 : 1))
+            #expect(try await gc.runOnce(now: now.addingTimeInterval(121), limit: 10) == 1)
         }
     }
 
-    @Test("room migration freezes pending and leased owner events while control events continue")
-    func sourceRoomMigrationFence() async throws {
-        try await withUserEventDatabase { database, sql, schema in
-            let room = RoomID(uuid: UUID()), healthy = RoomID(uuid: UUID())
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            for id in [room, healthy] {
-                try await sql.raw("""
-                    INSERT INTO \(unsafeRaw: schema).rooms (room_id, room_shard_id, capacity_profile_id)
-                    VALUES (\(bind: id.uuidValue!), 'source', 'standard')
-                    """).run()
-            }
-            let outbox = try PostgresV2UserStateEventOutbox(database: database, schema: schema)
-            func enqueue(_ source: RoomID?) async throws -> V2UserStateEvent {
-                let event = try V2UserStateEvent(sourceEventID: .init(uuid: UUID()), userID: .init(uuid: UUID()),
-                    kind: .directReadReceipt,
-                    payload: JSONSerialization.data(withJSONObject: ["room_id": (source ?? room).rawValue]), createdAt: now)
-                try await outbox.enqueue(event, sourceRoomID: source, in: sql)
-                return event
-            }
-            let leased = try await enqueue(room)
-            let lease = try #require(try await outbox.claim(now: now, leaseDuration: 60, limit: 10).first)
-            #expect(lease.event.sourceEventID == leased.sourceEventID)
-            _ = try await enqueue(room)
-            _ = try await enqueue(.init(uuid: UUID())) // Missing owner must fail closed.
-            let control = try await enqueue(nil), other = try await enqueue(healthy)
-            let request = try V2RoomOwnerMigrationPreparation(migrationID: UUID(), roomID: room,
-                source: .init(shardID: "source", epoch: 0), targetShardID: "target")
-            try await PostgresV2RoomMigrationWriteFence(database: database, schema: schema)
-                .install(for: .init(request: request, phase: .freezing, createdAt: now, updatedAt: now))
-            func frozenSnapshot() async throws -> String {
-                struct Row: Decodable { let value: String }
-                return try #require(try await sql.raw("""
-                    SELECT jsonb_agg(to_jsonb(work) ORDER BY source_event_id)::text AS value
-                    FROM \(unsafeRaw: schema).user_state_event_outbox AS work
-                    WHERE source_room_id = \(bind: room.uuidValue!)
-                    """).first(decoding: Row.self)).value
-            }
-            let before = try await frozenSnapshot()
-            #expect(try await outbox.acknowledge(lease, sequence: 1, now: now) == false)
-            try await outbox.retry(lease, disposition: .retry(at: now))
-            try await outbox.retry(lease, disposition: .pause)
-            let fresh = try PostgresV2UserStateEventOutbox(database: database, schema: schema)
-            let claims = try await fresh.claim(now: now.addingTimeInterval(61), leaseDuration: 60, limit: 10)
-            #expect(Set(claims.map { $0.event.sourceEventID }) == [control.sourceEventID, other.sourceEventID])
-            for claim in claims {
-                #expect(try await fresh.acknowledge(claim, sequence: 1, now: now.addingTimeInterval(62)))
-            }
-            #expect(try await frozenSnapshot() == before)
-            #expect(try await fresh.claim(now: now.addingTimeInterval(200), leaseDuration: 60, limit: 10).isEmpty)
-        }
-    }
 
     @Test("source ownership distinguishes room events from control events with the same room payload")
     func sourceRoomOwnership() async throws {
@@ -139,50 +82,25 @@ struct PostgresV2UserStateEventTests {
         }
     }
 
-    @Test("first resolved payload survives lost acknowledgement, compaction and cross-database mirroring")
+    @Test("first resolved payload survives lost acknowledgement and compaction")
     func preservesFirstResolvedPayload() async throws {
-        guard let secondary = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL") else { return }
         try await withUserEventDatabase { database, sql, schema in
-            try await withUserEventDatabase(databaseURL: secondary) { target, targetSQL, targetSchema in
-                let event = try userStateFixture()
-                let visible = Data("{\"is_visible\":true,\"revision\":0}".utf8)
-                let hidden = Data("{\"is_visible\":false,\"revision\":1}".utf8)
-                let source = try PostgresV2UserStateEventProjector(database: database, schema: schema)
-                let mirror = try PostgresV2UserStateEventProjector(database: target, schema: targetSchema)
-                let first = try await source.projectResolved(event, projectionPayload: visible)
-                let retried = try await source.projectResolved(event, projectionPayload: hidden)
-                #expect(first.sequence == retried.sequence)
-                #expect(try JSONSerialization.jsonObject(with: Data(retried.payloadJSON.utf8)) as? NSDictionary ==
-                    JSONSerialization.jsonObject(with: visible) as? NSDictionary)
-                #expect(try await mirror.mirrorResolved(event, projection: retried) == first.sequence)
-                #expect(try await targetSQL.raw("""
-                    SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
-                    WHERE payload = \(bind: String(decoding: visible, as: UTF8.self))::jsonb
-                    """).first(decoding: UserStateCountRow.self)?.value == 1)
-                let conflicting = V2UserStateEventProjection(sequence: first.sequence,
-                    payloadJSON: String(decoding: hidden, as: UTF8.self))
-                await #expect(throws: V2UserStateEventError.identityConflict) {
-                    _ = try await mirror.mirrorResolved(event, projection: conflicting)
-                }
-                try await sql.raw("DELETE FROM \(unsafeRaw: schema).user_sync_log").run()
-                try await targetSQL.raw("DELETE FROM \(unsafeRaw: targetSchema).user_sync_log").run()
-                let restored = try PostgresV2UserStateEventProjector(database: database, schema: schema)
-                let replay = try await restored.projectResolved(event, projectionPayload: hidden)
-                #expect(replay.sequence == first.sequence)
-                #expect(try await mirror.mirrorResolved(event, projection: replay) == first.sequence)
-                #expect(try await targetSQL.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 0)
-                #expect(try await sql.raw("""
-                    SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_state_event_receipts
-                    WHERE payload = \(bind: event.payloadJSON)::jsonb
-                      AND projection_payload = \(bind: String(decoding: visible, as: UTF8.self))::jsonb
-                    """).first(decoding: UserStateCountRow.self)?.value == 1)
-                let changed = try V2UserStateEvent(sourceEventID: event.sourceEventID, userID: event.userID,
-                    kind: event.kind, payload: Data("{\"source_changed\":true}".utf8), createdAt: event.createdAt)
-                await #expect(throws: V2UserStateEventError.identityConflict) {
-                    _ = try await restored.projectResolved(changed, projectionPayload: visible)
-                }
-                #expect(try await restored.project(userStateFixture(user: event.userID)) == first.sequence + 1)
-            }
+            let event = try userStateFixture()
+            let visible = Data("{\"is_visible\":true,\"revision\":0}".utf8)
+            let hidden = Data("{\"is_visible\":false,\"revision\":1}".utf8)
+            let source = try PostgresV2UserStateEventProjector(database: database, schema: schema)
+            let first = try await source.projectResolved(event, projectionPayload: visible)
+            let retried = try await source.projectResolved(event, projectionPayload: hidden)
+            #expect(first.sequence == retried.sequence)
+            #expect(try JSONSerialization.jsonObject(with: Data(retried.payloadJSON.utf8)) as? NSDictionary ==
+                JSONSerialization.jsonObject(with: visible) as? NSDictionary)
+            try await sql.raw("DELETE FROM \(unsafeRaw: schema).user_sync_log").run()
+            let restored = try PostgresV2UserStateEventProjector(database: database, schema: schema)
+            let replay = try await restored.projectResolved(event, projectionPayload: hidden)
+            #expect(replay.sequence == first.sequence)
+            #expect(try JSONSerialization.jsonObject(with: Data(replay.payloadJSON.utf8)) as? NSDictionary ==
+                JSONSerialization.jsonObject(with: visible) as? NSDictionary)
+            #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 0)
         }
     }
 
@@ -488,96 +406,28 @@ struct PostgresV2UserStateEventTests {
         }
     }
 
-    @Test("shadow projection preserves sequence and rolls back collisions")
-    func mirrorSequence() async throws {
-        try await withUserEventDatabase { database, sql, schema in
-            let event = try userStateFixture()
-            let projector = try PostgresV2UserStateEventProjector(database: database, schema: schema)
-            #expect(try await projector.mirror(event, sequence: 8) == 8)
-            #expect(try await projector.mirror(event, sequence: 8) == 8)
-            await #expect(throws: V2UserStateEventError.identityConflict) {
-                _ = try await projector.mirror(event, sequence: 9)
-            }
-            let next = try userStateFixture(user: event.userID)
-            await #expect(throws: V2UserStateEventError.identityConflict) {
-                _ = try await projector.mirror(next, sequence: 8)
-            }
-            #expect(try await projector.project(next) == 9)
-            #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_state_event_receipts").first(decoding: UserStateCountRow.self)?.value == 2)
-        }
-    }
 
-    @Test("migration copies compacted receipts, fences writes, fingerprints and cleans source")
-    func migrationReceipts() async throws {
-        try await withUserEventDatabase { database, sql, schema in
-            try await withUserEventDatabase { target, targetSQL, targetSchema in
-                let event = try userStateFixture()
-                let projector = try PostgresV2UserStateEventProjector(database: database, schema: schema)
-                #expect(try await projector.project(event) == 1)
-                try await sql.raw("DELETE FROM \(unsafeRaw: schema).user_sync_log").run()
-                let transfer = try PostgresV2UserShardProjectionTransfer(source: database, target: target,
-                    sourceBucket: "source", targetBucket: "target", sourceSchema: schema, targetSchema: targetSchema, pageSize: 1)
-                let record = V2UserShardMigrationRecord(migrationID: UUID(), userID: event.userID,
-                    sourceBucket: "source", targetBucket: "target", sourceRouterEpoch: 1,
-                    phase: .copying, sourceFingerprint: nil, targetFingerprint: nil)
-                try await transfer.copy(record)
-                await #expect(throws: V2UserShardProjectionTransferError.migrationFenceConflict) {
-                    _ = try await projector.project(event)
-                }
-                let fingerprints = try await transfer.fingerprints(for: record)
-                #expect(fingerprints.source == fingerprints.target)
-                let destination = try PostgresV2UserStateEventProjector(database: target, schema: targetSchema)
-                #expect(try await destination.project(event) == 1)
-                #expect(try await targetSQL.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 0)
-                try await targetSQL.raw("UPDATE \(unsafeRaw: targetSchema).user_state_event_receipts SET payload = '{\"changed\":true}'::jsonb").run()
-                let changed = try await transfer.fingerprints(for: record)
-                #expect(changed.source != changed.target)
-                try await transfer.cleanSource(for: record)
-                #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_state_event_receipts").first(decoding: UserStateCountRow.self)?.value == 0)
-            }
-        }
-    }
-
-    @Test("routed forwarding commits source before a failed mirror and recovers after cutover")
-    func routedForwardingRecovery() async throws {
+    @Test("routed events reach only the current owner and replay after compaction")
+    func routedCurrentOwnerRecovery() async throws {
         try await withUserStateRouteConnection { control in
         try await withUserEventDatabase { database, sql, schema in
             try await withUserEventDatabase { target, targetSQL, targetSchema in
                 let event = try userStateFixture()
-                let user = try #require(event.userID.uuidValue)
-                try await sql.raw("""
-                    INSERT INTO \(unsafeRaw: schema).user_shard_migrations
-                        (migration_id, user_id, source_bucket, target_bucket, source_router_epoch, phase, created_at, updated_at)
-                    VALUES (\(bind: UUID()), \(bind: user), 'source', 'target', 1, 'forwarding', now(), now())
-                    """).run()
-                try await targetSQL.raw("""
-                    INSERT INTO \(unsafeRaw: targetSchema).user_projection_checkpoints
-                        (user_id, projected_sequence, migration_fence_token, migration_fence_expires_at, updated_at)
-                    VALUES (\(bind: user), 0, \(bind: UUID()), now() + interval '5 minutes', now())
-                    """).run()
-                let registry = try V2StaticUserShardStorageRegistry(locations: [
+                                let registry = try V2StaticUserShardStorageRegistry(locations: [
                     .init(bucket: "source", database: database, schema: schema),
-                    .init(bucket: "target", database: database, schema: targetSchema),
+                    .init(bucket: "target", database: target, schema: targetSchema),
                 ])
-                let sourceRoute = try UserStateTestRouteFence(database: control,
-                    route: V2UserShardRoute(bucket: "source", observedRouterEpoch: 1))
-                let routed = try V2RoutedUserStateEventProjector(routeFence: sourceRoute, registry: registry, controlSchema: schema)
-                await #expect(throws: V2UserShardProjectionTransferError.migrationFenceConflict) {
-                    _ = try await routed.project(event)
-                }
-                #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 1)
-                try await targetSQL.raw("UPDATE \(unsafeRaw: targetSchema).user_projection_checkpoints SET migration_fence_token = NULL, migration_fence_expires_at = NULL").run()
+                let route = try UserStateTestRouteFence(database: control,
+                    route: V2UserShardRoute(bucket: "target", observedRouterEpoch: 1))
+                let routed = try V2RoutedUserStateEventProjector(routeFence: route, registry: registry, controlSchema: schema)
+                #expect(try await routed.project(event) == 1)
                 #expect(try await routed.project(event) == 1)
                 #expect(try await targetSQL.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 1)
                 try await targetSQL.raw("DELETE FROM \(unsafeRaw: targetSchema).user_sync_log").run()
-                try await sql.raw("UPDATE \(unsafeRaw: schema).user_shard_migrations SET phase = 'cutover'").run()
-                let targetRoute = try UserStateTestRouteFence(database: control,
-                    route: V2UserShardRoute(bucket: "target", observedRouterEpoch: 2, readFallbackBucket: "source"))
-                let moved = try V2RoutedUserStateEventProjector(routeFence: targetRoute, registry: registry, controlSchema: schema)
-                #expect(try await moved.project(event) == 1)
+                #expect(try await routed.project(event) == 1)
                 #expect(try await targetSQL.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 0)
-                #expect(try await moved.project(userStateFixture(user: event.userID)) == 2)
-                #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 1)
+                #expect(try await routed.project(userStateFixture(user: event.userID)) == 2)
+                #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).user_sync_log").first(decoding: UserStateCountRow.self)?.value == 0)
             }
         }
         }

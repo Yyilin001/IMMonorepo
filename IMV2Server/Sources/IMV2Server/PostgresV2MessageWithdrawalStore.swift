@@ -77,10 +77,9 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
 
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: WithdrawalRoomRow.self) else { throw V2MessageWithdrawalStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             guard let message = try await sql.raw("""
                 SELECT room_id, sender_user_id, content_revision, withdrawn_at
@@ -199,7 +198,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
     }
 }
 
-private struct WithdrawalRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; let migrationFenceID: UUID?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", migrationFenceID = "migration_fence_id" } }
+private struct WithdrawalRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
 private struct WithdrawalMessageRow: Decodable { let roomID: UUID; let senderUserID: UUID; let contentRevision: Int64; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", senderUserID = "sender_user_id", contentRevision = "content_revision", withdrawnAt = "withdrawn_at" } }
 private struct WithdrawalCommittedTimestampRow: Decodable {
     let createdAt: Date

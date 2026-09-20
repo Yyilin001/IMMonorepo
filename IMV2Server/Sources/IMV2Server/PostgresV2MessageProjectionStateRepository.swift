@@ -271,10 +271,10 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             """).first(decoding: MessageProjectionStateRow.self)?.value
     }
 
-    /// 面向「消息变更先于有界历史回填到达」的过渡期自愈路径。
+    /// 为尚未物化的消息修订按需建立共享状态。
     ///
     /// 它只读取控制面权威数据并持久化一个不可变的当前状态；
-    /// 迁移完成后的常规写入始终命中上面的 `load` 路径。
+    /// 已经物化的修订直接使用上面的 `load` 路径。
     ///
     /// - Parameters:
     ///   - messageID: 目标消息。

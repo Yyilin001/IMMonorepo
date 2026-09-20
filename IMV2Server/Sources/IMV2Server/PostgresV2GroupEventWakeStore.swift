@@ -149,7 +149,7 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
     private func roomWritable(skipLocked: Bool) -> SQLQueryString {
         """
         (SELECT true FROM im_v2.rooms AS room
-         WHERE room.room_id = wake.room_id AND room.migration_fence_id IS NULL
+         WHERE room.room_id = wake.room_id
          FOR SHARE OF room \(unsafeRaw: skipLocked ? "SKIP LOCKED" : ""))
         """
     }

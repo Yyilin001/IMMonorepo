@@ -79,10 +79,9 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             }
             let retainUntil = try validatedAuditRetention(now: now)
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id, frozen_at
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, frozen_at
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationControlRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
             switch command.action {
             case .freezeRoom:
@@ -169,10 +168,9 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             }
             let retainUntil = try validatedAuditRetention(now: now)
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
             if !isTrustedSafety {
                 guard let role = try await sql.raw("""
@@ -299,10 +297,9 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             }
             let retainUntil = try validatedAuditRetention(now: now)
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
             guard let actor = try await sql.raw("""
                 SELECT role FROM im_v2.room_memberships
@@ -425,10 +422,9 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             let retainUntil = try validatedAuditRetention(now: now)
             guard v2PostgresTimestampPrecedes(now, commandMuteUntil) else { throw V2ModerationValidationError.invalidMuteExpiry }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class, migration_fence_id
+                SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
-            guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
             guard let role = try await sql.raw("""
                 SELECT role FROM im_v2.room_memberships
@@ -525,8 +521,8 @@ private struct ModerationMuteTimestampRow: Decodable {
     }
 }
 
-private struct ModerationRoomRow: Decodable { let migrationFenceID: UUID?; let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
-private struct ModerationControlRoomRow: Decodable { let migrationFenceID: UUID?; let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; let frozenAt: Date?; enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id", roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", frozenAt = "frozen_at" } }
+private struct ModerationRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class" } }
+private struct ModerationControlRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let capacityProfileID: String; let capacityClass: V2GroupCapacityClass; let frozenAt: Date?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", frozenAt = "frozen_at" } }
 private struct ModerationRoleRow: Decodable { let role: String }
 private struct ModerationBooleanRow: Decodable { let value: Bool }
 private struct ModerationMessageRow: Decodable { let roomID: UUID; let contentRevision: Int64; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", contentRevision = "content_revision", withdrawnAt = "withdrawn_at" } }

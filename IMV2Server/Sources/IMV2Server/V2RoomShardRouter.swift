@@ -10,7 +10,7 @@ import SQLKit
 public struct V2RoomShardRoute: Equatable, Sendable {
     /// 去除首尾空白后的非空逻辑分片标识。
     public let shardID: String
-    /// 非负路由代次；历史房间兼容路由与新用户对提议路由使用零。
+    /// 非负路由代次；新用户对提议路由使用零。
     public let epoch: Int64
 
     /// 规范化并验证路由值。
@@ -101,7 +101,7 @@ public protocol V2DirectRoomShardRouting: V2RoomShardRouting {
 
 /// 使用 PostgreSQL 控制面目录解析并登记房间归属。
 ///
-/// 优先查询显式 `room_owner_routes`，未命中时只读历史 `rooms.room_shard_id` 并使用零代次，
+/// 只查询显式 `room_owner_routes`；新建房间在创建事务中登记目录，
 /// 避免部署新分片配置后重新哈希已有房间。新私聊登记用户对及房间两份一致的目录记录。
 /// 现有房间查询不打开控制面事务包裹归属存储操作；用户对创建才使用短事务与建议锁。
 public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
@@ -118,12 +118,12 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
         self.now = now
     }
 
-    /// 优先读取显式房间路由，缺失时回退到历史房间归属。
+    /// 读取显式房间路由；缺失时拒绝访问。
     ///
     /// - Parameter roomID: UUID 形式的房间标识。
-    /// - Returns: 显式分片与代次，或历史房间分片与零代次。
+    /// - Returns: 显式分片与代次。
     /// - Throws: 无法取得 SQL 适配器或解析 UUID 时抛出 `corruptPersistenceState`；
-    ///   两处都未命中时抛出 `roomNotFound`，路由校验和数据库错误原样传播。
+    ///   目录未命中时抛出 `roomNotFound`，路由校验和数据库错误原样传播。
     public func route(for roomID: RoomID) async throws -> V2RoomShardRoute {
         guard let sql = database as? any SQLDatabase,
               let roomUUID = UUID(uuidString: roomID.rawValue)
@@ -135,18 +135,10 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
             """).first(decoding: RouteRow.self) {
             return try .init(shardID: row.roomShardID, epoch: row.routeEpoch)
         }
-        // Before physical routing is enabled, `rooms` itself is the only
-        // durable owner directory. Keep that fallback read-only so a legacy
-        // route cannot be accidentally rewritten by a new hash configuration.
-        guard let legacy = try await sql.raw("""
-            SELECT room_shard_id FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)
-            """).first(decoding: LegacyRouteRow.self) else {
-            throw V2RoomShardRouteError.roomNotFound
-        }
-        return try .init(shardID: legacy.roomShardID, epoch: 0)
+        throw V2RoomShardRouteError.roomNotFound
     }
 
-    /// 通过集合查询批量解析路由，最多进行显式目录与历史目录各一次读取。
+    /// 通过一次集合查询批量解析显式目录中的路由。
     ///
     /// 两次读取未包裹在本方法创建的统一事务中，不保证跨查询的同一时刻快照。
     ///
@@ -179,21 +171,6 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
             routes[try RoomID(row.roomID.uuidString)] = try .init(
                 shardID: row.roomShardID, epoch: row.routeEpoch
             )
-        }
-        let legacyRoomIDs = requestedRoomIDs.compactMap { routes[$0.roomID] == nil ? $0.uuid : nil }
-        if !legacyRoomIDs.isEmpty {
-            let legacyJSON = try roomRouteUUIDJSON(legacyRoomIDs)
-            let legacyRows = try await sql.raw("""
-                SELECT room.room_id, room.room_shard_id
-                FROM im_v2.rooms AS room
-                INNER JOIN jsonb_array_elements_text(\(bind: legacyJSON)::jsonb) AS requested(room_id)
-                  ON room.room_id = requested.room_id::uuid
-                """).all(decoding: RoutedLegacyRoomRow.self)
-            for row in legacyRows {
-                routes[try RoomID(row.roomID.uuidString)] = try .init(
-                    shardID: row.roomShardID, epoch: 0
-                )
-            }
         }
         guard routes.count == requestedRoomIDs.count else {
             throw V2RoomShardRouteError.roomNotFound
@@ -322,22 +299,6 @@ private struct RoutedRoomRow: Decodable {
         case roomShardID = "room_shard_id"
         case routeEpoch = "route_epoch"
     }
-}
-
-/// 集合查询得到的历史房间归属行。
-private struct RoutedLegacyRoomRow: Decodable {
-    let roomID: UUID
-    let roomShardID: String
-    enum CodingKeys: String, CodingKey {
-        case roomID = "room_id"
-        case roomShardID = "room_shard_id"
-    }
-}
-
-/// 单房间历史归属行，不含显式代次。
-private struct LegacyRouteRow: Decodable {
-    let roomShardID: String
-    enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id" }
 }
 
 /// 用户对目录中用于一致性校验的房间及路由行。

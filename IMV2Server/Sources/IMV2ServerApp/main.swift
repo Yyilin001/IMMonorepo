@@ -1316,12 +1316,6 @@ enum IMV2ServerApp {
                 store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
                 idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
             )
-            let userShardMigrationRetentionWorker = V2UserShardMigrationRetentionWorker(
-                store: PostgresV2UserShardMigrationStore(database: maintenanceDatabase),
-                cleaner: V2UserShardProjectionSourceCleaner(
-                    registry: maintenanceUserShardStorage
-                )
-            )
             let pushWakeWorker: V2PushWakeWorker?
             switch configuration.push {
             case .disabled:
@@ -1935,16 +1929,6 @@ enum IMV2ServerApp {
                             } catch {
                                 logger.error("IM V2 shared message-state cleanup failed; retrying")
                             }
-                        }
-                        do {
-                            _ = try await userShardMigrationRetentionWorker.runOnce(limit: configuration.workerBatchSize)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            // The cleaner is idempotent and retains a fenced
-                            // claim through expiry on failure; never include
-                            // source/target details in process logs.
-                            logger.error("IM V2 user-shard retention worker failed; retrying")
                         }
                         for database in forwardBackgroundDatabases.values {
                             do {

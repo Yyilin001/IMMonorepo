@@ -1482,10 +1482,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let routingKeyBase64 = optional("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64", environment: environment)
         let tlsCAPath = optional("IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH", environment: environment)
         let tlsServerName = optional("IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME", environment: environment)
-        let rawPayloadEncoding = optional(
-            "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING",
-            environment: environment
-        )
         let rawWakeDeferralDelay = optional(
             "IM_V2_GROUP_WAKE_DEFERRAL_MS",
             environment: environment
@@ -1496,11 +1492,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             guard tlsCAPath == nil, tlsServerName == nil else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
                     "IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH/IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME"
-                )
-            }
-            guard rawPayloadEncoding == nil else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"
                 )
             }
             guard rawWakeDeferralDelay == nil else {
@@ -1518,13 +1509,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             guard let url = URL(string: rawURL) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL") }
             guard let routingKey = Data(base64Encoded: routingKeyBase64) else {
                 throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
-            }
-            guard let payloadEncoding = V2NATSGroupEventPayloadEncoding(
-                rawValue: rawPayloadEncoding ?? V2NATSGroupEventPayloadEncoding.json.rawValue
-            ) else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_GROUP_WAKE_NATS_PAYLOAD_ENCODING"
-                )
             }
             let wakeDeferralDelayMilliseconds: Int
             if let rawWakeDeferralDelay {
@@ -1547,7 +1531,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                     routingKey: routingKey,
                     tlsCAPath: tlsCAPath,
                     tlsServerName: tlsServerName,
-                    payloadEncoding: payloadEncoding,
                     wakeDeferralDelayMilliseconds:
                         wakeDeferralDelayMilliseconds
                 ))

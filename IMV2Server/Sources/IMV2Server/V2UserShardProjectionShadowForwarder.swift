@@ -5,7 +5,7 @@ import SQLKit
 
 /// 用户同步中不参与扇出的一小部分（关系、拉黑与接收偏好）以控制面存储为权威。
 ///
-/// 该边界把已提交记录镜像到当前写入归属；当迁移仍在源端写入时，也会镜像到迁移目标。
+/// 该边界把已提交记录镜像到当前写入归属。
 /// 来源操作标识就是持久化重试键，因此响应丢失后可以安全地重复镜像，
 /// 而不会额外占用目标端序号。
 public struct V2UserShardProjectionShadowRequest: Sendable {
@@ -35,7 +35,7 @@ public struct V2UserShardProjectionShadowRequest: Sendable {
 
 /// 用户分片投影影子转发能力。
 public protocol V2UserShardProjectionShadowing: Sendable {
-    /// 把既有控制面记录写入用户当前写入归属，并在需要时镜像到迁移目标。
+    /// 把既有控制面记录写入用户当前写入归属。
     ///
     /// 返回的序号属于当前写入归属，可用于尽力而为的实时同步提示；
     /// 返回 `nil` 表示控制面存储中不存在所请求的来源投影。
@@ -119,18 +119,13 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
     /// - Throws: 路由或存储失败时抛出。
     public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
         try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
-            guard let sql = fencedDatabase as? any SQLDatabase,
-                  let userUUID = UUID(uuidString: userID.rawValue)
+            guard fencedDatabase is any SQLDatabase,
+                  UUID(uuidString: userID.rawValue) != nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let migration = try await sql.raw("""
-                SELECT phase, source_bucket, target_bucket
-                FROM im_v2.user_shard_migrations
-                WHERE user_id = \(bind: userUUID)
-                """).first(decoding: ShadowMigrationRow.self)?.record
             return try await shadow(
                 userID: userID, sourceEventID: sourceEventID,
                 projectionKinds: projectionKinds, route: route,
-                controlDatabase: fencedDatabase, migration: migration
+                controlDatabase: fencedDatabase
             )
         }
     }
@@ -176,7 +171,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
     private func shadow(
         userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>, route: V2UserShardRoute,
-        controlDatabase: any Database, migration: ShadowMigration?
+        controlDatabase: any Database
     ) async throws -> UInt64? {
         guard !projectionKinds.isEmpty,
               let sql = controlDatabase as? any SQLDatabase,
@@ -209,31 +204,16 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             // mirrored sequence, otherwise a client could stop just before
             // the invalidation and retain stale profile data.
             liveSequence = max(liveSequence ?? 0, sequence)
-            if let migration,
-               (migration.phase == .forwarding || migration.phase == .verified),
-               migration.sourceBucket == route.bucket {
-                var target = try registry.location(for: migration.targetBucket)
-                if coLocatedControlBuckets.contains(migration.targetBucket) {
-                    target = try .init(
-                        bucket: target.bucket, database: controlDatabase,
-                        schema: target.schema
-                    )
-                }
-                let targetProjector = try PostgresV2UserProjectionStore(database: target.database, schema: target.schema)
-                _ = try await targetProjector.mirror(.init(
-                    userID: userID, sequence: sequence, sourceEventID: sourceEventID,
-                    projectionKind: row.projectionKind, payloadJSON: row.payloadJSON, createdAt: row.createdAt.date
-                ), persistedCreatedAt: row.createdAt)
-            }
+
         }
         return liveSequence
     }
 
     /// 有界批量镜像实现，语义与逐条标量路径一致。
     ///
-    /// 常见的同置拓扑下：一次性获取所有切换栅栏，用两条集合查询加载全部迁移/来源行，
+    /// 同库部署下批量读取当前路由与控制来源行，
     /// 并复用来源 Sync 序号作为已物化的实时结果。
-    /// 远端路由以及处于活跃转发的迁移，则保留与标量路径相同的目标事务与幂等校验。
+    /// 远端路由保留与标量路径相同的目标事务与幂等校验。
     ///
     /// - Parameters:
     ///   - requests: 待镜像的请求列表，返回结果顺序与之一致。
@@ -264,28 +244,6 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         }
         guard flattened.count <= 2_048 else {
             throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-
-        let uniqueUserIDs = Array(Set(requests.map(\.userID.rawValue))).sorted()
-        let userIDsJSON = try shadowJSON(uniqueUserIDs)
-        let migrationRows = try await sql.raw("""
-            WITH requested AS (
-                SELECT value::uuid AS user_id
-                FROM jsonb_array_elements_text(\(bind: userIDsJSON)::jsonb)
-                     AS values(value)
-            )
-            SELECT migration.user_id, migration.phase,
-                   migration.source_bucket, migration.target_bucket
-            FROM im_v2.user_shard_migrations AS migration
-            JOIN requested USING (user_id)
-            """).all(decoding: ShadowBatchMigrationRow.self)
-        var migrations: [UserID: ShadowMigration] = [:]
-        for row in migrationRows {
-            let userID = try UserID(row.userID.uuidString)
-            guard migrations[userID] == nil else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            migrations[userID] = row.record
         }
 
         var sourceRowsByOrdinal: [[ShadowSourceRow]] = Array(
@@ -327,7 +285,6 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         for index in requests.indices {
             let request = requests[index]
             let route = routes[index]
-            let migration = migrations[request.userID]
             let sourceRows = sourceRowsByOrdinal[index]
             guard sourceRows.count <= request.projectionKinds.count else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -362,30 +319,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                     )
                 }
                 liveSequence = max(liveSequence ?? 0, sequence)
-                if let migration,
-                   (migration.phase == .forwarding || migration.phase == .verified),
-                   migration.sourceBucket == route.bucket {
-                    var target = try registry.location(for: migration.targetBucket)
-                    if coLocatedControlBuckets.contains(migration.targetBucket) {
-                        target = try .init(
-                            bucket: target.bucket,
-                            database: controlDatabase,
-                            schema: target.schema
-                        )
-                    }
-                    let targetProjector = try PostgresV2UserProjectionStore(
-                        database: target.database,
-                        schema: target.schema
-                    )
-                    _ = try await targetProjector.mirror(.init(
-                        userID: request.userID,
-                        sequence: sequence,
-                        sourceEventID: request.sourceEventID,
-                        projectionKind: row.projectionKind,
-                        payloadJSON: row.payloadJSON,
-                        createdAt: row.createdAt.date
-                    ), persistedCreatedAt: row.createdAt)
-                }
+
             }
             results[index] = liveSequence
         }
@@ -406,23 +340,6 @@ private struct ShadowSourceRow: Decodable {
         case createdAt = "created_at"
     }
 }
-private struct ShadowMigration: Sendable {
-    let phase: V2UserShardMigrationPhase
-    let sourceBucket: String
-    let targetBucket: String
-}
-private struct ShadowMigrationRow: Decodable {
-    let phase: V2UserShardMigrationPhase
-    let sourceBucket: String
-    let targetBucket: String
-    var record: ShadowMigration { .init(phase: phase, sourceBucket: sourceBucket, targetBucket: targetBucket) }
-    enum CodingKeys: String, CodingKey {
-        case phase
-        case sourceBucket = "source_bucket"
-        case targetBucket = "target_bucket"
-    }
-}
-
 private struct ShadowBatchInput: Encodable {
     let ordinal: Int
     let userID: UUID
@@ -433,22 +350,6 @@ private struct ShadowBatchInput: Encodable {
         case userID = "user_id"
         case sourceEventID = "source_event_id"
         case projectionKind = "projection_kind"
-    }
-}
-
-private struct ShadowBatchMigrationRow: Decodable {
-    let userID: UUID
-    let phase: V2UserShardMigrationPhase
-    let sourceBucket: String
-    let targetBucket: String
-    var record: ShadowMigration {
-        .init(phase: phase, sourceBucket: sourceBucket, targetBucket: targetBucket)
-    }
-    enum CodingKeys: String, CodingKey {
-        case userID = "user_id"
-        case phase
-        case sourceBucket = "source_bucket"
-        case targetBucket = "target_bucket"
     }
 }
 

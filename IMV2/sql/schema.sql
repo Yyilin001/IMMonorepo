@@ -782,8 +782,8 @@ CREATE TABLE im_v2.group_join_requests (
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
     CONSTRAINT group_join_requests_note_check CHECK (((note IS NULL) OR ((octet_length(note) >= 1) AND (octet_length(note) <= 500)))),
-    CONSTRAINT group_join_requests_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'approving'::text, 'approved'::text, 'rejected'::text, 'cancelled'::text]))),
-    CONSTRAINT group_join_requests_decision_check CHECK ((((state = 'cancelled'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = 'pending'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = 'approving'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = 'approved'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = 'rejected'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))
+    CONSTRAINT group_join_requests_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'cancelled'::text]))),
+    CONSTRAINT group_join_requests_decision_check CHECK ((((state = 'cancelled'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = 'pending'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = 'approved'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = 'rejected'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))
 );
 
 -- Control-plane reservations and durable recovery scheduling.
@@ -813,7 +813,7 @@ CREATE TABLE im_v2.group_join_quota_intents (
     PRIMARY KEY (applicant_user_id, operation_id),
     CONSTRAINT group_join_quota_outcome_check CHECK (
         (phase = 'held' AND outcome IS NULL AND target_request_id IS NULL)
-        OR (phase = 'tracking' AND outcome IS NOT NULL AND outcome IN ('pending', 'approving') AND target_request_id IS NOT NULL)
+        OR (phase = 'tracking' AND outcome IS NOT NULL AND outcome IN ('pending') AND target_request_id IS NOT NULL)
         OR (phase = 'denied' AND outcome IS NOT NULL AND outcome IN ('unavailable', 'rate_limited', 'permission_denied') AND target_request_id IS NULL)
         OR (phase = 'terminal' AND outcome IS NOT NULL AND (
             (outcome IN ('approved', 'rejected', 'cancelled') AND target_request_id IS NOT NULL)
@@ -861,57 +861,6 @@ CREATE TABLE im_v2.group_join_submission_receipts (
         (disposition = 'request' AND target_request_id IS NOT NULL)
         OR (disposition IN ('already_member', 'unavailable', 'rate_limited', 'permission_denied') AND target_request_id IS NULL))
 );
-
-CREATE TABLE im_v2.group_join_approval_recovery_audit (
-    operation_id uuid PRIMARY KEY,
-    operator_principal text NOT NULL,
-    shard_id text NOT NULL,
-    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
-    room_id uuid NOT NULL,
-    request_id uuid NOT NULL,
-    reviewer_user_id uuid NOT NULL,
-    decision_operation_id uuid NOT NULL,
-    reason_code text NOT NULL CHECK (reason_code IN ('dependency_recovered', 'data_repaired', 'false_positive')),
-    outcome text NOT NULL CHECK (outcome IN ('completed', 'released', 'quarantined', 'not_approving')),
-    detail text NOT NULL CHECK (detail IN ('committed_operation', 'no_historical_add', 'operation_mismatch', 'historical_add_without_receipt', 'invalid_revision', 'invite_exhausted', 'not_approving')),
-    requested_at timestamp with time zone NOT NULL,
-    applicant_user_id uuid NOT NULL,
-    prepared_revision bigint,
-    member_room_id uuid,
-    member_target_user_id uuid,
-    member_action text,
-    expected_revision bigint,
-    resulting_revision bigint,
-    room_sequence bigint,
-    event_id uuid,
-    CONSTRAINT group_join_approval_recovery_audit_result_check CHECK (
-        (member_room_id IS NULL AND member_target_user_id IS NULL AND member_action IS NULL AND expected_revision IS NULL AND resulting_revision IS NULL AND room_sequence IS NULL AND event_id IS NULL)
-        OR (member_room_id IS NOT NULL AND member_target_user_id IS NOT NULL AND member_action IS NOT NULL AND expected_revision IS NOT NULL AND resulting_revision IS NOT NULL AND room_sequence IS NOT NULL AND event_id IS NOT NULL)
-    ),
-    CONSTRAINT group_join_approval_recovery_audit_completed_check CHECK (outcome <> 'completed' OR expected_revision IS NOT NULL)
-);
-
-CREATE TABLE im_v2.room_membership_operation_fences (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    request_id uuid NOT NULL,
-    recovery_operation_id uuid NOT NULL REFERENCES im_v2.group_join_approval_recovery_audit(operation_id) ON DELETE RESTRICT,
-    created_at timestamp with time zone NOT NULL,
-    PRIMARY KEY (actor_user_id, operation_id)
-);
-
-CREATE FUNCTION im_v2.reject_approval_recovery_mutation() RETURNS trigger
-    LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'approval recovery evidence is immutable'; END;$$;
-
-CREATE TRIGGER group_join_approval_recovery_audit_immutable
-    BEFORE UPDATE OR DELETE ON im_v2.group_join_approval_recovery_audit
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_approval_recovery_mutation();
-CREATE TRIGGER room_membership_operation_fences_immutable
-    BEFORE UPDATE OR DELETE ON im_v2.room_membership_operation_fences
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_approval_recovery_mutation();
-CREATE INDEX group_join_requests_approving_recovery_idx
-    ON im_v2.group_join_requests (room_id, request_id) WHERE state = 'approving';
 
 CREATE TABLE im_v2.media_download_grants (
     download_session_id uuid NOT NULL,
@@ -2053,7 +2002,6 @@ $$;
 
 CREATE TABLE im_v2.rooms (
     room_id uuid NOT NULL,
-    migration_fence_id uuid,
     owner_epoch bigint DEFAULT 0 NOT NULL CHECK (owner_epoch >= 0),
     room_kind text DEFAULT 'group'::text NOT NULL,
     room_shard_id text NOT NULL,
@@ -2092,35 +2040,6 @@ CREATE TRIGGER rooms_touch_last_event_at BEFORE UPDATE ON im_v2.rooms
 -- Physical room-store routing is control-plane metadata. The canonical room,
 -- membership and message rows live only in the selected owner store; these
 -- records contain no endpoint and are never sent to clients.
-CREATE TABLE im_v2.room_owner_migrations (
-    migration_id uuid PRIMARY KEY,
-    room_id uuid NOT NULL,
-    source_shard_id text NOT NULL CHECK (length(btrim(source_shard_id)) > 0),
-    target_shard_id text NOT NULL CHECK (length(btrim(target_shard_id)) > 0 AND target_shard_id <> source_shard_id),
-    source_epoch bigint NOT NULL CHECK (source_epoch >= 0),
-    target_epoch bigint NOT NULL CHECK (target_epoch > source_epoch AND target_epoch - source_epoch = 1),
-    phase text NOT NULL CHECK (phase IN ('prepared', 'freezing', 'frozen', 'copying', 'copied', 'verified', 'published', 'retaining', 'completed', 'aborted')),
-    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
-    updated_at timestamptz NOT NULL CHECK (isfinite(updated_at) AND updated_at >= created_at)
-);
-CREATE UNIQUE INDEX room_owner_migrations_active_room_key ON im_v2.room_owner_migrations(room_id)
-    WHERE phase NOT IN ('completed', 'aborted');
-
-CREATE FUNCTION im_v2.preserve_room_migration_identity() RETURNS trigger
-    LANGUAGE plpgsql AS $$
-BEGIN
-    IF (NEW.migration_id, NEW.room_id, NEW.source_shard_id, NEW.target_shard_id,
-        NEW.source_epoch, NEW.target_epoch, NEW.created_at) IS DISTINCT FROM
-       (OLD.migration_id, OLD.room_id, OLD.source_shard_id, OLD.target_shard_id,
-        OLD.source_epoch, OLD.target_epoch, OLD.created_at) THEN
-        RAISE EXCEPTION 'room migration identity is immutable';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER room_owner_migrations_identity_guard BEFORE UPDATE ON im_v2.room_owner_migrations
-    FOR EACH ROW EXECUTE FUNCTION im_v2.preserve_room_migration_identity();
-
 CREATE TABLE im_v2.room_owner_routes (
     room_id uuid NOT NULL,
     room_shard_id text NOT NULL,
@@ -2260,14 +2179,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-49'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-49'::text))
+    schema_id text DEFAULT 'im-v2-current-51'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-51'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-49');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-51');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2535,10 +2454,7 @@ CREATE TABLE im_v2.user_projection_checkpoints (
     next_attempt_at timestamp with time zone,
     last_failure_code text,
     paused_at timestamp with time zone,
-    migration_fence_token uuid,
-    migration_fence_expires_at timestamp with time zone,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_projection_checkpoints_check CHECK (((migration_fence_token IS NULL) = (migration_fence_expires_at IS NULL))),
     CONSTRAINT user_projection_checkpoints_check1 CHECK (((state = 'paused'::text) = (paused_at IS NOT NULL))),
     CONSTRAINT user_projection_checkpoints_check2 CHECK (((next_attempt_at IS NULL) OR (state = 'ready'::text))),
     CONSTRAINT user_projection_checkpoints_check3 CHECK (((failure_count = 0) = (failed_sequence IS NULL))),
@@ -2634,51 +2550,11 @@ CREATE TABLE im_v2.user_room_preferences (
     updated_at timestamp with time zone NOT NULL
 );
 
-CREATE TABLE im_v2.user_shard_migrations (
-    migration_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    source_bucket text NOT NULL,
-    target_bucket text NOT NULL,
-    source_router_epoch bigint NOT NULL,
-    phase text NOT NULL,
-    source_fingerprint text,
-    target_fingerprint text,
-    verified_at timestamp with time zone,
-    cutover_operation_id uuid,
-    retention_until timestamp with time zone,
-    last_error_code text,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    retention_claim_token uuid,
-    retention_claim_expires_at timestamp with time zone,
-    retention_retry_count bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT user_shard_migrations_check CHECK (((length(btrim(target_bucket)) > 0) AND (target_bucket <> source_bucket))),
-    CONSTRAINT user_shard_migrations_phase_check CHECK ((phase = ANY (ARRAY['prepared'::text, 'copying'::text, 'copied'::text, 'verifying'::text, 'forwarding'::text, 'verified'::text, 'cutover'::text, 'retention'::text, 'completed'::text, 'rolled_back'::text, 'failed'::text]))),
-    CONSTRAINT user_shard_migrations_retention_claim_shape CHECK ((((retention_claim_token IS NULL) AND (retention_claim_expires_at IS NULL)) OR ((retention_claim_token IS NOT NULL) AND (retention_claim_expires_at IS NOT NULL)))),
-    CONSTRAINT user_shard_migrations_retention_retry_count_check CHECK ((retention_retry_count >= 0)),
-    CONSTRAINT user_shard_migrations_source_bucket_check CHECK ((length(btrim(source_bucket)) > 0)),
-    CONSTRAINT user_shard_migrations_source_router_epoch_check CHECK ((source_router_epoch >= 0))
-);
-
-CREATE TABLE im_v2.user_shard_route_operations (
-    operation_id uuid NOT NULL,
-    operator_principal text NOT NULL,
-    user_id uuid NOT NULL,
-    write_bucket text NOT NULL,
-    read_fallback_bucket text,
-    resulting_router_epoch bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_shard_route_operations_operator_principal_check CHECK ((length(btrim(operator_principal)) > 0)),
-    CONSTRAINT user_shard_route_operations_resulting_router_epoch_check CHECK ((resulting_router_epoch >= 0))
-);
-
 CREATE TABLE im_v2.user_shard_route_overrides (
     user_id uuid NOT NULL,
     write_bucket text NOT NULL,
-    read_fallback_bucket text,
     router_epoch bigint NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_shard_route_overrides_check CHECK (((read_fallback_bucket IS NULL) OR ((length(btrim(read_fallback_bucket)) > 0) AND (read_fallback_bucket <> write_bucket)))),
     CONSTRAINT user_shard_route_overrides_router_epoch_check CHECK ((router_epoch >= 0)),
     CONSTRAINT user_shard_route_overrides_write_bucket_check CHECK ((length(btrim(write_bucket)) > 0))
 );
@@ -2687,9 +2563,7 @@ CREATE TABLE im_v2.user_shard_router_configuration (
     configuration_key boolean DEFAULT true NOT NULL,
     router_epoch bigint NOT NULL,
     default_write_bucket text NOT NULL,
-    default_read_fallback_bucket text,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_shard_router_configuration_check CHECK (((default_read_fallback_bucket IS NULL) OR ((length(btrim(default_read_fallback_bucket)) > 0) AND (default_read_fallback_bucket <> default_write_bucket)))),
     CONSTRAINT user_shard_router_configuration_configuration_key_check CHECK (configuration_key),
     CONSTRAINT user_shard_router_configuration_default_write_bucket_check CHECK ((length(btrim(default_write_bucket)) > 0)),
     CONSTRAINT user_shard_router_configuration_router_epoch_check CHECK ((router_epoch >= 0))
@@ -3230,18 +3104,6 @@ ALTER TABLE ONLY im_v2.user_room_preference_operations
 ALTER TABLE ONLY im_v2.user_room_preferences
     ADD CONSTRAINT user_room_preferences_pkey PRIMARY KEY (user_id, room_id);
 
-ALTER TABLE ONLY im_v2.user_shard_migrations
-    ADD CONSTRAINT user_shard_migrations_cutover_operation_id_key UNIQUE (cutover_operation_id);
-
-ALTER TABLE ONLY im_v2.user_shard_migrations
-    ADD CONSTRAINT user_shard_migrations_pkey PRIMARY KEY (migration_id);
-
-ALTER TABLE ONLY im_v2.user_shard_migrations
-    ADD CONSTRAINT user_shard_migrations_user_id_key UNIQUE (user_id);
-
-ALTER TABLE ONLY im_v2.user_shard_route_operations
-    ADD CONSTRAINT user_shard_route_operations_pkey PRIMARY KEY (operation_id);
-
 ALTER TABLE ONLY im_v2.user_shard_route_overrides
     ADD CONSTRAINT user_shard_route_overrides_pkey PRIMARY KEY (user_id);
 
@@ -3304,11 +3166,10 @@ CREATE INDEX group_announcement_operations_cleanup_idx ON im_v2.group_announceme
 
 CREATE INDEX group_invite_links_room_active_idx ON im_v2.group_invite_links USING btree (room_id, created_at DESC, invite_id DESC) WHERE (state = 'active'::text);
 
-CREATE INDEX group_join_requests_room_pending_idx ON im_v2.group_join_requests USING btree (room_id, created_at, request_id) WHERE (state = ANY (ARRAY['pending'::text, 'approving'::text]));
+CREATE INDEX group_join_requests_room_pending_idx ON im_v2.group_join_requests USING btree (room_id, created_at, request_id) WHERE (state = ANY (ARRAY['pending'::text]));
 
-CREATE INDEX group_join_requests_applicant_pending_idx ON im_v2.group_join_requests USING btree (applicant_user_id, created_at) WHERE (state = ANY (ARRAY['pending'::text, 'approving'::text]));
+CREATE INDEX group_join_requests_applicant_pending_idx ON im_v2.group_join_requests USING btree (applicant_user_id, created_at) WHERE (state = ANY (ARRAY['pending'::text]));
 
-CREATE INDEX group_join_requests_invite_approving_idx ON im_v2.group_join_requests USING btree (invite_id) WHERE (state = 'approving'::text);
 
 CREATE INDEX group_event_wake_outbox_claim_idx ON im_v2.group_event_wake_outbox USING btree (next_attempt_at, updated_at) WHERE (state = 'pending'::text);
 
@@ -3479,10 +3340,6 @@ CREATE INDEX user_relationship_operations_cleanup_idx ON im_v2.user_relationship
 CREATE INDEX user_room_preference_operations_cleanup_idx ON im_v2.user_room_preference_operations USING btree (updated_at);
 
 CREATE INDEX user_room_preferences_visible_idx ON im_v2.user_room_preferences USING btree (user_id, archived_at, pinned_at DESC, updated_at DESC);
-
-CREATE INDEX user_shard_migrations_retention_claim_idx ON im_v2.user_shard_migrations USING btree (phase, retention_until, retention_claim_expires_at) WHERE (phase = 'retention'::text);
-
-CREATE INDEX user_shard_route_operations_user_idx ON im_v2.user_shard_route_operations USING btree (user_id, created_at DESC);
 
 CREATE INDEX user_sync_log_compaction_age_idx ON im_v2.user_sync_log USING btree (user_id, created_at, user_sync_sequence);
 
@@ -3896,48 +3753,6 @@ CREATE INDEX group_invite_creation_recovery_pending_idx ON im_v2.group_invite_cr
 CREATE INDEX group_invite_creation_recovery_lease_idx ON im_v2.group_invite_creation_recovery
     (lease_expires_at, actor_user_id, operation_id) WHERE state = 'claimed';
 
-CREATE TABLE im_v2.group_invite_directory_import_audit (
-    operation_id uuid PRIMARY KEY,
-    operator_principal text NOT NULL,
-    shard_id text NOT NULL,
-    owner_epoch bigint NOT NULL,
-    room_id uuid NOT NULL,
-    after_invite_id uuid,
-    page_size bigint NOT NULL,
-    reason_code text NOT NULL,
-    requested_at timestamptz NOT NULL,
-    outcome text NOT NULL,
-    source_snapshot jsonb NOT NULL,
-    source_digest bytea NOT NULL,
-    source_count bigint NOT NULL,
-    inserted_count bigint NOT NULL,
-    published_count bigint NOT NULL,
-    unchanged_count bigint NOT NULL,
-    next_cursor uuid,
-    conflicting_invite_ids uuid[] NOT NULL,
-    CONSTRAINT group_invite_import_principal_check CHECK (operator_principal ~ '^[A-Za-z0-9_.:-]{1,128}$'),
-    CONSTRAINT group_invite_import_shard_check CHECK (octet_length(shard_id) >= 1 AND octet_length(shard_id) <= 128 AND shard_id = btrim(shard_id)),
-    CONSTRAINT group_invite_import_epoch_check CHECK (owner_epoch >= 0),
-    CONSTRAINT group_invite_import_page_check CHECK (page_size BETWEEN 1 AND 100),
-    CONSTRAINT group_invite_import_reason_check CHECK (reason_code IN ('dependency_recovered','data_repaired','false_positive')),
-    CONSTRAINT group_invite_import_outcome_check CHECK (outcome IN ('applied','conflict')),
-    CONSTRAINT group_invite_import_snapshot_check CHECK (jsonb_typeof(source_snapshot) = 'array' AND jsonb_array_length(source_snapshot) = source_count AND source_count BETWEEN 0 AND page_size),
-    CONSTRAINT group_invite_import_digest_check CHECK (source_digest = sha256(convert_to(source_snapshot::text, 'UTF8'))),
-    CONSTRAINT group_invite_import_counts_check CHECK (
-        inserted_count >= 0 AND published_count >= 0 AND unchanged_count >= 0
-        AND ((outcome = 'applied' AND inserted_count + published_count + unchanged_count = source_count AND cardinality(conflicting_invite_ids) = 0)
-          OR (outcome = 'conflict' AND inserted_count = 0 AND published_count = 0 AND unchanged_count = 0 AND cardinality(conflicting_invite_ids) BETWEEN 1 AND source_count))),
-    CONSTRAINT group_invite_import_cursor_check CHECK (next_cursor IS NULL OR (source_count = page_size AND next_cursor = (source_snapshot->-1->>'invite_id')::uuid))
-);
-CREATE FUNCTION im_v2.reject_group_invite_import_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'invite directory import audit is immutable';
-END;
-$$;
-CREATE TRIGGER group_invite_import_audit_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invite_directory_import_audit
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invite_import_audit_mutation();
-CREATE INDEX group_invite_links_import_page_idx ON im_v2.group_invite_links (room_id, invite_id);
-
 CREATE TABLE im_v2.device_revocation_capabilities (
     device_id uuid PRIMARY KEY,
     user_id uuid NOT NULL,
@@ -3981,15 +3796,6 @@ CREATE TABLE im_v2.device_registration_cancellations (
 CREATE UNIQUE INDEX registration_cancellation_issued_device_idx ON im_v2.device_registration_cancellations (device_id) WHERE user_id IS NOT NULL;
 CREATE INDEX registration_cancellation_pending_expiry_idx ON im_v2.device_registration_cancellations (issue_before) WHERE user_id IS NULL;
 
-CREATE TABLE im_v2.legacy_device_registration_cancellations (
-    user_id uuid NOT NULL,
-    device_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    cancelled_at timestamptz NOT NULL,
-    CONSTRAINT legacy_registration_cancellation_pkey PRIMARY KEY (user_id, device_id),
-    CONSTRAINT legacy_registration_cancellation_operation UNIQUE (user_id, operation_id),
-    CONSTRAINT legacy_registration_cancellation_time CHECK (isfinite(cancelled_at))
-);
 
 ALTER TABLE ONLY im_v2.direct_authorization_receipts
     ADD CONSTRAINT direct_authorization_receipts_room_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);

@@ -212,17 +212,11 @@ struct V2NATSGroupEventWakeBrokerTests {
                     == .groupEvents([first, second])
             )
 
-            // A mixed membership epoch must never become a live audience.
+            // A missing membership epoch must never become a live audience.
             // It degrades to a durable room-log cursor wake instead.
-            var object = try #require(
-                JSONSerialization.jsonObject(with: verifiedPayload) as? [String: Any]
-            )
-            var directEvents = try #require(
-                object["direct_events"] as? [[String: Any]]
-            )
-            directEvents[1]["group_membership_revision"] = 8
-            object["direct_events"] = directEvents
-            let invalidPayload = try JSONSerialization.data(withJSONObject: object)
+            var wire = try IMV2InternalGroupEventNotification(serializedBytes: verifiedPayload.dropFirst(5))
+            wire.groupEvents.membershipRevision = 0
+            let invalidPayload = Data([0x49, 0x4D, 0x4E, 0x47, 0x01]) + (try wire.serializedData())
             #expect(
                 V2NATSGroupEventWakeBroker.decodeNotificationPayload(invalidPayload)
                     == .wake(.init(roomID: roomID, highWatermark: 2))
@@ -319,8 +313,7 @@ struct V2NATSGroupEventWakeBrokerTests {
                 == notification
         )
 
-        let json = try natsGroupBatchPayload(events: [first, second])
-        #expect(binary.count < json.count)
+        #expect(V2NATSGroupEventWakeBroker.decodeNotificationPayload(Data("{\"room_id\":\"old\"}".utf8)) == nil)
 
         let mixedRevision = try natsGroupEvent(
             roomID: roomID,
@@ -393,8 +386,7 @@ struct V2NATSGroupEventWakeBrokerTests {
         do {
             let broker = try makeBroker(
                 port: try #require(server.localAddress?.port),
-                timeout: 1,
-                payloadEncoding: .protobufV1
+                timeout: 1
             )
             let roomID = try RoomID("00000000-0000-0000-0000-000000000918")
             let events = [
@@ -830,7 +822,6 @@ struct V2NATSGroupEventWakeBrokerTests {
         port: Int,
         timeout: TimeInterval,
         token: String? = nil,
-        payloadEncoding: V2NATSGroupEventPayloadEncoding = .json,
         coverageLost: @escaping @Sendable () async -> Void = {}
     ) throws -> V2NATSGroupEventWakeBroker {
         let url = try #require(URL(string: "nats://127.0.0.1:\(port)"))
@@ -840,7 +831,6 @@ struct V2NATSGroupEventWakeBrokerTests {
                 subjectPrefix: "imv2.test.group",
                 token: token,
                 routingKey: Self.routingKey,
-                payloadEncoding: payloadEncoding,
                 acknowledgementTimeout: timeout
             ),
             coverageLost: coverageLost,
@@ -1251,70 +1241,12 @@ private func natsGroupPayload(
 private func natsGroupBatchPayload(
     events: [V2DirectRoomLiveEvent]
 ) throws -> Data {
-    struct WireEvent: Encodable {
-        let sourceEventID: String
-        let roomSequence: UInt64
-        let projectionKind: String
-        let payload: Data
-        let recipientUserIDs: [String]
-        let groupMembershipRevision: UInt64
-        let excludedConnectionID: UUID?
-
-        enum CodingKeys: String, CodingKey {
-            case sourceEventID = "source_event_id"
-            case roomSequence = "room_sequence"
-            case projectionKind = "projection_kind"
-            case payload
-            case recipientUserIDs = "recipient_user_ids"
-            case groupMembershipRevision = "group_membership_revision"
-            case excludedConnectionID = "excluded_connection_id"
-        }
-    }
-    struct WireWake: Encodable {
-        let roomID: String
-        let highWatermark: UInt64
-        let directEvents: [WireEvent]
-
-        enum CodingKeys: String, CodingKey {
-            case roomID = "room_id"
-            case highWatermark = "high_watermark"
-            case directEvents = "direct_events"
-        }
-    }
-    let first = try #require(events.first)
-    let last = try #require(events.last)
-    return try JSONEncoder().encode(WireWake(
-        roomID: first.roomID.rawValue,
-        highWatermark: last.highWatermark,
-        directEvents: try events.map { event in
-            .init(
-                sourceEventID: event.sourceEventID.rawValue,
-                roomSequence: event.roomSequence,
-                projectionKind: event.projectionKind,
-                payload: event.payload,
-                recipientUserIDs: event.recipientUserIDs.map(\.rawValue).sorted(),
-                groupMembershipRevision: try #require(event.groupMembershipRevision),
-                excludedConnectionID: event.excludedConnectionID
-            )
-        }
-    ))
+    try V2NATSGroupEventProtobufCodec.encode(.groupEvents(events))
 }
 
 private func natsWakePayload(
     roomID: RoomID,
     highWatermark: UInt64
 ) throws -> Data {
-    struct WireWake: Encodable {
-        let roomID: String
-        let highWatermark: UInt64
-
-        enum CodingKeys: String, CodingKey {
-            case roomID = "room_id"
-            case highWatermark = "high_watermark"
-        }
-    }
-    return try JSONEncoder().encode(WireWake(
-        roomID: roomID.rawValue,
-        highWatermark: highWatermark
-    ))
+    try V2NATSGroupEventProtobufCodec.encode(.wake(.init(roomID: roomID, highWatermark: highWatermark)))
 }

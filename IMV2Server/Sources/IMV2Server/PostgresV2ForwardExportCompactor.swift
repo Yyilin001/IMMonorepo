@@ -22,7 +22,7 @@ public struct PostgresV2ForwardExportCompactor: Sendable {
                 SELECT export.export_id FROM im_v2.message_forward_exports AS export
                 WHERE export.delivery_completed_at IS NOT NULL
                   AND (SELECT true FROM im_v2.rooms AS room
-                       WHERE room.room_id = export.source_room_id AND room.migration_fence_id IS NULL
+                       WHERE room.room_id = export.source_room_id
                        FOR SHARE OF room SKIP LOCKED) AND export.payload IS NOT NULL
                   AND export.delivery_completed_at <= \(bind: cutoff)
                   AND (SELECT job.state = 'completed' AND job.completed_at = export.delivery_completed_at

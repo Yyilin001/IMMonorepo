@@ -202,10 +202,9 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
                 else { throw V2ProfilePresentationError.operationPayloadMismatch }
                 return try .init(roomID: roomID, userID: actorUserID, groupNickname: saved.nickname, revision: revision)
             }
-            guard let owner = try await sql.raw("""
-                SELECT migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE
-                """).first(decoding: NicknameRoomFenceRow.self) else { throw V2ProfilePresentationError.forbidden }
-            guard owner.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+            guard try await sql.raw("""
+                SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE
+                """).first(decoding: NicknameRoomFenceRow.self) != nil else { throw V2ProfilePresentationError.forbidden }
             guard try await activeMember(userID: actor, roomID: room, sql: sql) else { throw V2ProfilePresentationError.forbidden }
             let current = try await nicknameRow(room: room, user: actor, sql: sql)
             guard current?.revision == expectedSignedRevision else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
@@ -271,6 +270,6 @@ private func presentationLock(scope: String, sql: any SQLDatabase) async throws 
 }
 
 private struct NicknameRoomFenceRow: Decodable {
-    let migrationFenceID: UUID?
-    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
 }

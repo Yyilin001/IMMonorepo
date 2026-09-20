@@ -16,10 +16,7 @@ public struct PostgresV2GroupMessagingStore:
 {
     private let database: any Database
 
-    /// 组合数据库与新建群聊的权威副本形态策略。
-    ///
-    /// 混合大群固定以房间日志为权威副本；标准群取这里的部署策略，默认与部署默认一致
-    /// （`room_log`），兼容基线必须显式传 `fanout`。单聊不使用该参数，它由部署开关决定。
+    /// 组合数据库；新群统一使用房间日志。
     ///
     /// - Parameters:
     ///   - database: 存放房间、事件与投递的数据库。
@@ -394,6 +391,14 @@ public struct PostgresV2GroupMessagingStore:
                 throw V2GroupMessagingStoreError.corruptPersistenceState
             }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
+            // Co-located creation publishes its route atomically. A control
+            // manifest is published only by the control intent's finalizer.
+            if case .ownerDatabase = identityValidation {
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
+                    VALUES (\(bind: createdRoomID), \(bind: roomShardID), 0, \(bind: now), \(bind: now))
+                    """).run()
+            }
             try await sql.raw("""
                 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
                 VALUES (\(bind: createdRoomID), \(bind: input.actorID), \(bind: input.title), \(bind: now))

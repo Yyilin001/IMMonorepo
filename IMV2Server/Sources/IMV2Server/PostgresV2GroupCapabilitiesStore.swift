@@ -281,7 +281,7 @@ private func groupTransaction<Value: Equatable & Sendable>(_ database: any Datab
     catch let signal as GroupAdmissionSignal { switch signal { case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds); case .unavailable(let reason): return .unavailable(reason) } }
 }
 
-private struct GroupRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let groupPermissionRevision: Int64; let capacityProfileID: String; let roomKind: String; let capacityClass: V2GroupCapacityClass; let migrationFenceID: UUID?; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", groupPermissionRevision = "group_permission_revision", capacityProfileID = "capacity_profile_id", roomKind = "room_kind", capacityClass = "capacity_class", migrationFenceID = "migration_fence_id" } }
+private struct GroupRoomRow: Decodable { let roomShardID: String; let roomSequence: Int64; let membershipRevision: Int64; let groupPermissionRevision: Int64; let capacityProfileID: String; let roomKind: String; let capacityClass: V2GroupCapacityClass; enum CodingKeys: String, CodingKey { case roomShardID = "room_shard_id", roomSequence = "room_sequence", membershipRevision = "membership_revision", groupPermissionRevision = "group_permission_revision", capacityProfileID = "capacity_profile_id", roomKind = "room_kind", capacityClass = "capacity_class" } }
 private struct GroupMemberRow: Decodable { let role: V2RoomMembershipRole; let joinedRevision: Int64; enum CodingKeys: String, CodingKey { case role, joinedRevision = "joined_revision" } }
 private struct GroupMessageRow: Decodable { let roomID: UUID; let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case roomID = "room_id", withdrawnAt = "withdrawn_at" } }
 private struct GroupBoolRow: Decodable { let value: Bool }
@@ -296,8 +296,7 @@ private struct GroupCommittedTimestampRow: Decodable {
 }
 
 private func prepare(room: UUID, actor: UUID, required: V2GroupPermission, capacityProfile: V2CapacityProfile, now: Date, sql: any SQLDatabase) async throws -> GroupContext {
-    guard let state = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, group_permission_revision, capacity_profile_id, room_kind, capacity_class, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").first(decoding: GroupRoomRow.self) else { throw V2GroupCapabilitiesStoreError.roomNotFound }
-    guard state.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+    guard let state = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, group_permission_revision, capacity_profile_id, room_kind, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").first(decoding: GroupRoomRow.self) else { throw V2GroupCapabilitiesStoreError.roomNotFound }
     guard state.roomKind == "group", state.capacityProfileID == capacityProfile.id else { throw state.roomKind == "group" ? V2GroupCapabilitiesStoreError.corruptPersistenceState : V2GroupCapabilitiesStoreError.notGroupRoom }
     guard let member = try await sql.raw("SELECT role, joined_revision FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor) AND joined_revision <= \(bind: state.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: state.membershipRevision)) ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE").first(decoding: GroupMemberRow.self) else { throw V2GroupCapabilitiesStoreError.actorNotMember }
     let configuredPermissions = try await v2ResolvedGroupPermissions(roomID: room, role: member.role, sql: sql)

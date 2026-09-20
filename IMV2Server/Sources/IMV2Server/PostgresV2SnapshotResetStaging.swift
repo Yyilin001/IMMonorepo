@@ -20,7 +20,7 @@ struct PostgresV2SnapshotResetStager {
     /// 为设备暂存一次快照重置。
     ///
     /// 前置校验包括：代次为正、保留下限非负、能力生命周期为正的有限值、档位标识非空，
-    /// 且存在一个处于就绪状态且迁移栅栏已失效的投影检查点。
+    /// 且存在一个处于就绪状态的投影检查点。
     /// 随后在用户与档位维度上串行创建产物：优先复用基准序号落在保留下限与检查点之间、
     /// 未过期且同档同版本的既有产物，并把其到期时间至少延长到本次分配的新截止点；
     /// 否则新建产物。最后写入设备重置记录、同步令牌并推进游标状态。
@@ -66,8 +66,6 @@ struct PostgresV2SnapshotResetStager {
                 FROM \(unsafeRaw: table(schema, "user_projection_checkpoints"))
                 WHERE user_id = \(bind: userID)
                   AND state = 'ready'
-                  AND (migration_fence_expires_at IS NULL
-                       OR migration_fence_expires_at <= \(bind: now))
                 """).first(decoding: SnapshotResetCheckpointRow.self)
         else { throw V2SyncStoreError.snapshotCheckpointUnavailable }
         let (generation, overflow) = currentGeneration.addingReportingOverflow(1)

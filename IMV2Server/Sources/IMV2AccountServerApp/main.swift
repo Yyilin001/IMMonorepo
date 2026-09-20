@@ -72,7 +72,6 @@ enum IMV2AccountServerApp {
                     "/v2/device-credentials/refresh",
                     V2VaporDeviceRevocationCapabilityRoutes.path,
                     V2VaporDeviceRegistrationCancellationRoutes.path,
-                    V2VaporLegacyDeviceRegistrationCancellationRoutes.path
                 ]
             ))
 
@@ -217,10 +216,6 @@ enum IMV2AccountServerApp {
             ).register(on: app)
             V2VaporDeviceRegistrationCancellationRoutes(
                 service: V2PostgresDeviceRegistrationCancellationService(database: database)
-            ).register(on: app)
-            V2VaporLegacyDeviceRegistrationCancellationRoutes(
-                assertionVerifier: assertionIssuer,
-                service: V2PostgresLegacyDeviceRegistrationCancellationService(database: database)
             ).register(on: app)
             let pushEndpoints = PostgresV2PushDeviceEndpointStore(database: database, envelopeKey: configuration.pushEndpointEnvelopeKey)
             V2VaporPushEndpointRoutes(authenticator: authenticator, store: pushEndpoints).register(on: authenticatedAccountRoutes)

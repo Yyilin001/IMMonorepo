@@ -813,3 +813,15 @@ SQLite 数值排序在文本/二进制之前；MAX 可发现隐藏在正常数�
 显式修复异常行后，模拟重连替换通知流并复用同一停止的引擎；在 6 页/房间总预算内恢复到两个房间游标 5，待办清空，未调用无界个人流完成证明。
 4 个参数场景及运行器专项共 24 项通过；[证据](verification-records.md#20260920-recovery-invalid-date-runner)。
 本轮只补测试；新通知流为替身，不代表真实 TLS 重连或真机后台。没有自动改写坏库，B01/D08 继续开放。
+
+## 服务端既有转换的收敛核对（2026-09-20）
+
+本轮沿调用链核对以下直接转换，未发现需要新增保护层的缺口；仅记录源码依据，不新增测试或声称 B01 全范围关闭。
+
+| 转换位置 | 已有保护及结论 |
+| --- | --- |
+| PostgresV2ReadReceiptStore.appendPreferenceProjection | setPreferences 在新写入前校验 now；偏好时间由该值写入。幂等返回也校验持久化时间。毫秒转换位于 PostgreSQL 微秒可表示范围内。 |
+| V2ConversationCapabilitiesService 的会话状态与收藏投影 | 新操作先校验 now，可空 muteUntil 单独校验；重放校验持久化时间。无需再为私有投影方法新增一套时间策略。 |
+| PostgresV2DirectMessagingStore.appendDirectRoomProfileProjection | 方法内先校验 profile.updatedAt 和正 revision，再构造毫秒及修订投影。 |
+| PostgresV2MessageProjectionStateRepository 状态构造 | Int64(state.messageRevision) 前已有 UInt64(Int64.max) 上界检查。 |
+| PostgresV2SnapshotArtifactBuilder 累加及返回转换 | 当前 schema 将 next_page_index 限定为 0…4096、item_count 为 0…1000000、total_bytes 为 0…268435456；既有 PostgresV2SnapshotCounterBoundsTests 验证真实约束拒绝越界。不能仅见到加法就重复新增饱和计数器；本结论依赖当前 schema 就绪要求，不支持绕过约束的数据库。 |
